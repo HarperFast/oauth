@@ -1,0 +1,65 @@
+{
+	"name": "@harperdb/oauth",
+	"version": "0.1.0",
+	"description": "OAuth 2.0 authentication plugin for Harper",
+	"main": "dist/index.js",
+	"type": "module",
+	"exports": {
+		".": "./dist/index.js",
+		"./config": "./config.yaml"
+	},
+	"files": [
+		"dist/",
+		"assets/",
+		"schema/",
+		"config.yaml",
+		"README.md"
+	],
+	"scripts": {
+		"build": "tsc",
+		"dev": "tsc --watch",
+		"test": "npm run build && node --test 'test/**/*.test.js'",
+		"test:coverage": "npm run build && node --test --experimental-test-coverage 'test/**/*.test.js'",
+		"lint": "eslint .",
+		"format": "prettier .",
+		"format:check": "npm run format -- --check",
+		"format:write": "npm run format -- --write",
+		"prepublishOnly": "npm run build"
+	},
+	"dependencies": {
+		"jsonwebtoken": "^9.0.2",
+		"jwks-rsa": "^3.1.0"
+	},
+	"devDependencies": {
+		"@harperdb/code-guidelines": "^0.0.2",
+		"prettier": "^3.6.1",
+		"typescript": "^5.3.3",
+		"@types/node": "^20.11.0",
+		"@types/jsonwebtoken": "^9.0.5"
+	},
+	"peerDependencies": {
+		"harperdb": ">=4.6.0"
+	},
+	"keywords": [
+		"harperdb",
+		"harper",
+		"plugin",
+		"oauth",
+		"oauth2",
+		"authentication",
+		"oidc",
+		"openid"
+	],
+	"author": {
+		"name": "HarperDB",
+		"email": "support@harperdb.io"
+	},
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/HarperDB/oauth.git"
+	},
+	"bugs": {
+		"url": "https://github.com/HarperDB/oauth/issues"
+	}
+}

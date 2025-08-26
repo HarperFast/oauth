@@ -1,0 +1,320 @@
+<!doctype html>
+<html>
+	<head>
+		<title>Harper OAuth Test</title>
+		<style>
+			body {
+				font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+				max-width: 800px;
+				margin: 50px auto;
+				padding: 20px;
+			}
+			.user-info {
+				background: #f5f5f5;
+				padding: 20px;
+				border-radius: 8px;
+				margin: 20px 0;
+			}
+			.providers {
+				margin: 20px 0;
+			}
+			.provider-button {
+				display: inline-block;
+				padding: 10px 20px;
+				margin: 10px 10px 10px 0;
+				background: #0366d6;
+				color: white;
+				text-decoration: none;
+				border-radius: 6px;
+				border: none;
+				cursor: pointer;
+				font-size: 14px;
+			}
+			.provider-button.github {
+				background: #24292e;
+			}
+			.provider-button.github:hover {
+				background: #1a1e22;
+			}
+			.provider-button.google {
+				background: #4285f4;
+			}
+			.provider-button.google:hover {
+				background: #357ae8;
+			}
+			.provider-button.azure,
+			.provider-button.microsoft {
+				background: #0078d4;
+			}
+			.provider-button.azure:hover,
+			.provider-button.microsoft:hover {
+				background: #006cc1;
+			}
+			.provider-button.auth0 {
+				background: #eb5424;
+			}
+			.provider-button.auth0:hover {
+				background: #d44820;
+			}
+			.button {
+				display: inline-block;
+				padding: 10px 20px;
+				margin: 10px 10px 10px 0;
+				background: #6c757d;
+				color: white;
+				text-decoration: none;
+				border-radius: 6px;
+				border: none;
+				cursor: pointer;
+				font-size: 14px;
+			}
+			.button:hover {
+				background: #5a6268;
+			}
+			pre {
+				background: #f6f8fa;
+				padding: 10px;
+				border-radius: 6px;
+				overflow-x: auto;
+			}
+			.error {
+				color: #d73a49;
+				background: #ffeef0;
+				padding: 10px;
+				border-radius: 6px;
+				margin: 10px 0;
+			}
+			.success {
+				color: #28a745;
+				background: #d4edda;
+				padding: 10px;
+				border-radius: 6px;
+				margin: 10px 0;
+			}
+			.loading {
+				color: #666;
+				font-style: italic;
+			}
+		</style>
+	</head>
+	<body>
+		<h1>Harper OAuth Test</h1>
+
+		<div id="user-info" class="user-info">
+			<h2>Current User</h2>
+			<div id="user-status" class="loading">Loading...</div>
+		</div>
+
+		<div class="providers">
+			<h2>Login Options</h2>
+			<div id="provider-buttons" class="loading">Loading providers...</div>
+		</div>
+
+		<div id="actions">
+			<button onclick="logout()" class="button">Logout</button>
+			<button onclick="checkUser()" class="button">Refresh Status</button>
+		</div>
+
+		<div id="message"></div>
+
+		<h2>Debug Endpoints</h2>
+		<p>These endpoints are available in debug mode:</p>
+		<ul>
+			<li><a href="/oauth" target="_blank">/oauth</a> - List all configured providers</li>
+			<li id="user-endpoint">Loading...</li>
+			<li id="refresh-endpoint" style="display: none">
+				<a href="#" onclick="refreshToken(); return false;">/oauth/{provider}/refresh</a> - Refresh access token
+			</li>
+		</ul>
+
+		<script>
+			let currentProvider = null;
+			let availableProviders = [];
+
+			async function loadProviders() {
+				try {
+					const response = await fetch('/oauth');
+					const data = await response.json();
+
+					const providerButtons = document.getElementById('provider-buttons');
+
+					if (data.providers && data.providers.length > 0) {
+						availableProviders = data.providers;
+						providerButtons.innerHTML = data.providers
+							.map(
+								(p) => `
+                        <a href="/oauth/${p.name}/login" 
+                           class="provider-button ${p.provider}"
+                           onclick="setProvider('${p.name}'); return true;">
+                            Login with ${p.name.charAt(0).toUpperCase() + p.name.slice(1)}
+                        </a>
+                    `
+							)
+							.join('');
+
+						// Update user endpoint link
+						if (data.providers[0]) {
+							currentProvider = data.providers[0].name;
+							updateEndpoints();
+						}
+					} else {
+						providerButtons.innerHTML = '<p class="error">No OAuth providers configured</p>';
+					}
+				} catch (error) {
+					document.getElementById('provider-buttons').innerHTML =
+						'<p class="error">Error loading providers: ' + error.message + '</p>';
+				}
+			}
+
+			function setProvider(provider) {
+				currentProvider = provider;
+				localStorage.setItem('oauth-provider', provider);
+				updateEndpoints();
+			}
+
+			function updateEndpoints() {
+				if (currentProvider) {
+					document.getElementById('user-endpoint').innerHTML =
+						`<a href="/oauth/${currentProvider}/user" target="_blank">/oauth/${currentProvider}/user</a> - Current user info (JSON)`;
+				}
+			}
+
+			async function checkUser() {
+				if (!currentProvider && availableProviders.length > 0) {
+					currentProvider = availableProviders[0].name;
+				}
+
+				if (!currentProvider) {
+					document.getElementById('user-status').innerHTML = '<p class="error">No OAuth provider available</p>';
+					return;
+				}
+
+				try {
+					const response = await fetch(`/oauth/${currentProvider}/user`);
+					const data = await response.json();
+
+					const userStatus = document.getElementById('user-status');
+
+					if (response.status === 200 && (data.authenticated || data.body?.authenticated)) {
+						const user = data.body || data;
+						userStatus.innerHTML = `
+                        <p><strong>Authenticated:</strong> Yes</p>
+                        <p><strong>Username:</strong> ${user.username}</p>
+                        <p><strong>Email:</strong> ${user.email || 'N/A'}</p>
+                        <p><strong>Name:</strong> ${user.name || 'N/A'}</p>
+                        <p><strong>Role:</strong> ${user.role || 'N/A'}</p>
+                        <p><strong>Provider:</strong> ${user.provider}</p>
+                        <pre>${JSON.stringify(user, null, 2)}</pre>
+                    `;
+						showMessage('Authenticated successfully', 'success');
+					} else {
+						userStatus.innerHTML = `
+                        <p><strong>Authenticated:</strong> No</p>
+                        <p>Select a provider above to login.</p>
+                    `;
+					}
+				} catch (error) {
+					document.getElementById('user-status').innerHTML =
+						'<p class="error">Error checking user status: ' + error.message + '</p>';
+				}
+			}
+
+			async function logout() {
+				if (!currentProvider) {
+					showMessage('No provider selected', 'error');
+					return;
+				}
+
+				try {
+					const response = await fetch(`/oauth/${currentProvider}/logout`, {
+						method: 'POST',
+						headers: {
+							'Content-Type': 'application/json',
+						},
+					});
+
+					if (response.ok) {
+						showMessage('Logged out successfully', 'success');
+						checkUser();
+					} else {
+						throw new Error('Logout failed');
+					}
+				} catch (error) {
+					showMessage('Error logging out: ' + error.message, 'error');
+				}
+			}
+
+			async function refreshToken() {
+				if (!currentProvider) {
+					showMessage('No provider selected', 'error');
+					return;
+				}
+
+				try {
+					const response = await fetch(`/oauth/${currentProvider}/refresh`);
+					const data = await response.json();
+
+					if (response.ok) {
+						showMessage(
+							`Token refreshed successfully (expires in ${data.expiresIn || data.body?.expiresIn || 'unknown'} seconds)`,
+							'success'
+						);
+					} else {
+						showMessage(`Refresh failed: ${data.error || data.body?.error || 'Unknown error'}`, 'error');
+					}
+				} catch (error) {
+					showMessage('Error refreshing token: ' + error.message, 'error');
+				}
+			}
+
+			function showMessage(text, type) {
+				const messageEl = document.getElementById('message');
+				messageEl.className = type;
+				messageEl.textContent = text;
+				messageEl.style.display = 'block';
+
+				setTimeout(() => {
+					messageEl.style.display = 'none';
+				}, 5000);
+			}
+
+			// Initialize on page load
+			async function init() {
+				// Load saved provider preference
+				currentProvider = localStorage.getItem('oauth-provider');
+
+				await loadProviders();
+				await checkUser();
+
+				// Check for OAuth error parameters
+				const urlParams = new URLSearchParams(window.location.search);
+				const error = urlParams.get('error');
+				if (error) {
+					if (error === 'session_expired') {
+						showMessage('Session expired. Please login again.', 'error');
+					} else if (error === 'oauth_failed') {
+						const reason = urlParams.get('reason') || 'unknown';
+						showMessage(`OAuth login failed: ${reason}`, 'error');
+					} else if (error === 'invalid_request') {
+						showMessage('Invalid OAuth request. Please try again.', 'error');
+					} else {
+						showMessage(`Login error: ${error}`, 'error');
+					}
+					// Clean URL after showing error
+					window.history.replaceState({}, document.title, window.location.pathname);
+				}
+
+				// Check if we just logged in (redirected back)
+				if (window.location.pathname.includes('/callback')) {
+					showMessage('Login successful!', 'success');
+					// Redirect to test page to clean URL
+					setTimeout(() => {
+						window.location.href = '/oauth/test';
+					}, 1000);
+				}
+			}
+
+			init();
+		</script>
+	</body>
+</html>

@@ -1,0 +1,23 @@
+# OAuth Plugin Configuration
+# This file defines the plugin entry point and default settings
+# All settings can be overridden in your application's config.yaml
+
+# Plugin entry point (required by Harper)
+pluginModule: 'dist/index.js'
+
+# GraphQL schema for OAuth tables
+graphqlSchema:
+  files: 'schema/oauth.graphql'
+
+# Default settings (optional - these are used if not specified in app config)
+# No providers configured by default - must be configured in application
+# providers: {}
+
+# Default OAuth settings
+scope: 'openid profile email'
+usernameClaim: 'email'
+defaultRole: 'user'
+postLoginRedirect: '/'
+
+# Default redirect URI pattern (will be adjusted per provider)
+redirectUri: 'https://localhost:9953/oauth/callback'

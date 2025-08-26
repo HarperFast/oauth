@@ -1,0 +1,21 @@
+## OAuth Plugin Schema
+## This defines the tables needed for OAuth functionality
+
+## CSRF Token storage table in oauth database
+## Stores temporary CSRF tokens for OAuth flows (10 minute expiration)
+type csrf_tokens @table(database: "oauth", expiration: 600) {
+	token_id: ID @primaryKey
+	data: String # JSON stringified CSRFTokenData
+	created_at: Float
+}
+
+## OAuth User Session table (optional, for future use)
+## Could store OAuth-specific user data
+# type oauth_sessions @table(database: "oauth") {
+#     username: ID @primaryKey
+#     provider: String @indexed
+#     provider_id: String
+#     access_token: String
+#     refresh_token: String
+#     expires_at: Float
+# }
