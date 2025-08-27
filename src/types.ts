@@ -188,11 +188,16 @@ export interface Scope {
 	/** Plugin configuration from config.yaml */
 	options: {
 		getAll(): Record<string, any>;
+		on(event: 'change', listener: () => void): void;
+		on(event: 'error', listener: (error: Error) => void): void;
+		on(event: 'ready', listener: () => void): void;
 	};
 	/** Resource registration API */
 	resources: {
 		set(name: string, resource: any): void;
 	};
+	/** Scope event handlers */
+	on(event: 'close', listener: () => void): void;
 }
 
 /**
