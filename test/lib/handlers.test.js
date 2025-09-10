@@ -64,6 +64,46 @@ describe('OAuth Handlers', () => {
 				access_token: 'new-access-token',
 				expires_in: 3600,
 			})),
+			refreshTokensWithMetadata: mock.fn(async (refreshToken, existingMetadata) => {
+				const now = Date.now();
+				const expiresInMs = 3600 * 1000; // 1 hour
+				return {
+					...existingMetadata,
+					accessToken: 'new-access-token',
+					issuedAt: now,
+					refreshAt: now + expiresInMs,
+					refreshThreshold: now + (expiresInMs * 0.8),
+					refreshToken: refreshToken,
+					lastRefreshed: now
+				};
+			}),
+			processCallback: mock.fn(async (code, redirectUri) => {
+				const now = Date.now();
+				const expiresInMs = 3600 * 1000; // 1 hour
+				return {
+					user: 'user@example.com',
+					authProvider: 'oauth',
+					authProviderMetadata: {
+						provider: 'test',
+						accessToken: 'access-token-123',
+						refreshToken: 'refresh-token-456',
+						issuedAt: now,
+						refreshAt: now + expiresInMs,
+						refreshThreshold: now + (expiresInMs * 0.8),
+						userInfo: {
+							sub: 'user-123',
+							email: 'user@example.com',
+							name: 'Test User',
+						},
+						profile: {
+							email: 'user@example.com',
+							name: 'Test User',
+							picture: undefined
+						}
+					},
+					expiresAt: now + (24 * 60 * 60 * 1000)
+				};
+			}),
 		};
 
 		mockRequest = {
@@ -73,6 +113,14 @@ describe('OAuth Handlers', () => {
 			session: {
 				id: 'session-123',
 				update: mock.fn(),
+				authProviderMetadata: {
+					provider: 'test',
+					accessToken: 'old-access-token',
+					refreshToken: 'refresh-token-456',
+					issuedAt: Date.now() - 1800000, // 30 minutes ago
+					refreshAt: Date.now() + 1800000, // 30 minutes from now
+					refreshThreshold: Date.now() + 1440000, // 24 minutes from now (80% of 30 min)
+				},
 			},
 		};
 
@@ -97,11 +145,22 @@ describe('OAuth Handlers', () => {
 			assert.equal(mockProvider.getAuthorizationUrl.mock.calls.length, 1);
 		});
 
-		it('should use referer as original URL', async () => {
+		it('should use referer as original URL when domain is allowed', async () => {
+			// Configure allowed domains for security
+			mockConfig.allowedRedirectDomains = ['app.example.com'];
+			
 			const result = await handleLogin(mockRequest, mockProvider, mockConfig, mockLogger);
 
 			const csrfCall = mockProvider.generateCSRFToken.mock.calls[0];
 			assert.equal(csrfCall.arguments[0].originalUrl, 'https://app.example.com/page');
+		});
+		
+		it('should reject unsafe referer and fall back to postLoginRedirect', async () => {
+			// No allowed domains configured - should reject all absolute URLs
+			const result = await handleLogin(mockRequest, mockProvider, mockConfig, mockLogger);
+
+			const csrfCall = mockProvider.generateCSRFToken.mock.calls[0];
+			assert.equal(csrfCall.arguments[0].originalUrl, '/dashboard'); // Falls back to postLoginRedirect
 		});
 
 		it('should fall back to postLoginRedirect when no referer', async () => {
@@ -137,9 +196,10 @@ describe('OAuth Handlers', () => {
 
 			const updateCall = mockRequest.session.update.mock.calls[0];
 			assert.equal(updateCall.arguments[0].user, 'user@example.com');
-			assert.ok(updateCall.arguments[0].oauthUser);
-			assert.equal(updateCall.arguments[0].oauthToken, 'access-token-123');
-			assert.equal(updateCall.arguments[0].oauthRefreshToken, 'refresh-token-456');
+			assert.equal(updateCall.arguments[0].authProvider, 'oauth');
+			assert.ok(updateCall.arguments[0].authProviderMetadata);
+			assert.equal(updateCall.arguments[0].authProviderMetadata.accessToken, 'access-token-123');
+			assert.equal(updateCall.arguments[0].authProviderMetadata.refreshToken, 'refresh-token-456');
 		});
 
 		it('should handle OAuth error response', async () => {
@@ -237,29 +297,6 @@ describe('OAuth Handlers', () => {
 			assert.equal(result.body.error, 'Authentication failed');
 			assert.ok(result.body.message.includes('Invalid client credentials'));
 		});
-
-		it('should handle session without update function', async () => {
-			mockRequest.session = {
-				id: 'session-123',
-			};
-
-			const result = await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockLogger);
-
-			assert.equal(result.status, 302);
-			assert.equal(mockRequest.session.user, 'user@example.com');
-			assert.ok(mockRequest.session.oauthUser);
-			assert.equal(mockRequest.session.oauthToken, 'access-token-123');
-		});
-
-		it('should handle missing session', async () => {
-			delete mockRequest.session;
-
-			const result = await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockLogger);
-
-			assert.equal(result.status, 302);
-			// Should still complete but log warning
-			assert.equal(mockLogger.warn.mock.calls.length, 1);
-		});
 	});
 
 	describe('handleLogout', () => {
@@ -269,37 +306,24 @@ describe('OAuth Handlers', () => {
 			assert.equal(result.status, 200);
 			assert.equal(result.body.message, 'Logged out successfully');
 
+			// Verify session.update was called to clear OAuth data
+			assert.equal(mockRequest.session.update.mock.calls.length, 1);
 			const updateCall = mockRequest.session.update.mock.calls[0];
 			assert.equal(updateCall.arguments[0].user, undefined);
-			assert.equal(updateCall.arguments[0].oauthUser, undefined);
-			assert.equal(updateCall.arguments[0].oauthToken, undefined);
-			assert.equal(updateCall.arguments[0].oauthRefreshToken, undefined);
+			assert.equal(updateCall.arguments[0].authProvider, undefined);
+			assert.equal(updateCall.arguments[0].authProviderMetadata, undefined);
 		});
 
-		it('should handle session without update function', async () => {
-			mockRequest.session = {
-				user: 'test-user',
-				oauthUser: { username: 'test' },
-				oauthToken: 'token',
-				oauthRefreshToken: 'refresh',
-			};
-
-			const result = await handleLogout(mockRequest, mockLogger);
-
-			assert.equal(result.status, 200);
-			assert.equal(mockRequest.session.user, undefined);
-			assert.equal(mockRequest.session.oauthUser, undefined);
-			assert.equal(mockRequest.session.oauthToken, undefined);
-			assert.equal(mockRequest.session.oauthRefreshToken, undefined);
-		});
-
-		it('should handle missing session', async () => {
-			delete mockRequest.session;
+		it('should handle logout with different session ID', async () => {
+			mockRequest.session.id = 'different-session-id';
 
 			const result = await handleLogout(mockRequest, mockLogger);
 
 			assert.equal(result.status, 200);
 			assert.equal(result.body.message, 'Logged out successfully');
+			
+			// Verify session.update was called to clear OAuth data
+			assert.equal(mockRequest.session.update.mock.calls.length, 1);
 		});
 	});
 
@@ -371,20 +395,25 @@ describe('OAuth Handlers', () => {
 
 	describe('handleRefresh', () => {
 		it('should refresh access token', async () => {
-			mockRequest.session.oauthRefreshToken = 'refresh-token-456';
-
 			const result = await handleRefresh(mockRequest, mockProvider, mockConfig, mockLogger);
 
 			assert.equal(result.status, 200);
 			assert.equal(result.body.message, 'Token refreshed successfully');
 			assert.equal(result.body.expiresIn, 3600);
 
+			// Verify session.update was called with new tokens
+			assert.equal(mockRequest.session.update.mock.calls.length, 1);
 			const updateCall = mockRequest.session.update.mock.calls[0];
-			assert.equal(updateCall.arguments[0].oauthToken, 'new-access-token');
+			assert.equal(updateCall.arguments[0].authProviderMetadata.accessToken, 'new-access-token');
 		});
 
 		it('should handle missing refresh token', async () => {
-			delete mockRequest.session.oauthRefreshToken;
+			// Mock session without refresh token
+			mockRequest.session.authProviderMetadata = {
+				provider: 'test',
+				accessToken: 'old-access-token',
+				// No refreshToken
+			};
 
 			const result = await handleRefresh(mockRequest, mockProvider, mockConfig, mockLogger);
 
@@ -393,41 +422,51 @@ describe('OAuth Handlers', () => {
 		});
 
 		it('should handle provider without refresh support', async () => {
-			mockRequest.session.oauthRefreshToken = 'refresh-token';
-			delete mockProvider.refreshAccessToken;
+			// Mock provider without refreshTokensWithMetadata method
+			const providerWithoutRefresh = { ...mockProvider };
+			delete providerWithoutRefresh.refreshTokensWithMetadata;
 
-			const result = await handleRefresh(mockRequest, mockProvider, mockConfig, mockLogger);
+			const result = await handleRefresh(mockRequest, providerWithoutRefresh, mockConfig, mockLogger);
 
 			assert.equal(result.status, 501);
 			assert.equal(result.body.error, 'Token refresh not supported by this provider');
 		});
 
 		it('should handle refresh failure', async () => {
-			mockRequest.session.oauthRefreshToken = 'expired-refresh-token';
-			mockProvider.refreshAccessToken = mock.fn(async () => {
+			mockProvider.refreshTokensWithMetadata = mock.fn(async () => {
 				throw new Error('Refresh token expired');
 			});
 
 			const result = await handleRefresh(mockRequest, mockProvider, mockConfig, mockLogger);
 
-			assert.equal(result.status, 401);
+			assert.equal(result.status, 500);
 			assert.equal(result.body.error, 'Token refresh failed');
 			assert.ok(result.body.message.includes('Refresh token expired'));
 		});
 
 		it('should update refresh token when new one provided', async () => {
-			mockRequest.session.oauthRefreshToken = 'old-refresh-token';
-			mockProvider.refreshAccessToken = mock.fn(async () => ({
-				access_token: 'new-access',
-				refresh_token: 'new-refresh',
-				expires_in: 7200,
-			}));
+			mockProvider.refreshTokensWithMetadata = mock.fn(async (refreshToken, existingMetadata) => {
+				const now = Date.now();
+				const expiresInMs = 7200 * 1000; // 2 hours
+				return {
+					...existingMetadata,
+					accessToken: 'new-access',
+					issuedAt: now,
+					refreshAt: now + expiresInMs,
+					refreshThreshold: now + (expiresInMs * 0.8),
+					refreshToken: 'new-refresh',
+					lastRefreshed: now
+				};
+			});
 
 			const result = await handleRefresh(mockRequest, mockProvider, mockConfig, mockLogger);
 
 			assert.equal(result.status, 200);
+			
+			// Verify session.update was called with new tokens
 			const updateCall = mockRequest.session.update.mock.calls[0];
-			assert.equal(updateCall.arguments[0].oauthRefreshToken, 'new-refresh');
+			assert.equal(updateCall.arguments[0].authProviderMetadata.accessToken, 'new-access');
+			assert.equal(updateCall.arguments[0].authProviderMetadata.refreshToken, 'new-refresh');
 		});
 	});
 

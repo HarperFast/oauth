@@ -55,6 +55,10 @@ describe('OAuth Plugin Options Watcher', () => {
 					closeListeners.push(listener);
 				}
 			},
+			auth: {
+				addHook: () => {},
+				removeHook: () => {},
+			},
 		};
 	});
 

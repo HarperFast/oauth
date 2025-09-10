@@ -18,6 +18,13 @@ export async function handleApplication(scope: Scope): Promise<void> {
 	let debugMode = false;
 	let isInitialized = false;
 
+	// Check if sessions are enabled - OAuth plugin requires sessions to function
+	const sessionsEnabled = process.env.ENABLE_SESSIONS !== 'false'; // Default to true if not set
+	if (!sessionsEnabled) {
+		logger?.error?.('OAuth plugin cannot initialize: Sessions are disabled. Set ENABLE_SESSIONS=true to use OAuth authentication.');
+		return;
+	}
+
 	/**
 	 * Update OAuth configuration when options change
 	 */
@@ -81,6 +88,75 @@ export async function handleApplication(scope: Scope): Promise<void> {
 			logger?.info?.(`OAuth debug mode ${debugMode ? 'enabled' : 'disabled'}`);
 		}
 	}
+
+	// Register OAuth session validation hook for token refresh
+	scope.auth.addHook('sessionValidate', async (session: any, _request: any) => {
+		// Only handle OAuth sessions
+		if (session.authProvider !== 'oauth') {
+			return { valid: true };
+		}
+
+		const metadata = session.authProviderMetadata;
+		if (!metadata) {
+			logger?.warn?.('OAuth session missing metadata, invalidating');
+			return { valid: false };
+		}
+
+		// Check if token needs refresh using pre-calculated threshold
+		const now = Date.now();
+		const isExpired = now >= metadata.refreshAt;
+		const refreshNeeded = now >= metadata.refreshThreshold;
+
+		// Block access if token is expired and no refresh token
+		if (isExpired && !metadata.refreshToken) {
+			logger?.warn?.('OAuth token expired and no refresh token available');
+			return { valid: false };
+		}
+
+		// Attempt token refresh if needed and refresh token is available
+		if (refreshNeeded && metadata.refreshToken) {
+			// NOTE: Multiple concurrent requests may attempt to refresh the same token.
+			// This is acceptable - OAuth providers handle duplicate refresh requests gracefully,
+			// but we could refine this to only run a single concurrent refresh if needed.
+			logger?.info?.(isExpired 
+				? 'OAuth token expired, attempting refresh...' 
+				: 'OAuth token approaching expiration (80% lifetime), refreshing proactively...');
+			
+			try {
+				// Find the provider for this session
+				const providerName = metadata.provider;
+				const provider = providers[providerName];
+				
+				if (!provider) {
+					logger?.error?.(`OAuth provider '${providerName}' not found for token refresh`);
+					return { valid: false };
+				}
+
+				// Check if provider supports token refresh
+				if (!provider.provider.refreshTokensWithMetadata) {
+					logger?.warn?.(`OAuth provider '${providerName}' does not support token refresh`);
+					return { valid: false };
+				}
+
+				// Refresh the token using provider method
+				const newMetadata = await provider.provider.refreshTokensWithMetadata(metadata.refreshToken, metadata);
+
+				logger?.info?.('OAuth token refreshed successfully');
+
+				return {
+					valid: true,
+					updates: {
+						authProviderMetadata: newMetadata
+					}
+				};
+			} catch (error) {
+				logger?.error?.('OAuth token refresh failed:', error);
+				return { valid: false };
+			}
+		}
+
+		return { valid: true };
+	});
 
 	// Initial configuration
 	updateConfiguration();

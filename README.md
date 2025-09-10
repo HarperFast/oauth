@@ -175,6 +175,9 @@ Set default values for all providers in your `config.yaml`:
   usernameClaim: 'email'
   defaultRole: 'user'
   postLoginRedirect: '/dashboard'
+  allowedRedirectDomains:  # Global security setting
+    - myapp.com
+    - staging.myapp.com
   debug: true # Enable debug endpoints
   providers:
     # ... provider configs
@@ -184,13 +187,63 @@ Set default values for all providers in your `config.yaml`:
 
 Each provider can override global defaults:
 
-| Option              | Description                 | Default           |
-| ------------------- | --------------------------- | ----------------- |
-| `scope`             | OAuth scopes to request     | Provider-specific |
-| `usernameClaim`     | Field to use as username    | `'email'`         |
-| `defaultRole`       | Harper role to assign       | `'user'`          |
-| `postLoginRedirect` | URL to redirect after login | `'/'`             |
-| `redirectUri`       | Custom callback URL         | Auto-generated    |
+| Option                    | Description                          | Default           |
+| ------------------------- | ------------------------------------ | ----------------- |
+| `scope`                   | OAuth scopes to request              | Provider-specific |
+| `usernameClaim`           | Field to use as username             | `'email'`         |
+| `defaultRole`             | Harper role to assign                | `'user'`          |
+| `postLoginRedirect`       | URL to redirect after login          | `'/'`             |
+| `allowedRedirectDomains`  | Trusted domains for redirects        | `[]` (none)       |
+| `redirectUri`             | Custom callback URL                  | Auto-generated    |
+
+## Security Features
+
+### Open Redirect Prevention
+
+The OAuth plugin includes protection against **open redirect attacks** where malicious actors attempt to redirect users to phishing sites after authentication.
+
+**How it works:**
+
+- The plugin validates all redirect URLs from referer headers
+- Only relative URLs (same origin) are automatically trusted
+- Absolute URLs require explicit domain approval via `allowedRedirectDomains`
+- Suspicious redirects are logged and rejected
+
+**Configuration:**
+
+```yaml
+providers:
+  github:
+    provider: github
+    clientId: ${OAUTH_GITHUB_CLIENT_ID}
+    clientSecret: ${OAUTH_GITHUB_CLIENT_SECRET}
+    allowedRedirectDomains:
+      - myapp.com           # Allows myapp.com
+      - staging.myapp.com   # Allows staging.myapp.com
+      # Subdomain matching: myapp.com also allows app.myapp.com, admin.myapp.com, etc.
+```
+
+**Security behavior:**
+
+- ✅ **Safe**: `/dashboard`, `/app/settings` (relative URLs)
+- ✅ **Safe**: `https://myapp.com/profile` (if `myapp.com` in allowlist)
+- ❌ **Blocked**: `https://evil-site.com/phishing` (not in allowlist)
+- ❌ **Blocked**: `https://malicious.com` (not in allowlist)
+- 📝 **Logged**: All rejected redirects are logged for security monitoring
+
+**Default behavior:** If no `allowedRedirectDomains` are configured, all absolute URLs are rejected and the user is redirected to `postLoginRedirect` instead.
+
+### CSRF Protection
+
+- CSRF tokens expire after 10 minutes for security
+- State parameters prevent authorization code interception
+- Session validation prevents token hijacking
+
+### Token Security
+
+- Access tokens are automatically refreshed before expiration (80% lifetime)
+- Refresh tokens are securely stored in Harper's session system
+- Expired sessions require re-authentication
 
 ## How It Works
 

@@ -257,6 +257,82 @@ export class OAuthProvider implements IOAuthProvider {
 	}
 
 	/**
+	 * Process OAuth callback and create session metadata
+	 */
+	async processCallback(code: string, redirectUri: string): Promise<any> {
+		// Exchange code for tokens
+		const tokenResponse = await this.exchangeCodeForToken(code, redirectUri);
+
+		// Verify ID token if present (OIDC flow)
+		let idTokenClaims = null;
+		if (tokenResponse.id_token) {
+			try {
+				idTokenClaims = this.verifyIdToken ? await this.verifyIdToken(tokenResponse.id_token) : null;
+			} catch (error) {
+				// Log verification failure but continue with userinfo endpoint
+				// Error will be logged by caller
+			}
+		}
+
+		// Get user info (will use ID token claims if available and verified)
+		const userInfo = await this.getUserInfo(tokenResponse.access_token, idTokenClaims);
+
+		// Map to Harper user
+		const user = this.mapUserToHarper(userInfo);
+
+		// Create session metadata
+		const expiresInMs = (tokenResponse.expires_in || 3600) * 1000; // Default to 1 hour if provider doesn't specify
+		const now = Date.now();
+		const refreshAt = now + expiresInMs;
+		const refreshThreshold = now + (expiresInMs * 0.8); // Calculate 80% threshold once
+		
+		return {
+			user: user.username,
+			authProvider: 'oauth',
+			authProviderMetadata: {
+				provider: this.config.provider,
+				accessToken: tokenResponse.access_token,
+				refreshToken: tokenResponse.refresh_token,
+				issuedAt: now,
+				refreshAt,
+				refreshThreshold,
+				userInfo,
+				profile: {
+					email: userInfo.email,
+					name: userInfo.name || user.username,
+					picture: userInfo.avatar_url || userInfo.picture
+				}
+			},
+			expiresAt: now + (24 * 60 * 60 * 1000) // 24 hours session expiry
+		};
+	}
+
+	/**
+	 * Refresh OAuth tokens and calculate new expiration times
+	 */
+	async refreshTokensWithMetadata(refreshToken: string, existingMetadata: any): Promise<any> {
+		if (!this.refreshAccessToken) {
+			throw new Error(`Provider '${this.config.provider}' does not support token refresh`);
+		}
+
+		const tokenResponse = await this.refreshAccessToken(refreshToken);
+		const now = Date.now();
+		const expiresInMs = (tokenResponse.expires_in || 3600) * 1000; // Default to 1 hour if provider doesn't specify
+		
+		return {
+			// Preserve other existing metadata
+			...existingMetadata,
+			// Override with new token values
+			accessToken: tokenResponse.access_token,
+			issuedAt: now,
+			refreshAt: now + expiresInMs,
+			refreshThreshold: now + (expiresInMs * 0.8),
+			refreshToken: tokenResponse.refresh_token || refreshToken,
+			lastRefreshed: now
+		};
+	}
+
+	/**
 	 * Map OAuth user info to Harper user object
 	 */
 	mapUserToHarper(userInfo: any): OAuthUser {

@@ -10,6 +10,43 @@ import { fileURLToPath } from 'node:url';
 import type { Request, RequestTarget, Logger, IOAuthProvider, OAuthProviderConfig } from '../types.ts';
 
 /**
+ * Validate and sanitize redirect URL to prevent open redirect attacks
+ */
+function validateRedirectUrl(url: string | undefined, allowedDomains: string[] = []): string | null {
+	if (!url) return null;
+	
+	try {
+		const parsedUrl = new URL(url);
+		
+		// Only allow relative URLs (same origin) or explicitly allowed domains
+		if (parsedUrl.protocol === 'http:' || parsedUrl.protocol === 'https:') {
+			// For absolute URLs, check if domain is in allowed list
+			if (allowedDomains.length === 0) {
+				// If no allowed domains specified, reject all absolute URLs for security
+				return null;
+			}
+			
+			const hostname = parsedUrl.hostname.toLowerCase();
+			const isAllowed = allowedDomains.some(domain => {
+				const allowedDomain = domain.toLowerCase();
+				return hostname === allowedDomain || hostname.endsWith('.' + allowedDomain);
+			});
+			
+			if (!isAllowed) {
+				return null;
+			}
+		}
+		
+		// Return the normalized URL
+		return parsedUrl.href;
+	} catch (error) {
+		// Invalid URL format
+		return null;
+	}
+}
+
+
+/**
  * Handle OAuth login initiation
  */
 export async function handleLogin(
@@ -18,9 +55,20 @@ export async function handleLogin(
 	config: OAuthProviderConfig,
 	logger?: Logger
 ): Promise<any> {
+	// Validate referer URL to prevent open redirect attacks
+	const validatedReferer = validateRedirectUrl(
+		request.headers?.referer,
+		config.allowedRedirectDomains || []
+	);
+	
+	// Log security rejections for monitoring
+	if (request.headers?.referer && !validatedReferer) {
+		logger?.warn?.(`Rejected potentially unsafe referer URL for security: ${request.headers.referer}`);
+	}
+	
 	// Generate CSRF token with metadata
 	const csrfToken = await provider.generateCSRFToken({
-		originalUrl: request.headers?.referer || config.postLoginRedirect || '/oauth/test',
+		originalUrl: validatedReferer || config.postLoginRedirect || '/oauth/test',
 		sessionId: request.session?.id,
 	});
 
@@ -58,11 +106,13 @@ export async function handleCallback(
 		logger?.error?.(`OAuth error: ${error} - ${errorDescription}`);
 		// Redirect to original URL or fallback with error
 		const fallbackUrl = config.postLoginRedirect || '/';
-		const errorUrl = `${fallbackUrl}${fallbackUrl.includes('?') ? '&' : '?'}error=oauth_failed&reason=${encodeURIComponent(error)}`;
+		const errorUrl = new URL(fallbackUrl, 'http://localhost'); // Base URL for relative paths
+		errorUrl.searchParams.set('error', 'oauth_failed');
+		errorUrl.searchParams.set('reason', error);
 		return {
 			status: 302,
 			headers: {
-				Location: errorUrl,
+				Location: errorUrl.pathname + errorUrl.search,
 			},
 		};
 	}
@@ -71,11 +121,12 @@ export async function handleCallback(
 	if (!code || !state) {
 		logger?.warn?.('Missing required OAuth callback parameters');
 		const fallbackUrl = config.postLoginRedirect || '/';
-		const errorUrl = `${fallbackUrl}${fallbackUrl.includes('?') ? '&' : '?'}error=invalid_request`;
+		const errorUrl = new URL(fallbackUrl, 'http://localhost'); // Base URL for relative paths
+		errorUrl.searchParams.set('error', 'invalid_request');
 		return {
 			status: 302,
 			headers: {
-				Location: errorUrl,
+				Location: errorUrl.pathname + errorUrl.search,
 			},
 		};
 	}
@@ -96,49 +147,21 @@ export async function handleCallback(
 	}
 
 	try {
-		// Exchange code for tokens
-		const tokenResponse = await provider.exchangeCodeForToken(code, config.redirectUri || '');
+		// Process OAuth callback using provider (most providers use standard flow)
+		const sessionData = await provider.processCallback(code, config.redirectUri || '');
 
-		// Verify ID token if present (OIDC flow)
-		let idTokenClaims = null;
-		if (tokenResponse.id_token) {
-			try {
-				idTokenClaims = provider.verifyIdToken ? await provider.verifyIdToken(tokenResponse.id_token) : null;
-				logger?.info?.('ID token verified successfully');
-			} catch (error) {
-				// Log verification failure but continue with userinfo endpoint
-				logger?.warn?.('ID token verification failed, falling back to userinfo endpoint:', (error as Error).message);
-			}
-		}
-
-		// Get user info (will use ID token claims if available and verified)
-		const userInfo = await provider.getUserInfo(tokenResponse.access_token, idTokenClaims);
-
-		// Map to Harper user
-		const user = provider.mapUserToHarper(userInfo);
-
-		// Store in session if available
-		if (request.session) {
-			// Store user info in session
-			if (typeof request.session.update === 'function') {
-				await request.session.update({
-					user: user.username, // Harper expects just the username string
-					oauthUser: user, // Store full OAuth user object separately
-					oauthToken: tokenResponse.access_token,
-					oauthRefreshToken: tokenResponse.refresh_token,
-				});
-			} else {
-				request.session.user = user.username;
-				request.session.oauthUser = user;
-				request.session.oauthToken = tokenResponse.access_token;
-				if (tokenResponse.refresh_token) {
-					request.session.oauthRefreshToken = tokenResponse.refresh_token;
+		try {
+			await request.session!.update!(sessionData);
+			logger?.info?.(`OAuth login successful for user: ${sessionData.user}`);
+		} catch (error) {
+			logger?.error?.('Failed to create Harper session:', error);
+			return {
+				status: 500,
+				body: {
+					error: 'Session creation failed',
+					message: 'Could not create authentication session'
 				}
-			}
-
-			logger?.info?.(`OAuth login successful for user: ${user.username}`);
-		} else {
-			logger?.warn?.('No session available for OAuth user');
+			};
 		}
 
 		// Redirect to original URL or default
@@ -164,27 +187,30 @@ export async function handleCallback(
  * Handle user logout
  */
 export async function handleLogout(request: Request, logger?: Logger): Promise<any> {
-	if (request.session) {
-		if (typeof request.session.update === 'function') {
-			await request.session.update({
-				user: undefined,
-				oauthUser: undefined,
-				oauthToken: undefined,
-				oauthRefreshToken: undefined,
-			});
-		} else {
-			delete request.session.user;
-			delete request.session.oauthUser;
-			delete request.session.oauthToken;
-			delete request.session.oauthRefreshToken;
-		}
-		logger?.info?.('User logged out');
+	try {
+		// Clear OAuth session data
+		await request.session!.update!({
+			user: undefined,
+			authProvider: undefined,
+			authProviderMetadata: undefined,
+		} as any);
+		
+		logger?.info?.('User logged out successfully');
+		
+		return {
+			status: 200,
+			body: { message: 'Logged out successfully' },
+		};
+	} catch (error) {
+		logger?.error?.('Failed to clear session:', error);
+		return {
+			status: 500,
+			body: { 
+				error: 'Logout failed',
+				message: 'Could not clear session'
+			}
+		};
 	}
-
-	return {
-		status: 200,
-		body: { message: 'Logged out successfully' },
-	};
 }
 
 /**
@@ -200,10 +226,11 @@ export async function handleUserInfo(request: Request): Promise<any> {
 	}
 
 	// Check for OAuth user in session first, then Harper user
-	const oauthUser = request?.session?.oauthUser;
-	const username = request?.user || request?.session?.user;
+	const session = request?.session as any;
+	const username = request?.user || session?.user;
+	const isOAuthUser = session?.authProvider === 'oauth';
 
-	if (!username && !oauthUser) {
+	if (!username && !isOAuthUser) {
 		return {
 			status: 401,
 			body: {
@@ -214,16 +241,17 @@ export async function handleUserInfo(request: Request): Promise<any> {
 	}
 
 	// If we have OAuth user details, use those
-	if (oauthUser) {
+	if (isOAuthUser && session?.authProviderMetadata) {
+		const metadata = session.authProviderMetadata;
 		return {
 			status: 200,
 			body: {
 				authenticated: true,
-				username: oauthUser.username,
-				role: oauthUser.role,
-				email: oauthUser.email,
-				name: oauthUser.name,
-				provider: oauthUser.provider,
+				username: session.user,
+				role: 'user', // OAuth users get default role
+				email: metadata.profile?.email || null,
+				name: metadata.profile?.name || null,
+				provider: 'oauth',
 			},
 		};
 	}
@@ -257,56 +285,46 @@ export async function handleRefresh(
 	_config: OAuthProviderConfig,
 	logger?: Logger
 ): Promise<any> {
-	// Get refresh token from session
-	const refreshToken = request?.session?.oauthRefreshToken;
-
-	if (!refreshToken) {
+	// Get session data directly from request
+	if (!(request.session as any)?.authProviderMetadata?.refreshToken) {
 		return {
 			status: 401,
 			body: { error: 'No refresh token available' },
 		};
 	}
 
+	const metadata = (request.session as any).authProviderMetadata;
+	
+	// Check if provider supports token refresh
+	if (!provider.refreshTokensWithMetadata) {
+		return {
+			status: 501,
+			body: { error: 'Token refresh not supported by this provider' },
+		};
+	}
+
 	try {
-		// Refresh the access token
-		if (!provider.refreshAccessToken) {
-			return {
-				status: 501,
-				body: { error: 'Token refresh not supported by this provider' },
-			};
-		}
+		// Refresh the access token using provider method
+		const newMetadata = await provider.refreshTokensWithMetadata(metadata.refreshToken, metadata);
+		
+		await request.session!.update!({
+			authProviderMetadata: newMetadata
+		} as any);
 
-		const tokenResponse = await provider.refreshAccessToken(refreshToken);
-
-		// Update session with new tokens
-		if (request.session) {
-			if (typeof request.session.update === 'function') {
-				await request.session.update({
-					oauthToken: tokenResponse.access_token,
-					// Update refresh token if a new one was provided
-					oauthRefreshToken: tokenResponse.refresh_token || refreshToken,
-				});
-			} else {
-				request.session.oauthToken = tokenResponse.access_token;
-				if (tokenResponse.refresh_token) {
-					request.session.oauthRefreshToken = tokenResponse.refresh_token;
-				}
-			}
-
-			logger?.info?.('OAuth token refreshed successfully');
-		}
+		logger?.info?.('OAuth token refreshed successfully via manual endpoint');
 
 		return {
 			status: 200,
 			body: {
 				message: 'Token refreshed successfully',
-				expiresIn: tokenResponse.expires_in,
+				expiresIn: Math.round((newMetadata.refreshAt - newMetadata.issuedAt) / 1000), // Convert back to seconds
+				refreshedAt: newMetadata.issuedAt
 			},
 		};
 	} catch (error) {
-		logger?.error?.('Token refresh failed:', error);
+		logger?.error?.('Manual token refresh failed:', error);
 		return {
-			status: 401,
+			status: 500,
 			body: {
 				error: 'Token refresh failed',
 				message: (error as Error).message,

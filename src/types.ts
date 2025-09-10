@@ -60,6 +60,8 @@ export interface OAuthProviderConfig {
 	defaultRole?: string;
 	/** URL to redirect after successful login */
 	postLoginRedirect?: string;
+	/** Allowed domains for redirect validation (prevents open redirect attacks) */
+	allowedRedirectDomains?: string[];
 	/** Prefer ID token claims over userinfo endpoint (OIDC) */
 	preferIdToken?: boolean;
 	/** Whether to fetch email from provider's dedicated email endpoint */
@@ -153,6 +155,10 @@ export interface IOAuthProvider {
 	verifyIdToken?(idToken: string): Promise<any>;
 	/** Exchange refresh token for new access token */
 	refreshAccessToken?(refreshToken: string): Promise<TokenResponse>;
+	/** Process OAuth callback and create session metadata */
+	processCallback(code: string, redirectUri: string): Promise<any>;
+	/** Refresh tokens and calculate new expiration metadata */
+	refreshTokensWithMetadata?(refreshToken: string, existingMetadata: any): Promise<any>;
 }
 
 /**
@@ -198,6 +204,12 @@ export interface Scope {
 	};
 	/** Scope event handlers */
 	on(event: 'close', listener: () => void): void;
+	/** Harper authentication API - minimal hook registration only */
+	auth: {
+		/** Hook Registration */
+		addHook(hookName: string, handler: (...args: any[]) => any): void;
+		removeHook(hookName: string, handler: (...args: any[]) => any): void;
+	};
 }
 
 /**
