@@ -2,7 +2,7 @@
  * Tests for OAuth Resource
  */
 
-import { describe, it, before, after, beforeEach, mock } from 'node:test';
+import { describe, it, beforeEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
 
 // Mock Harper's Resource class for testing
@@ -16,12 +16,7 @@ import { createOAuthResource } from '../../dist/lib/resource.js';
 describe('OAuth Resource', () => {
 	let mockProviders;
 	let mockLogger;
-	let originalHandlers;
-
-	before(() => {
-		// Save original handler functions to restore later
-		originalHandlers = {};
-	});
+	let mockHookManager;
 
 	beforeEach(() => {
 		mockLogger = {
@@ -29,6 +24,12 @@ describe('OAuth Resource', () => {
 			warn: mock.fn(),
 			error: mock.fn(),
 			debug: mock.fn(),
+		};
+
+		mockHookManager = {
+			callOnLogin: mock.fn(async () => {}),
+			callOnLogout: mock.fn(async () => {}),
+			callOnTokenRefresh: mock.fn(async () => {}),
 		};
 
 		mockProviders = {
@@ -60,7 +61,7 @@ describe('OAuth Resource', () => {
 			let resource;
 
 			beforeEach(() => {
-				resource = createOAuthResource(mockProviders, false, mockLogger);
+				resource = createOAuthResource(mockProviders, false, mockHookManager, mockLogger);
 			});
 
 			it('should return 404 for root path', async () => {
@@ -132,7 +133,7 @@ describe('OAuth Resource', () => {
 			let resource;
 
 			beforeEach(() => {
-				resource = createOAuthResource(mockProviders, true, mockLogger);
+				resource = createOAuthResource(mockProviders, true, mockHookManager, mockLogger);
 			});
 
 			it('should show provider list at root', async () => {
@@ -194,7 +195,7 @@ describe('OAuth Resource', () => {
 			let resource;
 
 			beforeEach(() => {
-				resource = createOAuthResource(mockProviders, false, mockLogger);
+				resource = createOAuthResource(mockProviders, false, mockHookManager, mockLogger);
 			});
 
 			it('should handle string target', async () => {
@@ -254,7 +255,7 @@ describe('OAuth Resource', () => {
 			let resource;
 
 			beforeEach(() => {
-				resource = createOAuthResource(mockProviders, false, mockLogger);
+				resource = createOAuthResource(mockProviders, false, mockHookManager, mockLogger);
 			});
 
 			it('should handle logout POST request', async () => {
@@ -264,19 +265,19 @@ describe('OAuth Resource', () => {
 						update: mock.fn(),
 					},
 				};
-				const result = await resource.post('github/logout', {}, request);
+				const result = await resource.post('logout', {}, request);
 				assert.equal(result.status, 200);
 				assert.equal(result.body.message, 'Logged out successfully');
 			});
 
 			it('should reject non-logout POST requests', async () => {
 				const result = await resource.post('github/login', {}, {});
-				assert.equal(result.status, 405);
-				assert.equal(result.body.error, 'Method not allowed');
+				assert.equal(result.status, 404);
+				assert.equal(result.body.error, 'Not found');
 			});
 
-			it('should handle unknown provider in POST', async () => {
-				const result = await resource.post('unknown/logout', {}, {});
+			it('should handle other POST endpoints', async () => {
+				const result = await resource.post('github/something', {}, {});
 				assert.equal(result.status, 404);
 				assert.equal(result.body.error, 'Not found');
 			});
@@ -285,15 +286,15 @@ describe('OAuth Resource', () => {
 
 	describe('Resource Creation', () => {
 		it('should create resource with providers', () => {
-			const resource = createOAuthResource(mockProviders, false, mockLogger);
+			const resource = createOAuthResource(mockProviders, false, mockHookManager, mockLogger);
 			assert.ok(resource);
 			assert.equal(typeof resource.get, 'function');
 			assert.equal(typeof resource.post, 'function');
 		});
 
 		it('should create different instances with different configs', () => {
-			const resource1 = createOAuthResource(mockProviders, false, mockLogger);
-			const resource2 = createOAuthResource(mockProviders, true, mockLogger);
+			const resource1 = createOAuthResource(mockProviders, false, mockHookManager, mockLogger);
+			const resource2 = createOAuthResource(mockProviders, true, mockHookManager, mockLogger);
 			// Each resource is a new object
 			assert.notEqual(resource1, resource2);
 		});

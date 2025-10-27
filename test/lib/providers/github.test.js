@@ -26,7 +26,7 @@ describe('GitHub Provider', () => {
 
 		// Mock the helpers
 		const mockHelpers = {
-			getUserInfo: async (token) => ({
+			getUserInfo: async () => ({
 				login: 'testuser',
 				name: 'Test User',
 				email: null, // GitHub often returns null email

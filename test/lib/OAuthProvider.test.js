@@ -2,7 +2,7 @@
  * Tests for OAuthProvider
  */
 
-import { describe, it, before, after, beforeEach, mock } from 'node:test';
+import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { OAuthProvider } from '../../dist/lib/OAuthProvider.js';
 
@@ -79,6 +79,7 @@ describe('OAuthProvider', () => {
 
 			assert.throws(
 				() => {
+					// eslint-disable-next-line sonarjs/constructor-for-side-effects
 					new OAuthProvider(invalidConfig, mockLogger);
 				},
 				{
@@ -94,6 +95,7 @@ describe('OAuthProvider', () => {
 
 			assert.throws(
 				() => {
+					// eslint-disable-next-line sonarjs/constructor-for-side-effects
 					new OAuthProvider(invalidConfig, mockLogger);
 				},
 				{

@@ -220,13 +220,8 @@
 			}
 
 			async function logout() {
-				if (!currentProvider) {
-					showMessage('No provider selected', 'error');
-					return;
-				}
-
 				try {
-					const response = await fetch(`/oauth/${currentProvider}/logout`, {
+					const response = await fetch('/oauth/logout', {
 						method: 'POST',
 						headers: {
 							'Content-Type': 'application/json',

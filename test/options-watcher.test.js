@@ -1,4 +1,4 @@
-import { describe, it, before, after, beforeEach } from 'node:test';
+import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { handleApplication } from '../dist/index.js';
 
@@ -42,6 +42,12 @@ describe('OAuth Plugin Options Watcher', () => {
 					if (event === 'change') {
 						configChangeListeners.push(listener);
 					}
+				},
+			},
+			server: {
+				http(middleware) {
+					// Mock HTTP middleware registration
+					return middleware;
 				},
 			},
 			resources: {
@@ -129,8 +135,10 @@ describe('OAuth Plugin Options Watcher', () => {
 			providers: {},
 		};
 
-		// Trigger change event
+		// Trigger change event and wait for async update
 		configChangeListeners[0]();
+		// Give async config update time to complete
+		await new Promise((resolve) => setTimeout(resolve, 10));
 
 		// Should set error resource when no providers
 		assert.ok(resources.oauth, 'OAuth resource should still exist');

@@ -7,7 +7,52 @@
 
 import { initializeProviders } from './lib/config.ts';
 import { createOAuthResource } from './lib/resource.ts';
-import type { Scope, OAuthPluginConfig, ProviderRegistry } from './types.ts';
+import { validateAndRefreshSession } from './lib/sessionValidator.ts';
+import { clearOAuthSession } from './lib/handlers.ts';
+import { HookManager } from './lib/hookManager.ts';
+import type { Scope, OAuthPluginConfig, ProviderRegistry, OAuthHooks } from './types.ts';
+
+// Export HookManager class and types
+export { HookManager } from './lib/hookManager.ts';
+export type { OAuthHooks, OAuthUser, TokenResponse } from './types.ts';
+
+// Store hooks registered at module load time and active hookManager
+let pendingHooks: OAuthHooks | null = null;
+let activeHookManager: HookManager | null = null;
+
+/**
+ * Register OAuth hooks programmatically
+ * Call this from your application code to register lifecycle hooks
+ *
+ * This can be called:
+ * - At module load time (before the plugin initializes) - hooks will be queued
+ * - After plugin initialization - hooks will be applied immediately
+ *
+ * NOTE: This registers hooks at the module level, shared across all instances
+ * of the OAuth plugin. For most applications with a single OAuth plugin instance,
+ * this is the simplest and recommended approach.
+ *
+ * @example
+ * ```typescript
+ * import { registerHooks } from '@harperdb/oauth';
+ *
+ * // Can be called at module load time or later
+ * registerHooks({
+ *   onLogin: async (oauthUser, tokenResponse, session, request, provider) => {
+ *     console.log(`User logged in: ${oauthUser.username}`);
+ *   }
+ * });
+ * ```
+ */
+export function registerHooks(hooks: OAuthHooks): void {
+	if (activeHookManager) {
+		// Plugin is already loaded - apply immediately
+		activeHookManager.register(hooks);
+	} else {
+		// Plugin not loaded yet - queue for later
+		pendingHooks = hooks;
+	}
+}
 
 /**
  * Plugin entry point
@@ -18,13 +63,36 @@ export async function handleApplication(scope: Scope): Promise<void> {
 	let debugMode = false;
 	let isInitialized = false;
 
+	// Create hookManager instance scoped to this application
+	const hookManager = new HookManager(logger);
+
+	// Set as active hookManager for late hook registration
+	activeHookManager = hookManager;
+
+	// Apply any hooks that were registered at module load time
+	if (pendingHooks) {
+		hookManager.register(pendingHooks);
+		logger?.debug?.('Applied pending OAuth hooks');
+		pendingHooks = null; // Clear pending hooks after applying
+	}
+
 	/**
 	 * Update OAuth configuration when options change
 	 */
-	function updateConfiguration() {
-		const options = (scope.options.getAll() || {}) as OAuthPluginConfig;
+	async function updateConfiguration() {
+		const rawOptions = (scope.options.getAll() || {}) as OAuthPluginConfig;
+
+		// Expand environment variables in plugin-level options
+		let debugValue = rawOptions.debug;
+		if (typeof debugValue === 'string' && debugValue.startsWith('${') && debugValue.endsWith('}')) {
+			const envVar = debugValue.slice(2, -1);
+			debugValue = process.env[envVar] || debugValue;
+		}
+
+		const options = { ...rawOptions, debug: debugValue };
 		const previousDebugMode = debugMode;
-		debugMode = options.debug === true;
+		// Handle both boolean and string values (from environment variables)
+		debugMode = options.debug === true || options.debug === 'true';
 
 		// Log configuration update
 		if (isInitialized) {
@@ -64,7 +132,7 @@ export async function handleApplication(scope: Scope): Promise<void> {
 			});
 		} else {
 			// Register the OAuth resource with configured providers
-			scope.resources.set('oauth', createOAuthResource(providers, debugMode, logger));
+			scope.resources.set('oauth', createOAuthResource(providers, debugMode, hookManager, logger));
 
 			// Log all configured providers
 			logger?.info?.('OAuth plugin ready:', {
@@ -82,12 +150,76 @@ export async function handleApplication(scope: Scope): Promise<void> {
 		}
 	}
 
-	// Initial configuration
-	updateConfiguration();
+	// Register HTTP middleware for automatic OAuth session validation
+	// This runs on every HTTP request after authentication but before REST
+	scope.server.http(async (request: any, next: (req: any) => any) => {
+		// Only process requests with sessions that have OAuth data
+		if (!request.session?.oauth) {
+			return next(request);
+		}
 
-	// Watch for configuration changes
+		// Get the provider for this OAuth session
+		const providerName = request.session.oauth.provider;
+		const providerData = providers[providerName];
+
+		if (!providerData) {
+			logger?.warn?.(`OAuth provider '${providerName}' not found, logging out user`);
+			// Provider no longer exists - complete logout
+			await clearOAuthSession(request.session, logger);
+			return next(request);
+		}
+
+		// Validate and refresh session automatically
+		const validation = await validateAndRefreshSession(request, providerData.provider, logger, hookManager);
+
+		if (!validation.valid) {
+			// Session is no longer valid (already cleaned up by validator)
+			logger?.debug?.(`OAuth session invalidated: ${validation.error}`);
+		} else if (validation.refreshed) {
+			logger?.debug?.(`OAuth token auto-refreshed for ${providerName}`);
+		}
+
+		// Continue with the request (session updated if refreshed)
+		return next(request);
+	});
+
+	// Concurrency control for configuration updates
+	let updating = false;
+	let pendingUpdate = false;
+
+	/**
+	 * Run configuration update with concurrency protection
+	 */
+	const runUpdate = async () => {
+		if (updating) {
+			pendingUpdate = true;
+			return;
+		}
+
+		updating = true;
+		try {
+			await updateConfiguration();
+
+			// If another update was requested while we were running, run again
+			if (pendingUpdate) {
+				pendingUpdate = false;
+				await runUpdate();
+			}
+		} catch (error) {
+			logger?.error?.('Failed to update OAuth configuration:', error);
+		} finally {
+			updating = false;
+		}
+	};
+
+	// Initial configuration (errors propagate to plugin loader)
+	await updateConfiguration();
+
+	// Watch for configuration changes (errors caught internally)
 	scope.options.on('change', () => {
-		updateConfiguration();
+		runUpdate().catch((error) => {
+			logger?.error?.('Unexpected error in OAuth config update:', error);
+		});
 	});
 
 	// Clean up on scope close

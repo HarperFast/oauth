@@ -8,6 +8,7 @@ import { readFile } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Request, RequestTarget, Logger, IOAuthProvider, OAuthProviderConfig } from '../types.ts';
+import type { HookManager } from './hookManager.ts';
 
 /**
  * Handle OAuth login initiation
@@ -45,6 +46,7 @@ export async function handleCallback(
 	target: RequestTarget,
 	provider: IOAuthProvider,
 	config: OAuthProviderConfig,
+	hookManager: HookManager,
 	logger?: Logger
 ): Promise<any> {
 	// Get query parameters from target
@@ -117,26 +119,49 @@ export async function handleCallback(
 		// Map to Harper user
 		const user = provider.mapUserToHarper(userInfo);
 
+		// Call onLogin hook before storing session
+		// This allows user provisioning plugins to create/update user records
+		const hookData = await hookManager.callOnLogin(user, tokenResponse, request.session, request, config.provider);
+
 		// Store in session if available
 		if (request.session) {
-			// Store user info in session
-			if (typeof request.session.update === 'function') {
-				await request.session.update({
-					user: user.username, // Harper expects just the username string
-					oauthUser: user, // Store full OAuth user object separately
-					oauthToken: tokenResponse.access_token,
-					oauthRefreshToken: tokenResponse.refresh_token,
-				});
-			} else {
-				request.session.user = user.username;
-				request.session.oauthUser = user;
-				request.session.oauthToken = tokenResponse.access_token;
-				if (tokenResponse.refresh_token) {
-					request.session.oauthRefreshToken = tokenResponse.refresh_token;
-				}
+			// Calculate token expiration and refresh thresholds
+			const expiresIn = tokenResponse.expires_in || 3600; // Default 1 hour if not provided
+			const now = Date.now();
+			const expiresAt = now + expiresIn * 1000;
+			const refreshThreshold = now + expiresIn * 800; // Refresh at 80% of lifetime
+
+			// Prepare session data
+			const sessionData: any = {
+				user: hookData?.user || user.username, // Use hook's user if provided, otherwise OAuth username
+				oauthUser: user, // Store full OAuth user object separately
+				oauth: {
+					provider: config.provider,
+					accessToken: tokenResponse.access_token,
+					refreshToken: tokenResponse.refresh_token,
+					expiresAt,
+					refreshThreshold,
+					scope: tokenResponse.scope,
+					tokenType: tokenResponse.token_type || 'Bearer',
+					lastRefreshed: now,
+				},
+			};
+
+			// Merge remaining hook data into session if provided (excluding 'user' since we already used it)
+			if (hookData) {
+				// eslint-disable-next-line @typescript-eslint/no-unused-vars, sonarjs/no-unused-vars
+				const { user, ...remainingHookData } = hookData;
+				Object.assign(sessionData, remainingHookData);
 			}
 
-			logger?.info?.(`OAuth login successful for user: ${user.username}`);
+			// Store user info and OAuth metadata in session
+			if (typeof request.session.update === 'function') {
+				await request.session.update(sessionData);
+			} else {
+				Object.assign(request.session, sessionData);
+			}
+
+			logger?.info?.(`OAuth login successful for user: ${user.username}, token expires in ${expiresIn}s`);
 		} else {
 			logger?.warn?.('No session available for OAuth user');
 		}
@@ -161,25 +186,38 @@ export async function handleCallback(
 }
 
 /**
+ * Clear OAuth session data and log out the user
+ * Shared function for explicit logout and automatic logout on token expiration
+ *
+ * Deletes the session record from the hdb_session table, completely removing it
+ * rather than just clearing the user field. This ensures no orphaned sessions remain.
+ */
+export async function clearOAuthSession(session: any, logger?: Logger): Promise<void> {
+	if (!session) return;
+
+	// Delete the session record from the hdb_session table
+	// This completely removes the session on logout, rather than just nulling the user field
+	if (typeof session.delete === 'function') {
+		await session.delete(session.id);
+	} else {
+		// Fallback for sessions without delete method - clear in-memory
+		session.user = null;
+		delete session.oauth;
+		delete session.oauthUser;
+	}
+
+	logger?.info?.('OAuth session cleared');
+}
+
+/**
  * Handle user logout
  */
-export async function handleLogout(request: Request, logger?: Logger): Promise<any> {
-	if (request.session) {
-		if (typeof request.session.update === 'function') {
-			await request.session.update({
-				user: undefined,
-				oauthUser: undefined,
-				oauthToken: undefined,
-				oauthRefreshToken: undefined,
-			});
-		} else {
-			delete request.session.user;
-			delete request.session.oauthUser;
-			delete request.session.oauthToken;
-			delete request.session.oauthRefreshToken;
-		}
-		logger?.info?.('User logged out');
-	}
+export async function handleLogout(request: Request, hookManager: HookManager, logger?: Logger): Promise<any> {
+	// Call onLogout hook before clearing session
+	await hookManager.callOnLogout(request.session, request);
+
+	// Clear the OAuth session
+	await clearOAuthSession(request.session, logger);
 
 	return {
 		status: 200,
@@ -190,7 +228,7 @@ export async function handleLogout(request: Request, logger?: Logger): Promise<a
 /**
  * Get current user info
  */
-export async function handleUserInfo(request: Request): Promise<any> {
+export async function handleUserInfo(request: Request, tokenRefreshed = false): Promise<any> {
 	// Add debug logging
 	if (!request) {
 		return {
@@ -201,6 +239,7 @@ export async function handleUserInfo(request: Request): Promise<any> {
 
 	// Check for OAuth user in session first, then Harper user
 	const oauthUser = request?.session?.oauthUser;
+	const oauthMetadata = request?.session?.oauth;
 	const username = request?.user || request?.session?.user;
 
 	if (!username && !oauthUser) {
@@ -224,6 +263,17 @@ export async function handleUserInfo(request: Request): Promise<any> {
 				email: oauthUser.email,
 				name: oauthUser.name,
 				provider: oauthUser.provider,
+				// Include OAuth token status in debug mode
+				oauth: oauthMetadata
+					? {
+							provider: oauthMetadata.provider,
+							expiresAt: oauthMetadata.expiresAt,
+							refreshThreshold: oauthMetadata.refreshThreshold,
+							lastRefreshed: oauthMetadata.lastRefreshed,
+							hasRefreshToken: !!oauthMetadata.refreshToken,
+							tokenRefreshed,
+						}
+					: undefined,
 			},
 		};
 	}
@@ -249,7 +299,8 @@ export async function handleUserInfo(request: Request): Promise<any> {
 }
 
 /**
- * Refresh OAuth access token
+ * Refresh OAuth access token (legacy handler - not used, replaced by automatic refresh)
+ * Kept for backward compatibility
  */
 export async function handleRefresh(
 	request: Request,
@@ -258,7 +309,7 @@ export async function handleRefresh(
 	logger?: Logger
 ): Promise<any> {
 	// Get refresh token from session
-	const refreshToken = request?.session?.oauthRefreshToken;
+	const refreshToken = request?.session?.oauth?.refreshToken;
 
 	if (!refreshToken) {
 		return {
@@ -279,18 +330,25 @@ export async function handleRefresh(
 		const tokenResponse = await provider.refreshAccessToken(refreshToken);
 
 		// Update session with new tokens
-		if (request.session) {
+		if (request.session?.oauth) {
+			const expiresIn = tokenResponse.expires_in || 3600;
+			const now = Date.now();
+
+			const updatedOAuth = {
+				...request.session.oauth,
+				accessToken: tokenResponse.access_token,
+				refreshToken: tokenResponse.refresh_token || refreshToken,
+				expiresAt: now + expiresIn * 1000,
+				refreshThreshold: now + expiresIn * 800,
+				lastRefreshed: now,
+			};
+
 			if (typeof request.session.update === 'function') {
 				await request.session.update({
-					oauthToken: tokenResponse.access_token,
-					// Update refresh token if a new one was provided
-					oauthRefreshToken: tokenResponse.refresh_token || refreshToken,
+					oauth: updatedOAuth,
 				});
 			} else {
-				request.session.oauthToken = tokenResponse.access_token;
-				if (tokenResponse.refresh_token) {
-					request.session.oauthRefreshToken = tokenResponse.refresh_token;
-				}
+				request.session.oauth = updatedOAuth;
 			}
 
 			logger?.info?.('OAuth token refreshed successfully');
