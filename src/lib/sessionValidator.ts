@@ -123,7 +123,7 @@ export async function validateAndRefreshSession(
 		// Update session
 		session.oauth = updatedMetadata;
 		if (typeof session.update === 'function') {
-			await session.update(session);
+			await session.update({ oauth: updatedMetadata });
 		}
 
 		logger?.info?.('OAuth token refreshed successfully');
