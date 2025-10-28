@@ -5,13 +5,7 @@
  */
 
 import type { Request, RequestTarget, Logger, ProviderRegistry } from '../types.ts';
-import {
-	handleLogin,
-	handleCallback,
-	handleLogout,
-	handleUserInfo,
-	handleTestPage,
-} from './handlers.ts';
+import { handleLogin, handleCallback, handleLogout, handleUserInfo, handleTestPage } from './handlers.ts';
 import { validateAndRefreshSession } from './sessionValidator.ts';
 import type { HookManager } from './hookManager.ts';
 
