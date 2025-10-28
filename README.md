@@ -5,10 +5,13 @@ OAuth 2.0 authentication plugin for Harper applications with support for multipl
 ## Features
 
 - 🔐 **Multi-provider support**: GitHub, Google, Azure AD, Auth0, and custom providers
-- 🔄 **Seamless integration**: Works with Harper's session management system
+- 🔄 **Automatic token refresh**: Proactive token renewal on every request (80% lifetime threshold)
+- 🪝 **Lifecycle hooks**: Extensible hooks for user provisioning, logout, and token refresh events
+- 🔄 **Seamless integration**: Works with Harper's session management system via HTTP middleware
 - 🛡️ **CSRF protection**: Distributed token storage for cluster support
 - 🎯 **ID token verification**: Full OIDC support for compatible providers
 - 🔧 **Environment variables**: Secure configuration via `${ENV_VAR}` syntax
+- 🔥 **Hot-reloading**: Config changes applied automatically without restart
 - 📊 **Self-contained**: Includes its own database schema
 
 ## Installation
@@ -61,17 +64,60 @@ For local development with non-standard ports:
 https://localhost:9953/oauth/{provider}/callback
 ```
 
+## Automatic Token Management
+
+The plugin automatically manages OAuth token lifecycle on **every HTTP request**:
+
+- ✅ **Validates sessions** - Checks OAuth session data on each request
+- ✅ **Proactive refresh** - Refreshes tokens at 80% of their lifetime
+- ✅ **On-demand refresh** - Refreshes expired tokens immediately (if refresh token available)
+- ✅ **Auto-logout** - Logs out users when tokens expire and can't be refreshed
+- ✅ **Zero configuration** - No code changes needed in your application
+
+**Token Expiration Behavior**: If an OAuth token expires and cannot be refreshed (no refresh token or refresh fails), the user is automatically logged out (entire session cleared). This ensures session state remains consistent.
+
+Simply configure the OAuth plugin and it handles everything automatically. Your application code can access the OAuth user via:
+
+```typescript
+export function handleApplication(scope) {
+	const myResource = {
+		async get(target, request) {
+			// OAuth tokens are automatically validated and refreshed
+			if (request.session?.oauthUser) {
+				return {
+					message: 'Authenticated user',
+					user: request.session.oauthUser.username,
+					email: request.session.oauthUser.email,
+				};
+			}
+			return { message: 'Not authenticated' };
+		},
+	};
+
+	scope.resources.set('api', myResource);
+}
+```
+
+**Note**: The plugin doesn't enforce authentication - it only validates and refreshes tokens for sessions that have OAuth data. To require authentication, check for `request.session?.oauthUser` in your application code and return 401 if not present.
+
 ## Endpoints
 
-Each configured provider gets its own set of endpoints:
+### Authentication Endpoints
 
-| Endpoint                     | Description                            |
-| ---------------------------- | -------------------------------------- |
-| `/oauth/{provider}/login`    | Initiates OAuth flow                   |
-| `/oauth/{provider}/callback` | OAuth callback (configure in provider) |
-| `/oauth/{provider}/logout`   | Logs out the user                      |
-| `/oauth/{provider}/user`     | Returns current user info (debug mode) |
-| `/oauth/{provider}/test`     | Test page for OAuth flow (debug mode)  |
+| Endpoint                     | Method | Description                            |
+| ---------------------------- | ------ | -------------------------------------- |
+| `/oauth/{provider}/login`    | GET    | Initiates OAuth flow                   |
+| `/oauth/{provider}/callback` | GET    | OAuth callback (configure in provider) |
+| `/oauth/logout`              | POST   | Logs out the user (any provider)       |
+
+### Debug Endpoints (when `debug: true`)
+
+| Endpoint                    | Method | Description                   |
+| --------------------------- | ------ | ----------------------------- |
+| `/oauth/`                   | GET    | List all configured providers |
+| `/oauth/test`               | GET    | Interactive test page         |
+| `/oauth/{provider}/user`    | GET    | Current user info and tokens  |
+| `/oauth/{provider}/refresh` | GET    | Check/trigger token refresh   |
 
 ## Provider Configuration
 
@@ -192,6 +238,18 @@ Each provider can override global defaults:
 | `postLoginRedirect` | URL to redirect after login | `'/'`             |
 | `redirectUri`       | Custom callback URL         | Auto-generated    |
 
+### Configuration Hot-Reloading
+
+The plugin supports hot-reloading of configuration changes:
+
+- **Automatic Detection**: Config file changes are detected and applied automatically
+- **Concurrency Protection**: Only one config update runs at a time to prevent race conditions
+- **Queued Updates**: Rapid config changes are queued and processed sequentially
+- **Error Handling**: Config errors are logged but don't crash the plugin
+- **Active Sessions**: Existing OAuth sessions continue to work during reload
+
+You can safely edit `config.yaml` while the application is running, and changes will be applied without requiring a restart.
+
 ## How It Works
 
 The OAuth plugin provides authentication without requiring you to manage Harper users manually. When a user authenticates via OAuth:
@@ -243,23 +301,281 @@ The plugin integrates seamlessly with Harper's session management:
 // After successful OAuth login:
 request.session.user; // Harper username (from OAuth provider)
 request.session.oauthUser; // Full OAuth user details
-request.session.oauthToken; // OAuth access token
-request.session.oauthRefreshToken; // OAuth refresh token (if provided)
+request.session.oauth; // OAuth metadata including tokens and expiration
 ```
+
+### Automatic Token Refresh
+
+The plugin automatically manages OAuth token lifecycle:
+
+- **Proactive Refresh**: Tokens are automatically refreshed when they reach 80% of their lifetime
+- **On-Demand Refresh**: Expired tokens are refreshed on the next request (if refresh token available)
+- **Graceful Degradation**: If a token cannot be refreshed, the OAuth session data is cleared
+- **Transparent**: Applications don't need to handle token refresh logic
+
+Token metadata stored in session:
+
+```javascript
+request.session.oauth = {
+	provider: 'github', // OAuth provider name
+	accessToken: '...', // Current access token
+	refreshToken: '...', // Refresh token for renewals
+	expiresAt: 1234567890000, // Token expiration timestamp (ms)
+	refreshThreshold: 1234567800, // When to proactively refresh (80% of lifetime)
+	scope: 'openid profile email', // Granted scopes
+	tokenType: 'Bearer', // Token type
+	lastRefreshed: 1234567000000, // Last successful refresh
+};
+```
+
+## Lifecycle Hooks
+
+The OAuth plugin provides lifecycle hooks that allow you to customize behavior at key authentication events. This is useful for user provisioning, analytics, access control, and integrating with other systems.
+
+### Available Hooks
+
+| Hook             | When Called                   | Use Cases                                        |
+| ---------------- | ----------------------------- | ------------------------------------------------ |
+| `onLogin`        | After successful OAuth login  | User provisioning, role mapping, logging         |
+| `onLogout`       | When user logs out            | Cleanup, audit logging, revoke external sessions |
+| `onTokenRefresh` | After automatic token refresh | Update cached data, log token refreshes          |
+
+### Registering Hooks
+
+Register hooks programmatically using the `registerHooks()` function. This can be called at module load time (before the plugin initializes) or after the plugin has loaded:
+
+```typescript
+import { registerHooks } from '@harperdb/oauth';
+
+// Register hooks - can be called at module load time
+registerHooks({
+	onLogin: async (oauthUser, tokenResponse, session, request, provider) => {
+		console.log(`User ${oauthUser.username} logged in via ${provider}`);
+		// Add your custom logic here
+	},
+
+	onLogout: async (session, request) => {
+		console.log('User logged out');
+		// Cleanup logic here
+	},
+
+	onTokenRefresh: async (session, refreshed, request) => {
+		if (refreshed) {
+			console.log('Token refreshed successfully');
+		}
+	},
+});
+```
+
+**Timing Note**: The `registerHooks()` function can be called before or after the plugin initializes:
+
+- **Before initialization** - Hooks are queued and applied when the plugin loads
+- **After initialization** - Hooks are applied immediately
+
+This is a module-level singleton, shared across all OAuth plugin instances. For most applications with a single OAuth instance, this is the recommended approach.
+
+### Hook Signatures
+
+#### onLogin Hook
+
+Called after successful OAuth authentication, before the session is stored. Can return data to be merged into the session.
+
+```typescript
+async function onLogin(
+	oauthUser: OAuthUser, // Mapped OAuth user data
+	tokenResponse: TokenResponse, // Raw OAuth token response
+	session: any, // Current Harper session
+	request: any, // Harper request object
+	provider: string // Provider name (e.g., 'github')
+): Promise<Record<string, any> | void> {
+	// Example: Create/update user in database
+	const user = await tables.User.upsert({
+		email: oauthUser.email,
+		name: oauthUser.name,
+		oauthProvider: provider,
+		lastLogin: new Date().toISOString(),
+	});
+
+	// Return data to merge into session
+	return {
+		userId: user.id,
+		roles: user.roles,
+	};
+}
+```
+
+**Available Data:**
+
+- `oauthUser.username` - Username from OAuth provider
+- `oauthUser.email` - Email address
+- `oauthUser.name` - Full name
+- `oauthUser.role` - Assigned Harper role
+- `tokenResponse.access_token` - OAuth access token
+- `tokenResponse.id_token` - OIDC ID token (if available)
+
+#### onLogout Hook
+
+Called before the user's session is cleared. Use this for cleanup operations.
+
+```typescript
+async function onLogout(
+	session: any, // Session being cleared
+	request: any // Harper request object
+): Promise<void> {
+	// Example: Audit log
+	logger.info('User logged out', {
+		username: session.oauthUser?.username,
+		timestamp: new Date().toISOString(),
+	});
+
+	// Example: Revoke external tokens
+	if (session.oauth?.accessToken) {
+		await externalService.revokeToken(session.oauth.accessToken);
+	}
+}
+```
+
+#### onTokenRefresh Hook
+
+Called after the OAuth access token is automatically refreshed.
+
+```typescript
+async function onTokenRefresh(
+	session: any, // Updated session with new tokens
+	refreshed: boolean, // Whether tokens were actually refreshed
+	request?: any // Harper request object (if available)
+): Promise<void> {
+	if (refreshed) {
+		logger.debug('Token refreshed', {
+			provider: session.oauth?.provider,
+			expiresAt: session.oauth?.expiresAt,
+		});
+
+		// Example: Update cached external data
+		await updateUserCache(session.oauthUser.username);
+	}
+}
+```
+
+### Example: User Provisioning Plugin
+
+Here's a complete example of a user provisioning plugin that uses OAuth hooks:
+
+```typescript
+// user-provisioning/src/index.ts
+export async function handleApplication(scope) {
+	const logger = scope.logger;
+	const { User } = scope.tables;
+
+	// Export hooks for OAuth plugin
+	scope.exports = {
+		// Called after successful OAuth login
+		async onLogin(oauthUser, tokenResponse, session, request, provider) {
+			logger.info('User logging in', { email: oauthUser.email, provider });
+
+			// Create or update user in database
+			const user = await User.upsert({
+				email: oauthUser.email,
+				name: oauthUser.name,
+				oauthProvider: provider,
+				lastLoginDate: new Date().toISOString(),
+				isVerified: true, // OAuth email is verified
+			});
+
+			// Map user to organization based on email domain
+			const domain = oauthUser.email.split('@')[1];
+			const org = await scope.tables.Organization.search({
+				conditions: [{ attribute: 'emailDomain', value: domain }],
+			}).next();
+
+			// Assign roles
+			const roles = org ? await assignOrgRoles(user.id, org.id) : [];
+
+			// Return data to merge into session
+			return {
+				userId: user.id,
+				organizationId: org?.id,
+				roles: roles.map((r) => r.name),
+			};
+		},
+
+		// Called when user logs out
+		async onLogout(session, request) {
+			logger.info('User logging out', {
+				username: session.oauthUser?.username,
+				userId: session.userId,
+			});
+
+			// Record logout time
+			if (session.userId) {
+				await User.patch({
+					id: session.userId,
+					lastLogoutDate: new Date().toISOString(),
+				});
+			}
+		},
+
+		// Called after token refresh
+		async onTokenRefresh(session, refreshed, request) {
+			if (refreshed) {
+				logger.debug('Token refreshed for user', {
+					username: session.oauthUser?.username,
+				});
+			}
+		},
+	};
+}
+
+async function assignOrgRoles(userId, orgId) {
+	// Custom logic to assign roles based on organization
+	const defaultRole = await scope.tables.Role.search({
+		conditions: [
+			{ attribute: 'organizationId', value: orgId },
+			{ attribute: 'isDefault', value: true },
+		],
+	}).next();
+
+	return defaultRole ? [defaultRole] : [];
+}
+```
+
+**Configuration:**
+
+```yaml
+# config.yaml
+'@harperdb/oauth':
+  package: '@harperdb/oauth'
+  hooks: '@company/user-provisioning'
+  providers:
+    github:
+      clientId: ${OAUTH_GITHUB_CLIENT_ID}
+      clientSecret: ${OAUTH_GITHUB_CLIENT_SECRET}
+
+'@company/user-provisioning':
+  package: '@company/user-provisioning'
+```
+
+### Hook Best Practices
+
+1. **Keep hooks lightweight**: Hooks run on every login/logout/refresh - avoid expensive operations
+2. **Handle errors gracefully**: Hook errors are logged but don't block the OAuth flow
+3. **Don't modify session directly**: Return data from onLogin to merge into session
+4. **Use onTokenRefresh sparingly**: This hook runs frequently (every token refresh)
+5. **Log appropriately**: Use logger for debugging but avoid sensitive data
 
 ## Current Limitations & Future Plans
 
 ### Current Limitations
 
-- **No Harper User Creation**: OAuth users are session-only and not persisted as Harper database users
-- **No Role Mapping**: All users get the same default role - no mapping from OAuth provider roles/groups
-- **Session-Only**: Authentication is lost when the session expires (no persistent user records)
-- **No Authorization Rules**: Cannot define Harper-specific permissions based on OAuth attributes
+- **No Built-in User Creation**: OAuth users are session-only by default (use hooks for persistence)
+- **No Role Mapping**: All users get the same default role (use onLogin hook for custom logic)
+- **Session-Based**: Authentication persists only while session is active
+- **No Authorization Rules**: Cannot define Harper-specific permissions based on OAuth attributes (use hooks)
 
 ### Possible Future Enhancements
 
-- **User Persistence**: Option to automatically create/update Harper users from OAuth profiles
-- **Role Mapping**: Map OAuth provider groups/roles to Harper roles
+- **Built-in User Persistence**: Optional automatic creation/update of Harper users from OAuth profiles
+- **Built-in Role Mapping**: Map OAuth provider groups/roles to Harper roles
 - **Custom Claims Processing**: Transform OAuth claims into Harper user attributes
 - **Multi-Factor Authentication**: Additional security layers after OAuth
 - **Account Linking**: Link OAuth identities to existing Harper users
@@ -271,7 +587,7 @@ Enable debug mode to access additional endpoints:
 ```yaml
 '@harperdb/oauth':
   package: '@harperdb/oauth'
-  debug: true
+  debug: true # or use ${OAUTH_DEBUG} for environment variable
   providers:
     github:
       provider: github
@@ -279,12 +595,18 @@ Enable debug mode to access additional endpoints:
       clientSecret: ${OAUTH_GITHUB_CLIENT_SECRET}
 ```
 
+**Note**: Debug mode can be controlled via environment variable:
+
+```bash
+export OAUTH_DEBUG=true  # Enable debug endpoints
+```
+
 Debug endpoints:
 
 - `/oauth/` - List all configured providers
 - `/oauth/test` - Interactive test page
-- `/oauth/{provider}/user` - Get current user info
-- `/oauth/{provider}/refresh` - Refresh access token
+- `/oauth/{provider}/user` - Get current user info and token status
+- `/oauth/{provider}/refresh` - Check token status and trigger refresh if needed
 
 ## Database Schema
 

@@ -20,7 +20,7 @@
 		"dev": "tsc --watch",
 		"test": "npm run build && node --test 'test/**/*.test.js'",
 		"test:coverage": "npm run build && node --test --experimental-test-coverage 'test/**/*.test.js'",
-		"lint": "eslint .",
+		"lint": "eslint . --ignore-pattern 'dist/**'",
 		"format": "prettier .",
 		"format:check": "npm run format -- --check",
 		"format:write": "npm run format -- --write",

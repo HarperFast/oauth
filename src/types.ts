@@ -13,8 +13,8 @@ import type { IncomingMessage } from 'node:http';
  * Runtime configuration for the OAuth plugin
  */
 export interface OAuthPluginConfig {
-	/** Enable debug mode to expose additional endpoints and information */
-	debug?: boolean;
+	/** Enable debug mode to expose additional endpoints and information (can be boolean or string from env var) */
+	debug?: boolean | string;
 	/** OAuth provider configurations */
 	providers?: Record<string, any>;
 	/** Default redirect URI for all providers */
@@ -27,6 +27,48 @@ export interface OAuthPluginConfig {
 	usernameClaim?: string;
 	/** Default role assignment */
 	defaultRole?: string;
+	/** Lifecycle hooks */
+	hooks?: OAuthHooks;
+}
+
+/**
+ * OAuth Lifecycle Hooks
+ * Callbacks invoked at key points in the OAuth flow
+ */
+export interface OAuthHooks {
+	/**
+	 * Called after successful OAuth login, before session is finalized
+	 * Use this to provision users, assign roles, etc.
+	 * @param oauthUser - The OAuth user information
+	 * @param tokenResponse - The token response from the provider
+	 * @param session - The current session object
+	 * @param request - The HTTP request object
+	 * @param provider - The provider name (e.g., 'github', 'google')
+	 * @returns Optional data to merge into the session
+	 */
+	onLogin?: (
+		oauthUser: OAuthUser,
+		tokenResponse: TokenResponse,
+		session: any,
+		request: any,
+		provider: string
+	) => Promise<Record<string, any> | void>;
+
+	/**
+	 * Called before logout, before session is cleared
+	 * Use this to clean up user-specific data
+	 * @param session - The current session object
+	 * @param request - The HTTP request object
+	 */
+	onLogout?: (session: any, request: any) => Promise<void>;
+
+	/**
+	 * Called after token refresh completes
+	 * @param session - The updated session with new tokens
+	 * @param refreshed - Whether tokens were actually refreshed
+	 * @param request - The HTTP request object (may be undefined for background refresh)
+	 */
+	onTokenRefresh?: (session: any, refreshed: boolean, request?: any) => Promise<void>;
 }
 
 /**
@@ -196,6 +238,10 @@ export interface Scope {
 	resources: {
 		set(name: string, resource: any): void;
 	};
+	/** HTTP server middleware registration */
+	server: {
+		http(handler: (request: any, next: (req: any) => any) => Promise<any>, options?: any): void;
+	};
 	/** Scope event handlers */
 	on(event: 'close', listener: () => void): void;
 }
@@ -242,6 +288,29 @@ export interface Request extends IncomingMessage {
 }
 
 /**
+ * OAuth Session Metadata
+ * Token and expiration data stored in session for automatic refresh
+ */
+export interface OAuthSessionMetadata {
+	/** OAuth provider name (e.g., 'github', 'google') */
+	provider: string;
+	/** Current access token */
+	accessToken: string;
+	/** Refresh token for obtaining new access tokens */
+	refreshToken?: string;
+	/** Unix timestamp (ms) when the access token expires */
+	expiresAt?: number;
+	/** Unix timestamp (ms) when to proactively refresh (80% of lifetime) */
+	refreshThreshold?: number;
+	/** Space-separated list of granted scopes */
+	scope?: string;
+	/** Token type (usually 'Bearer') */
+	tokenType?: string;
+	/** Unix timestamp (ms) of last successful token refresh */
+	lastRefreshed?: number;
+}
+
+/**
  * Harper Session
  * Session data stored for authenticated users
  */
@@ -251,10 +320,8 @@ export interface Session {
 	user?: string;
 	/** Full OAuth user object */
 	oauthUser?: OAuthUser;
-	/** Current OAuth access token */
-	oauthToken?: string;
-	/** OAuth refresh token for token renewal */
-	oauthRefreshToken?: string;
+	/** OAuth session metadata for automatic token refresh */
+	oauth?: OAuthSessionMetadata;
 	/** Async session update method (when available) */
 	update?: (data: Partial<Session>) => Promise<void>;
 }

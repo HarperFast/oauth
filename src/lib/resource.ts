@@ -10,21 +10,31 @@ import {
 	handleCallback,
 	handleLogout,
 	handleUserInfo,
-	handleRefresh,
 	handleTestPage,
 } from './handlers.ts';
+import { validateAndRefreshSession } from './sessionValidator.ts';
+import type { HookManager } from './hookManager.ts';
 
 /**
  * Create an OAuth resource with the given configuration
  * Returns a resource object that Harper can use directly
  */
-export function createOAuthResource(providers: ProviderRegistry, debugMode: boolean, logger?: Logger): any {
+export function createOAuthResource(
+	providers: ProviderRegistry,
+	debugMode: boolean,
+	hookManager: HookManager,
+	logger?: Logger
+): any {
 	const notFound = {
 		status: 404,
 		body: { error: 'Not found' },
 	};
 
-	return {
+	const resource = {
+		// Expose hookManager for programmatic hook registration
+		hookManager,
+		// Expose providers for use with withOAuthValidation
+		providers,
 		/**
 		 * Handle GET requests
 		 */
@@ -48,13 +58,13 @@ export function createOAuthResource(providers: ProviderRegistry, debugMode: bool
 				// Debug mode: show full provider info
 				return {
 					message: 'OAuth providers',
+					logout: 'POST /oauth/logout',
 					providers: Object.keys(providers).map((name) => ({
 						name,
 						provider: providers[name].config.provider,
 						endpoints: {
 							login: `/oauth/${name}/login`,
 							callback: `/oauth/${name}/callback`,
-							logout: `/oauth/${name}/logout`,
 							user: `/oauth/${name}/user`,
 							refresh: `/oauth/${name}/refresh`,
 							test: `/oauth/${name}/test`,
@@ -82,16 +92,51 @@ export function createOAuthResource(providers: ProviderRegistry, debugMode: bool
 					return handleLogin(request, provider, config, logger);
 				case 'callback':
 					// Pass the target object directly - it should have a get() method for query params
-					return handleCallback(request, target as RequestTarget, provider, config, logger);
+					return handleCallback(request, target as RequestTarget, provider, config, hookManager, logger);
 				case 'user': {
 					// Debug mode only
 					if (!debugMode) return notFound;
-					return handleUserInfo(request);
+
+					// Validate and refresh session if needed before returning user info
+					const validation = await validateAndRefreshSession(request, provider, logger, hookManager);
+					if (!validation.valid) {
+						return {
+							status: 401,
+							body: {
+								authenticated: false,
+								error: validation.error || 'Session expired',
+								message: 'OAuth session is no longer valid. Please log in again.',
+							},
+						};
+					}
+
+					return handleUserInfo(request, validation.refreshed);
 				}
 				case 'refresh': {
 					// Debug mode only
 					if (!debugMode) return notFound;
-					return handleRefresh(request, provider, config, logger);
+
+					// Validate session before attempting refresh
+					const validation = await validateAndRefreshSession(request, provider, logger, hookManager);
+					if (!validation.valid) {
+						return {
+							status: 401,
+							body: {
+								error: validation.error || 'Session expired',
+								message: 'OAuth session is no longer valid. Please log in again.',
+							},
+						};
+					}
+
+					// Return refresh status
+					return {
+						status: 200,
+						body: {
+							message: validation.refreshed ? 'Token refreshed successfully' : 'Token is still valid',
+							refreshed: validation.refreshed,
+							expiresAt: request.session?.oauth?.expiresAt,
+						},
+					};
 				}
 				case 'test': {
 					// Debug mode only
@@ -106,10 +151,10 @@ export function createOAuthResource(providers: ProviderRegistry, debugMode: bool
 						message: `OAuth provider: ${providerName}`,
 						provider: config.provider,
 						configured: true,
+						logout: 'POST /oauth/logout',
 						endpoints: {
 							login: `/oauth/${providerName}/login`,
 							callback: `/oauth/${providerName}/callback`,
-							logout: `/oauth/${providerName}/logout`,
 							user: `/oauth/${providerName}/user`,
 							refresh: `/oauth/${providerName}/refresh`,
 							test: `/oauth/${providerName}/test`,
@@ -127,30 +172,19 @@ export function createOAuthResource(providers: ProviderRegistry, debugMode: bool
 			const id = typeof target === 'string' ? target : target?.id || target?.pathname || '';
 			const pathParts = (id || '').split('/').filter((p) => p);
 			const providerName = pathParts[0];
-			const action = pathParts[1];
 
-			// Check if provider exists
-			const providerData = providers[providerName];
-			if (!providerData) {
-				return debugMode
-					? {
-							status: 404,
-							body: {
-								error: 'Provider not found',
-								available: Object.keys(providers),
-							},
-						}
-					: notFound;
+			// Handle generic logout endpoint (no provider required)
+			if (providerName === 'logout') {
+				return handleLogout(request, hookManager, logger);
 			}
 
-			if (action === 'logout') {
-				return handleLogout(request, logger);
-			}
-
+			// For other POST endpoints, provider is required
 			return {
-				status: 405,
-				body: { error: 'Method not allowed' },
+				status: 404,
+				body: { error: 'Not found' },
 			};
 		},
 	};
+
+	return resource;
 }

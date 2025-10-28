@@ -2,7 +2,7 @@
  * Tests for OAuth Handlers
  */
 
-import { describe, it, before, after, beforeEach, mock } from 'node:test';
+import { describe, it, beforeEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import {
 	handleLogin,
@@ -17,6 +17,7 @@ describe('OAuth Handlers', () => {
 	let mockProvider;
 	let mockConfig;
 	let mockLogger;
+	let mockHookManager;
 	let mockRequest;
 	let mockTarget;
 
@@ -27,6 +28,12 @@ describe('OAuth Handlers', () => {
 			warn: mock.fn(),
 			error: mock.fn(),
 			debug: mock.fn(),
+		};
+
+		mockHookManager = {
+			callOnLogin: mock.fn(async () => {}),
+			callOnLogout: mock.fn(async () => {}),
+			callOnTokenRefresh: mock.fn(async () => {}),
 		};
 
 		mockConfig = {
@@ -98,7 +105,7 @@ describe('OAuth Handlers', () => {
 		});
 
 		it('should use referer as original URL', async () => {
-			const result = await handleLogin(mockRequest, mockProvider, mockConfig, mockLogger);
+			await handleLogin(mockRequest, mockProvider, mockConfig, mockLogger);
 
 			const csrfCall = mockProvider.generateCSRFToken.mock.calls[0];
 			assert.equal(csrfCall.arguments[0].originalUrl, 'https://app.example.com/page');
@@ -106,14 +113,14 @@ describe('OAuth Handlers', () => {
 
 		it('should fall back to postLoginRedirect when no referer', async () => {
 			delete mockRequest.headers.referer;
-			const result = await handleLogin(mockRequest, mockProvider, mockConfig, mockLogger);
+			await handleLogin(mockRequest, mockProvider, mockConfig, mockLogger);
 
 			const csrfCall = mockProvider.generateCSRFToken.mock.calls[0];
 			assert.equal(csrfCall.arguments[0].originalUrl, '/dashboard');
 		});
 
 		it('should include session ID in CSRF token', async () => {
-			const result = await handleLogin(mockRequest, mockProvider, mockConfig, mockLogger);
+			await handleLogin(mockRequest, mockProvider, mockConfig, mockLogger);
 
 			const csrfCall = mockProvider.generateCSRFToken.mock.calls[0];
 			assert.equal(csrfCall.arguments[0].sessionId, 'session-123');
@@ -122,7 +129,7 @@ describe('OAuth Handlers', () => {
 
 	describe('handleCallback', () => {
 		it('should handle successful OAuth callback', async () => {
-			const result = await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockLogger);
+			const result = await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockHookManager, mockLogger);
 
 			assert.equal(result.status, 302);
 			assert.equal(result.headers.Location, '/dashboard');
@@ -133,13 +140,15 @@ describe('OAuth Handlers', () => {
 		});
 
 		it('should update session with user data', async () => {
-			await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockLogger);
+			await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockHookManager, mockLogger);
 
 			const updateCall = mockRequest.session.update.mock.calls[0];
 			assert.equal(updateCall.arguments[0].user, 'user@example.com');
 			assert.ok(updateCall.arguments[0].oauthUser);
-			assert.equal(updateCall.arguments[0].oauthToken, 'access-token-123');
-			assert.equal(updateCall.arguments[0].oauthRefreshToken, 'refresh-token-456');
+			// Token data is now stored in oauth object
+			assert.ok(updateCall.arguments[0].oauth);
+			assert.equal(updateCall.arguments[0].oauth.accessToken, 'access-token-123');
+			assert.equal(updateCall.arguments[0].oauth.refreshToken, 'refresh-token-456');
 		});
 
 		it('should handle OAuth error response', async () => {
@@ -149,7 +158,7 @@ describe('OAuth Handlers', () => {
 				return null;
 			});
 
-			const result = await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockLogger);
+			const result = await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockHookManager, mockLogger);
 
 			assert.equal(result.status, 302);
 			assert.equal(result.headers.Location, '/dashboard?error=oauth_failed&reason=access_denied');
@@ -158,7 +167,7 @@ describe('OAuth Handlers', () => {
 		it('should handle missing code parameter', async () => {
 			mockTarget.get = mock.fn(() => null);
 
-			const result = await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockLogger);
+			const result = await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockHookManager, mockLogger);
 
 			assert.equal(result.status, 302);
 			assert.equal(result.headers.Location, '/dashboard?error=invalid_request');
@@ -167,7 +176,7 @@ describe('OAuth Handlers', () => {
 		it('should handle invalid CSRF token', async () => {
 			mockProvider.verifyCSRFToken = mock.fn(async () => null);
 
-			const result = await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockLogger);
+			const result = await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockHookManager, mockLogger);
 
 			assert.equal(result.status, 302);
 			assert.equal(result.headers.Location, '/oauth/test/login?error=session_expired');
@@ -181,7 +190,7 @@ describe('OAuth Handlers', () => {
 			});
 			mockConfig.postLoginRedirect = '/app/home';
 
-			const result = await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockLogger);
+			const result = await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockHookManager, mockLogger);
 
 			assert.equal(result.status, 302);
 			assert.equal(result.headers.Location, '/app/home?error=oauth_failed&reason=invalid_scope');
@@ -191,7 +200,7 @@ describe('OAuth Handlers', () => {
 			mockTarget.get = mock.fn(() => null);
 			mockConfig.postLoginRedirect = '/app?tab=auth';
 
-			const result = await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockLogger);
+			const result = await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockHookManager, mockLogger);
 
 			assert.equal(result.status, 302);
 			assert.equal(result.headers.Location, '/app?tab=auth&error=invalid_request');
@@ -204,7 +213,7 @@ describe('OAuth Handlers', () => {
 				id_token: 'id-token-jwt',
 			}));
 
-			await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockLogger);
+			await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockHookManager, mockLogger);
 
 			assert.equal(mockProvider.verifyIdToken.mock.calls.length, 1);
 			assert.equal(mockProvider.verifyIdToken.mock.calls[0].arguments[0], 'id-token-jwt');
@@ -219,7 +228,7 @@ describe('OAuth Handlers', () => {
 				id_token: 'invalid-token',
 			}));
 
-			const result = await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockLogger);
+			const result = await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockHookManager, mockLogger);
 
 			// Should still succeed, falling back to userinfo endpoint
 			assert.equal(result.status, 302);
@@ -231,7 +240,7 @@ describe('OAuth Handlers', () => {
 				throw new Error('Invalid client credentials');
 			});
 
-			const result = await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockLogger);
+			const result = await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockHookManager, mockLogger);
 
 			assert.equal(result.status, 500);
 			assert.equal(result.body.error, 'Authentication failed');
@@ -243,18 +252,20 @@ describe('OAuth Handlers', () => {
 				id: 'session-123',
 			};
 
-			const result = await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockLogger);
+			const result = await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockHookManager, mockLogger);
 
 			assert.equal(result.status, 302);
 			assert.equal(mockRequest.session.user, 'user@example.com');
 			assert.ok(mockRequest.session.oauthUser);
-			assert.equal(mockRequest.session.oauthToken, 'access-token-123');
+			// Token data is now stored in oauth object
+			assert.ok(mockRequest.session.oauth);
+			assert.equal(mockRequest.session.oauth.accessToken, 'access-token-123');
 		});
 
 		it('should handle missing session', async () => {
 			delete mockRequest.session;
 
-			const result = await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockLogger);
+			const result = await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockHookManager, mockLogger);
 
 			assert.equal(result.status, 302);
 			// Should still complete but log warning
@@ -264,39 +275,39 @@ describe('OAuth Handlers', () => {
 
 	describe('handleLogout', () => {
 		it('should clear session data', async () => {
-			const result = await handleLogout(mockRequest, mockLogger);
+			// Add delete method mock to session
+			mockRequest.session.delete = mock.fn();
+
+			const result = await handleLogout(mockRequest, mockHookManager, mockLogger);
 
 			assert.equal(result.status, 200);
 			assert.equal(result.body.message, 'Logged out successfully');
 
-			const updateCall = mockRequest.session.update.mock.calls[0];
-			assert.equal(updateCall.arguments[0].user, undefined);
-			assert.equal(updateCall.arguments[0].oauthUser, undefined);
-			assert.equal(updateCall.arguments[0].oauthToken, undefined);
-			assert.equal(updateCall.arguments[0].oauthRefreshToken, undefined);
+			// Should call session.delete with session ID
+			assert.equal(mockRequest.session.delete.mock.calls.length, 1);
+			assert.equal(mockRequest.session.delete.mock.calls[0].arguments[0], 'session-123');
 		});
 
-		it('should handle session without update function', async () => {
+		it('should handle session without delete function', async () => {
 			mockRequest.session = {
 				user: 'test-user',
 				oauthUser: { username: 'test' },
-				oauthToken: 'token',
-				oauthRefreshToken: 'refresh',
+				oauth: { accessToken: 'token' },
 			};
 
-			const result = await handleLogout(mockRequest, mockLogger);
+			const result = await handleLogout(mockRequest, mockHookManager, mockLogger);
 
 			assert.equal(result.status, 200);
-			assert.equal(mockRequest.session.user, undefined);
+			// Falls back to clearing fields when delete method isn't available
+			assert.equal(mockRequest.session.user, null);
+			assert.equal(mockRequest.session.oauth, undefined);
 			assert.equal(mockRequest.session.oauthUser, undefined);
-			assert.equal(mockRequest.session.oauthToken, undefined);
-			assert.equal(mockRequest.session.oauthRefreshToken, undefined);
 		});
 
 		it('should handle missing session', async () => {
 			delete mockRequest.session;
 
-			const result = await handleLogout(mockRequest, mockLogger);
+			const result = await handleLogout(mockRequest, mockHookManager, mockLogger);
 
 			assert.equal(result.status, 200);
 			assert.equal(result.body.message, 'Logged out successfully');
@@ -371,7 +382,7 @@ describe('OAuth Handlers', () => {
 
 	describe('handleRefresh', () => {
 		it('should refresh access token', async () => {
-			mockRequest.session.oauthRefreshToken = 'refresh-token-456';
+			mockRequest.session.oauth = { refreshToken: 'refresh-token-456' };
 
 			const result = await handleRefresh(mockRequest, mockProvider, mockConfig, mockLogger);
 
@@ -380,11 +391,11 @@ describe('OAuth Handlers', () => {
 			assert.equal(result.body.expiresIn, 3600);
 
 			const updateCall = mockRequest.session.update.mock.calls[0];
-			assert.equal(updateCall.arguments[0].oauthToken, 'new-access-token');
+			assert.equal(updateCall.arguments[0].oauth.accessToken, 'new-access-token');
 		});
 
 		it('should handle missing refresh token', async () => {
-			delete mockRequest.session.oauthRefreshToken;
+			mockRequest.session.oauth = {};
 
 			const result = await handleRefresh(mockRequest, mockProvider, mockConfig, mockLogger);
 
@@ -393,7 +404,7 @@ describe('OAuth Handlers', () => {
 		});
 
 		it('should handle provider without refresh support', async () => {
-			mockRequest.session.oauthRefreshToken = 'refresh-token';
+			mockRequest.session.oauth = { refreshToken: 'refresh-token' };
 			delete mockProvider.refreshAccessToken;
 
 			const result = await handleRefresh(mockRequest, mockProvider, mockConfig, mockLogger);
@@ -403,7 +414,7 @@ describe('OAuth Handlers', () => {
 		});
 
 		it('should handle refresh failure', async () => {
-			mockRequest.session.oauthRefreshToken = 'expired-refresh-token';
+			mockRequest.session.oauth = { refreshToken: 'expired-refresh-token' };
 			mockProvider.refreshAccessToken = mock.fn(async () => {
 				throw new Error('Refresh token expired');
 			});
@@ -416,7 +427,7 @@ describe('OAuth Handlers', () => {
 		});
 
 		it('should update refresh token when new one provided', async () => {
-			mockRequest.session.oauthRefreshToken = 'old-refresh-token';
+			mockRequest.session.oauth = { refreshToken: 'old-refresh-token' };
 			mockProvider.refreshAccessToken = mock.fn(async () => ({
 				access_token: 'new-access',
 				refresh_token: 'new-refresh',
@@ -427,7 +438,7 @@ describe('OAuth Handlers', () => {
 
 			assert.equal(result.status, 200);
 			const updateCall = mockRequest.session.update.mock.calls[0];
-			assert.equal(updateCall.arguments[0].oauthRefreshToken, 'new-refresh');
+			assert.equal(updateCall.arguments[0].oauth.refreshToken, 'new-refresh');
 		});
 	});
 
