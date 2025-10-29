@@ -161,7 +161,9 @@ async function handleTokenRefresh(session, refreshed, request) {
 
 ## Hook Registration
 
-Hooks must be registered programmatically using the `registerHooks()` function. This should be called in your application's main entry point (e.g., `resources.js`) at module load time, before the OAuth plugin initializes.
+Hooks are **lazy-referenced** - they are looked up when OAuth events occur (login, logout, token refresh), not when registered. This means you can call `registerHooks()` at any time, and there's no specific initialization window. The hooks are simply stored and referenced later when needed.
+
+The typical pattern is to register hooks in your application's main entry point (e.g., `resources.js`), but the timing is flexible.
 
 ### Recommended Pattern (Separate File)
 
