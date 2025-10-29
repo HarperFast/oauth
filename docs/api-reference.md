@@ -385,7 +385,13 @@ tls:
 Always check authentication before accessing protected resources:
 
 ```javascript
+// Check OAuth session
 if (!request.session?.oauthUser) {
+	throw new ClientError('Not authenticated', 401);
+}
+
+// Or check Harper user (set from session data during HTTP auth lifecycle if a User was added during an onLogin hook, for example)
+if (!request.user) {
 	throw new ClientError('Not authenticated', 401);
 }
 ```
