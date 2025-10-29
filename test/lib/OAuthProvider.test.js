@@ -79,7 +79,6 @@ describe('OAuthProvider', () => {
 
 			assert.throws(
 				() => {
-					// eslint-disable-next-line sonarjs/constructor-for-side-effects
 					new OAuthProvider(invalidConfig, mockLogger);
 				},
 				{
@@ -95,7 +94,6 @@ describe('OAuthProvider', () => {
 
 			assert.throws(
 				() => {
-					// eslint-disable-next-line sonarjs/constructor-for-side-effects
 					new OAuthProvider(invalidConfig, mockLogger);
 				},
 				{

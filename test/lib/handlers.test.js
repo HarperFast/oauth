@@ -129,7 +129,14 @@ describe('OAuth Handlers', () => {
 
 	describe('handleCallback', () => {
 		it('should handle successful OAuth callback', async () => {
-			const result = await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockHookManager, mockLogger);
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				mockLogger
+			);
 
 			assert.equal(result.status, 302);
 			assert.equal(result.headers.Location, '/dashboard');
@@ -158,7 +165,14 @@ describe('OAuth Handlers', () => {
 				return null;
 			});
 
-			const result = await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockHookManager, mockLogger);
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				mockLogger
+			);
 
 			assert.equal(result.status, 302);
 			assert.equal(result.headers.Location, '/dashboard?error=oauth_failed&reason=access_denied');
@@ -167,7 +181,14 @@ describe('OAuth Handlers', () => {
 		it('should handle missing code parameter', async () => {
 			mockTarget.get = mock.fn(() => null);
 
-			const result = await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockHookManager, mockLogger);
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				mockLogger
+			);
 
 			assert.equal(result.status, 302);
 			assert.equal(result.headers.Location, '/dashboard?error=invalid_request');
@@ -176,7 +197,14 @@ describe('OAuth Handlers', () => {
 		it('should handle invalid CSRF token', async () => {
 			mockProvider.verifyCSRFToken = mock.fn(async () => null);
 
-			const result = await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockHookManager, mockLogger);
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				mockLogger
+			);
 
 			assert.equal(result.status, 302);
 			assert.equal(result.headers.Location, '/oauth/test/login?error=session_expired');
@@ -190,7 +218,14 @@ describe('OAuth Handlers', () => {
 			});
 			mockConfig.postLoginRedirect = '/app/home';
 
-			const result = await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockHookManager, mockLogger);
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				mockLogger
+			);
 
 			assert.equal(result.status, 302);
 			assert.equal(result.headers.Location, '/app/home?error=oauth_failed&reason=invalid_scope');
@@ -200,7 +235,14 @@ describe('OAuth Handlers', () => {
 			mockTarget.get = mock.fn(() => null);
 			mockConfig.postLoginRedirect = '/app?tab=auth';
 
-			const result = await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockHookManager, mockLogger);
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				mockLogger
+			);
 
 			assert.equal(result.status, 302);
 			assert.equal(result.headers.Location, '/app?tab=auth&error=invalid_request');
@@ -228,7 +270,14 @@ describe('OAuth Handlers', () => {
 				id_token: 'invalid-token',
 			}));
 
-			const result = await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockHookManager, mockLogger);
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				mockLogger
+			);
 
 			// Should still succeed, falling back to userinfo endpoint
 			assert.equal(result.status, 302);
@@ -240,7 +289,14 @@ describe('OAuth Handlers', () => {
 				throw new Error('Invalid client credentials');
 			});
 
-			const result = await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockHookManager, mockLogger);
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				mockLogger
+			);
 
 			assert.equal(result.status, 500);
 			assert.equal(result.body.error, 'Authentication failed');
@@ -252,7 +308,14 @@ describe('OAuth Handlers', () => {
 				id: 'session-123',
 			};
 
-			const result = await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockHookManager, mockLogger);
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				mockLogger
+			);
 
 			assert.equal(result.status, 302);
 			assert.equal(mockRequest.session.user, 'user@example.com');
@@ -265,7 +328,14 @@ describe('OAuth Handlers', () => {
 		it('should handle missing session', async () => {
 			delete mockRequest.session;
 
-			const result = await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockHookManager, mockLogger);
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				mockLogger
+			);
 
 			assert.equal(result.status, 302);
 			// Should still complete but log warning

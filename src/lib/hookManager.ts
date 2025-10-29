@@ -24,9 +24,12 @@ export class HookManager {
 	 */
 	register(hooks: OAuthHooks): void {
 		this.hooks = hooks;
-		this.logger?.debug?.(`Registered OAuth hooks: ${Object.keys(hooks).filter(key => hooks[key as keyof OAuthHooks]).join(', ')}`);
+		this.logger?.debug?.(
+			`Registered OAuth hooks: ${Object.keys(hooks)
+				.filter((key) => hooks[key as keyof OAuthHooks])
+				.join(', ')}`
+		);
 	}
-
 
 	/**
 	 * Call onLogin hook

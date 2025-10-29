@@ -102,9 +102,7 @@ describe('HookManager', () => {
 			hookManager.register({ onLogin: mock.fn(async () => {}) });
 			await hookManager.callOnLogin({}, {}, {}, {}, 'github');
 
-			assert.ok(mockLogger.debug.mock.calls.some(call =>
-				call.arguments[0].includes('Calling onLogin hook')
-			));
+			assert.ok(mockLogger.debug.mock.calls.some((call) => call.arguments[0].includes('Calling onLogin hook')));
 		});
 	});
 
@@ -197,10 +195,12 @@ describe('HookManager', () => {
 			hookManager.register({ onTokenRefresh: mock.fn(async () => {}) });
 			await hookManager.callOnTokenRefresh({}, true);
 
-			assert.ok(mockLogger.debug.mock.calls.some(call =>
-				call.arguments[0].includes('Calling onTokenRefresh hook') &&
-				call.arguments[0].includes('refreshed: true')
-			));
+			assert.ok(
+				mockLogger.debug.mock.calls.some(
+					(call) =>
+						call.arguments[0].includes('Calling onTokenRefresh hook') && call.arguments[0].includes('refreshed: true')
+				)
+			);
 		});
 	});
 });

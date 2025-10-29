@@ -1,4 +1,23 @@
-node_modules/
-dist/
-*.tsbuildinfo
+# OS Files
 .DS_Store
+
+# IDE Files
+.vscode/
+.idea/
+
+# Dependencies
+node_modules/
+
+# Test Outputs
+coverage
+*.lcov
+.nyc_output/
+
+# TypeScript
+*.tsbuildinfo
+dist/
+
+# Environment Variables
+.env
+.env.*
+!.env.example

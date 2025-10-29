@@ -1,0 +1,44 @@
+name: PR Checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  lint-build-test:
+    name: Lint, Build & Test
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        node-version: [20, 22, 24]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run linter
+        run: npm run lint
+
+      - name: Check formatting
+        run: npm run format:check
+
+      # Coverage was failing to run on Node 20, so run it only on 22+
+      - name: Run tests with coverage (Node 22+)
+        if: matrix.node-version >= 22
+        run: npm run test:coverage
+
+      - name: Run tests (Node 20)
+        if: matrix.node-version == 20
+        run: npm run test
