@@ -373,9 +373,11 @@ OAuth requires HTTPS for callback URLs. Configure your Harper server with TLS:
 
 ```yaml
 http:
-  tls:
-    key: /path/to/key.pem
-    cert: /path/to/cert.pem
+  securePort: 9926
+
+tls:
+  certificate: /path/to/cert.pem
+  privateKey: /path/to/key.pem
 ```
 
 ### 2. Validate Session Data
@@ -401,20 +403,6 @@ return {
 	email: request.session.oauthUser.email,
 	name: request.session.oauthUser.name,
 };
-```
-
-### 4. Configure Session Security
-
-Use secure session configuration:
-
-```yaml
-http:
-  session:
-    secret: ${SESSION_SECRET} # Strong random secret
-    cookie:
-      secure: true # HTTPS only
-      httpOnly: true # No JavaScript access
-      sameSite: 'lax' # CSRF protection
 ```
 
 ---
