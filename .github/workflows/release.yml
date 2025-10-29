@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      id-token: write
+      id-token: write # Required for npm OIDC trusted publishing
 
     steps:
       - name: Checkout code
@@ -35,13 +35,11 @@ jobs:
       - name: Check formatting
         run: npm run format:check
 
-      - name: Run tests with coverage
-        run: npm run test:coverage
+      - name: Run tests
+        run: npm run test
 
-      - name: Publish to npm
-        run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Publish to npm (stable tag)
+        run: npm publish --provenance --access public --tag stable
 
       - name: Create GitHub Release
         uses: actions/create-release@v1
