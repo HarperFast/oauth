@@ -34,6 +34,7 @@ jobs:
       - name: Check formatting
         run: npm run format:check
 
+      # Coverage was failing to run on Node 20, so run it only on 22+
       - name: Run tests with coverage (Node 22+)
         if: matrix.node-version >= 22
         run: npm run test:coverage
