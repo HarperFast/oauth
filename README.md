@@ -56,22 +56,22 @@ Create or update users when they log in:
 import { registerHooks } from '@harperdb/oauth';
 
 registerHooks({
-  onLogin: async (oauthUser, tokenResponse, session, request, provider) => {
-    const { User } = tables;
-    
-    // Find or create user
-    let user = await User.findOne({ email: oauthUser.email });
-    
-    if (!user) {
-      user = await User.create({
-        email: oauthUser.email,
-        name: oauthUser.name,
-        provider: provider
-      });
-    }
-    
-    return { user: String(user.id) };
-  }
+	onLogin: async (oauthUser, tokenResponse, session, request, provider) => {
+		const { User } = tables;
+
+		// Find or create user
+		let user = await User.findOne({ email: oauthUser.email });
+
+		if (!user) {
+			user = await User.create({
+				email: oauthUser.email,
+				name: oauthUser.name,
+				provider: provider,
+			});
+		}
+
+		return { user: String(user.id) };
+	},
 });
 
 // Export your resources...
@@ -80,6 +80,7 @@ registerHooks({
 ### 5. Test Authentication
 
 Navigate to:
+
 ```
 http://localhost:9926/oauth/github/login
 ```
@@ -90,16 +91,16 @@ Access authenticated user in your resources:
 
 ```typescript
 export class MyResource extends tables.Resource {
-  async get(target, request) {
-    if (!request.session?.user) {
-      throw new ClientError('Not authenticated', 401);
-    }
+	async get(target, request) {
+		if (!request.session?.user) {
+			throw new ClientError('Not authenticated', 401);
+		}
 
-    return {
-      userId: request.session.user,
-      email: request.session.oauthUser.email
-    };
-  }
+		return {
+			userId: request.session.user,
+			email: request.session.oauthUser.email,
+		};
+	}
 }
 ```
 
@@ -107,7 +108,7 @@ export class MyResource extends tables.Resource {
 
 - **GitHub** - OAuth 2.0
 - **Google** - OpenID Connect
-- **Azure AD** - OpenID Connect  
+- **Azure AD** - OpenID Connect
 - **Auth0** - OpenID Connect
 - **Custom** - Generic OIDC provider
 
@@ -161,12 +162,12 @@ The plugin creates a `csrf_tokens` table for CSRF protection:
 
 ```graphql
 type CSRFToken @table {
-  token: string @key
-  sessionId: string
-  provider: string
-  originalUrl: string
-  createdAt: number
-  expiresAt: number @index
+	token: string @key
+	sessionId: string
+	provider: string
+	originalUrl: string
+	createdAt: number
+	expiresAt: number @index
 }
 ```
 
@@ -194,6 +195,7 @@ Enable debug endpoints for testing:
 ```
 
 Debug endpoints:
+
 - `GET /oauth/` - List configured providers
 - `GET /oauth/test` - Interactive test page
 - `GET /oauth/{provider}/user` - View current session
