@@ -39,11 +39,15 @@ import { registerHooks } from '@harperdb/oauth';
 
 registerHooks({
 	onLogin: async (oauthUser, tokenResponse, session, request, provider) => {
-		// Create user in your database
-		const user = await tables.User.put({
-			email: oauthUser.email,
-			name: oauthUser.name,
-		});
+		// Find or create user
+		let user;
+		for await (const u of tables.User.search([{ attribute: 'email', value: oauthUser.email }])) {
+			user = u;
+			break;
+		}
+		if (!user) {
+			user = await tables.User.create({ email: oauthUser.email, name: oauthUser.name });
+		}
 		return { user: String(user.id) };
 	},
 });
