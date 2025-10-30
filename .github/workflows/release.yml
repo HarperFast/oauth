@@ -33,7 +33,7 @@ jobs:
       - name: Check formatting
         run: npm run format:check
 
-      - name: Run tests
+      - name: Run (build and) tests
         run: npm run test
 
       - name: Publish to npm (stable tag)
@@ -53,6 +53,6 @@ jobs:
             npm install @harperdb/oauth
             ```
 
-            See [README](https://github.com/harperdb/oauth#readme) for usage details.
+            See [README](https://github.com/HarperFast/oauth#readme) for usage details.
           draft: false
           prerelease: false
