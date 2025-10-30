@@ -4,12 +4,12 @@ OAuth 2.0 and OpenID Connect authentication for Harper applications. Supports Gi
 
 ## Features
 
-- 🔐 **Multi-provider support** - GitHub, Google, Azure AD, Auth0, and custom OIDC providers
-- 🔄 **Automatic token refresh** - Proactive token renewal on every request
-- 🪝 **Lifecycle hooks** - Extensible hooks for user provisioning and custom logic
-- 🛡️ **CSRF protection** - Distributed token storage for cluster support
-- 🎯 **ID token verification** - Full OIDC support with signature validation
-- 🔧 **Zero configuration** - Works with Harper's session system automatically
+- **Multi-provider support** - GitHub, Google, Azure AD, Auth0, and custom OIDC providers
+- **Automatic token refresh** - Proactive token renewal on every request
+- **Lifecycle hooks** - Extensible hooks for user provisioning and custom logic
+- **CSRF protection** - Distributed token storage for cluster support
+- **ID token verification** - Full OIDC support with signature validation
+- **Zero configuration** - Works with Harper's session system automatically
 
 ## Installation
 
@@ -60,7 +60,11 @@ registerHooks({
 		const { User } = tables;
 
 		// Find or create user
-		let user = await User.findOne({ email: oauthUser.email });
+		let user;
+		for await (const existing of User.search({ email: oauthUser.email })) {
+			user = existing;
+			break;
+		}
 
 		if (!user) {
 			user = await User.create({
@@ -201,7 +205,7 @@ Debug endpoints:
 - `GET /oauth/{provider}/user` - View current session
 - `GET /oauth/{provider}/refresh` - Trigger token refresh
 
-**⚠️ Never enable debug mode in production**
+**Warning:** Never enable debug mode in production.
 
 ## License
 
