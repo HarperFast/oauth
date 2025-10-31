@@ -6,16 +6,16 @@
 	"author": {
 		"name": "HarperDB, Inc.",
 		"email": "opensource@harperdb.io",
-		"url": "https://harpersystems.dev/"
+		"url": "https://harper.fast/"
 	},
 	"contributors": [],
-	"homepage": "https://harpersystems.dev/",
+	"homepage": "https://harper.fast/",
 	"repository": {
 		"type": "git",
-		"url": "https://github.com/harperdb/oauth.git"
+		"url": "https://github.com/HarperFast/oauth.git"
 	},
 	"bugs": {
-		"url": "https://github.com/harperdb/oauth/issues",
+		"url": "https://github.com/HarperFast/oauth/issues",
 		"email": "opensource@harperdb.io"
 	},
 	"keywords": [
