@@ -56,12 +56,26 @@ describe('OAuth Resource', () => {
 		};
 	});
 
+	// Mock options object for createOAuthResource
+	const mockOptions = {
+		providers: {
+			github: {
+				provider: 'github',
+				clientId: 'github-client',
+			},
+			google: {
+				provider: 'google',
+				clientId: 'google-client',
+			},
+		},
+	};
+
 	describe('createOAuthResource', () => {
 		describe('Debug Mode OFF (Production)', () => {
 			let resource;
 
 			beforeEach(() => {
-				resource = createOAuthResource(mockProviders, false, mockHookManager, mockLogger);
+				resource = createOAuthResource(mockProviders, mockOptions, false, mockHookManager, mockLogger);
 			});
 
 			it('should return 404 for root path', async () => {
@@ -133,7 +147,7 @@ describe('OAuth Resource', () => {
 			let resource;
 
 			beforeEach(() => {
-				resource = createOAuthResource(mockProviders, true, mockHookManager, mockLogger);
+				resource = createOAuthResource(mockProviders, mockOptions, true, mockHookManager, mockLogger);
 			});
 
 			it('should show provider list at root', async () => {
@@ -195,7 +209,7 @@ describe('OAuth Resource', () => {
 			let resource;
 
 			beforeEach(() => {
-				resource = createOAuthResource(mockProviders, false, mockHookManager, mockLogger);
+				resource = createOAuthResource(mockProviders, mockOptions, false, mockHookManager, mockLogger);
 			});
 
 			it('should handle string target', async () => {
@@ -255,7 +269,7 @@ describe('OAuth Resource', () => {
 			let resource;
 
 			beforeEach(() => {
-				resource = createOAuthResource(mockProviders, false, mockHookManager, mockLogger);
+				resource = createOAuthResource(mockProviders, mockOptions, false, mockHookManager, mockLogger);
 			});
 
 			it('should handle logout POST request', async () => {
@@ -286,15 +300,15 @@ describe('OAuth Resource', () => {
 
 	describe('Resource Creation', () => {
 		it('should create resource with providers', () => {
-			const resource = createOAuthResource(mockProviders, false, mockHookManager, mockLogger);
+			const resource = createOAuthResource(mockProviders, mockOptions, false, mockHookManager, mockLogger);
 			assert.ok(resource);
 			assert.equal(typeof resource.get, 'function');
 			assert.equal(typeof resource.post, 'function');
 		});
 
 		it('should create different instances with different configs', () => {
-			const resource1 = createOAuthResource(mockProviders, false, mockHookManager, mockLogger);
-			const resource2 = createOAuthResource(mockProviders, true, mockHookManager, mockLogger);
+			const resource1 = createOAuthResource(mockProviders, mockOptions, false, mockHookManager, mockLogger);
+			const resource2 = createOAuthResource(mockProviders, mockOptions, true, mockHookManager, mockLogger);
 			// Each resource is a new object
 			assert.notEqual(resource1, resource2);
 		});

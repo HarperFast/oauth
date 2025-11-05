@@ -6,7 +6,18 @@
 
 import { OAuthProvider } from './OAuthProvider.ts';
 import { getProvider } from './providers/index.ts';
-import type { OAuthProviderConfig, OAuthPluginConfig, ProviderRegistry, Logger } from '../types.ts';
+import type {
+	OAuthProviderConfig,
+	OAuthPluginConfig,
+	ProviderRegistry,
+	ProviderRegistryEntry,
+	Logger,
+} from '../types.ts';
+
+/**
+ * Required fields for OAuth provider configuration
+ */
+const REQUIRED_PROVIDER_FIELDS = ['clientId', 'clientSecret', 'authorizationUrl', 'tokenUrl', 'userInfoUrl'] as const;
 
 /**
  * Build configuration for a specific provider
@@ -18,13 +29,24 @@ export function buildProviderConfig(
 ): OAuthProviderConfig {
 	const options = providerConfig || {};
 
-	// Expand environment variables in config values
+	// Create a proxy that lazily expands environment variables when accessed
+	// This solves race conditions where env vars are loaded after plugin initialization
 	const expandedOptions: Record<string, any> = {};
 	for (const [key, value] of Object.entries(options)) {
 		if (typeof value === 'string' && value.startsWith('${') && value.endsWith('}')) {
 			// Extract environment variable name
 			const envVar = value.slice(2, -1);
-			expandedOptions[key] = process.env[envVar] || value;
+
+			// Use getter for lazy evaluation
+			Object.defineProperty(expandedOptions, key, {
+				get() {
+					const envValue = process.env[envVar];
+					// Only use the env value if it's defined and not empty
+					return envValue !== undefined && envValue !== '' ? envValue : value;
+				},
+				enumerable: true,
+				configurable: true,
+			});
 		} else {
 			expandedOptions[key] = value;
 		}
@@ -60,13 +82,18 @@ export function buildProviderConfig(
 
 		// Provider preset (if available)
 		...providerPreset,
-
-		// Provider-specific options (with expanded env vars)
-		...expandedOptions,
-
-		// Ensure redirect URI includes provider name (override any previous value)
-		redirectUri,
 	};
+
+	// Manually copy expandedOptions to preserve getters (spread operator would invoke them)
+	for (const key of Object.keys(expandedOptions)) {
+		const descriptor = Object.getOwnPropertyDescriptor(expandedOptions, key);
+		if (descriptor) {
+			Object.defineProperty(config, key, descriptor);
+		}
+	}
+
+	// Ensure redirect URI includes provider name (override any previous value)
+	config.redirectUri = redirectUri;
 
 	// Handle provider-specific configuration
 	if (providerPreset?.configure) {
@@ -129,8 +156,12 @@ export function initializeProviders(options: OAuthPluginConfig, logger?: Logger)
 		const config = buildProviderConfig(providerConfig, providerName, pluginDefaults);
 
 		// Check if this provider is properly configured
-		const requiredFields = ['clientId', 'clientSecret', 'authorizationUrl', 'tokenUrl', 'userInfoUrl'];
-		const missingFields = requiredFields.filter((key) => !config[key as keyof OAuthProviderConfig]);
+		// Note: This triggers lazy env var expansion via getters
+		const missingFields = REQUIRED_PROVIDER_FIELDS.filter((key) => {
+			const value = config[key as keyof OAuthProviderConfig];
+			// Consider env var placeholders as "missing" if they haven't been loaded yet
+			return !value || (typeof value === 'string' && value.startsWith('${') && value.endsWith('}'));
+		});
 
 		if (missingFields.length > 0) {
 			logger?.warn?.(`OAuth provider '${providerName}' not configured. Missing: ${missingFields.join(', ')}`);
@@ -147,4 +178,51 @@ export function initializeProviders(options: OAuthPluginConfig, logger?: Logger)
 	}
 
 	return providers;
+}
+
+/**
+ * Get or lazily initialize a single provider by name
+ * This handles race conditions where env vars are loaded after initial plugin initialization
+ */
+export function getOrInitializeProvider(
+	providerName: string,
+	providers: ProviderRegistry,
+	options: OAuthPluginConfig,
+	logger?: Logger
+): ProviderRegistryEntry | null {
+	// Check if provider already exists
+	if (providers[providerName]) {
+		return providers[providerName];
+	}
+
+	// Provider not initialized yet - try to initialize it now
+	if (!options.providers || !options.providers[providerName]) {
+		logger?.debug?.(`OAuth provider '${providerName}' not defined in configuration`);
+		return null;
+	}
+
+	const pluginDefaults = extractPluginDefaults(options);
+	const config = buildProviderConfig(options.providers[providerName], providerName, pluginDefaults);
+
+	// Check if this provider is properly configured (with current env vars)
+	const missingFields = REQUIRED_PROVIDER_FIELDS.filter((key) => {
+		const value = config[key as keyof OAuthProviderConfig];
+		return !value || (typeof value === 'string' && value.startsWith('${') && value.endsWith('}'));
+	});
+
+	if (missingFields.length > 0) {
+		logger?.debug?.(`OAuth provider '${providerName}' cannot be initialized yet. Missing: ${missingFields.join(', ')}`);
+		return null;
+	}
+
+	// Initialize the provider
+	try {
+		const provider = new OAuthProvider(config, logger);
+		providers[providerName] = { provider, config };
+		logger?.info?.(`OAuth provider '${providerName}' initialized on-demand (${config.provider})`);
+		return providers[providerName];
+	} catch (error) {
+		logger?.error?.(`Failed to initialize OAuth provider '${providerName}':`, error);
+		return null;
+	}
 }

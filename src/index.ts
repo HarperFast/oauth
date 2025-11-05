@@ -82,14 +82,23 @@ export async function handleApplication(scope: Scope): Promise<void> {
 	async function updateConfiguration() {
 		const rawOptions = (scope.options.getAll() || {}) as OAuthPluginConfig;
 
-		// Expand environment variables in plugin-level options
-		let debugValue = rawOptions.debug;
-		if (typeof debugValue === 'string' && debugValue.startsWith('${') && debugValue.endsWith('}')) {
-			const envVar = debugValue.slice(2, -1);
-			debugValue = process.env[envVar] || debugValue;
-		}
+		// Expand environment variables in plugin-level options (lazily)
+		const options: OAuthPluginConfig = { ...rawOptions };
 
-		const options = { ...rawOptions, debug: debugValue };
+		// Create lazy getters for all string values that look like env vars
+		for (const [key, value] of Object.entries(rawOptions)) {
+			if (typeof value === 'string' && value.startsWith('${') && value.endsWith('}')) {
+				const envVar = value.slice(2, -1);
+				Object.defineProperty(options, key, {
+					get() {
+						const envValue = process.env[envVar];
+						return envValue !== undefined && envValue !== '' ? envValue : value;
+					},
+					enumerable: true,
+					configurable: true,
+				});
+			}
+		}
 		const previousDebugMode = debugMode;
 		// Handle both boolean and string values (from environment variables)
 		debugMode = options.debug === true || options.debug === 'true';
@@ -98,43 +107,22 @@ export async function handleApplication(scope: Scope): Promise<void> {
 		if (isInitialized) {
 			logger?.info?.('OAuth configuration changed, updating providers...');
 		} else {
-			logger?.info?.('OAuth plugin loading with options:', JSON.stringify(options, null, 2));
+			// Log raw options (don't stringify to avoid triggering lazy getters prematurely)
+			logger?.info?.('OAuth plugin loading...');
 			isInitialized = true;
 		}
 
 		// Re-initialize providers from new configuration
 		providers = initializeProviders(options, logger);
 
-		// Update the resource with new providers
-		if (Object.keys(providers).length === 0) {
-			// No valid providers configured
-			scope.resources.set('oauth', {
-				async get() {
-					return {
-						status: 503,
-						body: {
-							error: 'No valid OAuth providers configured',
-							message: 'Please check your OAuth configuration',
-							example: options.providers
-								? 'Check that all required fields are provided'
-								: {
-										providers: {
-											github: {
-												provider: 'github',
-												clientId: '${OAUTH_GITHUB_CLIENT_ID}',
-												clientSecret: '${OAUTH_GITHUB_CLIENT_SECRET}',
-											},
-										},
-									},
-						},
-					};
-				},
-			});
-		} else {
-			// Register the OAuth resource with configured providers
-			scope.resources.set('oauth', createOAuthResource(providers, debugMode, hookManager, logger));
+		// Always register the OAuth resource with lazy initialization support
+		// Even if no providers are initially configured, they may become available later
+		scope.resources.set('oauth', createOAuthResource(providers, options, debugMode, hookManager, logger));
 
-			// Log all configured providers
+		// Log configured providers
+		if (Object.keys(providers).length === 0) {
+			logger?.warn?.('No OAuth providers configured yet - will attempt lazy initialization on first request');
+		} else {
 			logger?.info?.('OAuth plugin ready:', {
 				providers: Object.entries(providers).map(([name, data]) => ({
 					name,
@@ -160,7 +148,17 @@ export async function handleApplication(scope: Scope): Promise<void> {
 
 		// Get the provider for this OAuth session
 		const providerName = request.session.oauth.provider;
-		const providerData = providers[providerName];
+		let providerData = providers[providerName];
+
+		// Try lazy initialization if provider not found (handles race condition with env var loading)
+		if (!providerData) {
+			const rawOptions = (scope.options.getAll() || {}) as OAuthPluginConfig;
+			const { getOrInitializeProvider } = await import('./lib/config.ts');
+			const initialized = getOrInitializeProvider(providerName, providers, rawOptions, logger);
+			if (initialized) {
+				providerData = initialized;
+			}
+		}
 
 		if (!providerData) {
 			logger?.warn?.(`OAuth provider '${providerName}' not found, logging out user`);
