@@ -4,9 +4,10 @@
  * Harper resource class for handling OAuth REST endpoints
  */
 
-import type { Request, RequestTarget, Logger, ProviderRegistry } from '../types.ts';
+import type { Request, RequestTarget, Logger, ProviderRegistry, OAuthPluginConfig } from '../types.ts';
 import { handleLogin, handleCallback, handleLogout, handleUserInfo, handleTestPage } from './handlers.ts';
 import { validateAndRefreshSession } from './sessionValidator.ts';
+import { getOrInitializeProvider } from './config.ts';
 import type { HookManager } from './hookManager.ts';
 
 /**
@@ -15,6 +16,7 @@ import type { HookManager } from './hookManager.ts';
  */
 export function createOAuthResource(
 	providers: ProviderRegistry,
+	options: OAuthPluginConfig,
 	debugMode: boolean,
 	hookManager: HookManager,
 	logger?: Logger
@@ -67,8 +69,16 @@ export function createOAuthResource(
 				};
 			}
 
-			// Check if provider exists
-			const providerData = providers[providerName];
+			// Check if provider exists, or try to initialize it lazily
+			let providerData = providers[providerName];
+			if (!providerData) {
+				// Try lazy initialization (handles race condition with env var loading)
+				const initialized = getOrInitializeProvider(providerName, providers, options, logger);
+				if (initialized) {
+					providerData = initialized;
+				}
+			}
+
 			if (!providerData) {
 				return {
 					status: 404,
