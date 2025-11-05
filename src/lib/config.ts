@@ -9,6 +9,29 @@ import { getProvider } from './providers/index.ts';
 import type { OAuthProviderConfig, OAuthPluginConfig, ProviderRegistry, Logger } from '../types.ts';
 
 /**
+ * Expand environment variable in a string value
+ *
+ * If the value is a string in the format `${VAR_NAME}`, it will be replaced
+ * with the value of the environment variable. Non-string values are returned unchanged.
+ *
+ * @example
+ * expandEnvVar('${MY_VAR}') // Returns process.env.MY_VAR or '${MY_VAR}' if undefined
+ * expandEnvVar('literal')   // Returns 'literal'
+ * expandEnvVar(123)         // Returns 123
+ * expandEnvVar(true)        // Returns true
+ */
+export function expandEnvVar(value: any): any {
+	if (typeof value === 'string' && value.startsWith('${') && value.endsWith('}')) {
+		// Extract environment variable name
+		const envVar = value.slice(2, -1);
+		const envValue = process.env[envVar];
+		// Only use env value if it exists (even if empty string)
+		return envValue !== undefined ? envValue : value;
+	}
+	return value;
+}
+
+/**
  * Build configuration for a specific provider
  */
 export function buildProviderConfig(
@@ -21,13 +44,7 @@ export function buildProviderConfig(
 	// Expand environment variables in config values
 	const expandedOptions: Record<string, any> = {};
 	for (const [key, value] of Object.entries(options)) {
-		if (typeof value === 'string' && value.startsWith('${') && value.endsWith('}')) {
-			// Extract environment variable name
-			const envVar = value.slice(2, -1);
-			expandedOptions[key] = process.env[envVar] || value;
-		} else {
-			expandedOptions[key] = value;
-		}
+		expandedOptions[key] = expandEnvVar(value);
 	}
 
 	// Check for known provider presets
@@ -99,10 +116,10 @@ export function buildProviderConfig(
 export function extractPluginDefaults(options: OAuthPluginConfig): Partial<OAuthProviderConfig> {
 	const pluginDefaults: Partial<OAuthProviderConfig> = {};
 
-	// Copy all non-provider config to defaults
+	// Copy all non-provider config to defaults, expanding environment variables
 	for (const [key, value] of Object.entries(options)) {
 		if (key !== 'providers' && key !== 'debug') {
-			pluginDefaults[key as keyof OAuthProviderConfig] = value as any;
+			pluginDefaults[key as keyof OAuthProviderConfig] = expandEnvVar(value);
 		}
 	}
 

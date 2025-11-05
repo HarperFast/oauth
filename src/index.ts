@@ -5,7 +5,7 @@
  * Supports any standard OAuth 2.0 provider through configuration.
  */
 
-import { initializeProviders } from './lib/config.ts';
+import { initializeProviders, expandEnvVar } from './lib/config.ts';
 import { createOAuthResource } from './lib/resource.ts';
 import { validateAndRefreshSession } from './lib/sessionValidator.ts';
 import { clearOAuthSession } from './lib/handlers.ts';
@@ -83,11 +83,7 @@ export async function handleApplication(scope: Scope): Promise<void> {
 		const rawOptions = (scope.options.getAll() || {}) as OAuthPluginConfig;
 
 		// Expand environment variables in plugin-level options
-		let debugValue = rawOptions.debug;
-		if (typeof debugValue === 'string' && debugValue.startsWith('${') && debugValue.endsWith('}')) {
-			const envVar = debugValue.slice(2, -1);
-			debugValue = process.env[envVar] || debugValue;
-		}
+		const debugValue = expandEnvVar(rawOptions.debug);
 
 		const options = { ...rawOptions, debug: debugValue };
 		const previousDebugMode = debugMode;

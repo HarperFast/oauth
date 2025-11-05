@@ -4,7 +4,12 @@
 
 import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildProviderConfig, extractPluginDefaults, initializeProviders } from '../../dist/lib/config.js';
+import {
+	buildProviderConfig,
+	extractPluginDefaults,
+	initializeProviders,
+	expandEnvVar,
+} from '../../dist/lib/config.js';
 
 describe('OAuth Configuration', () => {
 	let originalEnv;
@@ -23,7 +28,7 @@ describe('OAuth Configuration', () => {
 	beforeEach(() => {
 		// Reset environment for each test
 		Object.keys(process.env).forEach((key) => {
-			if (key.startsWith('OAUTH_')) {
+			if (key.startsWith('OAUTH_') || key.startsWith('TEST_')) {
 				delete process.env[key];
 			}
 		});
@@ -34,6 +39,46 @@ describe('OAuth Configuration', () => {
 			error: () => {},
 			debug: () => {},
 		};
+	});
+
+	describe('expandEnvVar', () => {
+		it('should expand environment variable references', () => {
+			process.env.TEST_VAR = 'test-value';
+			const result = expandEnvVar('${TEST_VAR}');
+			assert.equal(result, 'test-value');
+		});
+
+		it('should return original value when env var does not exist', () => {
+			const result = expandEnvVar('${NONEXISTENT_VAR}');
+			assert.equal(result, '${NONEXISTENT_VAR}');
+		});
+
+		it('should return non-string values unchanged', () => {
+			assert.equal(expandEnvVar(123), 123);
+			assert.equal(expandEnvVar(true), true);
+			assert.equal(expandEnvVar(null), null);
+			assert.deepEqual(expandEnvVar({ key: 'value' }), { key: 'value' });
+		});
+
+		it('should return literal strings unchanged', () => {
+			const result = expandEnvVar('literal-string');
+			assert.equal(result, 'literal-string');
+		});
+
+		it('should not expand partial matches', () => {
+			const result1 = expandEnvVar('${MISSING_CLOSE');
+			const result2 = expandEnvVar('MISSING_OPEN}');
+			const result3 = expandEnvVar('text ${VAR} text');
+			assert.equal(result1, '${MISSING_CLOSE');
+			assert.equal(result2, 'MISSING_OPEN}');
+			assert.equal(result3, 'text ${VAR} text');
+		});
+
+		it('should handle empty environment variable values', () => {
+			process.env.EMPTY_VAR = '';
+			const result = expandEnvVar('${EMPTY_VAR}');
+			assert.equal(result, '');
+		});
 	});
 
 	describe('buildProviderConfig', () => {
@@ -318,6 +363,62 @@ describe('OAuth Configuration', () => {
 			assert.equal(defaults.providers, undefined);
 			assert.equal(defaults.debug, undefined);
 		});
+
+		it('should expand environment variables in plugin defaults', () => {
+			process.env.TEST_REDIRECT_URI = 'https://example.com/oauth/callback';
+			process.env.TEST_DEFAULT_ROLE = 'admin';
+
+			const options = {
+				redirectUri: '${TEST_REDIRECT_URI}',
+				defaultRole: '${TEST_DEFAULT_ROLE}',
+				scope: 'openid profile',
+				providers: { github: {} },
+			};
+
+			const defaults = extractPluginDefaults(options);
+
+			assert.equal(defaults.redirectUri, 'https://example.com/oauth/callback');
+			assert.equal(defaults.defaultRole, 'admin');
+			assert.equal(defaults.scope, 'openid profile');
+		});
+
+		it('should preserve literal values when not env vars', () => {
+			const options = {
+				redirectUri: 'https://literal.com/oauth',
+				scope: 'openid profile email',
+			};
+
+			const defaults = extractPluginDefaults(options);
+
+			assert.equal(defaults.redirectUri, 'https://literal.com/oauth');
+			assert.equal(defaults.scope, 'openid profile email');
+		});
+
+		it('should handle missing environment variables in defaults', () => {
+			const options = {
+				redirectUri: '${NONEXISTENT_REDIRECT_URI}',
+				postLoginRedirect: '/home',
+			};
+
+			const defaults = extractPluginDefaults(options);
+
+			// Should preserve the original value when env var doesn't exist
+			assert.equal(defaults.redirectUri, '${NONEXISTENT_REDIRECT_URI}');
+			assert.equal(defaults.postLoginRedirect, '/home');
+		});
+
+		it('should handle non-string values in defaults', () => {
+			const options = {
+				redirectUri: 'https://example.com/oauth',
+				timeout: 5000,
+				enabled: true,
+			};
+
+			const defaults = extractPluginDefaults(options);
+
+			assert.equal(defaults.timeout, 5000);
+			assert.equal(defaults.enabled, true);
+		});
 	});
 
 	describe('initializeProviders', () => {
@@ -452,6 +553,33 @@ describe('OAuth Configuration', () => {
 			// Since OAuthProvider constructor is robust, this should still work
 			const providers = initializeProviders(options, mockLogger);
 			assert.ok(providers.bad || !providers.bad); // Either initialized or skipped
+		});
+
+		it('should expand environment variables in plugin-level redirectUri', () => {
+			process.env.TEST_OAUTH_REDIRECT = 'https://test.com/oauth';
+			process.env.TEST_GOOGLE_CLIENT_ID = 'google-client-123';
+			process.env.TEST_GOOGLE_SECRET = 'google-secret-456';
+
+			const options = {
+				redirectUri: '${TEST_OAUTH_REDIRECT}',
+				defaultRole: 'user',
+				providers: {
+					google: {
+						provider: 'google',
+						clientId: '${TEST_GOOGLE_CLIENT_ID}',
+						clientSecret: '${TEST_GOOGLE_SECRET}',
+					},
+				},
+			};
+
+			const providers = initializeProviders(options, mockLogger);
+
+			assert.ok(providers.google);
+			assert.equal(providers.google.config.clientId, 'google-client-123');
+			assert.equal(providers.google.config.clientSecret, 'google-secret-456');
+			// The redirectUri should use the expanded value from plugin defaults
+			assert.ok(providers.google.config.redirectUri.startsWith('https://test.com/oauth'));
+			assert.ok(providers.google.config.redirectUri.includes('google'));
 		});
 	});
 });
