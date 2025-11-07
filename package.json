@@ -45,8 +45,8 @@
 	"scripts": {
 		"build": "tsc",
 		"dev": "tsc --watch",
-		"test": "npm run build && node --test test/**/*.test.js",
-		"test:coverage": "npm run build && node --test --experimental-test-coverage test/**/*.test.js",
+		"test": "npm run build && node --test",
+		"test:coverage": "npm run build && node --test --experimental-test-coverage",
 		"lint": "eslint . --ignore-pattern 'dist/**'",
 		"format": "prettier .",
 		"format:check": "npm run format -- --check",

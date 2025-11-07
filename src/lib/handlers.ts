@@ -11,17 +11,72 @@ import type { Request, RequestTarget, Logger, IOAuthProvider, OAuthProviderConfi
 import type { HookManager } from './hookManager.ts';
 
 /**
+ * Sanitize a redirect parameter to prevent open redirect attacks
+ *
+ * Takes a user-provided redirect URL and extracts only the path portion,
+ * stripping any protocol, domain, or port information.
+ *
+ * Blocks dangerous protocols like javascript:, data:, vbscript:, and file:
+ * to prevent XSS and other injection attacks.
+ *
+ * @param redirectParam - User-provided redirect URL (may be absolute, relative, or protocol-relative)
+ * @returns Safe relative path (pathname + search + hash), or '/' if invalid
+ *
+ * @example
+ * sanitizeRedirect('https://evil.com/phish')  // '/phish'
+ * sanitizeRedirect('//evil.com/phish')        // '/phish'
+ * sanitizeRedirect('/dashboard')              // '/dashboard'
+ * sanitizeRedirect('javascript:alert(1)')     // '/'
+ * sanitizeRedirect('invalid')                 // '/'
+ */
+export function sanitizeRedirect(redirectParam: string): string {
+	try {
+		const url = new URL(redirectParam, 'http://localhost');
+
+		// Block dangerous protocols
+		// These protocols can be used for XSS, file access, or other attacks
+		const dangerousProtocols = ['javascript:', 'data:', 'vbscript:', 'file:'];
+		if (dangerousProtocols.some((proto) => url.protocol === proto)) {
+			return '/';
+		}
+
+		const sanitized = url.pathname + url.search + url.hash;
+
+		// Additional validation: result must start with /
+		if (!sanitized.startsWith('/')) {
+			return '/';
+		}
+
+		return sanitized;
+	} catch (error) {
+		// Invalid URL - return safe default
+		return '/';
+	}
+}
+
+/**
  * Handle OAuth login initiation
  */
 export async function handleLogin(
 	request: Request,
+	target: RequestTarget,
 	provider: IOAuthProvider,
 	config: OAuthProviderConfig,
 	logger?: Logger
 ): Promise<any> {
+	// Determine redirect URL: query param > referer header > config default
+	let redirectParam = target.get?.('redirect');
+
+	// Sanitize redirect parameter to prevent open redirect attacks
+	if (redirectParam) {
+		redirectParam = sanitizeRedirect(redirectParam);
+	}
+
+	const originalUrl = redirectParam || request.headers?.referer || config.postLoginRedirect || '/';
+
 	// Generate CSRF token with metadata
 	const csrfToken = await provider.generateCSRFToken({
-		originalUrl: request.headers?.referer || config.postLoginRedirect || '/oauth/test',
+		originalUrl,
 		sessionId: request.session?.id,
 	});
 
@@ -170,7 +225,7 @@ export async function handleCallback(
 		return {
 			status: 302,
 			headers: {
-				Location: tokenData.originalUrl || config.postLoginRedirect || '/oauth/test',
+				Location: tokenData.originalUrl || config.postLoginRedirect || '/',
 			},
 		};
 	} catch (error) {
