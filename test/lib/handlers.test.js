@@ -96,7 +96,7 @@ describe('OAuth Handlers', () => {
 
 	describe('handleLogin', () => {
 		it('should initiate OAuth login flow', async () => {
-			const result = await handleLogin(mockRequest, mockProvider, mockConfig, mockLogger);
+			const result = await handleLogin(mockRequest, mockTarget, mockProvider, mockConfig, mockLogger);
 
 			assert.equal(result.status, 302);
 			assert.equal(result.headers.Location, 'https://auth.test.com/authorize?state=csrf-token-123');
@@ -104,23 +104,37 @@ describe('OAuth Handlers', () => {
 			assert.equal(mockProvider.getAuthorizationUrl.mock.calls.length, 1);
 		});
 
-		it('should use referer as original URL', async () => {
-			await handleLogin(mockRequest, mockProvider, mockConfig, mockLogger);
+		it('should use redirect query parameter when provided', async () => {
+			const targetWithRedirect = {
+				get: mock.fn((key) => {
+					if (key === 'redirect') return '/custom/redirect/path';
+					return undefined;
+				}),
+			};
+
+			await handleLogin(mockRequest, targetWithRedirect, mockProvider, mockConfig, mockLogger);
+
+			const csrfCall = mockProvider.generateCSRFToken.mock.calls[0];
+			assert.equal(csrfCall.arguments[0].originalUrl, '/custom/redirect/path');
+		});
+
+		it('should use referer as original URL when no redirect param', async () => {
+			await handleLogin(mockRequest, mockTarget, mockProvider, mockConfig, mockLogger);
 
 			const csrfCall = mockProvider.generateCSRFToken.mock.calls[0];
 			assert.equal(csrfCall.arguments[0].originalUrl, 'https://app.example.com/page');
 		});
 
-		it('should fall back to postLoginRedirect when no referer', async () => {
+		it('should fall back to postLoginRedirect when no redirect param or referer', async () => {
 			delete mockRequest.headers.referer;
-			await handleLogin(mockRequest, mockProvider, mockConfig, mockLogger);
+			await handleLogin(mockRequest, mockTarget, mockProvider, mockConfig, mockLogger);
 
 			const csrfCall = mockProvider.generateCSRFToken.mock.calls[0];
 			assert.equal(csrfCall.arguments[0].originalUrl, '/dashboard');
 		});
 
 		it('should include session ID in CSRF token', async () => {
-			await handleLogin(mockRequest, mockProvider, mockConfig, mockLogger);
+			await handleLogin(mockRequest, mockTarget, mockProvider, mockConfig, mockLogger);
 
 			const csrfCall = mockProvider.generateCSRFToken.mock.calls[0];
 			assert.equal(csrfCall.arguments[0].sessionId, 'session-123');

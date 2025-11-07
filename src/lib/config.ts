@@ -63,7 +63,7 @@ export function buildProviderConfig(
 		scope: pluginDefaults.scope || 'openid profile email',
 		usernameClaim: pluginDefaults.usernameClaim || 'email',
 		defaultRole: pluginDefaults.defaultRole || 'user',
-		postLoginRedirect: pluginDefaults.postLoginRedirect || '/oauth/test',
+		postLoginRedirect: pluginDefaults.postLoginRedirect || '/',
 
 		// Provider type
 		provider: 'generic',

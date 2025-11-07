@@ -83,7 +83,8 @@ export function createOAuthResource(
 
 			switch (action) {
 				case 'login':
-					return handleLogin(request, provider, config, logger);
+					// Pass the target object for query params (e.g., ?redirect=/dashboard)
+					return handleLogin(request, target as RequestTarget, provider, config, logger);
 				case 'callback':
 					// Pass the target object directly - it should have a get() method for query params
 					return handleCallback(request, target as RequestTarget, provider, config, hookManager, logger);
