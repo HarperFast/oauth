@@ -10,7 +10,7 @@ jobs:
     name: Publish to npm
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
       id-token: write # Required for npm OIDC trusted publishing
 
     steps:
@@ -37,22 +37,4 @@ jobs:
         run: npm run test
 
       - name: Publish to npm (stable tag)
-        run: npm publish --provenance --access public --tag stable
-
-      - name: Create GitHub Release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ github.ref_name }}
-          release_name: Release ${{ github.ref_name }}
-          body: |
-            ## Installation
-
-            ```bash
-            npm install @harperdb/oauth
-            ```
-
-            See [README](https://github.com/HarperFast/oauth#readme) for usage details.
-          draft: false
-          prerelease: false
+        run: npm publish --provenance --access public
