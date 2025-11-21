@@ -93,4 +93,63 @@ describe('GitHub Provider', () => {
 			global.fetch = originalFetch;
 		}
 	});
+
+	it('should have token validation support', () => {
+		const github = getProvider('github');
+		assert.ok(github.validateToken);
+		assert.equal(typeof github.validateToken, 'function');
+		assert.ok(github.tokenValidationInterval);
+		assert.equal(github.tokenValidationInterval, 15 * 60 * 1000); // 15 minutes
+	});
+
+	it('should validate tokens with HEAD request', async () => {
+		const github = getProvider('github');
+
+		const originalFetch = global.fetch;
+		global.fetch = async (url, options) => {
+			assert.equal(url, 'https://api.github.com/user');
+			assert.equal(options.method, 'HEAD');
+			assert.equal(options.headers.Authorization, 'Bearer valid-token');
+			return { ok: true, status: 200 };
+		};
+
+		try {
+			const isValid = await github.validateToken('valid-token');
+			assert.equal(isValid, true);
+		} finally {
+			global.fetch = originalFetch;
+		}
+	});
+
+	it('should return false for invalid tokens', async () => {
+		const github = getProvider('github');
+
+		const originalFetch = global.fetch;
+		global.fetch = async () => {
+			return { ok: false, status: 401, statusText: 'Unauthorized' };
+		};
+
+		try {
+			const isValid = await github.validateToken('invalid-token');
+			assert.equal(isValid, false);
+		} finally {
+			global.fetch = originalFetch;
+		}
+	});
+
+	it('should handle validation errors gracefully', async () => {
+		const github = getProvider('github');
+
+		const originalFetch = global.fetch;
+		global.fetch = async () => {
+			throw new Error('Network error');
+		};
+
+		try {
+			const isValid = await github.validateToken('test-token');
+			assert.equal(isValid, false); // Should return false on error
+		} finally {
+			global.fetch = originalFetch;
+		}
+	});
 });

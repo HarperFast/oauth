@@ -110,6 +110,10 @@ export interface OAuthProviderConfig {
 	additionalParams?: Record<string, string>;
 	/** Custom function to fetch/transform user info */
 	getUserInfo?: (accessToken: string, helpers: GetUserInfoHelpers) => Promise<any>;
+	/** Custom function to validate token (for non-expiring tokens like GitHub) */
+	validateToken?: (accessToken: string, logger?: Logger) => Promise<boolean>;
+	/** Interval for periodic token validation (ms) - only for tokens without expiration */
+	tokenValidationInterval?: number;
 	/** Provider-specific configuration function (e.g., for tenant/domain setup) */
 	configure?: (param: string) => Partial<OAuthProviderConfig>;
 }
@@ -308,6 +312,8 @@ export interface OAuthSessionMetadata {
 	tokenType?: string;
 	/** Unix timestamp (ms) of last successful token refresh */
 	lastRefreshed?: number;
+	/** Unix timestamp (ms) of last token validation (for non-expiring tokens) */
+	lastValidated?: number;
 }
 
 /**

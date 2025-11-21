@@ -4,14 +4,7 @@
 
 import { describe, it, beforeEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import {
-	handleLogin,
-	handleCallback,
-	handleLogout,
-	handleUserInfo,
-	handleRefresh,
-	handleTestPage,
-} from '../../dist/lib/handlers.js';
+import { handleLogin, handleCallback, handleLogout, handleUserInfo, handleTestPage } from '../../dist/lib/handlers.js';
 
 describe('OAuth Handlers', () => {
 	let mockProvider;
@@ -339,6 +332,32 @@ describe('OAuth Handlers', () => {
 			assert.equal(mockRequest.session.oauth.accessToken, 'access-token-123');
 		});
 
+		it('should handle tokens without expiration (GitHub style)', async () => {
+			// GitHub doesn't return expires_in - tokens don't expire
+			mockProvider.exchangeCodeForToken = mock.fn(async () => ({
+				access_token: 'github-token-123',
+				token_type: 'bearer',
+				scope: 'user:email',
+				// No expires_in field - token doesn't expire
+			}));
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				mockLogger
+			);
+
+			assert.equal(result.status, 302);
+			const updateCall = mockRequest.session.update.mock.calls[0];
+			// expiresAt and refreshThreshold should be undefined for non-expiring tokens
+			assert.equal(updateCall.arguments[0].oauth.expiresAt, undefined);
+			assert.equal(updateCall.arguments[0].oauth.refreshThreshold, undefined);
+			assert.equal(updateCall.arguments[0].oauth.accessToken, 'github-token-123');
+		});
+
 		it('should handle missing session', async () => {
 			delete mockRequest.session;
 
@@ -461,68 +480,6 @@ describe('OAuth Handlers', () => {
 
 			assert.equal(result.status, 500);
 			assert.equal(result.body.error, 'Request object not provided');
-		});
-	});
-
-	describe('handleRefresh', () => {
-		it('should refresh access token', async () => {
-			mockRequest.session.oauth = { refreshToken: 'refresh-token-456' };
-
-			const result = await handleRefresh(mockRequest, mockProvider, mockConfig, mockLogger);
-
-			assert.equal(result.status, 200);
-			assert.equal(result.body.message, 'Token refreshed successfully');
-			assert.equal(result.body.expiresIn, 3600);
-
-			const updateCall = mockRequest.session.update.mock.calls[0];
-			assert.equal(updateCall.arguments[0].oauth.accessToken, 'new-access-token');
-		});
-
-		it('should handle missing refresh token', async () => {
-			mockRequest.session.oauth = {};
-
-			const result = await handleRefresh(mockRequest, mockProvider, mockConfig, mockLogger);
-
-			assert.equal(result.status, 401);
-			assert.equal(result.body.error, 'No refresh token available');
-		});
-
-		it('should handle provider without refresh support', async () => {
-			mockRequest.session.oauth = { refreshToken: 'refresh-token' };
-			delete mockProvider.refreshAccessToken;
-
-			const result = await handleRefresh(mockRequest, mockProvider, mockConfig, mockLogger);
-
-			assert.equal(result.status, 501);
-			assert.equal(result.body.error, 'Token refresh not supported by this provider');
-		});
-
-		it('should handle refresh failure', async () => {
-			mockRequest.session.oauth = { refreshToken: 'expired-refresh-token' };
-			mockProvider.refreshAccessToken = mock.fn(async () => {
-				throw new Error('Refresh token expired');
-			});
-
-			const result = await handleRefresh(mockRequest, mockProvider, mockConfig, mockLogger);
-
-			assert.equal(result.status, 401);
-			assert.equal(result.body.error, 'Token refresh failed');
-			assert.ok(result.body.message.includes('Refresh token expired'));
-		});
-
-		it('should update refresh token when new one provided', async () => {
-			mockRequest.session.oauth = { refreshToken: 'old-refresh-token' };
-			mockProvider.refreshAccessToken = mock.fn(async () => ({
-				access_token: 'new-access',
-				refresh_token: 'new-refresh',
-				expires_in: 7200,
-			}));
-
-			const result = await handleRefresh(mockRequest, mockProvider, mockConfig, mockLogger);
-
-			assert.equal(result.status, 200);
-			const updateCall = mockRequest.session.update.mock.calls[0];
-			assert.equal(updateCall.arguments[0].oauth.refreshToken, 'new-refresh');
 		});
 	});
 
