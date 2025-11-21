@@ -69,7 +69,8 @@
 		"harperdb": ">=4.6.0"
 	},
 	"engines": {
-		"node": ">=20"
+		"node": ">=20",
+		"bun": ">=1.0"
 	},
 	"devEngines": {
 		"runtime": {

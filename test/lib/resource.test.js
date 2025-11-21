@@ -2,8 +2,9 @@
  * Tests for OAuth Resource
  */
 
-import { describe, it, beforeEach, mock } from 'node:test';
+import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { createMockFn, createMockLogger } from '../helpers/mockFn.js';
 
 // Mock Harper's Resource class for testing
 global.Resource = class {
@@ -19,24 +20,19 @@ describe('OAuth Resource', () => {
 	let mockHookManager;
 
 	beforeEach(() => {
-		mockLogger = {
-			info: mock.fn(),
-			warn: mock.fn(),
-			error: mock.fn(),
-			debug: mock.fn(),
-		};
+		mockLogger = createMockLogger();
 
 		mockHookManager = {
-			callOnLogin: mock.fn(async () => {}),
-			callOnLogout: mock.fn(async () => {}),
-			callOnTokenRefresh: mock.fn(async () => {}),
+			callOnLogin: createMockFn(async () => {}),
+			callOnLogout: createMockFn(async () => {}),
+			callOnTokenRefresh: createMockFn(async () => {}),
 		};
 
 		mockProviders = {
 			github: {
 				provider: {
-					generateCSRFToken: mock.fn(),
-					getAuthorizationUrl: mock.fn(),
+					generateCSRFToken: createMockFn(),
+					getAuthorizationUrl: createMockFn(),
 				},
 				config: {
 					provider: 'github',
@@ -45,8 +41,8 @@ describe('OAuth Resource', () => {
 			},
 			google: {
 				provider: {
-					generateCSRFToken: mock.fn(),
-					getAuthorizationUrl: mock.fn(),
+					generateCSRFToken: createMockFn(),
+					getAuthorizationUrl: createMockFn(),
 				},
 				config: {
 					provider: 'google',
@@ -233,7 +229,7 @@ describe('OAuth Resource', () => {
 			it('should handle target with query params for callback', async () => {
 				const target = {
 					id: 'github/callback',
-					get: mock.fn((key) => {
+					get: createMockFn((key) => {
 						if (key === 'code') return 'auth-code';
 						if (key === 'state') return 'csrf-token';
 						return null;
@@ -241,7 +237,7 @@ describe('OAuth Resource', () => {
 				};
 
 				// Add verifyCSRFToken method to mock provider
-				mockProviders.github.provider.verifyCSRFToken = mock.fn(async () => null);
+				mockProviders.github.provider.verifyCSRFToken = createMockFn(async () => null);
 
 				const result = await resource.get(target, {
 					session: { id: 'test' },
@@ -262,7 +258,7 @@ describe('OAuth Resource', () => {
 				const request = {
 					session: {
 						user: 'test-user',
-						update: mock.fn(),
+						update: createMockFn(),
 					},
 				};
 				const result = await resource.post('logout', {}, request);

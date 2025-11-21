@@ -4,7 +4,7 @@
 
 import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { CSRFTokenManager } from '../../dist/lib/CSRFTokenManager.js';
+import { CSRFTokenManager, resetCSRFTableCache } from '../../dist/lib/CSRFTokenManager.js';
 
 describe('CSRFTokenManager', () => {
 	let manager;
@@ -23,6 +23,9 @@ describe('CSRFTokenManager', () => {
 	});
 
 	beforeEach(() => {
+		// Reset the module-level cache to prevent test interference
+		resetCSRFTableCache();
+
 		// Create a new instance for each test
 		manager = new CSRFTokenManager();
 		storedRecords = new Map();

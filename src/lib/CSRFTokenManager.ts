@@ -28,6 +28,14 @@ function getCSRFTable(): Table {
 	return csrfTable;
 }
 
+/**
+ * Reset the cached CSRF table reference (for testing only)
+ * @internal
+ */
+export function resetCSRFTableCache(): void {
+	csrfTable = undefined as any;
+}
+
 export class CSRFTokenManager {
 	private logger?: Logger;
 

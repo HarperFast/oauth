@@ -2,29 +2,27 @@
  * Tests for HookManager
  */
 
-import { describe, it, beforeEach, mock } from 'node:test';
+import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { HookManager } from '../../dist/lib/hookManager.js';
+import { createMockFn, createMockLogger } from '../helpers/mockFn.js';
+
+// Note: mock is imported and used by the helper, we only use createMockFn in tests
 
 describe('HookManager', () => {
 	let hookManager;
 	let mockLogger;
 
 	beforeEach(() => {
-		mockLogger = {
-			debug: mock.fn(),
-			error: mock.fn(),
-			info: mock.fn(),
-			warn: mock.fn(),
-		};
+		mockLogger = createMockLogger();
 		hookManager = new HookManager(mockLogger);
 	});
 
 	describe('register', () => {
 		it('should register hooks', () => {
 			const hooks = {
-				onLogin: mock.fn(),
-				onLogout: mock.fn(),
+				onLogin: createMockFn(),
+				onLogout: createMockFn(),
 			};
 
 			hookManager.register(hooks);
@@ -33,9 +31,9 @@ describe('HookManager', () => {
 
 		it('should log registered hooks', () => {
 			const hooks = {
-				onLogin: mock.fn(),
-				onLogout: mock.fn(),
-				onTokenRefresh: mock.fn(),
+				onLogin: createMockFn(),
+				onLogout: createMockFn(),
+				onTokenRefresh: createMockFn(),
 			};
 
 			hookManager.register(hooks);
@@ -53,14 +51,14 @@ describe('HookManager', () => {
 		});
 
 		it('should return true when hooks registered', () => {
-			hookManager.register({ onLogin: mock.fn() });
+			hookManager.register({ onLogin: createMockFn() });
 			assert.equal(hookManager.hasHooks(), true);
 		});
 	});
 
 	describe('callOnLogin', () => {
 		it('should call onLogin hook with correct parameters', async () => {
-			const onLoginMock = mock.fn(async () => ({ customData: 'test' }));
+			const onLoginMock = createMockFn(async () => ({ customData: 'test' }));
 			hookManager.register({ onLogin: onLoginMock });
 
 			const oauthUser = { username: 'testuser', email: 'test@example.com' };
@@ -86,7 +84,7 @@ describe('HookManager', () => {
 		});
 
 		it('should catch and log errors from onLogin hook', async () => {
-			const onLoginMock = mock.fn(async () => {
+			const onLoginMock = createMockFn(async () => {
 				throw new Error('Hook error');
 			});
 			hookManager.register({ onLogin: onLoginMock });
@@ -99,7 +97,7 @@ describe('HookManager', () => {
 		});
 
 		it('should log debug message when calling hook', async () => {
-			hookManager.register({ onLogin: mock.fn(async () => {}) });
+			hookManager.register({ onLogin: createMockFn(async () => {}) });
 			await hookManager.callOnLogin({}, {}, {}, {}, 'github');
 
 			assert.ok(mockLogger.debug.mock.calls.some((call) => call.arguments[0].includes('Calling onLogin hook')));
@@ -108,7 +106,7 @@ describe('HookManager', () => {
 
 	describe('callOnLogout', () => {
 		it('should call onLogout hook with correct parameters', async () => {
-			const onLogoutMock = mock.fn(async () => {});
+			const onLogoutMock = createMockFn(async () => {});
 			hookManager.register({ onLogout: onLogoutMock });
 
 			const session = { id: 'session123', user: 'testuser' };
@@ -127,7 +125,7 @@ describe('HookManager', () => {
 		});
 
 		it('should catch and log errors from onLogout hook', async () => {
-			const onLogoutMock = mock.fn(async () => {
+			const onLogoutMock = createMockFn(async () => {
 				throw new Error('Logout hook error');
 			});
 			hookManager.register({ onLogout: onLogoutMock });
@@ -141,7 +139,7 @@ describe('HookManager', () => {
 
 	describe('callOnTokenRefresh', () => {
 		it('should call onTokenRefresh hook with correct parameters', async () => {
-			const onTokenRefreshMock = mock.fn(async () => {});
+			const onTokenRefreshMock = createMockFn(async () => {});
 			hookManager.register({ onTokenRefresh: onTokenRefreshMock });
 
 			const session = { id: 'session123', oauth: { accessToken: 'token' } };
@@ -156,7 +154,7 @@ describe('HookManager', () => {
 		});
 
 		it('should handle refreshed=false', async () => {
-			const onTokenRefreshMock = mock.fn(async () => {});
+			const onTokenRefreshMock = createMockFn(async () => {});
 			hookManager.register({ onTokenRefresh: onTokenRefreshMock });
 
 			await hookManager.callOnTokenRefresh({}, false);
@@ -165,7 +163,7 @@ describe('HookManager', () => {
 		});
 
 		it('should work without request parameter', async () => {
-			const onTokenRefreshMock = mock.fn(async () => {});
+			const onTokenRefreshMock = createMockFn(async () => {});
 			hookManager.register({ onTokenRefresh: onTokenRefreshMock });
 
 			await hookManager.callOnTokenRefresh({}, true);
@@ -180,7 +178,7 @@ describe('HookManager', () => {
 		});
 
 		it('should catch and log errors from onTokenRefresh hook', async () => {
-			const onTokenRefreshMock = mock.fn(async () => {
+			const onTokenRefreshMock = createMockFn(async () => {
 				throw new Error('Refresh hook error');
 			});
 			hookManager.register({ onTokenRefresh: onTokenRefreshMock });
@@ -192,14 +190,15 @@ describe('HookManager', () => {
 		});
 
 		it('should log debug message with refreshed status', async () => {
-			hookManager.register({ onTokenRefresh: mock.fn(async () => {}) });
+			hookManager.register({ onTokenRefresh: createMockFn(async () => {}) });
 			await hookManager.callOnTokenRefresh({}, true);
 
 			assert.ok(
-				mockLogger.debug.mock.calls.some(
-					(call) =>
-						call.arguments[0].includes('Calling onTokenRefresh hook') && call.arguments[0].includes('refreshed: true')
-				)
+				mockLogger.debug.mock.calls.some((call) => {
+					const args = call.arguments || call;
+					const message = args[0];
+					return message.includes('Calling onTokenRefresh hook') && message.includes('refreshed: true');
+				})
 			);
 		});
 	});
