@@ -2,9 +2,10 @@
  * Tests for OAuth Handlers
  */
 
-import { describe, it, beforeEach, mock } from 'node:test';
+import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { handleLogin, handleCallback, handleLogout, handleUserInfo, handleTestPage } from '../../dist/lib/handlers.js';
+import { createMockFn, createMockLogger } from '../helpers/mockFn.js';
 
 describe('OAuth Handlers', () => {
 	let mockProvider;
@@ -16,17 +17,12 @@ describe('OAuth Handlers', () => {
 
 	beforeEach(() => {
 		// Setup common mocks
-		mockLogger = {
-			info: mock.fn(),
-			warn: mock.fn(),
-			error: mock.fn(),
-			debug: mock.fn(),
-		};
+		mockLogger = createMockLogger();
 
 		mockHookManager = {
-			callOnLogin: mock.fn(async () => {}),
-			callOnLogout: mock.fn(async () => {}),
-			callOnTokenRefresh: mock.fn(async () => {}),
+			callOnLogin: createMockFn(async () => {}),
+			callOnLogout: createMockFn(async () => {}),
+			callOnTokenRefresh: createMockFn(async () => {}),
 		};
 
 		mockConfig = {
@@ -41,26 +37,26 @@ describe('OAuth Handlers', () => {
 		};
 
 		mockProvider = {
-			generateCSRFToken: mock.fn(async () => 'csrf-token-123'),
-			getAuthorizationUrl: mock.fn(() => 'https://auth.test.com/authorize?state=csrf-token-123'),
-			verifyCSRFToken: mock.fn(async () => ({ originalUrl: '/dashboard', timestamp: Date.now() })),
-			exchangeCodeForToken: mock.fn(async () => ({
+			generateCSRFToken: createMockFn(async () => 'csrf-token-123'),
+			getAuthorizationUrl: createMockFn(() => 'https://auth.test.com/authorize?state=csrf-token-123'),
+			verifyCSRFToken: createMockFn(async () => ({ originalUrl: '/dashboard', timestamp: Date.now() })),
+			exchangeCodeForToken: createMockFn(async () => ({
 				access_token: 'access-token-123',
 				refresh_token: 'refresh-token-456',
 			})),
-			getUserInfo: mock.fn(async () => ({
+			getUserInfo: createMockFn(async () => ({
 				sub: 'user-123',
 				email: 'user@example.com',
 				name: 'Test User',
 			})),
-			mapUserToHarper: mock.fn(() => ({
+			mapUserToHarper: createMockFn(() => ({
 				username: 'user@example.com',
 				role: 'user',
 				email: 'user@example.com',
 				name: 'Test User',
 				provider: 'test',
 			})),
-			refreshAccessToken: mock.fn(async () => ({
+			refreshAccessToken: createMockFn(async () => ({
 				access_token: 'new-access-token',
 				expires_in: 3600,
 			})),
@@ -72,12 +68,12 @@ describe('OAuth Handlers', () => {
 			},
 			session: {
 				id: 'session-123',
-				update: mock.fn(),
+				update: createMockFn(),
 			},
 		};
 
 		mockTarget = {
-			get: mock.fn((key) => {
+			get: createMockFn((key) => {
 				const params = {
 					code: 'auth-code-789',
 					state: 'csrf-token-123',
@@ -99,7 +95,7 @@ describe('OAuth Handlers', () => {
 
 		it('should use redirect query parameter when provided', async () => {
 			const targetWithRedirect = {
-				get: mock.fn((key) => {
+				get: createMockFn((key) => {
 					if (key === 'redirect') return '/custom/redirect/path';
 					return undefined;
 				}),
@@ -166,7 +162,7 @@ describe('OAuth Handlers', () => {
 		});
 
 		it('should handle OAuth error response', async () => {
-			mockTarget.get = mock.fn((key) => {
+			mockTarget.get = createMockFn((key) => {
 				if (key === 'error') return 'access_denied';
 				if (key === 'error_description') return 'User denied access';
 				return null;
@@ -186,7 +182,7 @@ describe('OAuth Handlers', () => {
 		});
 
 		it('should handle missing code parameter', async () => {
-			mockTarget.get = mock.fn(() => null);
+			mockTarget.get = createMockFn(() => null);
 
 			const result = await handleCallback(
 				mockRequest,
@@ -202,7 +198,7 @@ describe('OAuth Handlers', () => {
 		});
 
 		it('should handle invalid CSRF token', async () => {
-			mockProvider.verifyCSRFToken = mock.fn(async () => null);
+			mockProvider.verifyCSRFToken = createMockFn(async () => null);
 
 			const result = await handleCallback(
 				mockRequest,
@@ -218,7 +214,7 @@ describe('OAuth Handlers', () => {
 		});
 
 		it('should handle OAuth error with custom postLoginRedirect', async () => {
-			mockTarget.get = mock.fn((key) => {
+			mockTarget.get = createMockFn((key) => {
 				if (key === 'error') return 'invalid_scope';
 				if (key === 'error_description') return 'Requested scope not allowed';
 				return null;
@@ -239,7 +235,7 @@ describe('OAuth Handlers', () => {
 		});
 
 		it('should handle missing parameters with query string in postLoginRedirect', async () => {
-			mockTarget.get = mock.fn(() => null);
+			mockTarget.get = createMockFn(() => null);
 			mockConfig.postLoginRedirect = '/app?tab=auth';
 
 			const result = await handleCallback(
@@ -256,8 +252,8 @@ describe('OAuth Handlers', () => {
 		});
 
 		it('should verify ID token when present', async () => {
-			mockProvider.verifyIdToken = mock.fn(async () => ({ sub: 'user-123', email: 'verified@example.com' }));
-			mockProvider.exchangeCodeForToken = mock.fn(async () => ({
+			mockProvider.verifyIdToken = createMockFn(async () => ({ sub: 'user-123', email: 'verified@example.com' }));
+			mockProvider.exchangeCodeForToken = createMockFn(async () => ({
 				access_token: 'access-token',
 				id_token: 'id-token-jwt',
 			}));
@@ -269,10 +265,10 @@ describe('OAuth Handlers', () => {
 		});
 
 		it('should handle ID token verification failure gracefully', async () => {
-			mockProvider.verifyIdToken = mock.fn(async () => {
+			mockProvider.verifyIdToken = createMockFn(async () => {
 				throw new Error('Invalid signature');
 			});
-			mockProvider.exchangeCodeForToken = mock.fn(async () => ({
+			mockProvider.exchangeCodeForToken = createMockFn(async () => ({
 				access_token: 'access-token',
 				id_token: 'invalid-token',
 			}));
@@ -292,7 +288,7 @@ describe('OAuth Handlers', () => {
 		});
 
 		it('should handle token exchange failure', async () => {
-			mockProvider.exchangeCodeForToken = mock.fn(async () => {
+			mockProvider.exchangeCodeForToken = createMockFn(async () => {
 				throw new Error('Invalid client credentials');
 			});
 
@@ -334,7 +330,7 @@ describe('OAuth Handlers', () => {
 
 		it('should handle tokens without expiration (GitHub style)', async () => {
 			// GitHub doesn't return expires_in - tokens don't expire
-			mockProvider.exchangeCodeForToken = mock.fn(async () => ({
+			mockProvider.exchangeCodeForToken = createMockFn(async () => ({
 				access_token: 'github-token-123',
 				token_type: 'bearer',
 				scope: 'user:email',
@@ -379,7 +375,7 @@ describe('OAuth Handlers', () => {
 	describe('handleLogout', () => {
 		it('should clear session data', async () => {
 			// Add delete method mock to session
-			mockRequest.session.delete = mock.fn();
+			mockRequest.session.delete = createMockFn();
 
 			const result = await handleLogout(mockRequest, mockHookManager, mockLogger);
 
