@@ -181,10 +181,20 @@ export async function handleCallback(
 		// Store in session if available
 		if (request.session) {
 			// Calculate token expiration and refresh thresholds
-			const expiresIn = tokenResponse.expires_in || 3600; // Default 1 hour if not provided
+			// For providers that don't return expires_in (like GitHub), tokens don't expire
+			// so we don't set expiration/refresh thresholds to avoid premature session cleanup
 			const now = Date.now();
-			const expiresAt = now + expiresIn * 1000;
-			const refreshThreshold = now + expiresIn * 800; // Refresh at 80% of lifetime
+			let expiresAt: number | undefined;
+			let refreshThreshold: number | undefined;
+
+			if (tokenResponse.expires_in) {
+				// Token has expiration - calculate thresholds
+				const expiresIn = tokenResponse.expires_in;
+				expiresAt = now + expiresIn * 1000;
+				refreshThreshold = now + expiresIn * 800; // Refresh at 80% of lifetime
+			}
+			// else: No expires_in means token doesn't expire (e.g., GitHub)
+			// Leave expiresAt and refreshThreshold undefined so middleware doesn't try to refresh
 
 			// Prepare session data
 			const sessionData: any = {
@@ -216,7 +226,9 @@ export async function handleCallback(
 				Object.assign(request.session, sessionData);
 			}
 
-			logger?.info?.(`OAuth login successful for user: ${user.username}, token expires in ${expiresIn}s`);
+			logger?.info?.(
+				`OAuth login successful for user: ${user.username}${tokenResponse.expires_in ? `, token expires in ${tokenResponse.expires_in}s` : ', token does not expire'}`
+			);
 		} else {
 			logger?.warn?.('No session available for OAuth user');
 		}
@@ -351,81 +363,6 @@ export async function handleUserInfo(request: Request, tokenRefreshed = false): 
 			provider: 'harper',
 		},
 	};
-}
-
-/**
- * Refresh OAuth access token (legacy handler - not used, replaced by automatic refresh)
- * Kept for backward compatibility
- */
-export async function handleRefresh(
-	request: Request,
-	provider: IOAuthProvider,
-	_config: OAuthProviderConfig,
-	logger?: Logger
-): Promise<any> {
-	// Get refresh token from session
-	const refreshToken = request?.session?.oauth?.refreshToken;
-
-	if (!refreshToken) {
-		return {
-			status: 401,
-			body: { error: 'No refresh token available' },
-		};
-	}
-
-	try {
-		// Refresh the access token
-		if (!provider.refreshAccessToken) {
-			return {
-				status: 501,
-				body: { error: 'Token refresh not supported by this provider' },
-			};
-		}
-
-		const tokenResponse = await provider.refreshAccessToken(refreshToken);
-
-		// Update session with new tokens
-		if (request.session?.oauth) {
-			const expiresIn = tokenResponse.expires_in || 3600;
-			const now = Date.now();
-
-			const updatedOAuth = {
-				...request.session.oauth,
-				accessToken: tokenResponse.access_token,
-				refreshToken: tokenResponse.refresh_token || refreshToken,
-				expiresAt: now + expiresIn * 1000,
-				refreshThreshold: now + expiresIn * 800,
-				lastRefreshed: now,
-			};
-
-			if (typeof request.session.update === 'function') {
-				await request.session.update({
-					oauth: updatedOAuth,
-				});
-			} else {
-				request.session.oauth = updatedOAuth;
-			}
-
-			logger?.info?.('OAuth token refreshed successfully');
-		}
-
-		return {
-			status: 200,
-			body: {
-				message: 'Token refreshed successfully',
-				expiresIn: tokenResponse.expires_in,
-			},
-		};
-	} catch (error) {
-		logger?.error?.('Token refresh failed:', error);
-		return {
-			status: 401,
-			body: {
-				error: 'Token refresh failed',
-				message: (error as Error).message,
-			},
-		};
-	}
 }
 
 /**

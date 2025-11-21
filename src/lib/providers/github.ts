@@ -20,6 +20,29 @@ export const GitHubProvider: OAuthProviderConfig = {
 	usernameClaim: 'login',
 	emailClaim: 'email',
 	nameClaim: 'name',
+	// Validate token every 15 minutes (GitHub tokens don't expire but can be revoked)
+	tokenValidationInterval: 15 * 60 * 1000, // 15 minutes
+
+	// GitHub-specific: validate token by making lightweight API call
+	async validateToken(accessToken: string, logger?: any): Promise<boolean> {
+		try {
+			const response = await fetch('https://api.github.com/user', {
+				method: 'HEAD', // HEAD request - no body, just status
+				headers: {
+					Authorization: `Bearer ${accessToken}`,
+					Accept: 'application/json',
+				},
+			});
+			const isValid = response.ok;
+			if (!isValid) {
+				logger?.debug?.(`GitHub token validation failed: ${response.status} ${response.statusText}`);
+			}
+			return isValid;
+		} catch (error) {
+			logger?.warn?.('GitHub token validation error:', (error as Error).message);
+			return false; // Assume invalid on error
+		}
+	},
 
 	// GitHub-specific: need to fetch email separately if not public
 	async getUserInfo(accessToken: string, helpers: GetUserInfoHelpers): Promise<any> {

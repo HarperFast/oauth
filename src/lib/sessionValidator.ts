@@ -66,6 +66,46 @@ export async function validateAndRefreshSession(
 	const isExpired = oauthMetadata.expiresAt ? now >= oauthMetadata.expiresAt : false;
 	const needsRefresh = oauthMetadata.refreshThreshold ? now >= oauthMetadata.refreshThreshold : false;
 
+	// For tokens without expiration (like GitHub), perform periodic validation
+	if (!oauthMetadata.expiresAt && !oauthMetadata.refreshThreshold && provider.config.validateToken) {
+		const validationInterval = provider.config.tokenValidationInterval || 15 * 60 * 1000; // Default 15 minutes
+		const lastCheck = oauthMetadata.lastValidated || oauthMetadata.lastRefreshed || 0;
+		const timeSinceLastCheck = now - lastCheck;
+
+		if (timeSinceLastCheck > validationInterval) {
+			logger?.debug?.('Performing periodic token validation for non-expiring token');
+
+			try {
+				const isValid = await provider.config.validateToken(oauthMetadata.accessToken, logger);
+
+				if (!isValid) {
+					logger?.debug?.('OAuth token validation failed (token revoked or invalid), logging out');
+					await clearOAuthSession(session, logger);
+					return { valid: false, error: 'Token validation failed - token may have been revoked' };
+				}
+
+				// Update last validated timestamp
+				oauthMetadata.lastValidated = now;
+				if (typeof session.update === 'function') {
+					// Harper session.update() replaces the entire session, so pass all fields
+					await session.update({
+						user: session.user,
+						oauthUser: session.oauthUser,
+						oauth: oauthMetadata,
+					});
+				}
+
+				logger?.debug?.('Token validation successful');
+			} catch (error) {
+				logger?.error?.('Token validation error:', (error as Error).message);
+				// Don't logout on validation errors - could be network issue
+				// Token will be validated again on next request
+			}
+		}
+
+		return { valid: true, refreshed: false };
+	}
+
 	// Token is still valid and doesn't need refresh
 	if (!isExpired && !needsRefresh) {
 		return { valid: true, refreshed: false };
@@ -123,7 +163,12 @@ export async function validateAndRefreshSession(
 		// Update session
 		session.oauth = updatedMetadata;
 		if (typeof session.update === 'function') {
-			await session.update({ oauth: updatedMetadata });
+			// Harper session.update() replaces the entire session, so pass all fields
+			await session.update({
+				user: session.user,
+				oauthUser: session.oauthUser,
+				oauth: updatedMetadata,
+			});
 		}
 
 		logger?.info?.('OAuth token refreshed successfully');
