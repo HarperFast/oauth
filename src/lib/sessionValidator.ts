@@ -84,15 +84,12 @@ export async function validateAndRefreshSession(
 					return { valid: false, error: 'Token validation failed - token may have been revoked' };
 				}
 
-				// Update last validated timestamp
+				// Update last validated timestamp in session
 				oauthMetadata.lastValidated = now;
+				session.oauth = oauthMetadata;
+
 				if (typeof session.update === 'function') {
-					// Harper session.update() replaces the entire session, so pass all fields
-					await session.update({
-						user: session.user,
-						oauthUser: session.oauthUser,
-						oauth: oauthMetadata,
-					});
+					await session.update(session);
 				}
 
 				logger?.debug?.('Token validation successful');
@@ -140,6 +137,9 @@ export async function validateAndRefreshSession(
 			return { valid: true, refreshed: false };
 		}
 
+		// Attempt to refresh the token
+		logger?.debug?.('Attempting token refresh with refresh token');
+
 		// Perform token refresh
 		const tokenResponse = await provider.refreshAccessToken(oauthMetadata.refreshToken);
 
@@ -150,7 +150,7 @@ export async function validateAndRefreshSession(
 
 		// Update session with new tokens and metadata
 		const updatedMetadata: OAuthSessionMetadata = {
-			...oauthMetadata,
+			provider: oauthMetadata.provider,
 			accessToken: tokenResponse.access_token,
 			refreshToken: tokenResponse.refresh_token || oauthMetadata.refreshToken, // Keep existing if not provided
 			expiresAt: newExpiresAt,
@@ -158,17 +158,13 @@ export async function validateAndRefreshSession(
 			scope: tokenResponse.scope || oauthMetadata.scope,
 			tokenType: tokenResponse.token_type || oauthMetadata.tokenType,
 			lastRefreshed: now,
+			lastValidated: oauthMetadata.lastValidated, // Preserve if exists
 		};
 
-		// Update session
+		// Update session with refreshed token
 		session.oauth = updatedMetadata;
 		if (typeof session.update === 'function') {
-			// Harper session.update() replaces the entire session, so pass all fields
-			await session.update({
-				user: session.user,
-				oauthUser: session.oauthUser,
-				oauth: updatedMetadata,
-			});
+			await session.update(session);
 		}
 
 		logger?.info?.('OAuth token refreshed successfully');

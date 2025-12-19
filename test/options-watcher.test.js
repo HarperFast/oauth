@@ -175,4 +175,91 @@ describe('OAuth Plugin Options Watcher', () => {
 		assert.ok(lastResourceSet, 'Resource should be updated after adding provider');
 		assert.equal(lastResourceSet.name, 'oauth', 'OAuth resource should be updated');
 	});
+
+	it('should handle config update errors gracefully', async () => {
+		let errorLogged = false;
+		scope.logger.error = (msg) => {
+			if (msg.includes('Failed to update OAuth configuration') || msg.includes('Unexpected error')) {
+				errorLogged = true;
+			}
+		};
+
+		await handleApplication(scope);
+
+		// Override getAll to throw an error
+		scope.options.getAll = () => {
+			throw new Error('Config error');
+		};
+
+		// Trigger change event
+		configChangeListeners[0]();
+
+		// Give async error handling time to complete
+		await new Promise((resolve) => setTimeout(resolve, 10));
+
+		// Should log error
+		assert.ok(errorLogged, 'Should log config update errors');
+	});
+
+	it('should register HTTP middleware for session validation', async () => {
+		let middlewareRegistered = false;
+		scope.server.http = (middleware) => {
+			middlewareRegistered = true;
+			return middleware;
+		};
+
+		await handleApplication(scope);
+
+		assert.ok(middlewareRegistered, 'Should register HTTP middleware');
+	});
+
+	it('should call close handler on scope close', async () => {
+		let closeHandlerCalled = false;
+		scope.logger.info = (msg) => {
+			if (msg.includes('shutting down')) {
+				closeHandlerCalled = true;
+			}
+		};
+
+		await handleApplication(scope);
+
+		// Trigger close event
+		closeListeners[0]();
+
+		assert.ok(closeHandlerCalled, 'Should call close handler');
+	});
+
+	it('should handle missing providers configuration', async () => {
+		scope.options._config = {
+			debug: false,
+			// No providers key at all
+		};
+
+		await handleApplication(scope);
+
+		// Should set error resource when providers missing
+		assert.ok(resources.oauth, 'OAuth resource should exist');
+		const response = await resources.oauth.get();
+		assert.equal(response.status, 503, 'Should return 503 when providers missing');
+	});
+
+	it('should handle invalid provider configuration', async () => {
+		scope.options._config = {
+			debug: false,
+			providers: {
+				invalid: {
+					// Missing required fields
+					provider: 'github',
+					// No clientId or clientSecret
+				},
+			},
+		};
+
+		await handleApplication(scope);
+
+		// Should set error resource when all providers are invalid
+		assert.ok(resources.oauth, 'OAuth resource should exist');
+		const response = await resources.oauth.get();
+		assert.equal(response.status, 503, 'Should return 503 when all providers invalid');
+	});
 });

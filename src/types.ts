@@ -160,6 +160,12 @@ export interface TokenResponse {
 	id_token?: string;
 	/** Space-separated granted scopes */
 	scope?: string;
+	/** Error code if token request failed (some providers return 200 with error) */
+	error?: string;
+	/** Human-readable error description */
+	error_description?: string;
+	/** URL to documentation about the error */
+	error_uri?: string;
 }
 
 /**
