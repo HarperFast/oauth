@@ -4,172 +4,314 @@
  * Harper resource class for handling OAuth REST endpoints
  */
 
-import type { Request, RequestTarget, Logger, ProviderRegistry } from '../types.ts';
+import { Resource } from 'harperdb';
+import type { RequestTarget } from 'harperdb';
+import type { Request, Logger, ProviderRegistry } from '../types.ts';
 import { handleLogin, handleCallback, handleLogout, handleUserInfo, handleTestPage } from './handlers.ts';
 import type { HookManager } from './hookManager.ts';
 
 /**
- * Create an OAuth resource with the given configuration
- * Returns a resource object that Harper can use directly
+ * Parsed route information from a request target
  */
-export function createOAuthResource(
-	providers: ProviderRegistry,
-	debugMode: boolean,
-	hookManager: HookManager,
-	logger?: Logger
-): any {
-	const notFound = {
-		status: 404,
-		body: { error: 'Not found' },
-	};
+export interface ParsedRoute {
+	providerName: string;
+	action: string;
+	path: string;
+}
 
-	const resource = {
-		// Expose hookManager for programmatic hook registration
-		hookManager,
-		// Expose providers for use with withOAuthValidation
-		providers,
-		/**
-		 * Handle GET requests
-		 */
-		async get(target: RequestTarget | string, request: Request): Promise<any> {
-			// Target can be an object with id, pathname, or a string
-			const id = typeof target === 'string' ? target : target?.id || target?.pathname || '';
-			const pathParts = (id || '').split('/').filter((p) => p);
-			const providerName = pathParts[0];
-			const action = pathParts[1];
+/**
+ * OAuth Resource - proper Harper Resource class for handling OAuth endpoints
+ * Follows Resource API v2 pattern (loadAsInstance = false)
+ */
+export class OAuthResource extends Resource {
+	static loadAsInstance = false; // Use Resource API v2
 
-			// Special case: /oauth/test without provider (debug mode only)
-			if (providerName === 'test' && !action) {
-				if (!debugMode) return notFound;
-				return handleTestPage(logger);
-			}
+	// Store configuration as static properties (shared across all requests)
+	static providers: ProviderRegistry = {};
+	static debugMode: boolean = false;
+	static hookManager: HookManager | null = null;
+	static logger: Logger | undefined = undefined;
 
-			// If no provider specified
-			if (!providerName) {
-				if (!debugMode) return notFound;
+	/**
+	 * Configure the OAuth resource with providers and settings
+	 * Called once during plugin initialization
+	 */
+	static configure(providers: ProviderRegistry, debugMode: boolean, hookManager: HookManager, logger?: Logger): void {
+		OAuthResource.providers = providers;
+		OAuthResource.debugMode = debugMode;
+		OAuthResource.hookManager = hookManager;
+		OAuthResource.logger = logger;
+	}
 
-				// Debug mode: show full provider info
-				return {
-					message: 'OAuth providers',
-					logout: 'POST /oauth/logout',
-					providers: Object.keys(providers).map((name) => ({
-						name,
-						provider: providers[name].config.provider,
-						endpoints: {
-							login: `/oauth/${name}/login`,
-							callback: `/oauth/${name}/callback`,
-							user: `/oauth/${name}/user`,
-							refresh: `/oauth/${name}/refresh`,
-							test: `/oauth/${name}/test`,
-						},
-					})),
-				};
-			}
+	/**
+	 * Parse a request target into provider and action components
+	 * Exported as static method for testability
+	 */
+	static parseRoute(target: RequestTarget): ParsedRoute {
+		const id = target.id || target.pathname || '';
+		const path = typeof id === 'string' ? id : String(id);
 
-			// Check if provider exists
-			const providerData = providers[providerName];
-			if (!providerData) {
-				return {
-					status: 404,
-					body: {
-						error: 'Provider not found',
-						available: Object.keys(providers),
-					},
-				};
-			}
+		// Validate path length to prevent DoS attacks with extremely long URLs
+		if (path.length > 2048) {
+			// Return empty route for oversized paths (will result in 404)
+			return {
+				providerName: '',
+				action: '',
+				path: '',
+			};
+		}
 
-			const { provider, config } = providerData;
+		const pathParts = path.split('/').filter((p) => p);
 
-			switch (action) {
-				case 'login':
-					// Pass the target object for query params (e.g., ?redirect=/dashboard)
-					return handleLogin(request, target as RequestTarget, provider, config, logger);
-				case 'callback':
-					// Pass the target object directly - it should have a get() method for query params
-					return handleCallback(request, target as RequestTarget, provider, config, hookManager, logger);
-				case 'user': {
-					// Debug mode only
-					if (!debugMode) return notFound;
+		return {
+			providerName: pathParts[0] || '',
+			action: pathParts[1] || '',
+			path,
+		};
+	}
 
-					// Session validation/refresh already handled by middleware
-					// Just return user info from the session
-					return handleUserInfo(request, false);
-				}
-				case 'refresh': {
-					// Debug mode only
-					if (!debugMode) return notFound;
+	/**
+	 * Check if a route should return 404 in production mode
+	 * Debug-only endpoints return 404 when debug mode is off
+	 */
+	static isDebugOnlyRoute(route: ParsedRoute): boolean {
+		const { providerName, action } = route;
 
-					// Session validation/refresh already handled by middleware
-					// This endpoint is just for checking refresh status
-					const oauthData = request.session?.oauth;
-					if (!oauthData || !oauthData.accessToken) {
-						return {
-							status: 401,
-							body: {
-								error: 'No OAuth session',
-								message: 'OAuth session is no longer valid. Please log in again.',
-							},
-						};
-					}
+		// Root path (provider list) - debug only
+		if (!providerName) return true;
 
-					// Return current token status
-					return {
-						status: 200,
-						body: {
-							message: 'Token is valid',
-							provider: oauthData.provider,
-							expiresAt: oauthData.expiresAt,
-							lastRefreshed: oauthData.lastRefreshed,
-						},
-					};
-				}
-				case 'test': {
-					// Debug mode only
-					if (!debugMode) return notFound;
-					return handleTestPage(logger);
-				}
-				default: {
-					// Debug mode only
-					if (!debugMode) return notFound;
-					// Show provider configuration info
-					return {
-						message: `OAuth provider: ${providerName}`,
-						provider: config.provider,
-						configured: true,
-						logout: 'POST /oauth/logout',
-						endpoints: {
-							login: `/oauth/${providerName}/login`,
-							callback: `/oauth/${providerName}/callback`,
-							user: `/oauth/${providerName}/user`,
-							refresh: `/oauth/${providerName}/refresh`,
-							test: `/oauth/${providerName}/test`,
-						},
-					};
-				}
-			}
-		},
+		// Test endpoints - debug only
+		if (providerName === 'test' && !action) return true;
+		if (action === 'test') return true;
 
-		/**
-		 * Handle POST requests
-		 */
-		async post(target: RequestTarget | string, _body: any, request: Request): Promise<any> {
-			// Target can be an object with id, pathname, or a string
-			const id = typeof target === 'string' ? target : target?.id || target?.pathname || '';
-			const pathParts = (id || '').split('/').filter((p) => p);
-			const providerName = pathParts[0];
+		// Debug info endpoints
+		if (action === 'user' || action === 'refresh') return true;
 
-			// Handle generic logout endpoint (no provider required)
-			if (providerName === 'logout') {
-				return handleLogout(request, hookManager, logger);
-			}
+		// Provider info (no action) - debug only
+		if (providerName && !action) return true;
 
-			// For other POST endpoints, provider is required
+		return false;
+	}
+
+	/**
+	 * Build the standard 404 response
+	 */
+	static notFoundResponse() {
+		return {
+			status: 404,
+			body: { error: 'Not found' },
+		};
+	}
+
+	/**
+	 * Build provider list response for root path
+	 */
+	static buildProviderListResponse(providers: ProviderRegistry): any {
+		return {
+			message: 'OAuth providers',
+			logout: 'POST /oauth/logout',
+			providers: Object.keys(providers).map((name) => ({
+				name,
+				provider: providers[name].config.provider,
+				endpoints: {
+					login: `/oauth/${name}/login`,
+					callback: `/oauth/${name}/callback`,
+					user: `/oauth/${name}/user`,
+					refresh: `/oauth/${name}/refresh`,
+					test: `/oauth/${name}/test`,
+				},
+			})),
+		};
+	}
+
+	/**
+	 * Build provider info response
+	 */
+	static buildProviderInfoResponse(providerName: string, providers: ProviderRegistry): any {
+		const providerData = providers[providerName];
+		if (!providerData) {
 			return {
 				status: 404,
-				body: { error: 'Not found' },
+				body: {
+					error: 'Provider not found',
+					available: Object.keys(providers),
+				},
 			};
-		},
-	};
+		}
 
-	return resource;
+		return {
+			message: `OAuth provider: ${providerName}`,
+			provider: providerData.config.provider,
+			configured: true,
+			logout: 'POST /oauth/logout',
+			endpoints: {
+				login: `/oauth/${providerName}/login`,
+				callback: `/oauth/${providerName}/callback`,
+				user: `/oauth/${providerName}/user`,
+				refresh: `/oauth/${providerName}/refresh`,
+				test: `/oauth/${providerName}/test`,
+			},
+		};
+	}
+
+	/**
+	 * Build token status response for /refresh endpoint
+	 */
+	static buildTokenStatusResponse(request: Request): any {
+		const oauthData = request.session?.oauth;
+		if (!oauthData || !oauthData.accessToken) {
+			return {
+				status: 401,
+				body: {
+					error: 'No OAuth session',
+					message: 'OAuth session is no longer valid. Please log in again.',
+				},
+			};
+		}
+
+		return {
+			status: 200,
+			body: {
+				message: 'Token is valid',
+				provider: oauthData.provider,
+				expiresAt: oauthData.expiresAt,
+				lastRefreshed: oauthData.lastRefreshed,
+			},
+		};
+	}
+
+	/**
+	 * Handle GET requests to OAuth endpoints
+	 * Resource API v2 signature: get(target)
+	 */
+	async get(target: RequestTarget): Promise<any> {
+		const providers = OAuthResource.providers;
+		const debugMode = OAuthResource.debugMode;
+		const logger = OAuthResource.logger;
+
+		// Parse the route
+		const route = OAuthResource.parseRoute(target);
+		const { providerName, action } = route;
+
+		// Get request from context (HarperDB provides the HTTP request here)
+		const context = this.getContext();
+		if (!context) {
+			logger?.error?.('Request context is null or undefined');
+			return {
+				status: 500,
+				body: { error: 'Internal server error' },
+			};
+		}
+		const request = context as unknown as Request;
+
+		// Check debug mode restrictions
+		if (!debugMode && OAuthResource.isDebugOnlyRoute(route)) {
+			return OAuthResource.notFoundResponse();
+		}
+
+		// Special case: /oauth/test without provider
+		if (providerName === 'test' && !action) {
+			return handleTestPage(logger);
+		}
+
+		// Root path - show provider list
+		if (!providerName) {
+			return OAuthResource.buildProviderListResponse(providers);
+		}
+
+		// Check if provider exists
+		const providerData = providers[providerName];
+		if (!providerData) {
+			return {
+				status: 404,
+				body: {
+					error: 'Provider not found',
+					available: Object.keys(providers),
+				},
+			};
+		}
+
+		const { provider, config } = providerData;
+		const hookManager = OAuthResource.hookManager!;
+
+		// Handle specific actions
+		switch (action) {
+			case 'login':
+				return handleLogin(request, target, provider, config, logger);
+
+			case 'callback':
+				return handleCallback(request, target, provider, config, hookManager, logger);
+
+			case 'user':
+				return handleUserInfo(request, false);
+
+			case 'refresh':
+				return OAuthResource.buildTokenStatusResponse(request);
+
+			case 'test':
+				return handleTestPage(logger);
+
+			default:
+				// Provider info (no action specified)
+				return OAuthResource.buildProviderInfoResponse(providerName, providers);
+		}
+	}
+
+	/**
+	 * Handle POST requests to OAuth endpoints
+	 * Resource API v2 signature: post(target, data)
+	 */
+	async post(target: RequestTarget, _data: any): Promise<any> {
+		const logger = OAuthResource.logger;
+		const hookManager = OAuthResource.hookManager!;
+
+		// Parse the route
+		const route = OAuthResource.parseRoute(target);
+		const { providerName } = route;
+
+		// Get request from context (HarperDB provides the HTTP request here)
+		const context = this.getContext();
+		if (!context) {
+			logger?.error?.('Request context is null or undefined');
+			return {
+				status: 500,
+				body: { error: 'Internal server error' },
+			};
+		}
+		const request = context as unknown as Request;
+
+		// Handle logout endpoint
+		if (providerName === 'logout') {
+			return handleLogout(request, hookManager, logger);
+		}
+
+		// All other POST endpoints are not supported
+		return OAuthResource.notFoundResponse();
+	}
+
+	/**
+	 * Expose hookManager for programmatic hook registration
+	 * This allows access via: scope.resources.get('oauth').hookManager
+	 */
+	static getHookManager(): HookManager | null {
+		return OAuthResource.hookManager;
+	}
+
+	/**
+	 * Expose providers for use with withOAuthValidation
+	 * This allows access via: scope.resources.get('oauth').providers
+	 */
+	static getProviders(): ProviderRegistry {
+		return OAuthResource.providers;
+	}
+
+	/**
+	 * Reset configuration (useful for testing)
+	 */
+	static reset(): void {
+		OAuthResource.providers = {};
+		OAuthResource.debugMode = false;
+		OAuthResource.hookManager = null;
+		OAuthResource.logger = undefined;
+	}
 }

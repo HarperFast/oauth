@@ -52,7 +52,13 @@ describe('OAuth Plugin Options Watcher', () => {
 			},
 			resources: {
 				set(name, resource) {
-					resources[name] = resource;
+					// If resource is a class with loadAsInstance = false (Resource API v2),
+					// instantiate it to match Harper's behavior
+					if (typeof resource === 'function' && resource.loadAsInstance === false) {
+						resources[name] = new resource();
+					} else {
+						resources[name] = resource;
+					}
 					lastResourceSet = { name, resource };
 				},
 			},
