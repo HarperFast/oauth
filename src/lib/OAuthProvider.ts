@@ -367,17 +367,36 @@ export class OAuthProvider implements IOAuthProvider {
 
 		if (!response.ok) {
 			const error = await response.text();
+			this.logger?.error?.('Token refresh HTTP error:', {
+				status: response.status,
+				statusText: response.statusText,
+				body: error,
+			});
 			throw new Error(`Token refresh failed: ${error}`);
 		}
 
 		const contentType = response.headers.get('content-type');
+		let tokenData: TokenResponse;
+
 		if (contentType?.includes('application/json')) {
-			return response.json() as Promise<TokenResponse>;
+			tokenData = await response.json();
 		} else {
 			// Some providers return form-encoded data
 			const text = await response.text();
 			const tokenParams = new URLSearchParams(text);
-			return Object.fromEntries(tokenParams) as unknown as TokenResponse;
+			tokenData = Object.fromEntries(tokenParams) as unknown as TokenResponse;
 		}
+
+		// Check if response contains an error (some providers return 200 with error object)
+		if (tokenData.error) {
+			this.logger?.error?.('Token refresh returned error in response:', {
+				error: tokenData.error,
+				error_description: tokenData.error_description,
+				error_uri: tokenData.error_uri,
+			});
+			throw new Error(`Token refresh failed: ${tokenData.error_description || tokenData.error}`);
+		}
+
+		return tokenData;
 	}
 }

@@ -6,7 +6,6 @@
 
 import type { Request, RequestTarget, Logger, ProviderRegistry } from '../types.ts';
 import { handleLogin, handleCallback, handleLogout, handleUserInfo, handleTestPage } from './handlers.ts';
-import { validateAndRefreshSession } from './sessionValidator.ts';
 import type { HookManager } from './hookManager.ts';
 
 /**
@@ -92,44 +91,35 @@ export function createOAuthResource(
 					// Debug mode only
 					if (!debugMode) return notFound;
 
-					// Validate and refresh session if needed before returning user info
-					const validation = await validateAndRefreshSession(request, provider, logger, hookManager);
-					if (!validation.valid) {
-						return {
-							status: 401,
-							body: {
-								authenticated: false,
-								error: validation.error || 'Session expired',
-								message: 'OAuth session is no longer valid. Please log in again.',
-							},
-						};
-					}
-
-					return handleUserInfo(request, validation.refreshed);
+					// Session validation/refresh already handled by middleware
+					// Just return user info from the session
+					return handleUserInfo(request, false);
 				}
 				case 'refresh': {
 					// Debug mode only
 					if (!debugMode) return notFound;
 
-					// Validate session before attempting refresh
-					const validation = await validateAndRefreshSession(request, provider, logger, hookManager);
-					if (!validation.valid) {
+					// Session validation/refresh already handled by middleware
+					// This endpoint is just for checking refresh status
+					const oauthData = request.session?.oauth;
+					if (!oauthData || !oauthData.accessToken) {
 						return {
 							status: 401,
 							body: {
-								error: validation.error || 'Session expired',
+								error: 'No OAuth session',
 								message: 'OAuth session is no longer valid. Please log in again.',
 							},
 						};
 					}
 
-					// Return refresh status
+					// Return current token status
 					return {
 						status: 200,
 						body: {
-							message: validation.refreshed ? 'Token refreshed successfully' : 'Token is still valid',
-							refreshed: validation.refreshed,
-							expiresAt: request.session?.oauth?.expiresAt,
+							message: 'Token is valid',
+							provider: oauthData.provider,
+							expiresAt: oauthData.expiresAt,
+							lastRefreshed: oauthData.lastRefreshed,
 						},
 					};
 				}

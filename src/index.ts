@@ -99,7 +99,10 @@ export async function handleApplication(scope: Scope): Promise<void> {
 		}
 
 		// Re-initialize providers from new configuration
-		providers = initializeProviders(options, logger);
+		// Clear existing providers and repopulate (don't reassign to preserve closure reference)
+		const newProviders = initializeProviders(options, logger);
+		Object.keys(providers).forEach((key) => delete providers[key]);
+		Object.assign(providers, newProviders);
 
 		// Update the resource with new providers
 		if (Object.keys(providers).length === 0) {

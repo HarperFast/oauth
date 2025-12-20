@@ -137,6 +137,32 @@ describe('GitHub Provider', () => {
 		}
 	});
 
+	it('should log debug message for invalid tokens', async () => {
+		const github = getProvider('github');
+
+		let debugCalled = false;
+		const mockLogger = {
+			debug: (msg) => {
+				if (msg.includes('token validation failed') && msg.includes('401')) {
+					debugCalled = true;
+				}
+			},
+		};
+
+		const originalFetch = global.fetch;
+		global.fetch = async () => {
+			return { ok: false, status: 401, statusText: 'Unauthorized' };
+		};
+
+		try {
+			const isValid = await github.validateToken('invalid-token', mockLogger);
+			assert.equal(isValid, false);
+			assert.ok(debugCalled, 'Should call debug logger for invalid tokens');
+		} finally {
+			global.fetch = originalFetch;
+		}
+	});
+
 	it('should handle validation errors gracefully', async () => {
 		const github = getProvider('github');
 
@@ -148,6 +174,112 @@ describe('GitHub Provider', () => {
 		try {
 			const isValid = await github.validateToken('test-token');
 			assert.equal(isValid, false); // Should return false on error
+		} finally {
+			global.fetch = originalFetch;
+		}
+	});
+
+	it('should log warning on validation network errors', async () => {
+		const github = getProvider('github');
+
+		let warnCalled = false;
+		const mockLogger = {
+			warn: (msg, error) => {
+				if (msg.includes('GitHub token validation error') && error.includes('Network error')) {
+					warnCalled = true;
+				}
+			},
+		};
+
+		const originalFetch = global.fetch;
+		global.fetch = async () => {
+			throw new Error('Network error');
+		};
+
+		try {
+			const isValid = await github.validateToken('test-token', mockLogger);
+			assert.equal(isValid, false);
+			assert.ok(warnCalled, 'Should call warn logger on network errors');
+		} finally {
+			global.fetch = originalFetch;
+		}
+	});
+
+	it('should handle when no primary email exists', async () => {
+		const github = getProvider('github');
+
+		const mockHelpers = {
+			getUserInfo: async () => ({
+				login: 'testuser',
+				name: 'Test User',
+				email: null,
+			}),
+			logger: {
+				info: () => {},
+				debug: () => {},
+				warn: () => {},
+			},
+		};
+
+		// Mock fetch to return emails without primary
+		const originalFetch = global.fetch;
+		global.fetch = async (url) => {
+			if (url === 'https://api.github.com/user/emails') {
+				return {
+					ok: true,
+					json: async () => [
+						{ email: 'secondary1@example.com', primary: false, verified: true },
+						{ email: 'secondary2@example.com', primary: false, verified: false },
+					],
+				};
+			}
+			throw new Error('Unexpected URL: ' + url);
+		};
+
+		try {
+			const userInfo = await github.getUserInfo.call({ config: github }, 'test-token', mockHelpers);
+			// Should return user info without email when no primary email found
+			assert.equal(userInfo.login, 'testuser');
+			assert.equal(userInfo.email, null);
+		} finally {
+			global.fetch = originalFetch;
+		}
+	});
+
+	it('should handle when email API returns non-OK status', async () => {
+		const github = getProvider('github');
+
+		const mockHelpers = {
+			getUserInfo: async () => ({
+				login: 'testuser',
+				name: 'Test User',
+				email: null,
+			}),
+			logger: {
+				info: () => {},
+				debug: () => {},
+				warn: () => {},
+			},
+		};
+
+		// Mock fetch to return 403 (permissions issue)
+		const originalFetch = global.fetch;
+		global.fetch = async (url) => {
+			if (url === 'https://api.github.com/user/emails') {
+				return {
+					ok: false,
+					status: 403,
+					statusText: 'Forbidden',
+				};
+			}
+			throw new Error('Unexpected URL: ' + url);
+		};
+
+		try {
+			const userInfo = await github.getUserInfo.call({ config: github }, 'test-token', mockHelpers);
+			// Should return user info without email when API fails
+			assert.equal(userInfo.login, 'testuser');
+			assert.equal(userInfo.email, null);
 		} finally {
 			global.fetch = originalFetch;
 		}

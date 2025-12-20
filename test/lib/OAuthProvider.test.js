@@ -412,4 +412,377 @@ describe('OAuthProvider', () => {
 			assert.equal(userInfo.custom, true);
 		});
 	});
+
+	describe('Token Refresh', () => {
+		beforeEach(() => {
+			provider = new OAuthProvider(mockConfig, mockLogger);
+		});
+
+		it('should refresh access token with correct parameters', async () => {
+			const originalFetch = global.fetch;
+			let capturedRequest;
+
+			global.fetch = async (url, options) => {
+				capturedRequest = { url, options };
+				return {
+					ok: true,
+					headers: {
+						get: (name) => (name === 'content-type' ? 'application/json' : null),
+					},
+					json: async () => ({
+						access_token: 'new-access-token',
+						token_type: 'Bearer',
+						expires_in: 3600,
+						refresh_token: 'new-refresh-token',
+						scope: 'openid profile email',
+					}),
+				};
+			};
+
+			try {
+				const result = await provider.refreshAccessToken('old-refresh-token');
+
+				assert.equal(capturedRequest.url, mockConfig.tokenUrl);
+				assert.equal(capturedRequest.options.method, 'POST');
+				assert.ok(capturedRequest.options.body.includes('grant_type=refresh_token'));
+				assert.ok(capturedRequest.options.body.includes('refresh_token=old-refresh-token'));
+				assert.ok(capturedRequest.options.body.includes('client_id=test-client-id'));
+				assert.ok(capturedRequest.options.body.includes('client_secret=test-client-secret'));
+
+				assert.equal(result.access_token, 'new-access-token');
+				assert.equal(result.refresh_token, 'new-refresh-token');
+				assert.equal(result.expires_in, 3600);
+			} finally {
+				global.fetch = originalFetch;
+			}
+		});
+
+		it('should handle form-encoded refresh token response', async () => {
+			const originalFetch = global.fetch;
+
+			global.fetch = async () => ({
+				ok: true,
+				headers: {
+					get: () => 'application/x-www-form-urlencoded',
+				},
+				text: async () => 'access_token=refreshed-token&token_type=bearer&expires_in=7200',
+			});
+
+			try {
+				const result = await provider.refreshAccessToken('refresh-token');
+				assert.equal(result.access_token, 'refreshed-token');
+				assert.equal(result.token_type, 'bearer');
+				assert.equal(result.expires_in, '7200');
+			} finally {
+				global.fetch = originalFetch;
+			}
+		});
+
+		it('should throw on HTTP error during token refresh', async () => {
+			const originalFetch = global.fetch;
+
+			global.fetch = async () => ({
+				ok: false,
+				status: 400,
+				statusText: 'Bad Request',
+				text: async () => 'invalid_grant: The refresh token is invalid',
+			});
+
+			try {
+				await assert.rejects(async () => await provider.refreshAccessToken('bad-token'), {
+					message: /Token refresh failed.*invalid_grant/i,
+				});
+			} finally {
+				global.fetch = originalFetch;
+			}
+		});
+
+		it('should handle HTTP 200 with error object (GitHub-style)', async () => {
+			const originalFetch = global.fetch;
+
+			global.fetch = async () => ({
+				ok: true,
+				headers: {
+					get: () => 'application/json',
+				},
+				json: async () => ({
+					error: 'bad_refresh_token',
+					error_description: 'The refresh token passed is incorrect or expired.',
+					error_uri: 'https://docs.github.com/apps',
+				}),
+			});
+
+			try {
+				await assert.rejects(async () => await provider.refreshAccessToken('expired-token'), {
+					message: /Token refresh failed.*incorrect or expired/i,
+				});
+			} finally {
+				global.fetch = originalFetch;
+			}
+		});
+
+		it('should handle HTTP 200 with error object without description', async () => {
+			const originalFetch = global.fetch;
+
+			global.fetch = async () => ({
+				ok: true,
+				headers: {
+					get: () => 'application/json',
+				},
+				json: async () => ({
+					error: 'invalid_token',
+				}),
+			});
+
+			try {
+				await assert.rejects(async () => await provider.refreshAccessToken('token'), {
+					message: /Token refresh failed.*invalid_token/i,
+				});
+			} finally {
+				global.fetch = originalFetch;
+			}
+		});
+
+		it('should include scope in refresh request when configured', async () => {
+			const configWithScope = {
+				...mockConfig,
+				scope: 'read write admin',
+			};
+			provider = new OAuthProvider(configWithScope, mockLogger);
+
+			const originalFetch = global.fetch;
+			let capturedRequest;
+
+			global.fetch = async (url, options) => {
+				capturedRequest = { url, options };
+				return {
+					ok: true,
+					headers: {
+						get: () => 'application/json',
+					},
+					json: async () => ({
+						access_token: 'new-token',
+						token_type: 'Bearer',
+						expires_in: 3600,
+					}),
+				};
+			};
+
+			try {
+				await provider.refreshAccessToken('refresh-token');
+				assert.ok(capturedRequest.options.body.includes('scope=read+write+admin'));
+			} finally {
+				global.fetch = originalFetch;
+			}
+		});
+
+		it('should throw when refresh token is missing', async () => {
+			await assert.rejects(async () => await provider.refreshAccessToken(''), {
+				message: /Refresh token is required/i,
+			});
+		});
+	});
+
+	describe('getUserInfo with ID Token Claims', () => {
+		beforeEach(() => {
+			provider = new OAuthProvider(mockConfig, mockLogger);
+		});
+
+		it('should prefer ID token claims when available', async () => {
+			const idTokenClaims = {
+				sub: 'id-token-sub',
+				email: 'idtoken@example.com',
+				name: 'ID Token User',
+			};
+
+			const userInfo = await provider.getUserInfo('access-token', idTokenClaims);
+			assert.equal(userInfo.email, 'idtoken@example.com');
+			assert.equal(userInfo.name, 'ID Token User');
+		});
+
+		it('should fetch email separately when missing from ID token', async () => {
+			const originalFetch = global.fetch;
+
+			global.fetch = async (url) => {
+				assert.equal(url, mockConfig.userInfoUrl);
+				return {
+					ok: true,
+					json: async () => ({
+						email: 'fetched@example.com',
+					}),
+				};
+			};
+
+			const configWithFetchEmail = {
+				...mockConfig,
+				fetchEmail: true,
+			};
+			provider = new OAuthProvider(configWithFetchEmail, mockLogger);
+
+			try {
+				const idTokenClaimsNoEmail = {
+					sub: '123',
+					name: 'User Without Email',
+				};
+
+				const userInfo = await provider.getUserInfo('access-token', idTokenClaimsNoEmail);
+				assert.equal(userInfo.email, 'fetched@example.com');
+				assert.equal(userInfo.name, 'User Without Email');
+			} finally {
+				global.fetch = originalFetch;
+			}
+		});
+
+		it('should handle fetchEmail failure gracefully', async () => {
+			const originalFetch = global.fetch;
+
+			global.fetch = async () => {
+				throw new Error('Network error');
+			};
+
+			const configWithFetchEmail = {
+				...mockConfig,
+				fetchEmail: true,
+			};
+			provider = new OAuthProvider(configWithFetchEmail, mockLogger);
+
+			try {
+				const idTokenClaimsNoEmail = {
+					sub: '123',
+					name: 'User Without Email',
+				};
+
+				const userInfo = await provider.getUserInfo('access-token', idTokenClaimsNoEmail);
+				// Should return ID token claims even though email fetch failed
+				assert.equal(userInfo.name, 'User Without Email');
+				assert.equal(userInfo.email, undefined);
+			} finally {
+				global.fetch = originalFetch;
+			}
+		});
+	});
+
+	describe('fetchUserInfo', () => {
+		beforeEach(() => {
+			provider = new OAuthProvider(mockConfig, mockLogger);
+		});
+
+		it('should throw on HTTP error response', async () => {
+			const originalFetch = global.fetch;
+
+			global.fetch = async () => ({
+				ok: false,
+				statusText: 'Unauthorized',
+			});
+
+			try {
+				await assert.rejects(async () => await provider.fetchUserInfo('invalid-token'), {
+					message: /Failed to fetch user info.*Unauthorized/i,
+				});
+			} finally {
+				global.fetch = originalFetch;
+			}
+		});
+	});
+
+	describe('mapUserToHarper', () => {
+		beforeEach(() => {
+			provider = new OAuthProvider(mockConfig, mockLogger);
+		});
+
+		it('should throw when username claim is missing', () => {
+			const userInfoNoEmail = {
+				sub: '123',
+				name: 'User',
+			};
+
+			assert.throws(
+				() => {
+					provider.mapUserToHarper(userInfoNoEmail);
+				},
+				{
+					message: /Username claim 'email' not found/i,
+				}
+			);
+		});
+
+		it('should handle different provider user ID fields', () => {
+			const userInfoWithId = {
+				email: 'user@example.com',
+				id: 'provider-id-123',
+			};
+
+			const harperUser = provider.mapUserToHarper(userInfoWithId);
+			assert.equal(harperUser.providerUserId, 'provider-id-123');
+		});
+
+		it('should handle user_id field', () => {
+			const userInfoWithUserId = {
+				email: 'user@example.com',
+				user_id: 'user-id-456',
+			};
+
+			const harperUser = provider.mapUserToHarper(userInfoWithUserId);
+			assert.equal(harperUser.providerUserId, 'user-id-456');
+		});
+
+		it('should include metadata with OAuth claims', () => {
+			const userInfo = {
+				email: 'user@example.com',
+				sub: '123',
+				custom_field: 'custom_value',
+			};
+
+			const harperUser = provider.mapUserToHarper(userInfo);
+			assert.ok(harperUser.metadata);
+			assert.equal(harperUser.metadata.oauthProvider, 'test');
+			assert.deepEqual(harperUser.metadata.oauthClaims, userInfo);
+		});
+	});
+
+	describe('ID Token Verification', () => {
+		beforeEach(() => {
+			provider = new OAuthProvider(mockConfig, mockLogger);
+		});
+
+		it('should throw on invalid ID token format', async () => {
+			await assert.rejects(async () => await provider.verifyIdToken('invalid.token'), {
+				message: /Invalid ID token format/i,
+			});
+		});
+
+		it('should warn when JWKS is not configured', async () => {
+			let warnCalled = false;
+			const loggerWithWarn = {
+				...mockLogger,
+				warn: (msg) => {
+					if (msg.includes('verifying claims only')) {
+						warnCalled = true;
+					}
+				},
+			};
+
+			provider = new OAuthProvider(mockConfig, loggerWithWarn);
+
+			// Create a simple JWT token (not signed, just for testing claims verification)
+			const header = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url');
+			const payload = Buffer.from(
+				JSON.stringify({
+					sub: '123',
+					aud: mockConfig.clientId,
+					exp: Math.floor(Date.now() / 1000) + 3600, // Valid for 1 hour
+					iat: Math.floor(Date.now() / 1000),
+				})
+			).toString('base64url');
+			const fakeToken = `${header}.${payload}.fake-signature`;
+
+			try {
+				await provider.verifyIdToken(fakeToken);
+				assert.ok(warnCalled, 'Should warn when JWKS not configured');
+			} catch {
+				// Expected to potentially fail, but should have warned
+				assert.ok(warnCalled, 'Should warn when JWKS not configured');
+			}
+		});
+	});
 });

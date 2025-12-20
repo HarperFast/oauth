@@ -27,7 +27,8 @@ export function getProvider(name: string): OAuthProviderConfig | null {
 		return null;
 	}
 
-	// Return a copy to avoid mutations
+	// Return a shallow copy to avoid direct mutations
+	// Note: Functions (getUserInfo, configure, validateToken) are preserved by reference
 	return { ...provider };
 }
 
