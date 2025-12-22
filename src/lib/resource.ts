@@ -94,6 +94,65 @@ export class OAuthResource extends Resource {
 	}
 
 	/**
+	 * Check if a request is allowed to access debug endpoints
+	 * Uses IP allowlist for security (defaults to localhost only)
+	 *
+	 * @param request - The incoming request
+	 * @param logger - Optional logger for access tracking
+	 * @returns true if access is allowed, false otherwise
+	 */
+	static checkDebugAccess(request: Request, logger?: Logger): boolean {
+		// Get IP allowlist from environment variable or use localhost-only default
+		// Use ?? to allow empty string (which denies all access)
+		const DEBUG_ALLOWED_IPS = process.env.DEBUG_ALLOWED_IPS ?? '127.0.0.1,::1';
+		const allowedIps = DEBUG_ALLOWED_IPS.split(',').map((ip) => ip.trim());
+		const clientIp = request.ip || '';
+
+		// Check if client IP matches any allowed IP
+		let ipAllowed = false;
+		for (const allowed of allowedIps) {
+			// Exact match
+			if (allowed === clientIp) {
+				ipAllowed = true;
+				break;
+			}
+			// Simple prefix match for CIDR-like patterns (e.g., "10.0.0." matches "10.0.0.1")
+			if (allowed.endsWith('.') && clientIp.startsWith(allowed)) {
+				ipAllowed = true;
+				break;
+			}
+		}
+
+		// Log access attempt
+		if (ipAllowed) {
+			logger?.info?.('OAuth debug endpoint accessed', {
+				ip: clientIp,
+			});
+		} else {
+			logger?.warn?.('OAuth debug endpoint access denied - unauthorized IP', {
+				ip: clientIp,
+				allowedIps,
+			});
+		}
+
+		return ipAllowed;
+	}
+
+	/**
+	 * Build forbidden response for unauthorized debug access
+	 */
+	static forbiddenResponse(): any {
+		return {
+			status: 403,
+			body: {
+				error: 'Access forbidden',
+				message: 'Debug endpoints are only accessible from allowed IPs.',
+				hint: 'Set DEBUG_ALLOWED_IPS environment variable to allow access from your IP. Defaults to localhost only (127.0.0.1,::1).',
+			},
+		};
+	}
+
+	/**
 	 * Build the standard 404 response
 	 */
 	static notFoundResponse() {
@@ -207,6 +266,13 @@ export class OAuthResource extends Resource {
 		// Check debug mode restrictions
 		if (!debugMode && OAuthResource.isDebugOnlyRoute(route)) {
 			return OAuthResource.notFoundResponse();
+		}
+
+		// If debug mode is enabled and this is a debug-only route, check IP allowlist
+		if (debugMode && OAuthResource.isDebugOnlyRoute(route)) {
+			if (!OAuthResource.checkDebugAccess(request, logger)) {
+				return OAuthResource.forbiddenResponse();
+			}
 		}
 
 		// Special case: /oauth/test without provider

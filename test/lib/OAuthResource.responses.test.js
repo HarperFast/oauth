@@ -6,9 +6,10 @@
 import { describe, it, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 
-// Note: Bun uses test/bun-preload.js to mock the harperdb module
-// Node.js will load the real harperdb module, which may trigger async
-// native module loading that continues after tests complete. This is harmless.
+// Mock Harper's Resource class
+global.Resource = class {
+	static loadAsInstance = false;
+};
 
 import { OAuthResource } from '../../dist/lib/resource.js';
 
