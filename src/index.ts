@@ -155,7 +155,7 @@ export async function handleApplication(scope: Scope): Promise<void> {
 
 	// Register HTTP middleware for automatic OAuth session validation
 	// This runs on every HTTP request after authentication but before REST
-	scope.server.http(async (request: any, next: (req: any) => any) => {
+	scope.server.http?.(async (request: any, next: (req: any) => any) => {
 		// Only process requests with sessions that have OAuth data
 		if (!request.session?.oauth) {
 			return next(request);
