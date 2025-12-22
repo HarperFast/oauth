@@ -261,6 +261,8 @@ export interface Request extends IncomingMessage {
 	user?: User | string;
 	session?: Session;
 	headers: IncomingMessage['headers'];
+	/** Client IP address */
+	ip?: string;
 }
 
 /**
