@@ -6,14 +6,15 @@
  */
 
 import { initializeProviders, expandEnvVar } from './lib/config.ts';
-import { createOAuthResource } from './lib/resource.ts';
+import { OAuthResource } from './lib/resource.ts';
 import { validateAndRefreshSession } from './lib/sessionValidator.ts';
 import { clearOAuthSession } from './lib/handlers.ts';
 import { HookManager } from './lib/hookManager.ts';
 import type { Scope, OAuthPluginConfig, ProviderRegistry, OAuthHooks } from './types.ts';
 
-// Export HookManager class and types
+// Export HookManager class, OAuthResource class, and types
 export { HookManager } from './lib/hookManager.ts';
+export { OAuthResource } from './lib/resource.ts';
 export type { OAuthHooks, OAuthUser, TokenResponse } from './types.ts';
 
 // Store hooks registered at module load time and active hookManager
@@ -106,7 +107,7 @@ export async function handleApplication(scope: Scope): Promise<void> {
 
 		// Update the resource with new providers
 		if (Object.keys(providers).length === 0) {
-			// No valid providers configured
+			// No valid providers configured - register a simple error resource
 			scope.resources.set('oauth', {
 				async get() {
 					return {
@@ -130,8 +131,11 @@ export async function handleApplication(scope: Scope): Promise<void> {
 				},
 			});
 		} else {
-			// Register the OAuth resource with configured providers
-			scope.resources.set('oauth', createOAuthResource(providers, debugMode, hookManager, logger));
+			// Configure the OAuth resource with providers and settings
+			OAuthResource.configure(providers, debugMode, hookManager, logger);
+
+			// Register the OAuth resource class
+			scope.resources.set('oauth', OAuthResource);
 
 			// Log all configured providers
 			logger?.info?.('OAuth plugin ready:', {
