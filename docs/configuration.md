@@ -300,7 +300,44 @@ When `debug: true` is enabled, additional endpoints are available:
 - `GET /oauth/{provider}/user` - Current user info and token status
 - `GET /oauth/{provider}/refresh` - Trigger token refresh
 
-**Warning:** Never enable debug mode in production environments.
+### Security: IP-Based Access Control
+
+**By default, debug endpoints are only accessible from localhost** (`127.0.0.1` and `::1`). This prevents unauthorized access to sensitive debugging information.
+
+To allow access from other IPs, set the `DEBUG_ALLOWED_IPS` environment variable:
+
+```bash
+# Allow single IP
+DEBUG_ALLOWED_IPS=192.168.1.100
+
+# Allow multiple IPs (comma-separated)
+DEBUG_ALLOWED_IPS=192.168.1.100,192.168.1.101,10.0.0.50
+
+# Allow IP range using prefix matching (e.g., all 10.0.0.x)
+DEBUG_ALLOWED_IPS=10.0.0.
+
+# Deny all access (empty string)
+DEBUG_ALLOWED_IPS=
+```
+
+**Access denial response:**
+
+```json
+{
+	"error": "Access forbidden",
+	"message": "Debug endpoints are only accessible from allowed IPs.",
+	"hint": "Set DEBUG_ALLOWED_IPS environment variable to allow access from your IP. Defaults to localhost only (127.0.0.1,::1)."
+}
+```
+
+**Security best practices:**
+
+- Keep debug mode disabled in production
+- Use IP allowlist when debug mode must be enabled remotely
+- Monitor access logs for unauthorized attempts
+- Regular endpoints (`/login`, `/callback`, `/logout`) are not affected by IP restrictions
+
+**Warning:** Never enable debug mode in production environments without strict IP controls.
 
 ## Complete Example
 
