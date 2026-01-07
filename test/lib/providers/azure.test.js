@@ -31,11 +31,12 @@ describe('Azure Provider', () => {
 		const azure = getProvider('azure');
 		assert.ok(azure.configure);
 
-		const configured = azure.configure('my-tenant-id');
-		assert.ok(configured.authorizationUrl.includes('my-tenant-id'));
-		assert.ok(configured.tokenUrl.includes('my-tenant-id'));
-		assert.ok(configured.jwksUri.includes('my-tenant-id'));
-		assert.equal(configured.issuer, 'https://login.microsoftonline.com/my-tenant-id/v2.0');
+		const tenantId = '12345678-1234-1234-1234-123456789012';
+		const configured = azure.configure(tenantId);
+		assert.ok(configured.authorizationUrl.includes(tenantId));
+		assert.ok(configured.tokenUrl.includes(tenantId));
+		assert.ok(configured.jwksUri.includes(tenantId));
+		assert.equal(configured.issuer, `https://login.microsoftonline.com/${tenantId}/v2.0`);
 	});
 
 	it('should handle microsoft alias', () => {

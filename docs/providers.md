@@ -2,6 +2,22 @@
 
 Detailed setup instructions for each supported OAuth provider.
 
+## Built-in Providers vs Active Providers
+
+**Important distinction:**
+
+- **Built-in providers** - Provider templates included in the OAuth plugin code (GitHub, Google, Azure, Auth0, Okta)
+  - Zero runtime overhead - code presence ≠ execution
+  - Not active until you configure them
+  - No security risk from unused providers
+
+- **Active providers** - Providers you explicitly configure with credentials
+  - Only configured providers are instantiated and available for authentication
+  - Each requires `clientId`, `clientSecret`, and OAuth URLs
+  - Only these providers accept login requests
+
+**Example:** The OAuth plugin includes Okta code, but Okta authentication is **not available** unless you configure an Okta provider with credentials. Built-in providers are templates, not active endpoints.
+
 ## GitHub OAuth
 
 ### 1. Create OAuth App
@@ -172,6 +188,81 @@ export OAUTH_AUTH0_CLIENT_SECRET="your_client_secret"
 - `email` - Access email address
 
 [Auth0 Scopes Documentation](https://auth0.com/docs/get-started/apis/scopes)
+
+---
+
+## Okta (OIDC)
+
+### 1. Create Application
+
+1. Go to [Okta Developer Console](https://developer.okta.com/)
+2. Navigate to Applications > Applications
+3. Click "Create App Integration"
+4. Choose "OIDC - OpenID Connect"
+5. Select "Web Application"
+6. Fill in:
+   - **App integration name:** Your application name
+   - **Sign-in redirect URIs:** `https://yourdomain.com/oauth/okta/callback`
+   - **Sign-out redirect URIs:** `https://yourdomain.com` (optional)
+7. Click "Save"
+8. Copy the **Client ID** and **Client Secret**
+9. Note your **Okta domain** (e.g., `dev-12345.okta.com`)
+
+### 2. Configure Plugin
+
+```yaml
+'@harperdb/oauth':
+  providers:
+    okta:
+      domain: ${OAUTH_OKTA_DOMAIN}
+      clientId: ${OAUTH_OKTA_CLIENT_ID}
+      clientSecret: ${OAUTH_OKTA_CLIENT_SECRET}
+      scope: 'openid profile email groups' # Optional, this is the default
+```
+
+### 3. Environment Variables
+
+```bash
+export OAUTH_OKTA_DOMAIN="dev-12345.okta.com"
+export OAUTH_OKTA_CLIENT_ID="your_client_id"
+export OAUTH_OKTA_CLIENT_SECRET="your_client_secret"
+```
+
+### Available Scopes
+
+- `openid` - OpenID Connect (required)
+- `profile` - Access profile information
+- `email` - Access email address
+- `groups` - Access user's group memberships (for role mapping)
+
+### Group-Based Role Mapping
+
+Okta supports mapping user groups to roles. The plugin will use the first group as the user's role:
+
+```yaml
+'@harperdb/oauth':
+  providers:
+    okta:
+      domain: ${OAUTH_OKTA_DOMAIN}
+      clientId: ${OAUTH_OKTA_CLIENT_ID}
+      clientSecret: ${OAUTH_OKTA_CLIENT_SECRET}
+      scope: 'openid profile email groups'
+      # First group will be used as role, falls back to defaultRole
+      defaultRole: 'user'
+```
+
+To include groups in the ID token:
+
+1. In Okta Admin Console, go to Security > API > Authorization Servers
+2. Select your authorization server (or "default")
+3. Go to Claims tab
+4. Add a claim with:
+   - **Name:** `groups`
+   - **Include in token type:** ID Token, Always
+   - **Value type:** Groups
+   - **Filter:** Matches regex `.*` (or filter to specific groups)
+
+[Okta OAuth Documentation](https://developer.okta.com/docs/guides/implement-oauth-for-okta/main/)
 
 ---
 

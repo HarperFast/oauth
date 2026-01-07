@@ -285,15 +285,53 @@ export class OAuthResource extends Resource {
 			return OAuthResource.buildProviderListResponse(providers);
 		}
 
-		// Check if provider exists
-		const providerData = providers[providerName];
+		// Validate provider name format (basic security check)
+		if (providerName.length > 128 || !/^[a-zA-Z0-9_-]+$/.test(providerName)) {
+			return {
+				status: 400,
+				body: { error: 'Invalid provider name format' },
+			};
+		}
+
+		// Check if provider exists in registry
+		let providerData = providers[providerName];
+
+		// If not found, try to resolve via hook
+		if (!providerData && OAuthResource.hookManager?.hasHook('onResolveProvider')) {
+			try {
+				logger?.debug?.(`Provider "${providerName}" not found in registry, calling onResolveProvider hook`);
+
+				const config = await OAuthResource.hookManager.callResolveProvider(providerName, logger);
+
+				if (config) {
+					// Hook resolved provider - register it dynamically
+					const { OAuthProvider } = await import('./OAuthProvider.ts');
+					const provider = new OAuthProvider(config, logger);
+
+					providers[providerName] = {
+						provider,
+						config,
+					};
+
+					providerData = providers[providerName];
+
+					logger?.info?.(`Dynamically registered provider: ${providerName}`);
+				}
+			} catch (error) {
+				// Hook threw error - log and return 500
+				logger?.error?.(`Error resolving provider ${providerName}:`, (error as Error).message);
+				return {
+					status: 500,
+					body: { error: 'Failed to resolve OAuth provider' },
+				};
+			}
+		}
+
+		// Still not found - return 404
 		if (!providerData) {
 			return {
 				status: 404,
-				body: {
-					error: 'Provider not found',
-					available: Object.keys(providers),
-				},
+				body: { error: 'OAuth provider not found' },
 			};
 		}
 

@@ -71,11 +71,16 @@ http://localhost:9926/oauth/github/login
 
 ## Supported Providers
 
+The OAuth plugin includes built-in templates for:
+
 - **GitHub** - OAuth 2.0
 - **Google** - OIDC
 - **Azure AD** - OIDC
 - **Auth0** - OIDC
+- **Okta** - OIDC
 - **Custom** - Generic OIDC provider
+
+> **Important:** Built-in providers are templates only. **None are active** until you configure them with `clientId`, `clientSecret`, and other required settings. The presence of provider code does not enable authentication or create security exposure.
 
 ## Next Steps
 

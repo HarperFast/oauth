@@ -17,6 +17,23 @@ export { HookManager } from './lib/hookManager.ts';
 export { OAuthResource } from './lib/resource.ts';
 export type { OAuthHooks, OAuthUser, TokenResponse } from './types.ts';
 
+// Export multi-tenant SSO support
+export { TenantManager } from './lib/tenantManager.ts';
+export type { TenantConfig, TenantRegistryEntry } from './lib/tenantManager.ts';
+
+// Export validation utilities for secure tenant configuration
+export {
+	validateDomainSafety,
+	validateDomainAllowlist,
+	validateEmailDomain,
+	validateTenantId,
+	sanitizeTenantName,
+	validateAzureTenantId,
+} from './lib/providers/validation.ts';
+
+// Export provider utilities
+export { getProvider } from './lib/providers/index.ts';
+
 // Store hooks registered at module load time and active hookManager
 let pendingHooks: OAuthHooks | null = null;
 let activeHookManager: HookManager | null = null;

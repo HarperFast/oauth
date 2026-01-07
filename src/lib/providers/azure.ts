@@ -5,6 +5,7 @@
  */
 
 import type { OAuthProviderConfig } from '../../types.ts';
+import { validateAzureTenantId } from './validation.ts';
 
 export const AzureADProvider: OAuthProviderConfig = {
 	provider: 'azure',
@@ -23,9 +24,8 @@ export const AzureADProvider: OAuthProviderConfig = {
 
 	// Azure-specific: configure endpoints based on tenant
 	configure: (tenantId: string): Partial<OAuthProviderConfig> => {
-		if (!tenantId) {
-			throw new Error('Azure AD provider requires tenantId configuration');
-		}
+		// Validate Azure tenant ID format
+		validateAzureTenantId(tenantId);
 
 		return {
 			authorizationUrl: `https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/authorize`,

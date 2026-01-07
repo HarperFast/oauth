@@ -4,6 +4,163 @@ Lifecycle hooks allow you to customize the OAuth authentication flow by executin
 
 ## Available Hooks
 
+### onResolveProvider
+
+Called when a provider is not found in the static registry. Allows applications to implement multi-tenant OAuth by dynamically resolving provider configurations based on naming conventions.
+
+**Purpose:** Multi-tenant SSO, organization-specific OAuth providers, database-backed provider configuration
+
+**Signature:**
+
+```typescript
+async function onResolveProvider(providerName: string, logger?: Logger): Promise<OAuthProviderConfig | null>;
+```
+
+**Parameters:**
+
+- `providerName` - Provider name from URL path (e.g., `"okta-org_abc123"`)
+- `logger` - Optional logger instance
+
+**Returns:** Provider configuration object or null if provider not found
+
+**Example:**
+
+```javascript
+import {
+	getProvider,
+	validateTenantId,
+	validateDomainSafety,
+	validateDomainAllowlist,
+	validateAzureTenantId,
+} from '@harperdb/oauth';
+
+const { Organization } = tables;
+
+async function resolveOAuthProvider(providerName, logger) {
+	// Parse provider name format: "{provider}-{tenantId}"
+	const match = providerName.match(/^(okta|azure|auth0)-(.+)$/);
+	if (!match) {
+		// Not a multi-tenant provider name
+		return null;
+	}
+
+	const [, provider, tenantId] = match;
+
+	// Validate tenant ID format BEFORE database lookup
+	try {
+		validateTenantId(tenantId);
+	} catch (error) {
+		logger?.warn?.(`Invalid tenant ID in provider name: ${providerName}`);
+		return null; // Return 404, not 500
+	}
+
+	// Query Organization table for OAuth config
+	const org = await Organization.get(tenantId);
+
+	// Check if OAuth is enabled for this organization
+	if (!org?.oauthConfig?.enabled || org.oauthConfig.status !== 'active') {
+		logger?.debug?.(`OAuth not enabled for tenant: ${tenantId}`);
+		return null;
+	}
+
+	const config = org.oauthConfig;
+
+	// Verify provider type matches
+	if (config.provider !== provider) {
+		logger?.warn?.(`Provider mismatch: URL has ${provider}, config has ${config.provider}`);
+		return null;
+	}
+
+	// Get base provider configuration from OAuth plugin
+	const baseProvider = getProvider(provider);
+	if (!baseProvider) {
+		logger?.error?.(`Unknown provider type: ${provider}`);
+		return null;
+	}
+
+	// Apply provider-specific configuration with validation
+	let providerSpecificConfig = {};
+
+	try {
+		if (baseProvider.configure) {
+			switch (provider) {
+				case 'okta':
+				case 'auth0':
+					if (!config.domain) {
+						throw new Error(`${provider} requires domain configuration`);
+					}
+					// Validate domain safety (SSRF protection)
+					const hostname = validateDomainSafety(config.domain, provider);
+					const allowedDomains = {
+						okta: ['.okta.com', '.okta-emea.com', '.oktapreview.com'],
+						auth0: ['.auth0.com', '.eu.auth0.com', '.au.auth0.com'],
+					};
+					validateDomainAllowlist(hostname, allowedDomains[provider], provider);
+					providerSpecificConfig = baseProvider.configure(config.domain);
+					break;
+
+				case 'azure':
+					if (!config.azureTenantId) {
+						throw new Error('Azure requires tenantId configuration');
+					}
+					// Validate Azure tenant ID format
+					validateAzureTenantId(config.azureTenantId);
+					providerSpecificConfig = baseProvider.configure(config.azureTenantId);
+					break;
+			}
+		}
+	} catch (error) {
+		logger?.error?.(`Invalid OAuth config for organization ${org.name}:`, error);
+		return null;
+	}
+
+	// Build complete provider configuration
+	const providerConfig = {
+		// Base provider properties
+		provider: config.provider,
+		scope: config.scope || baseProvider.scope,
+		usernameClaim: baseProvider.usernameClaim,
+		emailClaim: baseProvider.emailClaim,
+		nameClaim: baseProvider.nameClaim,
+		roleClaim: baseProvider.roleClaim,
+		defaultRole: baseProvider.defaultRole,
+		preferIdToken: baseProvider.preferIdToken,
+		// Provider-specific URLs from configure()
+		authorizationUrl: providerSpecificConfig.authorizationUrl,
+		tokenUrl: providerSpecificConfig.tokenUrl,
+		userInfoUrl: providerSpecificConfig.userInfoUrl,
+		jwksUri: providerSpecificConfig.jwksUri,
+		issuer: providerSpecificConfig.issuer,
+		// Tenant-specific credentials from database
+		clientId: config.clientId,
+		clientSecret: config.clientSecret,
+	};
+
+	return providerConfig;
+}
+```
+
+**Security Requirements:**
+
+- **MUST** validate tenant ID format before database lookup
+- **MUST** validate domain safety (SSRF protection)
+- **MUST** validate provider-specific configuration
+- **MUST NOT** return configurations for disabled/inactive tenants
+- **SHOULD** log all resolution attempts for audit trail
+
+**URL Structure:**
+
+When using `onResolveProvider`, users access tenant-specific login URLs:
+
+```bash
+/oauth/okta-org_abc123/login    ← Acme Corp's Okta
+/oauth/azure-org_xyz789/login   ← Globex's Azure AD
+```
+
+The provider name (`okta-org_abc123`) is parsed by your hook to extract the provider type and tenant ID, then dynamically resolves the configuration from your database.
+
+---
+
 ### onLogin
 
 Called after successful OAuth authentication, before the session is created.
