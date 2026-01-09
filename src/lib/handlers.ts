@@ -63,6 +63,7 @@ export async function handleLogin(
 	target: RequestTarget,
 	provider: IOAuthProvider,
 	config: OAuthProviderConfig,
+	providerName: string,
 	logger?: Logger
 ): Promise<any> {
 	// Determine redirect URL: query param > referer header > config default
@@ -76,9 +77,11 @@ export async function handleLogin(
 	const originalUrl = redirectParam || request.headers?.referer || config.postLoginRedirect || '/';
 
 	// Generate CSRF token with metadata
+	// Bind token to provider to prevent cross-provider CSRF attacks
 	const csrfToken = await provider.generateCSRFToken({
 		originalUrl,
 		sessionId: request.session?.id,
+		providerName, // Bind state token to this provider
 	});
 
 	// Build authorization URL with CSRF token as state parameter
@@ -103,6 +106,7 @@ export async function handleCallback(
 	provider: IOAuthProvider,
 	config: OAuthProviderConfig,
 	hookManager: HookManager,
+	providerName: string,
 	logger?: Logger
 ): Promise<any> {
 	// Get query parameters from target
@@ -143,12 +147,28 @@ export async function handleCallback(
 	if (!tokenData) {
 		logger?.warn?.('Invalid or expired CSRF token');
 		// Redirect back to login with error parameter
-		const providerKey = config.provider || 'oauth';
-		const loginUrl = `/oauth/${providerKey}/login?error=session_expired`;
+		const loginUrl = `/oauth/${providerName}/login?error=session_expired`;
 		return {
 			status: 302,
 			headers: {
 				Location: loginUrl,
+			},
+		};
+	}
+
+	// Verify state token was issued for THIS provider (prevents cross-provider attacks)
+	if (tokenData.providerName !== providerName) {
+		logger?.warn?.(
+			`State token provider mismatch: token issued for '${tokenData.providerName}', callback for '${providerName}'`
+		);
+		// This could be an attack - redirect back to original URL with error
+		// Do NOT redirect to login endpoint as that would restart OAuth flow
+		const redirectUrl = tokenData.originalUrl || config.postLoginRedirect || '/';
+		const errorUrl = `${redirectUrl}${redirectUrl.includes('?') ? '&' : '?'}error=auth_failed&reason=csrf`;
+		return {
+			status: 302,
+			headers: {
+				Location: errorUrl,
 			},
 		};
 	}
@@ -177,7 +197,8 @@ export async function handleCallback(
 
 		// Call onLogin hook before storing session
 		// This allows user provisioning plugins to create/update user records
-		const hookData = await hookManager.callOnLogin(user, tokenResponse, request.session, request, config.provider);
+		// Pass providerName (registry key) not config.provider (provider type) for multi-tenant support
+		const hookData = await hookManager.callOnLogin(user, tokenResponse, request.session, request, providerName);
 
 		// Store in session if available
 		if (request.session) {
@@ -198,11 +219,13 @@ export async function handleCallback(
 			// Leave expiresAt and refreshThreshold undefined so middleware doesn't try to refresh
 
 			// Prepare session data
+			// Store providerName (registry key) not config.provider (provider type)
+			// This ensures session validation can look up the correct provider
 			const sessionData: any = {
 				user: hookData?.user || user.username, // Use hook's user if provided, otherwise OAuth username
 				oauthUser: user, // Store full OAuth user object separately
 				oauth: {
-					provider: config.provider,
+					provider: providerName, // Store registry key (e.g., 'harperdb') not provider type (e.g., 'okta')
 					accessToken: tokenResponse.access_token,
 					refreshToken: tokenResponse.refresh_token,
 					expiresAt,

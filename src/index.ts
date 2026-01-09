@@ -5,7 +5,7 @@
  * Supports any standard OAuth 2.0 provider through configuration.
  */
 
-import { initializeProviders, expandEnvVar } from './lib/config.ts';
+import { initializeProviders, expandEnvVar, extractPluginDefaults } from './lib/config.ts';
 import { OAuthResource } from './lib/resource.ts';
 import { validateAndRefreshSession } from './lib/sessionValidator.ts';
 import { clearOAuthSession } from './lib/handlers.ts';
@@ -80,6 +80,7 @@ export async function handleApplication(scope: Scope): Promise<void> {
 	let providers: ProviderRegistry = {};
 	let debugMode = false;
 	let isInitialized = false;
+	let pluginDefaults: any = {}; // Store plugin defaults for dynamic provider resolution
 
 	// Create hookManager instance scoped to this application
 	const hookManager = new HookManager(logger);
@@ -122,6 +123,9 @@ export async function handleApplication(scope: Scope): Promise<void> {
 		Object.keys(providers).forEach((key) => delete providers[key]);
 		Object.assign(providers, newProviders);
 
+		// Extract plugin defaults for dynamic provider resolution
+		pluginDefaults = extractPluginDefaults(options);
+
 		// Update the resource with new providers
 		if (Object.keys(providers).length === 0) {
 			// No valid providers configured - register a simple error resource
@@ -149,7 +153,7 @@ export async function handleApplication(scope: Scope): Promise<void> {
 			});
 		} else {
 			// Configure the OAuth resource with providers and settings
-			OAuthResource.configure(providers, debugMode, hookManager, logger);
+			OAuthResource.configure(providers, debugMode, hookManager, pluginDefaults, logger);
 
 			// Register the OAuth resource class
 			scope.resources.set('oauth', OAuthResource);
@@ -180,7 +184,36 @@ export async function handleApplication(scope: Scope): Promise<void> {
 
 		// Get the provider for this OAuth session
 		const providerName = request.session.oauth.provider;
-		const providerData = providers[providerName];
+		let providerData = providers[providerName];
+
+		// If provider not found in registry, try to resolve via hook (dynamic providers)
+		if (!providerData && hookManager?.hasHook('onResolveProvider')) {
+			try {
+				logger?.debug?.(`Provider "${providerName}" not in registry, attempting dynamic resolution`);
+
+				const hookConfig = await hookManager.callResolveProvider(providerName, logger);
+
+				if (hookConfig) {
+					// Hook resolved provider - build full config and register dynamically
+					const { OAuthProvider } = await import('./lib/OAuthProvider.ts');
+					const { buildProviderConfig } = await import('./lib/config.ts');
+
+					// Build full provider config (handles Okta/Azure/Auth0 domain configuration)
+					const config = buildProviderConfig(hookConfig, providerName, pluginDefaults);
+					const provider = new OAuthProvider(config, logger);
+
+					providers[providerName] = {
+						provider,
+						config,
+					};
+
+					providerData = providers[providerName];
+					logger?.info?.(`Dynamically registered provider for session validation: ${providerName}`);
+				}
+			} catch (error) {
+				logger?.error?.(`Error resolving provider ${providerName} for session:`, (error as Error).message);
+			}
+		}
 
 		if (!providerData) {
 			logger?.warn?.(`OAuth provider '${providerName}' not found, logging out user`);

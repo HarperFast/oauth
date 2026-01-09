@@ -1,619 +1,442 @@
-# Multi-Tenant SSO with Okta
+# Multi-Tenant SSO
 
-Enable multiple enterprises to sign in using their own Okta instances. Perfect for B2B SaaS applications where each customer has their own identity provider.
+Enable multiple enterprises to use their own OAuth providers (Okta, Azure AD, Auth0, etc.) in your B2B SaaS application. Each organization gets a unique SSO login URL.
 
 ## Overview
 
-The multi-tenant SSO system allows you to:
+**What you get:**
 
-- **Register multiple tenants** - Each enterprise customer brings their own Okta
-- **Automatic tenant discovery** - Route users by email domain
-- **Tenant selection UI** - Beautiful selection page when users have multiple orgs
-- **Zero configuration changes** - Add new tenants without redeploying
+- Each customer uses their own identity provider
+- Zero-config tenant registration via hooks
+- Automatic provider resolution from your database
+- Works with Okta, Azure AD, Auth0, Google, and any OAuth 2.0 provider
 
-## Architecture
+**How it works:**
 
 ```
-User visits app → Enters email → Discovers tenant → Redirects to tenant's Okta → Returns authenticated
+Organization has URL → /oauth/acme-corp/login → Plugin calls your hook → Hook returns OAuth config → User authenticates
 ```
 
 ## Quick Start
 
-### 1. Install and Import
+### 1. Store Tenant Configurations
+
+Store OAuth configs in your database (structure is up to you):
 
 ```typescript
-import { TenantManager } from '@harperdb/oauth';
+// Example: tenants table
+{
+  id: 'acme-corp',
+  name: 'Acme Corporation',
+  provider: 'okta',
+  domain: 'acme-corp.okta.com',  // For Okta/Auth0
+  client_id: '...',
+  client_secret: '...',  // Encrypt in production!
+}
 ```
 
-### 2. Configure Tenants
+### 2. Register Hook to Resolve Providers
 
-Create a configuration file or store in your database. Supports Okta, Azure AD, Auth0, and any OAuth provider:
-
-```typescript
-const tenants = [
-	// Okta tenant
-	{
-		tenantId: 'acme-corp',
-		name: 'Acme Corporation',
-		provider: 'okta',
-		domain: 'acme-corp.okta.com',
-		clientId: process.env.ACME_CLIENT_ID,
-		clientSecret: process.env.ACME_CLIENT_SECRET,
-		emailDomains: ['acme.com', 'acmecorp.com'],
-	},
-	// Azure AD tenant
-	{
-		tenantId: 'globex',
-		name: 'Globex Industries',
-		provider: 'azure',
-		azureTenantId: process.env.GLOBEX_TENANT_ID,
-		clientId: process.env.GLOBEX_CLIENT_ID,
-		clientSecret: process.env.GLOBEX_CLIENT_SECRET,
-		emailDomains: ['globex.com'],
-	},
-	// Auth0 tenant
-	{
-		tenantId: 'initech',
-		name: 'Initech',
-		provider: 'auth0',
-		domain: 'initech.auth0.com',
-		clientId: process.env.INITECH_CLIENT_ID,
-		clientSecret: process.env.INITECH_CLIENT_SECRET,
-		emailDomains: ['initech.com'],
-	},
-];
-```
-
-### 3. Setup in Your Harper Application
+The OAuth plugin calls your `onResolveProvider` hook when a user visits `/oauth/{tenantId}/login`:
 
 ```typescript
-// In your Harper application entry point
-import { TenantManager, sanitizeTenantName } from '@harperdb/oauth';
+import { registerHooks } from '@harperdb/oauth';
 
 export async function handleApplication(scope) {
-	// Initialize tenant manager
-	const tenantManager = TenantManager.fromConfig({
-		tenants,
-		logger: scope.logger,
-	});
+	const { tables, logger } = scope;
 
-	// Convert tenants to provider registry
-	const tenantProviders = tenantManager.toProviderRegistry();
+	// Register hook to dynamically load tenant OAuth configs
+	registerHooks({
+		async onResolveProvider(tenantId, logger) {
+			// Look up tenant in your database (structure is up to you)
+			const tenant = await tables.tenants.get(tenantId);
 
-	// Initialize OAuth plugin with tenant providers
-	scope.options.providers = {
-		// Static providers (optional)
-		github: {
-			provider: 'github',
-			clientId: process.env.GITHUB_CLIENT_ID,
-			clientSecret: process.env.GITHUB_CLIENT_SECRET,
-		},
-		// Merge tenant providers
-		...Object.fromEntries(Object.entries(tenantProviders).map(([id, entry]) => [id, entry.config])),
-	};
-
-	// Add login page with tenant selection
-	// Note: Discovery should be internal to your app, not a public API
-	scope.resources.set('login', {
-		async get(_target, request) {
-			// If user is already authenticated, redirect to app
-			if (request.session?.user) {
-				return { status: 302, headers: { Location: '/dashboard' } };
+			if (!tenant) {
+				return null; // 404 - tenant not found
 			}
 
-			// Get list of configured tenants for selection UI
-			const tenants = tenantManager.getAllTenants().map((t) => ({
-				id: t.tenantId,
-				name: t.name,
-				loginUrl: `/oauth/${t.tenantId}/login`,
-			}));
-
-			// Return HTML tenant selection page
-			// IMPORTANT: Use sanitizeTenantName() to prevent XSS attacks
-			// In production, customize this UI to match your brand
+			// Return OAuth config for this tenant
 			return {
-				status: 200,
-				headers: { 'Content-Type': 'text/html' },
-				body: `
-          <!DOCTYPE html>
-          <html>
-            <head><title>Sign In</title></head>
-            <body>
-              <h1>Sign in to Your Organization</h1>
-              ${tenants
-								.map(
-									(t) => `
-                <a href="${t.loginUrl}">${sanitizeTenantName(t.name)}</a>
-              `
-								)
-								.join('')}
-            </body>
-          </html>
-        `,
+				provider: tenant.provider, // 'okta' | 'azure' | 'auth0' | 'google' | 'github'
+				domain: tenant.domain, // For Okta/Auth0
+				azureTenantId: tenant.azure_tenant_id, // For Azure
+				clientId: tenant.client_id,
+				clientSecret: tenant.client_secret,
+				scope: tenant.scope || 'openid profile email',
 			};
 		},
 	});
 }
 ```
 
-## OAuth Endpoints
+### 3. Distribute SSO Links
 
-Once configured, each tenant gets these OAuth endpoints:
+Each organization gets a unique login URL to distribute to their employees:
 
-### Tenant-Specific Login
-
-**GET /oauth/{tenantId}/login**
-
-Initiates OAuth login flow for a specific tenant. Redirects to the tenant's OAuth provider (Okta, Azure AD, Auth0, etc.).
-
-Example: `/oauth/acme-corp/login`
-
-### OAuth Callback
-
-**GET /oauth/callback**
-
-Handles the OAuth callback from all providers. This is shared across all tenants.
-
-### Logout
-
-**POST /oauth/logout**
-
-Clears the user's session.
-
-## User Experience Flows
-
-### Flow 1: Email-Based Discovery
-
-```typescript
-// In your frontend
-async function handleLogin(email) {
-	const response = await fetch(`/sso/discover?email=${email}`);
-	const result = await response.json();
-
-	if (result.found) {
-		// Redirect to their organization's login
-		window.location.href = result.loginUrl;
-	} else {
-		// Show error: "No organization found for this email"
-	}
-}
+```
+https://yourapp.com/oauth/acme-corp/login
+https://yourapp.com/oauth/globex/login
+https://yourapp.com/oauth/initech/login
 ```
 
-### Flow 2: Organization Selector
+**How organizations use these links:**
 
-```html
-<!-- Link to the tenant selection page -->
-<a href="/login">Sign in with SSO</a>
+- Add to SSO portal (Okta, Azure)
+- Bookmark for employees
+- Include in onboarding emails
+- Display on login page
+
+## Frontend Integration
+
+### Option 1: Direct SSO Links (Recommended)
+
+Each organization gets a unique login URL:
+
+```
+https://yourapp.com/oauth/acme-corp/login
+https://yourapp.com/oauth/globex/login
 ```
 
-Users see a beautiful page listing all organizations and can search/select theirs.
-
-### Flow 3: Direct Link
-
-For users who know their organization:
-
-```html
-<a href="/oauth/acme-corp/login">Sign in as Acme Corporation</a>
-```
-
-## Frontend Integration Example
-
-### React Component
-
-```typescript
-import { useState } from 'react';
-
-function SSOLogin() {
-  const [email, setEmail] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-
-  async function handleSubmit(e) {
-    e.preventDefault();
-    setLoading(true);
-    setError('');
-
-    try {
-      const response = await fetch(`/sso/discover?email=${encodeURIComponent(email)}`);
-      const result = await response.json();
-
-      if (result.found) {
-        // Redirect to their Okta login
-        window.location.href = result.loginUrl;
-      } else {
-        setError('No organization found for this email address');
-      }
-    } catch (err) {
-      setError('Failed to discover organization');
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  return (
-    <form onSubmit={handleSubmit}>
-      <input
-        type="email"
-        value={email}
-        onChange={(e) => setEmail(e.target.value)}
-        placeholder="Enter your work email"
-        required
-      />
-      <button type="submit" disabled={loading}>
-        {loading ? 'Discovering...' : 'Continue with SSO'}
-      </button>
-      {error && <p className="error">{error}</p>}
-
-      <a href="/login">Or choose your organization</a>
-    </form>
-  );
-}
-```
-
-## Dynamic Tenant Registration
-
-Load tenants from database at runtime:
-
-```typescript
-// Load from Harper table
-const tenantsTable = tables.tenants;
-const tenantRecords = await tenantsTable.search();
-
-const tenants = tenantRecords.map((record) => ({
-	tenantId: record.id,
-	name: record.name,
-	provider: record.provider || 'okta',
-	domain: record.okta_domain || record.domain,
-	azureTenantId: record.azure_tenant_id,
-	clientId: record.client_id,
-	clientSecret: record.client_secret,
-	emailDomains: record.email_domains,
-}));
-
-const tenantManager = TenantManager.fromConfig({
-	tenants,
-	logger: scope.logger,
-});
-```
-
-## Adding New Tenants
-
-### Option 1: Pre-Configured Tenants
-
-**Best for:** Small number of enterprise customers where you manage the configuration.
-
-Add to your tenants array and restart:
-
-```typescript
-const tenants = [
-	// ... existing tenants
-	{
-		tenantId: 'new-customer',
-		name: 'New Customer Inc',
-		provider: 'okta',
-		domain: 'new-customer.okta.com',
-		clientId: process.env.NEW_CUSTOMER_CLIENT_ID,
-		clientSecret: process.env.NEW_CUSTOMER_CLIENT_SECRET,
-		emailDomains: ['newcustomer.com'],
-	},
-];
-```
-
-### Option 2: Admin API
-
-**Best for:** Moderate number of customers, admin-controlled registration.
-
-Create an admin endpoint to add tenants dynamically:
-
-```typescript
-scope.resources.set('admin/tenants', {
-	async post(data, target, request) {
-		// Verify admin access
-		if (request.user?.role !== 'admin') {
-			return { status: 403, body: { error: 'Forbidden' } };
-		}
-
-		// Register new tenant
-		tenantManager.registerTenant({
-			tenantId: data.tenantId,
-			name: data.name,
-			provider: data.provider,
-			domain: data.domain,
-			azureTenantId: data.azureTenantId,
-			clientId: data.clientId,
-			clientSecret: data.clientSecret,
-			emailDomains: data.emailDomains,
-		});
-
-		// Persist to database
-		await tenantsTable.put(data);
-
-		return { message: 'Tenant registered successfully' };
-	},
-});
-```
-
-### Option 3: Self-Service Registration (Allow Any Tenant)
-
-> ⚠️ **IMPORTANT: Application-Level Security Required**
->
-> Self-service tenant registration is a **reference example** showing how to dynamically register OAuth providers.
-> Your application MUST implement these security controls before production use:
->
-> - **Domain ownership verification** (DNS TXT records, email confirmation, etc.)
-> - **Admin approval workflows**
-> - **Rate limiting** on registration endpoints
->
-> The OAuth plugin handles authentication; tenant management security is your application's responsibility.
-
-**Best for:** Large-scale B2B SaaS where enterprises self-onboard (with application-enforced security).
-
-Instead of pre-configuring tenants, let enterprises register their own OAuth provider through your application:
-
-```typescript
-scope.resources.set(
-	'register-org',
-	createTenantRegistrationResource(tenantManager, tables.tenants, providerRegistry, logger)
-);
-```
-
-**User Flow:**
-
-1. Enterprise admin visits `/register-org`
-2. Fills in form:
-   - Organization name
-   - OAuth provider (Okta/Azure/Auth0)
-   - Provider-specific details (domain, tenant ID)
-   - Client ID & Secret from their OAuth app
-   - Email domains for auto-discovery
-   - Admin email for verification
-3. System validates OAuth credentials
-4. Sends verification email
-5. Once verified, organization is active
-6. Their users can now sign in via SSO
+Users access their organization's specific URL (typically bookmarked or linked from their SSO portal).
 
 **Benefits:**
 
-- **Zero manual work** - Enterprises onboard themselves
-- **Scales infinitely** - Support unlimited organizations
-- **No deployment** - New tenants added without code changes
-- **Validation built-in** - Test OAuth credentials before accepting
+- No email domain issues (contractors, shared domains)
+- Users can belong to multiple organizations
+- No security enumeration risks
+- Simple implementation
 
-**Example Registration Form Response:**
+### Option 2: Organization Picker
 
-```json
-{
-	"message": "Organization registered successfully",
-	"tenantId": "acme-corp",
-	"loginUrl": "/oauth/acme-corp/login",
-	"nextSteps": ["Verify your email address", "Test the login flow", "Add your team members"]
+If you need a login page that lists organizations, fetch tenants from your database and display them. Important: Always sanitize tenant names with `sanitizeTenantName()` before displaying in HTML to prevent XSS.
+
+**Note on Email-Based Discovery:** While you could implement email domain lookup (e.g., `user@acme.com` → redirect to `acme-corp` tenant), this pattern has challenges:
+
+- Contractors with vendor emails can't be reliably mapped
+- Users in multiple organizations create ambiguity
+- Requires storing and maintaining email domain mappings
+- Adds complexity without significant UX benefit over direct links
+
+For most applications, Direct SSO Links (Option 1) provide a simpler, more reliable user experience.
+
+## OAuth Endpoints
+
+Each tenant automatically gets these endpoints:
+
+| Endpoint                     | Method | Description            |
+| ---------------------------- | ------ | ---------------------- |
+| `/oauth/{tenantId}/login`    | GET    | Initiates OAuth flow   |
+| `/oauth/{tenantId}/callback` | GET    | OAuth callback handler |
+| `/oauth/logout`              | POST   | Clears session         |
+
+## Adding New Tenants
+
+### Static Configuration
+
+Define tenants in your application code:
+
+```typescript
+export async function handleApplication(scope) {
+	registerHooks({
+		async onResolveProvider(tenantId) {
+			const staticTenants = {
+				'acme-corp': {
+					provider: 'okta',
+					domain: 'acme-corp.okta.com',
+					clientId: process.env.ACME_CLIENT_ID,
+					clientSecret: process.env.ACME_CLIENT_SECRET,
+				},
+				'globex': {
+					provider: 'azure',
+					azureTenantId: process.env.GLOBEX_TENANT_ID,
+					clientId: process.env.GLOBEX_CLIENT_ID,
+					clientSecret: process.env.GLOBEX_CLIENT_SECRET,
+				},
+			};
+
+			return staticTenants[tenantId] || null;
+		},
+	});
 }
 ```
 
-**Implementation Requirements:**
+**Best for:** Small number of enterprise customers.
 
-- Registration form with provider-specific fields
-- OAuth credential validation before acceptance
-- Email verification flow
-- Database persistence for tenant configurations
-- Admin approval workflow (recommended)
+### Database-Driven (Dynamic)
 
-## Supported Identity Providers
+Load from database at runtime (shown in Quick Start above).
 
-The multi-tenant system works with **any OAuth 2.0 / OIDC provider**. Here are commonly requested enterprise providers:
+**Best for:** Moderate to large number of customers.
 
-### Built-in Support
+### Admin API
 
-- **Okta** - Most popular enterprise SSO
-- **Azure AD / Microsoft Entra ID** - Microsoft enterprise
-- **Auth0** - Developer-friendly identity platform
-- **Google** - Google Workspace for enterprises
+Create an admin endpoint to add tenants without redeployment. The endpoint should:
 
-### Easy to Add
+- Verify admin access
+- Validate tenant data (use `validateTenantId()` and `validateDomainSafety()` from '@harperdb/oauth')
+- Store tenant config in your database
+- Encrypt `clientSecret` before storing
 
-These providers work with the generic OAuth configuration:
+See `examples/multi-tenant-sso.js` for a complete implementation.
 
-- **OneLogin** - `provider: 'generic'` with OneLogin endpoints
-- **Ping Identity** - PingOne/PingFederate with custom domains
-- **Keycloak** - Self-hosted, custom domain per tenant
-- **AWS Cognito** - Different user pool per tenant
-- **Salesforce Identity** - Each Salesforce org
-- **SAP Cloud Identity** - SAP enterprise customers
-- **Custom OAuth Servers** - IdentityServer, Ory, etc.
+**Best for:** Internal admin-controlled tenant registration.
 
-### Example: OneLogin Tenant
+### Self-Service Registration
+
+> ⚠️ **Security Warning**: Self-service registration requires domain ownership verification (DNS TXT records, email confirmation) to prevent attackers from registering domains they don't own. Implement verification BEFORE enabling self-service.
+
+Self-service flow:
+
+1. Validate OAuth credentials (test token exchange)
+2. Send verification email to admin@{domain}
+3. Store tenant as 'pending' status
+4. Activate after verification confirmed
+
+**Best for:** Large-scale B2B SaaS with proper security controls.
+
+## Supported Providers
+
+The OAuth plugin supports any OAuth 2.0 / OIDC provider:
+
+### Built-in Presets
+
+These providers have built-in URL templates (just provide domain):
+
+- **Okta** - `provider: 'okta'`, `domain: 'company.okta.com'`
+- **Azure AD** - `provider: 'azure'`, `azureTenantId: 'tenant-guid'`
+- **Auth0** - `provider: 'auth0'`, `domain: 'company.auth0.com'`
+- **Google** - `provider: 'google'` (no domain needed)
+- **GitHub** - `provider: 'github'` (no domain needed)
+
+### Custom Providers
+
+Use `provider: 'custom'` for any OAuth 2.0 provider:
 
 ```typescript
 {
-  tenantId: 'acme-corp',
-  name: 'Acme Corporation',
-  provider: 'generic',
-  domain: 'acme-corp.onelogin.com',
-  clientId: process.env.ACME_CLIENT_ID,
-  clientSecret: process.env.ACME_CLIENT_SECRET,
-  emailDomains: ['acme.com'],
-  additionalConfig: {
-    authorizationUrl: 'https://acme-corp.onelogin.com/oidc/2/auth',
-    tokenUrl: 'https://acme-corp.onelogin.com/oidc/2/token',
-    userInfoUrl: 'https://acme-corp.onelogin.com/oidc/2/me',
-    scope: 'openid profile email',
+  provider: 'custom',
+  authorizationUrl: 'https://sso.company.com/oauth/authorize',
+  tokenUrl: 'https://sso.company.com/oauth/token',
+  userInfoUrl: 'https://sso.company.com/oauth/userinfo',
+  clientId: '...',
+  clientSecret: '...',
+  scope: 'openid profile email',
+}
+```
+
+Works with: OneLogin, Ping Identity, Keycloak, Salesforce, custom OAuth servers, etc.
+
+## Security
+
+### OAuth Plugin Handles
+
+The OAuth plugin automatically provides:
+
+- ✅ CSRF protection with state tokens
+- ✅ Token validation and refresh
+- ✅ Session isolation per tenant
+- ✅ Path length limits (DoS prevention)
+- ✅ Secure token storage (never logged)
+
+### Your Application Must Handle
+
+Multi-tenant systems require additional security:
+
+#### 1. Domain Ownership Verification
+
+**Only required for self-service registration**: If you allow public tenant registration (see "Self-Service Registration" above), you MUST verify that registrants own the domains they claim.
+
+**Not required if:**
+
+- You manually add tenants (Static Configuration)
+- Admins add tenants through internal tools (Admin API)
+- You work directly with customer IT teams to configure SSO
+
+**Verification Methods** (for self-service only):
+
+- **DNS TXT record** - Add verification code to DNS, query to confirm
+- **Email verification** - Send link to `admin@domain.com`
+- **Manual approval** - Admin reviews each registration
+
+**Why verification matters for self-service:** Without it, attackers can register "gmail.com" with their own OAuth server and intercept all Gmail users attempting to log in.
+
+#### 2. Secret Management
+
+OAuth client secrets must be protected:
+
+```typescript
+// Good: Encrypt secrets in database
+const encrypted = await encrypt(clientSecret);
+await tables.tenants.put({ client_secret: encrypted });
+
+// Good: Use secrets manager
+const secret = await secretsManager.getSecret(`tenant/${id}/oauth-secret`);
+
+// Bad: Store plaintext
+await tables.tenants.put({ client_secret: 'plaintext' }); // ❌
+```
+
+**Options:**
+
+- Environment variables (static tenants)
+- Secrets manager (AWS, Azure, HashiCorp Vault)
+- Database encryption (dynamic tenants)
+
+#### 3. Access Control
+
+- Rate limit login attempts
+- Restrict admin endpoints to admins only
+- Never expose complete tenant list publicly
+
+## Session Structure
+
+After successful OAuth login, the session contains:
+
+```typescript
+{
+  user: 'username',          // Your app's username
+  oauthUser: {               // OAuth profile
+    username: string,
+    email: string,
+    name: string,
+    role: string,
+    provider: 'okta-acme-corp'
+  },
+  oauth: {                   // Token metadata
+    provider: 'acme-corp',
+    accessToken: string,
+    refreshToken: string,
+    expiresAt: number,
+    // ...
   }
 }
 ```
 
-### Adding New Provider Presets
-
-To add a new built-in provider (like OneLogin):
-
-1. Create `src/lib/providers/onelogin.ts`:
+Access session data in your API endpoints via `request.session`:
 
 ```typescript
-export const OneLoginProvider: OAuthProviderConfig = {
-	provider: 'onelogin',
-	authorizationUrl: '', // Set by configure()
-	tokenUrl: '', // Set by configure()
-	userInfoUrl: '', // Set by configure()
-	scope: 'openid profile email',
+// In your Resource methods
+async get(_target, request) {
+	const username = request.session?.user;
+	const email = request.session?.oauthUser?.email;
+	const tenantId = request.session?.oauth?.provider;
 
-	configure: (domain: string) => {
-		const cleanDomain = domain.replace(/^https?:\/\//, '');
+	if (!username) {
+		return { status: 401, body: { error: 'Not authenticated' } };
+	}
+
+	// ... return user's data
+}
+```
+
+## Validation Utilities
+
+The plugin exports security validation functions:
+
+```typescript
+import {
+	validateDomainSafety, // Blocks suspicious domains
+	validateEmailDomain, // Validates email format safely
+	validateTenantId, // Validates tenant ID format
+	sanitizeTenantName, // Sanitizes for HTML display
+	validateAzureTenantId, // Validates Azure tenant GUID
+} from '@harperdb/oauth';
+
+// Example: Validate tenant registration
+const result = validateDomainSafety(domain);
+if (!result.safe) {
+	return { status: 400, body: { error: result.reason } };
+}
+```
+
+See [Security Best Practices](./security.md) for details.
+
+## Lifecycle Hooks
+
+Customize behavior with additional hooks (inside `handleApplication` where you have access to `scope.tables`):
+
+```typescript
+const { tables } = scope;
+
+registerHooks({
+	// Required: Resolve provider config
+	async onResolveProvider(tenantId, logger) {
+		// ... (shown above)
+	},
+
+	// Optional: User provisioning
+	async onLogin(user, tokenResponse, session, request) {
+		// Create/update user record in your database
+		const userRecord = await tables.users.get(user.email);
+		if (!userRecord) {
+			await tables.users.put({
+				id: user.email,
+				name: user.name,
+				role: user.role || 'user',
+				tenant: session.oauth.provider,
+			});
+		}
+
+		// Return custom session data
 		return {
-			authorizationUrl: `https://${cleanDomain}/oidc/2/auth`,
-			tokenUrl: `https://${cleanDomain}/oidc/2/token`,
-			userInfoUrl: `https://${cleanDomain}/oidc/2/me`,
+			user: user.email, // Override session username
+			customField: 'value',
 		};
 	},
-};
+
+	// Optional: Cleanup on logout
+	async onLogout(session, request) {
+		// Log logout event
+		await tables.audit_log.put({
+			action: 'logout',
+			user: session.user,
+			timestamp: Date.now(),
+		});
+	},
+
+	// Optional: Post-refresh actions
+	async onTokenRefresh(session, refreshed, request) {
+		if (refreshed) {
+			// Token was refreshed
+			logger.info('Token refreshed for user', session.user);
+		}
+	},
+});
 ```
 
-2. Add to `src/lib/providers/index.ts`
-3. Use like any other provider: `provider: 'onelogin'`
-
-## Security Considerations
-
-### OAuth Plugin Responsibilities
-
-The OAuth plugin provides secure authentication:
-
-- **Secure OAuth flows** - CSRF protection, token validation, automatic refresh
-- **Email format validation** - Prevents injection attacks on discovery endpoints
-- **Session isolation** - Each tenant's tokens and sessions are isolated
-- **Token security** - Never logs tokens, never exposes in error messages
-- **Configurable endpoint exposure** - Control which discovery endpoints are publicly accessible
-
-### Your Application's Responsibilities
-
-Multi-tenant systems require application-level security controls beyond OAuth:
-
-#### 1. Domain Ownership Verification (Required for Production)
-
-**The only reliable security control:** Verify that registrants actually own the domains they claim.
-
-Methods (use at least one):
-
-- **DNS TXT record verification** - Require adding a verification code to DNS
-  - Example: `_acme-challenge.company.com TXT "verification-code-12345"`
-  - Query DNS to confirm before activating tenant
-- **Email-based verification** - Send confirmation link to `admin@domain.com` or `postmaster@domain.com`
-  - Requires recipient to have access to domain email
-- **Manual admin approval** - Review and approve each new tenant registration
-  - Scalability trade-off but strongest assurance
-
-**Why this matters:** Without domain verification:
-
-- Attacker registers "gmail.com" and intercepts all Gmail users
-- Attacker claims competitor domains
-- Anyone can impersonate any organization
-
-#### 2. Security Best Practices
-
-**Tenant Discovery:**
-
-- Keep tenant discovery internal to your application
-- Look up organizations in your own database, not via public API
-- Never expose complete tenant lists publicly to prevent customer enumeration
-
-**Access Control:**
-
-- Rate limit login attempts for standard brute force protection
-- Validate all tenant configuration automatically (TenantManager handles this)
-- Only allow organization admins to configure OAuth settings
-
-#### 3. Secret Management
-
-OAuth client secrets require protection:
-
-- **Environment variables** - For static tenant configurations
-- **Secrets manager** - AWS Secrets Manager, Azure Key Vault, HashiCorp Vault
-- **Encryption at rest** - If storing in database, encrypt the `client_secret` field
-- **Never log** - Ensure secrets never appear in application logs
-
-```javascript
-// Good: Load from environment or secrets manager
-const clientSecret = await secretsManager.getSecret(`tenant/${tenantId}/oauth-secret`);
-
-// Bad: Store in plaintext database
-await db.put({ clientSecret: 'plain-text-secret' }); // ❌ Don't do this
-```
-
-### Built-in OAuth Plugin Security
-
-For reference, the OAuth plugin automatically handles:
-
-- ✅ CSRF protection with state tokens (10-minute expiry)
-- ✅ Token security (never logged or exposed)
-- ✅ Email injection prevention
-- ✅ Path length limits (DoS prevention)
-- ✅ Session isolation per tenant
-
-## Testing
-
-### Test Tenant Discovery
-
-```bash
-# Discover tenant by email
-curl "http://localhost:9926/sso/discover?email=user@acme.com"
-
-# List all tenants
-curl "http://localhost:9926/sso/tenants"
-```
-
-### Test Login Flow
-
-1. Visit `/login` to see tenant selection page
-2. Enter email or select organization
-3. Complete Okta authentication
-4. Verify session contains tenant info
-
-## Enterprise Onboarding Workflow
-
-1. **Customer creates Okta application**
-   - Follow [Okta setup guide](./providers.md#okta-oidc)
-   - Provide you with: domain, client ID, client secret, email domains
-
-2. **You register the tenant**
-   - Add configuration to your app
-   - Deploy or use admin API to register
-
-3. **Customer's users can log in**
-   - Via email discovery
-   - Via organization selector
-   - Via direct link
+See [Lifecycle Hooks](./lifecycle-hooks.md) for details.
 
 ## Troubleshooting
 
-### Tenant Not Found
+### Tenant Not Found (404)
 
-**Issue:** User email doesn't match any tenant
+**Cause:** `onResolveProvider` returned `null`
 
-**Solution:**
+**Fix:**
 
-- Verify email domain is in `emailDomains` array
-- Check for typos in domain configuration
-- Ensure domain matching is case-insensitive
+- Verify tenant ID in database matches URL
+- Check tenant status is 'active'
+- Confirm hook is registered
 
-### Wrong OAuth Provider Instance
+### OAuth Error: invalid_client
 
-**Issue:** User redirected to wrong OAuth provider
+**Cause:** Client ID or secret incorrect
 
-**Solution:**
+**Fix:**
 
-- Verify `domain` (or `azureTenantId` for Azure) is correct for tenant
-- Check for multiple tenants with overlapping domains
-- Review email domain mapping
+- Verify credentials in database match OAuth app
+- Check environment variables loaded
+- Ensure no extra whitespace in secrets
 
-### Client Credentials Invalid
+### Session Lost After Restart
 
-**Issue:** OAuth flow fails with invalid_client
+**Cause:** Dynamic providers not resolved from database
 
-**Solution:**
-
-- Verify client ID and secret are correct
-- Ensure credentials match the Okta application
-- Check environment variables are loaded
+**Fix:** The plugin automatically re-resolves providers from your hook - no action needed. If sessions are lost, check session storage configuration.
 
 ## Next Steps
 
-- [Configure lifecycle hooks](./lifecycle-hooks.md) for custom tenant logic
-- [Review token refresh](./token-refresh-and-sessions.md) for session management
-- [API reference](./api-reference.md) for advanced configuration
+- [Lifecycle Hooks](./lifecycle-hooks.md) - User provisioning and custom logic
+- [Token Refresh](./token-refresh-and-sessions.md) - Automatic token refresh
+- [Security Best Practices](./security.md) - Production security checklist
+- [API Reference](./api-reference.md) - Complete API documentation

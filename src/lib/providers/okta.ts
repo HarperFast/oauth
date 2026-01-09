@@ -36,8 +36,8 @@ export const OktaProvider: OAuthProviderConfig = {
 		const ALLOWED_OKTA_DOMAINS = ['.okta.com', '.okta-emea.com', '.oktapreview.com'];
 		validateDomainAllowlist(hostname, ALLOWED_OKTA_DOMAINS, 'Okta');
 
-		// Default to /oauth2/v1 authorization server
-		// Users can override with authServerPath config option
+		// Use /oauth2/v1 (org authorization server - most compatible)
+		// For /oauth2/default or custom auth servers, set authorizationUrl/tokenUrl/userInfoUrl directly in config
 		const authServerPath = '/oauth2/v1';
 
 		return {
