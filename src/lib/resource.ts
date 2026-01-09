@@ -6,7 +6,7 @@
 
 import { Resource } from 'harperdb';
 import type { RequestTarget } from 'harperdb';
-import type { Request, Logger, ProviderRegistry } from '../types.ts';
+import type { Request, Logger, ProviderRegistry, OAuthProviderConfig } from '../types.ts';
 import { handleLogin, handleCallback, handleLogout, handleUserInfo, handleTestPage } from './handlers.ts';
 import type { HookManager } from './hookManager.ts';
 
@@ -30,16 +30,24 @@ export class OAuthResource extends Resource {
 	static providers: ProviderRegistry = {};
 	static debugMode: boolean = false;
 	static hookManager: HookManager | null = null;
+	static pluginDefaults: Partial<OAuthProviderConfig> = {};
 	static logger: Logger | undefined = undefined;
 
 	/**
 	 * Configure the OAuth resource with providers and settings
 	 * Called once during plugin initialization
 	 */
-	static configure(providers: ProviderRegistry, debugMode: boolean, hookManager: HookManager, logger?: Logger): void {
+	static configure(
+		providers: ProviderRegistry,
+		debugMode: boolean,
+		hookManager: HookManager,
+		pluginDefaults: Partial<OAuthProviderConfig>,
+		logger?: Logger
+	): void {
 		OAuthResource.providers = providers;
 		OAuthResource.debugMode = debugMode;
 		OAuthResource.hookManager = hookManager;
+		OAuthResource.pluginDefaults = pluginDefaults;
 		OAuthResource.logger = logger;
 	}
 
@@ -285,15 +293,59 @@ export class OAuthResource extends Resource {
 			return OAuthResource.buildProviderListResponse(providers);
 		}
 
-		// Check if provider exists
-		const providerData = providers[providerName];
+		// Validate provider name format (basic security check)
+		if (providerName.length > 128 || !/^[a-zA-Z0-9_-]+$/.test(providerName)) {
+			return {
+				status: 400,
+				body: { error: 'Invalid provider name format' },
+			};
+		}
+
+		// Check if provider exists in registry
+		let providerData = providers[providerName];
+
+		// If not found, try to resolve via hook
+		if (!providerData && OAuthResource.hookManager?.hasHook('onResolveProvider')) {
+			try {
+				logger?.debug?.(`Provider "${providerName}" not found in registry, calling onResolveProvider hook`);
+
+				const hookConfig = await OAuthResource.hookManager.callResolveProvider(providerName, logger);
+
+				if (hookConfig) {
+					// Hook resolved provider - build full config and register dynamically
+					const { OAuthProvider } = await import('./OAuthProvider.ts');
+					const { buildProviderConfig } = await import('./config.ts');
+
+					// Build full provider config (handles Okta/Azure/Auth0 domain configuration)
+					const pluginDefaults = OAuthResource.pluginDefaults || {};
+					const config = buildProviderConfig(hookConfig, providerName, pluginDefaults);
+
+					const provider = new OAuthProvider(config, logger);
+
+					providers[providerName] = {
+						provider,
+						config,
+					};
+
+					providerData = providers[providerName];
+
+					logger?.info?.(`Dynamically registered provider: ${providerName}`);
+				}
+			} catch (error) {
+				// Hook threw error - log and return 500
+				logger?.error?.(`Error resolving provider ${providerName}:`, (error as Error).message);
+				return {
+					status: 500,
+					body: { error: 'Failed to resolve OAuth provider' },
+				};
+			}
+		}
+
+		// Still not found - return 404
 		if (!providerData) {
 			return {
 				status: 404,
-				body: {
-					error: 'Provider not found',
-					available: Object.keys(providers),
-				},
+				body: { error: 'OAuth provider not found' },
 			};
 		}
 
@@ -303,10 +355,10 @@ export class OAuthResource extends Resource {
 		// Handle specific actions
 		switch (action) {
 			case 'login':
-				return handleLogin(request, target, provider, config, logger);
+				return handleLogin(request, target, provider, config, providerName, logger);
 
 			case 'callback':
-				return handleCallback(request, target, provider, config, hookManager, logger);
+				return handleCallback(request, target, provider, config, hookManager, providerName, logger);
 
 			case 'user':
 				return handleUserInfo(request, false);
@@ -378,6 +430,7 @@ export class OAuthResource extends Resource {
 		OAuthResource.providers = {};
 		OAuthResource.debugMode = false;
 		OAuthResource.hookManager = null;
+		OAuthResource.pluginDefaults = {};
 		OAuthResource.logger = undefined;
 	}
 }

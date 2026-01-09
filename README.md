@@ -110,11 +110,16 @@ export class MyResource extends tables.Resource {
 
 ## Supported Providers
 
+Built-in provider templates (not active until configured):
+
 - **GitHub** - OAuth 2.0
 - **Google** - OpenID Connect
 - **Azure AD** - OpenID Connect
 - **Auth0** - OpenID Connect
-- **Custom** - Generic OIDC provider
+- **Okta** - OpenID Connect (with multi-tenant support)
+- **Custom OIDC** - Any compliant provider
+
+> **Note:** Built-in providers are templates that require configuration. None are active until you provide OAuth credentials (`clientId`, `clientSecret`, etc.). Having provider code in the plugin does not enable authentication or create security exposure.
 
 ## How It Works
 

@@ -39,7 +39,11 @@ describe('OAuth Handlers', () => {
 		mockProvider = {
 			generateCSRFToken: createMockFn(async () => 'csrf-token-123'),
 			getAuthorizationUrl: createMockFn(() => 'https://auth.test.com/authorize?state=csrf-token-123'),
-			verifyCSRFToken: createMockFn(async () => ({ originalUrl: '/dashboard', timestamp: Date.now() })),
+			verifyCSRFToken: createMockFn(async () => ({
+				originalUrl: '/dashboard',
+				timestamp: Date.now(),
+				providerName: 'test-provider', // Match the default providerName used in tests
+			})),
 			exchangeCodeForToken: createMockFn(async () => ({
 				access_token: 'access-token-123',
 				refresh_token: 'refresh-token-456',
@@ -85,12 +89,21 @@ describe('OAuth Handlers', () => {
 
 	describe('handleLogin', () => {
 		it('should initiate OAuth login flow', async () => {
-			const result = await handleLogin(mockRequest, mockTarget, mockProvider, mockConfig, mockLogger);
+			const providerName = 'test-provider';
+			const result = await handleLogin(mockRequest, mockTarget, mockProvider, mockConfig, providerName, mockLogger);
 
 			assert.equal(result.status, 302);
 			assert.equal(result.headers.Location, 'https://auth.test.com/authorize?state=csrf-token-123');
 			assert.equal(mockProvider.generateCSRFToken.mock.calls.length, 1);
 			assert.equal(mockProvider.getAuthorizationUrl.mock.calls.length, 1);
+		});
+
+		it('should bind CSRF token to provider name', async () => {
+			const providerName = 'acme-corp';
+			await handleLogin(mockRequest, mockTarget, mockProvider, mockConfig, providerName, mockLogger);
+
+			const csrfCall = mockProvider.generateCSRFToken.mock.calls[0];
+			assert.equal(csrfCall.arguments[0].providerName, 'acme-corp');
 		});
 
 		it('should use redirect query parameter when provided', async () => {
@@ -101,14 +114,14 @@ describe('OAuth Handlers', () => {
 				}),
 			};
 
-			await handleLogin(mockRequest, targetWithRedirect, mockProvider, mockConfig, mockLogger);
+			await handleLogin(mockRequest, targetWithRedirect, mockProvider, mockConfig, 'test-provider', mockLogger);
 
 			const csrfCall = mockProvider.generateCSRFToken.mock.calls[0];
 			assert.equal(csrfCall.arguments[0].originalUrl, '/custom/redirect/path');
 		});
 
 		it('should use referer as original URL when no redirect param', async () => {
-			await handleLogin(mockRequest, mockTarget, mockProvider, mockConfig, mockLogger);
+			await handleLogin(mockRequest, mockTarget, mockProvider, mockConfig, 'test-provider', mockLogger);
 
 			const csrfCall = mockProvider.generateCSRFToken.mock.calls[0];
 			assert.equal(csrfCall.arguments[0].originalUrl, 'https://app.example.com/page');
@@ -116,14 +129,14 @@ describe('OAuth Handlers', () => {
 
 		it('should fall back to postLoginRedirect when no redirect param or referer', async () => {
 			delete mockRequest.headers.referer;
-			await handleLogin(mockRequest, mockTarget, mockProvider, mockConfig, mockLogger);
+			await handleLogin(mockRequest, mockTarget, mockProvider, mockConfig, 'test-provider', mockLogger);
 
 			const csrfCall = mockProvider.generateCSRFToken.mock.calls[0];
 			assert.equal(csrfCall.arguments[0].originalUrl, '/dashboard');
 		});
 
 		it('should include session ID in CSRF token', async () => {
-			await handleLogin(mockRequest, mockTarget, mockProvider, mockConfig, mockLogger);
+			await handleLogin(mockRequest, mockTarget, mockProvider, mockConfig, 'test-provider', mockLogger);
 
 			const csrfCall = mockProvider.generateCSRFToken.mock.calls[0];
 			assert.equal(csrfCall.arguments[0].sessionId, 'session-123');
@@ -138,6 +151,7 @@ describe('OAuth Handlers', () => {
 				mockProvider,
 				mockConfig,
 				mockHookManager,
+				'test-provider',
 				mockLogger
 			);
 
@@ -150,7 +164,16 @@ describe('OAuth Handlers', () => {
 		});
 
 		it('should update session with user data', async () => {
-			await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockHookManager, mockLogger);
+			await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				'test-provider',
+				mockLogger
+			);
 
 			const updateCall = mockRequest.session.update.mock.calls[0];
 			assert.equal(updateCall.arguments[0].user, 'user@example.com');
@@ -174,6 +197,7 @@ describe('OAuth Handlers', () => {
 				mockProvider,
 				mockConfig,
 				mockHookManager,
+				'test-provider',
 				mockLogger
 			);
 
@@ -190,6 +214,7 @@ describe('OAuth Handlers', () => {
 				mockProvider,
 				mockConfig,
 				mockHookManager,
+				'test-provider',
 				mockLogger
 			);
 
@@ -206,11 +231,13 @@ describe('OAuth Handlers', () => {
 				mockProvider,
 				mockConfig,
 				mockHookManager,
+				'test-provider',
+				'test-provider',
 				mockLogger
 			);
 
 			assert.equal(result.status, 302);
-			assert.equal(result.headers.Location, '/oauth/test/login?error=session_expired');
+			assert.equal(result.headers.Location, '/oauth/test-provider/login?error=session_expired');
 		});
 
 		it('should handle OAuth error with custom postLoginRedirect', async () => {
@@ -227,6 +254,7 @@ describe('OAuth Handlers', () => {
 				mockProvider,
 				mockConfig,
 				mockHookManager,
+				'test-provider',
 				mockLogger
 			);
 
@@ -244,6 +272,7 @@ describe('OAuth Handlers', () => {
 				mockProvider,
 				mockConfig,
 				mockHookManager,
+				'test-provider',
 				mockLogger
 			);
 
@@ -258,7 +287,16 @@ describe('OAuth Handlers', () => {
 				id_token: 'id-token-jwt',
 			}));
 
-			await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockHookManager, mockLogger);
+			await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				'test-provider',
+				mockLogger
+			);
 
 			assert.equal(mockProvider.verifyIdToken.mock.calls.length, 1);
 			assert.equal(mockProvider.verifyIdToken.mock.calls[0].arguments[0], 'id-token-jwt');
@@ -279,6 +317,7 @@ describe('OAuth Handlers', () => {
 				mockProvider,
 				mockConfig,
 				mockHookManager,
+				'test-provider',
 				mockLogger
 			);
 
@@ -298,6 +337,7 @@ describe('OAuth Handlers', () => {
 				mockProvider,
 				mockConfig,
 				mockHookManager,
+				'test-provider',
 				mockLogger
 			);
 
@@ -317,6 +357,7 @@ describe('OAuth Handlers', () => {
 				mockProvider,
 				mockConfig,
 				mockHookManager,
+				'test-provider',
 				mockLogger
 			);
 
@@ -343,6 +384,7 @@ describe('OAuth Handlers', () => {
 				mockProvider,
 				mockConfig,
 				mockHookManager,
+				'test-provider',
 				mockLogger
 			);
 
@@ -363,12 +405,124 @@ describe('OAuth Handlers', () => {
 				mockProvider,
 				mockConfig,
 				mockHookManager,
+				'test-provider',
 				mockLogger
 			);
 
 			assert.equal(result.status, 302);
 			// Should still complete but log warning
 			assert.equal(mockLogger.warn.mock.calls.length, 1);
+		});
+
+		// Security tests for provider binding
+		it('should reject callback when state token provider does not match callback provider', async () => {
+			// State token was issued for 'evil-company' but callback is for 'target-company'
+			mockProvider.verifyCSRFToken = createMockFn(async () => ({
+				originalUrl: '/dashboard',
+				timestamp: Date.now(),
+				providerName: 'evil-company', // Token was for different provider
+			}));
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'target-company', // But callback is for this provider
+				mockLogger
+			);
+
+			// Should reject with error - redirects to original URL with error params
+			assert.equal(result.status, 302);
+			assert.equal(result.headers.Location, '/dashboard?error=auth_failed&reason=csrf');
+
+			// Should log warning about potential attack
+			assert.ok(mockLogger.warn.mock.calls.some((call) => call.arguments[0].includes('State token provider mismatch')));
+
+			// Should NOT attempt token exchange
+			assert.equal(mockProvider.exchangeCodeForToken.mock.calls.length, 0);
+		});
+
+		it('should allow callback when state token provider matches callback provider', async () => {
+			// State token was issued for 'acme-corp' and callback is also for 'acme-corp'
+			mockProvider.verifyCSRFToken = createMockFn(async () => ({
+				originalUrl: '/dashboard',
+				timestamp: Date.now(),
+				providerName: 'acme-corp',
+			}));
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'acme-corp', // Same provider
+				'test-provider',
+				mockLogger
+			);
+
+			// Should succeed
+			assert.equal(result.status, 302);
+			assert.equal(result.headers.Location, '/dashboard');
+
+			// Should attempt token exchange
+			assert.equal(mockProvider.exchangeCodeForToken.mock.calls.length, 1);
+		});
+
+		it('should prevent cross-tenant CSRF attack', async () => {
+			// Attack scenario: Evil Company tries to use Target Company's callback URL
+			// 1. Attacker gets victim to authenticate at evil-company.okta.com
+			// 2. Evil Okta redirects to fabric.com/oauth/target-company/callback
+			// 3. But state token was issued for evil-company
+
+			mockProvider.verifyCSRFToken = createMockFn(async () => ({
+				originalUrl: '/',
+				timestamp: Date.now(),
+				providerName: 'evil-company',
+			}));
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'target-company',
+				'test-provider',
+				mockLogger
+			);
+
+			// Attack should be blocked - redirects to original URL with error params
+			assert.equal(result.status, 302);
+			assert.equal(result.headers.Location, '/?error=auth_failed&reason=csrf');
+
+			// Should not reveal target company's OAuth configuration
+			assert.equal(mockProvider.exchangeCodeForToken.mock.calls.length, 0);
+		});
+
+		it('should store providerName in session oauth metadata', async () => {
+			mockProvider.verifyCSRFToken = createMockFn(async () => ({
+				originalUrl: '/dashboard',
+				timestamp: Date.now(),
+				providerName: 'acme-corp',
+			}));
+
+			await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'acme-corp',
+				'test-provider',
+				mockLogger
+			);
+
+			const updateCall = mockRequest.session.update.mock.calls[0];
+			// Provider should be the registry key (providerName), not the provider type
+			assert.equal(updateCall.arguments[0].oauth.provider, 'acme-corp');
 		});
 	});
 

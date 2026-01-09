@@ -38,6 +38,51 @@ export interface OAuthPluginConfig {
  */
 export interface OAuthHooks {
 	/**
+	 * Resolve OAuth provider configuration dynamically
+	 *
+	 * Called when a provider is not found in the static registry.
+	 * Allows applications to implement multi-tenant OAuth by
+	 * returning provider configurations based on naming conventions.
+	 *
+	 * Example: Provider name "okta-org_abc123" can be parsed to load
+	 * organization-specific Okta configuration from database.
+	 *
+	 * @param providerName - Provider name from URL path (e.g., "okta-org_abc123")
+	 * @param logger - Optional logger instance
+	 * @returns Provider configuration or null if not found
+	 * @throws Error if resolution fails (returns 500 to client)
+	 *
+	 * Security Requirements:
+	 * - MUST validate tenant ID format before database lookup
+	 * - MUST validate domain safety (SSRF protection)
+	 * - MUST validate provider-specific configuration
+	 * - MUST NOT return configurations for disabled/inactive tenants
+	 * - SHOULD log all resolution attempts for audit trail
+	 *
+	 * @example
+	 * ```typescript
+	 * onResolveProvider: async (providerName, logger) => {
+	 *   // Parse provider name: "okta-org_abc123" → ["okta", "org_abc123"]
+	 *   const match = providerName.match(/^(okta|azure|auth0)-(.+)$/);
+	 *   if (!match) return null;
+	 *
+	 *   const [, provider, tenantId] = match;
+	 *
+	 *   // Validate tenant ID format
+	 *   validateTenantId(tenantId);
+	 *
+	 *   // Query database for tenant config
+	 *   const org = await Organization.get(tenantId, context);
+	 *   if (!org?.oauthConfig?.enabled) return null;
+	 *
+	 *   // Build and return provider config
+	 *   return buildProviderConfig(org.oauthConfig, provider);
+	 * }
+	 * ```
+	 */
+	onResolveProvider?: (providerName: string, logger?: Logger) => Promise<OAuthProviderConfig | null>;
+
+	/**
 	 * Called after successful OAuth login, before session is finalized
 	 * Use this to provision users, assign roles, etc.
 	 * @param oauthUser - The OAuth user information

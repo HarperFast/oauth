@@ -96,6 +96,7 @@ export function buildProviderConfig(
 				}
 				break;
 			case 'auth0':
+			case 'okta':
 				if (expandedOptions.domain) {
 					providerConfig = providerPreset.configure(expandedOptions.domain);
 				}

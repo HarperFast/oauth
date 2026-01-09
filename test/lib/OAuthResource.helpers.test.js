@@ -152,21 +152,24 @@ describe('OAuthResource - Helper Methods', () => {
 		it('should configure all properties', () => {
 			const mockProviders = { github: { config: { provider: 'github' } } };
 			const mockHookManager = { callOnLogin: () => {} };
+			const mockPluginDefaults = { redirectUri: 'http://localhost/callback' };
 			const mockLogger = { info: () => {} };
 
-			OAuthResource.configure(mockProviders, true, mockHookManager, mockLogger);
+			OAuthResource.configure(mockProviders, true, mockHookManager, mockPluginDefaults, mockLogger);
 
 			assert.equal(OAuthResource.providers, mockProviders);
 			assert.equal(OAuthResource.debugMode, true);
 			assert.equal(OAuthResource.hookManager, mockHookManager);
+			assert.equal(OAuthResource.pluginDefaults, mockPluginDefaults);
 			assert.equal(OAuthResource.logger, mockLogger);
 		});
 
 		it('should allow configuration without logger', () => {
 			const mockProviders = { github: { config: { provider: 'github' } } };
 			const mockHookManager = { callOnLogin: () => {} };
+			const mockPluginDefaults = {};
 
-			OAuthResource.configure(mockProviders, false, mockHookManager);
+			OAuthResource.configure(mockProviders, false, mockHookManager, mockPluginDefaults);
 
 			assert.equal(OAuthResource.providers, mockProviders);
 			assert.equal(OAuthResource.debugMode, false);
@@ -177,14 +180,16 @@ describe('OAuthResource - Helper Methods', () => {
 		it('should reset all properties to defaults', () => {
 			const mockProviders = { github: { config: { provider: 'github' } } };
 			const mockHookManager = { callOnLogin: () => {} };
+			const mockPluginDefaults = {};
 			const mockLogger = { info: () => {} };
 
-			OAuthResource.configure(mockProviders, true, mockHookManager, mockLogger);
+			OAuthResource.configure(mockProviders, true, mockHookManager, mockPluginDefaults, mockLogger);
 			OAuthResource.reset();
 
 			assert.deepEqual(OAuthResource.providers, {});
 			assert.equal(OAuthResource.debugMode, false);
 			assert.equal(OAuthResource.hookManager, null);
+			assert.deepEqual(OAuthResource.pluginDefaults, {});
 			assert.equal(OAuthResource.logger, undefined);
 		});
 
@@ -192,11 +197,12 @@ describe('OAuthResource - Helper Methods', () => {
 			const providers1 = { github: { config: { provider: 'github' } } };
 			const providers2 = { google: { config: { provider: 'google' } } };
 			const mockHookManager = { callOnLogin: () => {} };
+			const mockPluginDefaults = {};
 
-			OAuthResource.configure(providers1, true, mockHookManager);
+			OAuthResource.configure(providers1, true, mockHookManager, mockPluginDefaults);
 			assert.equal(Object.keys(OAuthResource.providers).length, 1);
 
-			OAuthResource.configure(providers2, false, mockHookManager);
+			OAuthResource.configure(providers2, false, mockHookManager, mockPluginDefaults);
 			assert.equal(Object.keys(OAuthResource.providers).length, 1);
 			assert.ok(OAuthResource.providers.google);
 			assert.equal(OAuthResource.debugMode, false);
@@ -219,7 +225,8 @@ describe('OAuthResource - Helper Methods', () => {
 		it('should return configured hookManager', () => {
 			const mockHookManager = { callOnLogin: () => {} };
 			const mockProviders = {};
-			OAuthResource.configure(mockProviders, false, mockHookManager);
+			const mockPluginDefaults = {};
+			OAuthResource.configure(mockProviders, false, mockHookManager, mockPluginDefaults);
 
 			assert.equal(OAuthResource.getHookManager(), mockHookManager);
 		});
@@ -230,7 +237,8 @@ describe('OAuthResource - Helper Methods', () => {
 				google: { config: { provider: 'google' } },
 			};
 			const mockHookManager = { callOnLogin: () => {} };
-			OAuthResource.configure(mockProviders, false, mockHookManager);
+			const mockPluginDefaults = {};
+			OAuthResource.configure(mockProviders, false, mockHookManager, mockPluginDefaults);
 
 			const providers = OAuthResource.getProviders();
 			assert.equal(Object.keys(providers).length, 2);

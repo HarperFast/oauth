@@ -6,14 +6,24 @@ import { GitHubProvider } from './github.ts';
 import { GoogleProvider } from './google.ts';
 import { AzureADProvider } from './azure.ts';
 import { auth0Provider } from './auth0.ts';
+import { OktaProvider } from './okta.ts';
+import { genericProvider } from './generic.ts';
 import type { OAuthProviderConfig } from '../../types.ts';
 
-export const providers: Record<string, OAuthProviderConfig> = {
+// Auto-register all providers
+const providerModules = {
 	github: GitHubProvider,
 	google: GoogleProvider,
 	azure: AzureADProvider,
-	microsoft: AzureADProvider, // Alias
 	auth0: auth0Provider,
+	okta: OktaProvider,
+	generic: genericProvider,
+};
+
+export const providers: Record<string, OAuthProviderConfig> = {
+	...providerModules,
+	// Aliases
+	microsoft: AzureADProvider,
 };
 
 /**

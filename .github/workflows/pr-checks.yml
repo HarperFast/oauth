@@ -41,7 +41,7 @@ jobs:
 
       - name: Run tests (Node 20)
         if: matrix.node-version == 20
-        run: npm run test
+        run: npm run test:node-twenty
 
   test-bun:
     name: Test with Bun

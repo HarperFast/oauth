@@ -4,7 +4,7 @@
  * Manages loading and calling lifecycle hooks for the OAuth plugin
  */
 
-import type { OAuthHooks, OAuthUser, TokenResponse, Logger } from '../types.ts';
+import type { OAuthHooks, OAuthUser, TokenResponse, Logger, OAuthProviderConfig } from '../types.ts';
 
 /**
  * Hook Manager
@@ -85,9 +85,44 @@ export class HookManager {
 	}
 
 	/**
+	 * Check if a specific hook is registered
+	 */
+	hasHook(hookName: keyof OAuthHooks): boolean {
+		return !!this.hooks[hookName];
+	}
+
+	/**
 	 * Check if any hooks are loaded
 	 */
 	hasHooks(): boolean {
 		return Object.keys(this.hooks).length > 0;
+	}
+
+	/**
+	 * Call onResolveProvider hook
+	 *
+	 * Called when a provider is not found in the static registry.
+	 * Allows applications to dynamically resolve provider configurations.
+	 *
+	 * @param providerName - Provider name from URL path (e.g., "okta-org_abc123")
+	 * @param logger - Optional logger instance
+	 * @returns Provider configuration or null if not found
+	 * @throws Error if resolution fails
+	 */
+	async callResolveProvider(providerName: string, logger?: Logger): Promise<OAuthProviderConfig | null> {
+		const hook = this.hooks.onResolveProvider;
+		if (!hook) return null;
+
+		try {
+			this.logger?.debug?.(`Calling onResolveProvider hook for: ${providerName}`);
+			const config = await hook(providerName, logger || this.logger);
+			if (config) {
+				this.logger?.debug?.(`Provider resolved: ${providerName} → ${config.provider}`);
+			}
+			return config;
+		} catch (error) {
+			this.logger?.error?.('onResolveProvider hook failed:', (error as Error).message);
+			throw error; // Re-throw for resource to handle (returns 500)
+		}
 	}
 }

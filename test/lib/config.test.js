@@ -254,17 +254,18 @@ describe('OAuth Configuration', () => {
 			});
 
 			it('should configure Azure with tenant', () => {
+				const tenantId = '12345678-1234-1234-1234-123456789012';
 				const providerConfig = {
 					provider: 'azure',
 					clientId: 'azure-client',
 					clientSecret: 'azure-secret',
-					tenantId: 'my-tenant',
+					tenantId,
 				};
 
 				const config = buildProviderConfig(providerConfig, 'azure', {});
 
-				assert.ok(config.authorizationUrl.includes('my-tenant'));
-				assert.ok(config.tokenUrl.includes('my-tenant'));
+				assert.ok(config.authorizationUrl.includes(tenantId));
+				assert.ok(config.tokenUrl.includes(tenantId));
 			});
 
 			it('should configure Auth0 with domain', () => {

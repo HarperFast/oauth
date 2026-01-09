@@ -6,6 +6,7 @@
  */
 
 import type { OAuthProviderConfig } from '../../types.ts';
+import { validateDomainSafety, validateDomainAllowlist } from './validation.ts';
 
 export const auth0Provider: OAuthProviderConfig = {
 	provider: 'auth0',
@@ -20,19 +21,19 @@ export const auth0Provider: OAuthProviderConfig = {
 
 	// URLs are configured dynamically based on domain
 	configure: (domain: string): Partial<OAuthProviderConfig> => {
-		if (!domain) {
-			throw new Error('Auth0 provider requires domain configuration');
-		}
+		// Validate domain safety (SSRF protection, private IPs, etc.)
+		const hostname = validateDomainSafety(domain, 'Auth0');
 
-		// Ensure domain doesn't include protocol or trailing slash
-		const cleanDomain = domain.replace(/^https?:\/\//, '').replace(/\/$/, '');
+		// Validate against Auth0 domain allowlist
+		const ALLOWED_AUTH0_DOMAINS = ['.auth0.com', '.us.auth0.com', '.eu.auth0.com', '.au.auth0.com', '.jp.auth0.com'];
+		validateDomainAllowlist(hostname, ALLOWED_AUTH0_DOMAINS, 'Auth0');
 
 		return {
-			authorizationUrl: `https://${cleanDomain}/authorize`,
-			tokenUrl: `https://${cleanDomain}/oauth/token`,
-			userInfoUrl: `https://${cleanDomain}/userinfo`,
-			jwksUri: `https://${cleanDomain}/.well-known/jwks.json`,
-			issuer: `https://${cleanDomain}/`,
+			authorizationUrl: `https://${hostname}/authorize`,
+			tokenUrl: `https://${hostname}/oauth/token`,
+			userInfoUrl: `https://${hostname}/userinfo`,
+			jwksUri: `https://${hostname}/.well-known/jwks.json`,
+			issuer: `https://${hostname}/`,
 		};
 	},
 };
