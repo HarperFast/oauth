@@ -182,16 +182,17 @@ export async function handleApplication(scope: Scope): Promise<void> {
 			return next(request);
 		}
 
-		// Get the provider for this OAuth session
-		const providerName = request.session.oauth.provider;
-		let providerData = providers[providerName];
+		// Get the provider config ID for this OAuth session
+		// Use providerConfigId (new) or fall back to provider (old) for backwards compatibility
+		const providerConfigId = request.session.oauth.providerConfigId || request.session.oauth.provider;
+		let providerData = providers[providerConfigId];
 
 		// If provider not found in registry, try to resolve via hook (dynamic providers)
 		if (!providerData && hookManager?.hasHook('onResolveProvider')) {
 			try {
-				logger?.debug?.(`Provider "${providerName}" not in registry, attempting dynamic resolution`);
+				logger?.debug?.(`Provider config "${providerConfigId}" not in registry, attempting dynamic resolution`);
 
-				const hookConfig = await hookManager.callResolveProvider(providerName, logger);
+				const hookConfig = await hookManager.callResolveProvider(providerConfigId, logger);
 
 				if (hookConfig) {
 					// Hook resolved provider - build full config and register dynamically
@@ -199,24 +200,24 @@ export async function handleApplication(scope: Scope): Promise<void> {
 					const { buildProviderConfig } = await import('./lib/config.ts');
 
 					// Build full provider config (handles Okta/Azure/Auth0 domain configuration)
-					const config = buildProviderConfig(hookConfig, providerName, pluginDefaults);
+					const config = buildProviderConfig(hookConfig, providerConfigId, pluginDefaults);
 					const provider = new OAuthProvider(config, logger);
 
-					providers[providerName] = {
+					providers[providerConfigId] = {
 						provider,
 						config,
 					};
 
-					providerData = providers[providerName];
-					logger?.info?.(`Dynamically registered provider for session validation: ${providerName}`);
+					providerData = providers[providerConfigId];
+					logger?.info?.(`Dynamically registered provider for session validation: ${providerConfigId}`);
 				}
 			} catch (error) {
-				logger?.error?.(`Error resolving provider ${providerName} for session:`, (error as Error).message);
+				logger?.error?.(`Error resolving provider ${providerConfigId} for session:`, (error as Error).message);
 			}
 		}
 
 		if (!providerData) {
-			logger?.warn?.(`OAuth provider '${providerName}' not found, logging out user`);
+			logger?.warn?.(`OAuth provider config '${providerConfigId}' not found, logging out user`);
 			// Provider no longer exists - complete logout
 			await clearOAuthSession(request.session, logger);
 			return next(request);
@@ -229,7 +230,7 @@ export async function handleApplication(scope: Scope): Promise<void> {
 			// Session is no longer valid (already cleaned up by validator)
 			logger?.debug?.(`OAuth session invalidated: ${validation.error}`);
 		} else if (validation.refreshed) {
-			logger?.debug?.(`OAuth token auto-refreshed for ${providerName}`);
+			logger?.debug?.(`OAuth token auto-refreshed for ${providerConfigId}`);
 		}
 
 		// Continue with the request (session updated if refreshed)
