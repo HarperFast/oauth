@@ -151,6 +151,8 @@ export async function validateAndRefreshSession(
 		// Update session with new tokens and metadata
 		const updatedMetadata: OAuthSessionMetadata = {
 			provider: oauthMetadata.provider,
+			providerConfigId: oauthMetadata.providerConfigId,
+			providerType: oauthMetadata.providerType,
 			accessToken: tokenResponse.access_token,
 			refreshToken: tokenResponse.refresh_token || oauthMetadata.refreshToken, // Keep existing if not provided
 			expiresAt: newExpiresAt,

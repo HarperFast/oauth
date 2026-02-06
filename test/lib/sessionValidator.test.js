@@ -131,6 +131,8 @@ test('should preserve provider field during token refresh', async () => {
 	const session = createMockSession({
 		oauth: {
 			provider: 'google',
+			providerConfigId: 'google',
+			providerType: 'google',
 			accessToken: 'old_token',
 			refreshToken: 'old_refresh',
 			expiresAt: Date.now() - 1000, // Already expired
@@ -146,6 +148,8 @@ test('should preserve provider field during token refresh', async () => {
 	// BUG: This assertion will FAIL before the fix!
 	// The provider field gets lost during session.update()
 	assert.strictEqual(session.oauth.provider, 'google', 'provider field should be preserved after token refresh');
+	assert.strictEqual(session.oauth.providerConfigId, 'google', 'providerConfigId field should be preserved after token refresh');
+	assert.strictEqual(session.oauth.providerType, 'google', 'providerType field should be preserved after token refresh');
 });
 
 test('should preserve custom session fields from hooks during refresh', async () => {

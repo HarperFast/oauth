@@ -367,6 +367,9 @@ describe('OAuth Handlers', () => {
 			// Token data is now stored in oauth object
 			assert.ok(mockRequest.session.oauth);
 			assert.equal(mockRequest.session.oauth.accessToken, 'access-token-123');
+			assert.equal(mockRequest.session.oauth.provider, 'test-provider', 'provider (config key) should be set');
+			assert.equal(mockRequest.session.oauth.providerConfigId, 'test-provider', 'providerConfigId should be set');
+			assert.equal(mockRequest.session.oauth.providerType, 'test', 'providerType should match config.provider');
 		});
 
 		it('should handle tokens without expiration (GitHub style)', async () => {
