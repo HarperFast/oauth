@@ -1,12 +1,12 @@
 # Configuration Reference
 
-Complete configuration options for the `@harperdb/oauth` plugin.
+Complete configuration options for the `@harperfast/oauth` plugin.
 
 ## Basic Configuration
 
 ```yaml
-'@harperdb/oauth':
-  package: '@harperdb/oauth'
+'@harperfast/oauth':
+  package: '@harperfast/oauth'
   providers:
     github:
       clientId: ${OAUTH_GITHUB_CLIENT_ID}
@@ -112,7 +112,7 @@ The OAuth plugin uses two different redirect configurations that serve distinct 
 **Configuration:**
 
 ```yaml
-'@harperdb/oauth':
+'@harperfast/oauth':
   redirectUri: ${OAUTH_REDIRECT_URI}
   providers:
     github:
@@ -143,7 +143,7 @@ The OAuth plugin uses two different redirect configurations that serve distinct 
 **Configuration:**
 
 ```yaml
-'@harperdb/oauth':
+'@harperfast/oauth':
   postLoginRedirect: ${OAUTH_POST_LOGIN_REDIRECT} # Default: '/'
 ```
 
@@ -202,7 +202,7 @@ window.location.href = '/oauth/github/login?redirect=' + encodeURIComponent('/ap
 **Recommended:** Configure `postLoginRedirect` with your SPA route including the fragment:
 
 ```yaml
-'@harperdb/oauth':
+'@harperfast/oauth':
   postLoginRedirect: '/app#home' # Always land on SPA home view
 ```
 
@@ -240,8 +240,8 @@ if (state.view) {
 ### Complete Redirect Configuration Example
 
 ```yaml
-'@harperdb/oauth':
-  package: '@harperdb/oauth'
+'@harperfast/oauth':
+  package: '@harperfast/oauth'
   redirectUri: ${OAUTH_REDIRECT_URI} # OAuth callback: https://app.example.com/oauth/callback
   postLoginRedirect: ${OAUTH_POST_LOGIN_REDIRECT} # After login: /dashboard
   debug: false
@@ -283,7 +283,7 @@ See the [Lifecycle Hooks documentation](./lifecycle-hooks.md) for complete detai
 
 ```javascript
 // resources.js
-import { registerHooks } from '@harperdb/oauth';
+import { registerHooks } from '@harperfast/oauth';
 import { hooks } from './src/lib/oauthHooks.js';
 
 registerHooks(hooks);
@@ -342,8 +342,8 @@ DEBUG_ALLOWED_IPS=
 ## Complete Example
 
 ```yaml
-'@harperdb/oauth':
-  package: '@harperdb/oauth'
+'@harperfast/oauth':
+  package: '@harperfast/oauth'
   debug: false
   providers:
     github:

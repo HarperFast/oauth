@@ -198,7 +198,7 @@ Register lifecycle hooks programmatically.
 **Import:**
 
 ```javascript
-import { registerHooks } from '@harperdb/oauth';
+import { registerHooks } from '@harperfast/oauth';
 ```
 
 **Signature:**

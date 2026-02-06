@@ -40,7 +40,7 @@ Store OAuth configs in your database (structure is up to you):
 The OAuth plugin calls your `onResolveProvider` hook when a user visits `/oauth/{tenantId}/login`:
 
 ```typescript
-import { registerHooks } from '@harperdb/oauth';
+import { registerHooks } from '@harperfast/oauth';
 
 export async function handleApplication(scope) {
 	const { tables, logger } = scope;
@@ -173,7 +173,7 @@ Load from database at runtime (shown in Quick Start above).
 Create an admin endpoint to add tenants without redeployment. The endpoint should:
 
 - Verify admin access
-- Validate tenant data (use `validateTenantId()` and `validateDomainSafety()` from '@harperdb/oauth')
+- Validate tenant data (use `validateTenantId()` and `validateDomainSafety()` from '@harperfast/oauth')
 - Store tenant config in your database
 - Encrypt `clientSecret` before storing
 
@@ -340,7 +340,7 @@ import {
 	validateTenantId, // Validates tenant ID format
 	sanitizeTenantName, // Sanitizes for HTML display
 	validateAzureTenantId, // Validates Azure tenant GUID
-} from '@harperdb/oauth';
+} from '@harperfast/oauth';
 
 // Example: Validate tenant registration
 const result = validateDomainSafety(domain);

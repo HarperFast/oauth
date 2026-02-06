@@ -14,7 +14,7 @@ OAuth 2.0 and OpenID Connect authentication for Harper applications. Supports Gi
 ## Installation
 
 ```bash
-npm install @harperdb/oauth
+npm install @harperfast/oauth
 ```
 
 ## Quick Start
@@ -24,8 +24,8 @@ npm install @harperdb/oauth
 Add to your `config.yaml`:
 
 ```yaml
-'@harperdb/oauth':
-  package: '@harperdb/oauth'
+'@harperfast/oauth':
+  package: '@harperfast/oauth'
   providers:
     github:
       clientId: ${OAUTH_GITHUB_CLIENT_ID}
@@ -53,7 +53,7 @@ Create or update users when they log in:
 
 ```typescript
 // resources.ts
-import { registerHooks } from '@harperdb/oauth';
+import { registerHooks } from '@harperfast/oauth';
 
 registerHooks({
 	onLogin: async (oauthUser, tokenResponse, session, request, provider) => {
@@ -195,7 +195,7 @@ Tokens automatically expire after 10 minutes.
 Enable debug endpoints for testing:
 
 ```yaml
-'@harperdb/oauth':
+'@harperfast/oauth':
   debug: true
   providers:
     github:

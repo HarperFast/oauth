@@ -52,7 +52,7 @@ let activeHookManager: HookManager | null = null;
  *
  * @example
  * ```typescript
- * import { registerHooks } from '@harperdb/oauth';
+ * import { registerHooks } from '@harperfast/oauth';
  *
  * // Can be called at module load time or later
  * registerHooks({

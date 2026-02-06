@@ -326,7 +326,7 @@ Need to force a refresh? Send any authenticated HTTP request to trigger middlewa
 Enable debug mode in config:
 
 ```yaml
-'@harperdb/oauth':
+'@harperfast/oauth':
   debug: true
 ```
 

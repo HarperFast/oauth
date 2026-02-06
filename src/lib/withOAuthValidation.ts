@@ -28,7 +28,7 @@ export interface OAuthValidationOptions {
  * @example
  * ```typescript
  * // In your application component:
- * import { withOAuthValidation } from '@harperdb/oauth';
+ * import { withOAuthValidation } from '@harperfast/oauth';
  *
  * export function handleApplication(scope) {
  *   // Get OAuth providers from the OAuth plugin
@@ -188,7 +188,7 @@ export function withOAuthValidation(resource: any, options: OAuthValidationOptio
  *
  * @example
  * ```typescript
- * import { getOAuthProviders } from '@harperdb/oauth';
+ * import { getOAuthProviders } from '@harperfast/oauth';
  *
  * export function handleApplication(scope) {
  *   const providers = getOAuthProviders(scope);

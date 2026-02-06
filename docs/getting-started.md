@@ -1,11 +1,11 @@
-# Getting Started with @harperdb/oauth
+# Getting Started with @harperfast/oauth
 
-The `@harperdb/oauth` plugin provides OAuth 2.0 and OpenID Connect (OIDC) authentication for Harper applications.
+The `@harperfast/oauth` plugin provides OAuth 2.0 and OpenID Connect (OIDC) authentication for Harper applications.
 
 ## Installation
 
 ```bash
-npm install @harperdb/oauth
+npm install @harperfast/oauth
 ```
 
 ## Quick Start
@@ -15,8 +15,8 @@ npm install @harperdb/oauth
 Add the plugin to your Harper application's `config.yaml`:
 
 ```yaml
-'@harperdb/oauth':
-  package: '@harperdb/oauth'
+'@harperfast/oauth':
+  package: '@harperfast/oauth'
   providers:
     github:
       clientId: ${OAUTH_GITHUB_CLIENT_ID}
@@ -35,7 +35,7 @@ export OAUTH_GITHUB_CLIENT_SECRET="your_github_client_secret"
 If you need to provision users or customize the authentication flow, register hooks in your `resources.js`:
 
 ```javascript
-import { registerHooks } from '@harperdb/oauth';
+import { registerHooks } from '@harperfast/oauth';
 
 registerHooks({
 	onLogin: async (oauthUser, tokenResponse, session, request, provider) => {

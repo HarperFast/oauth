@@ -34,7 +34,7 @@ Detailed setup instructions for each supported OAuth provider.
 ### 2. Configure Plugin
 
 ```yaml
-'@harperdb/oauth':
+'@harperfast/oauth':
   providers:
     github:
       clientId: ${OAUTH_GITHUB_CLIENT_ID}
@@ -75,7 +75,7 @@ export OAUTH_GITHUB_CLIENT_SECRET="your_client_secret"
 ### 2. Configure Plugin
 
 ```yaml
-'@harperdb/oauth':
+'@harperfast/oauth':
   providers:
     google:
       clientId: ${OAUTH_GOOGLE_CLIENT_ID}
@@ -119,7 +119,7 @@ export OAUTH_GOOGLE_CLIENT_SECRET="your_client_secret"
 ### 2. Configure Plugin
 
 ```yaml
-'@harperdb/oauth':
+'@harperfast/oauth':
   providers:
     azure:
       clientId: ${OAUTH_AZURE_CLIENT_ID}
@@ -164,7 +164,7 @@ export OAUTH_AZURE_TENANT_ID="your_tenant_id"
 ### 2. Configure Plugin
 
 ```yaml
-'@harperdb/oauth':
+'@harperfast/oauth':
   providers:
     auth0:
       domain: ${OAUTH_AUTH0_DOMAIN}
@@ -211,7 +211,7 @@ export OAUTH_AUTH0_CLIENT_SECRET="your_client_secret"
 ### 2. Configure Plugin
 
 ```yaml
-'@harperdb/oauth':
+'@harperfast/oauth':
   providers:
     okta:
       domain: ${OAUTH_OKTA_DOMAIN}
@@ -240,7 +240,7 @@ export OAUTH_OKTA_CLIENT_SECRET="your_client_secret"
 Okta supports mapping user groups to roles. The plugin will use the first group as the user's role:
 
 ```yaml
-'@harperdb/oauth':
+'@harperfast/oauth':
   providers:
     okta:
       domain: ${OAUTH_OKTA_DOMAIN}
@@ -273,7 +273,7 @@ For other OpenID Connect compatible providers:
 ### Configuration
 
 ```yaml
-'@harperdb/oauth':
+'@harperfast/oauth':
   providers:
     custom:
       clientId: ${OAUTH_CUSTOM_CLIENT_ID}

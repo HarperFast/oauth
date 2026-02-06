@@ -32,7 +32,7 @@ import {
 	validateDomainSafety,
 	validateDomainAllowlist,
 	validateAzureTenantId,
-} from '@harperdb/oauth';
+} from '@harperfast/oauth';
 
 const { Organization } = tables;
 
@@ -327,7 +327,7 @@ The typical pattern is to register hooks in your application's main entry point 
 **resources.js (application entry point):**
 
 ```javascript
-import { registerHooks } from '@harperdb/oauth';
+import { registerHooks } from '@harperfast/oauth';
 import { hooks } from './src/lib/oauthHooks.js';
 
 // Register hooks at module load time
@@ -412,7 +412,7 @@ You can also register hooks inline:
 **resources.js:**
 
 ```javascript
-import { registerHooks } from '@harperdb/oauth';
+import { registerHooks } from '@harperfast/oauth';
 
 registerHooks({
 	onLogin: async (oauthUser, tokenResponse, session, request, provider) => {
@@ -550,7 +550,7 @@ async function handleLogin(oauthUser, tokenResponse, session, request, provider)
 Use debug mode to test hooks during development:
 
 ```yaml
-'@harperdb/oauth':
+'@harperfast/oauth':
   debug: true
   providers:
     github:

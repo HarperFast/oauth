@@ -5,7 +5,7 @@
  * organizations with tenant routing and user provisioning.
  */
 
-import { registerHooks, TenantManager } from '@harperdb/oauth';
+import { registerHooks, TenantManager } from '@harperfast/oauth';
 
 // Initialize tenant manager with multiple Okta organizations
 const tenantManager = new TenantManager();

@@ -1,5 +1,5 @@
 {
-	"name": "@harperdb/oauth",
+	"name": "@harperfast/oauth",
 	"version": "1.2.0",
 	"description": "OAuth 2.0 authentication plugin for Harper",
 	"license": "Apache-2.0",
