@@ -315,8 +315,15 @@ export interface Request extends IncomingMessage {
  * Token and expiration data stored in session for automatic refresh
  */
 export interface OAuthSessionMetadata {
-	/** OAuth provider name (e.g., 'github', 'google') */
+	/**
+	 * Provider configuration ID/key from config (e.g., 'my-custom-github', 'production-okta').
+	 * @deprecated Use `providerConfigId` instead. This field is maintained for backwards compatibility only.
+	 */
 	provider: string;
+	/** Provider configuration ID/key from config (e.g., 'my-custom-github', 'production-okta'). */
+	providerConfigId: string;
+	/** OAuth provider type (e.g., 'github', 'google', 'okta') */
+	providerType: string;
 	/** Current access token */
 	accessToken: string;
 	/** Refresh token for obtaining new access tokens */

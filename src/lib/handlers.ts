@@ -219,13 +219,13 @@ export async function handleCallback(
 			// Leave expiresAt and refreshThreshold undefined so middleware doesn't try to refresh
 
 			// Prepare session data
-			// Store providerName (registry key) not config.provider (provider type)
-			// This ensures session validation can look up the correct provider
 			const sessionData: any = {
 				user: hookData?.user || user.username, // Use hook's user if provided, otherwise OAuth username
 				oauthUser: user, // Store full OAuth user object separately
 				oauth: {
-					provider: providerName, // Store registry key (e.g., 'harperdb') not provider type (e.g., 'okta')
+					provider: providerName, // Config key (backwards compatible - e.g., 'my-custom-github', 'production-okta')
+					providerConfigId: providerName, // Config key/ID (clearer naming for new code)
+					providerType: config.provider, // Provider type (e.g., 'github', 'okta')
 					accessToken: tokenResponse.access_token,
 					refreshToken: tokenResponse.refresh_token,
 					expiresAt,
@@ -358,6 +358,8 @@ export async function handleUserInfo(request: Request, tokenRefreshed = false): 
 				oauth: oauthMetadata
 					? {
 							provider: oauthMetadata.provider,
+							providerConfigId: oauthMetadata.providerConfigId,
+							providerType: oauthMetadata.providerType,
 							expiresAt: oauthMetadata.expiresAt,
 							refreshThreshold: oauthMetadata.refreshThreshold,
 							lastRefreshed: oauthMetadata.lastRefreshed,

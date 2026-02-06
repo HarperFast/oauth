@@ -373,7 +373,7 @@ registerHooks({
 				id: user.email,
 				name: user.name,
 				role: user.role || 'user',
-				tenant: session.oauth.provider,
+				tenant: session.oauth.providerConfigId, // Config ID = tenant ID
 			});
 		}
 
