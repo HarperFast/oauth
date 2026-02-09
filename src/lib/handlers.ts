@@ -266,11 +266,24 @@ export async function handleCallback(
 		};
 	} catch (error) {
 		logger?.error?.('OAuth callback error:', error);
+		const rawRedirect = tokenData.originalUrl || config.postLoginRedirect || '/';
+		const redirectUrl = sanitizeRedirect(rawRedirect);
+		// Use a safe, generic reason code — details are in the server log
+		const message = (error as Error).message || '';
+		let reason = 'unknown';
+		if (message.startsWith('Token exchange failed')) reason = 'token_exchange';
+		else if (message.includes('claim')) reason = 'user_mapping';
+		else if (message.includes('user info') || message.includes('userinfo')) reason = 'user_info';
+		else if (message.includes('hook') || message.includes('onLogin')) reason = 'login_hook';
+		// Use URL API to insert params before any hash fragment
+		const url = new URL(redirectUrl, 'http://localhost');
+		url.searchParams.set('error', 'auth_failed');
+		url.searchParams.set('reason', reason);
+		const errorUrl = url.pathname + url.search + url.hash;
 		return {
-			status: 500,
-			body: {
-				error: 'Authentication failed',
-				message: (error as Error).message,
+			status: 302,
+			headers: {
+				Location: errorUrl,
 			},
 		};
 	}
