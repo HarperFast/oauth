@@ -39,7 +39,7 @@
 
 5. **Run tests**: `npm test` (takes ~60-90 seconds)
    - Rebuilds project, then runs Node.js native test runner
-   - Runs all test/\*_/_.test.js files
+   - Runs all `test/**/*.test.js` files
    - 307 tests should pass, 2 skipped (expected)
    - You will see several "uncaughtException" errors in output - these are EXPECTED and do NOT indicate test failures
    - Tests use HarperDB mocking which causes harmless path errors in test output
