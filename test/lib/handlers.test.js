@@ -124,7 +124,17 @@ describe('OAuth Handlers', () => {
 			await handleLogin(mockRequest, mockTarget, mockProvider, mockConfig, 'test-provider', mockLogger);
 
 			const csrfCall = mockProvider.generateCSRFToken.mock.calls[0];
-			assert.equal(csrfCall.arguments[0].originalUrl, 'https://app.example.com/page');
+			// Referer is sanitized to a relative path
+			assert.equal(csrfCall.arguments[0].originalUrl, '/page');
+		});
+
+		it('should sanitize referer to prevent open redirect via CSRF token', async () => {
+			mockRequest.headers.referer = 'https://evil.com/steal';
+			await handleLogin(mockRequest, mockTarget, mockProvider, mockConfig, 'test-provider', mockLogger);
+
+			const csrfCall = mockProvider.generateCSRFToken.mock.calls[0];
+			// Must strip the external domain, keeping only the path
+			assert.equal(csrfCall.arguments[0].originalUrl, '/steal');
 		});
 
 		it('should fall back to postLoginRedirect when no redirect param or referer', async () => {
@@ -464,6 +474,30 @@ describe('OAuth Handlers', () => {
 			assert.ok(!result.headers.Location.includes('evil.com'));
 			// Should redirect to the sanitized path
 			assert.ok(result.headers.Location.startsWith('/phish'));
+		});
+
+		it('should not allow open redirect on successful callback via originalUrl', async () => {
+			// CSRF token returns an absolute external URL
+			mockProvider.verifyCSRFToken = createMockFn(async () => ({
+				originalUrl: 'https://evil.com/steal',
+				timestamp: Date.now(),
+				providerName: 'test-provider',
+			}));
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				mockLogger
+			);
+
+			assert.equal(result.status, 302);
+			// Success redirect must NOT go to external domain
+			assert.ok(!result.headers.Location.includes('evil.com'));
+			assert.ok(result.headers.Location.startsWith('/'));
 		});
 
 		it('should handle session without update function', async () => {
