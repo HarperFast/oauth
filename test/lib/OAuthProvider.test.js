@@ -331,17 +331,137 @@ describe('OAuthProvider', () => {
 			}
 		});
 
-		it('should throw on token exchange failure', async () => {
+		it('should throw with sanitized message on token exchange failure', async () => {
 			const originalFetch = global.fetch;
 
 			global.fetch = async () => ({
 				ok: false,
-				text: async () => 'Invalid client credentials',
+				status: 401,
+				statusText: 'Unauthorized',
+				headers: { get: () => null },
 			});
 
 			try {
 				await assert.rejects(async () => await provider.exchangeCodeForToken('code', 'https://callback'), {
-					message: /Token exchange failed.*Invalid client credentials/i,
+					message: /Token exchange failed.*401 Unauthorized/i,
+				});
+			} finally {
+				global.fetch = originalFetch;
+			}
+		});
+
+		it('should extract error_description from JSON error response', async () => {
+			const originalFetch = global.fetch;
+
+			global.fetch = async () => ({
+				ok: false,
+				status: 400,
+				statusText: 'Bad Request',
+				headers: { get: (h) => (h === 'content-type' ? 'application/json' : null) },
+				json: async () => ({
+					error: 'invalid_client',
+					error_description: 'The client credentials are invalid',
+				}),
+			});
+
+			try {
+				await assert.rejects(async () => await provider.exchangeCodeForToken('code', 'https://callback'), {
+					message: /Token exchange failed.*The client credentials are invalid/i,
+				});
+			} finally {
+				global.fetch = originalFetch;
+			}
+		});
+
+		it('should not leak HTML error pages in token exchange errors', async () => {
+			const originalFetch = global.fetch;
+
+			global.fetch = async () => ({
+				ok: false,
+				status: 500,
+				statusText: 'Internal Server Error',
+				headers: { get: (h) => (h === 'content-type' ? 'text/html' : null) },
+			});
+
+			try {
+				await assert.rejects(async () => await provider.exchangeCodeForToken('code', 'https://callback'), {
+					message: /Token exchange failed.*500 Internal Server Error/i,
+				});
+			} finally {
+				global.fetch = originalFetch;
+			}
+		});
+
+		it('should drain response body on non-JSON error to prevent socket leak', async () => {
+			const originalFetch = global.fetch;
+			let bodyCancelled = false;
+
+			global.fetch = async () => ({
+				ok: false,
+				status: 500,
+				statusText: 'Internal Server Error',
+				headers: { get: (h) => (h === 'content-type' ? 'text/html' : null) },
+				body: {
+					cancel: async () => {
+						bodyCancelled = true;
+					},
+				},
+			});
+
+			try {
+				await assert.rejects(async () => await provider.exchangeCodeForToken('code', 'https://callback'), {
+					message: /Token exchange failed/,
+				});
+				assert.ok(bodyCancelled, 'response.body.cancel() should have been called');
+			} finally {
+				global.fetch = originalFetch;
+			}
+		});
+	});
+
+	describe('JSON Parse Safety', () => {
+		beforeEach(() => {
+			provider = new OAuthProvider(mockConfig, mockLogger);
+		});
+
+		it('should fall back to status when JSON parse fails in token exchange', async () => {
+			const originalFetch = global.fetch;
+
+			global.fetch = async () => ({
+				ok: false,
+				status: 502,
+				statusText: 'Bad Gateway',
+				headers: { get: (h) => (h === 'content-type' ? 'application/json' : null) },
+				json: async () => {
+					throw new SyntaxError('Unexpected end of JSON input');
+				},
+			});
+
+			try {
+				await assert.rejects(async () => await provider.exchangeCodeForToken('code', 'https://callback'), {
+					message: /Token exchange failed.*502 Bad Gateway/i,
+				});
+			} finally {
+				global.fetch = originalFetch;
+			}
+		});
+
+		it('should fall back to status when JSON parse fails in token refresh', async () => {
+			const originalFetch = global.fetch;
+
+			global.fetch = async () => ({
+				ok: false,
+				status: 502,
+				statusText: 'Bad Gateway',
+				headers: { get: (h) => (h === 'content-type' ? 'application/json' : null) },
+				json: async () => {
+					throw new SyntaxError('Unexpected end of JSON input');
+				},
+			});
+
+			try {
+				await assert.rejects(async () => await provider.refreshAccessToken('bad-token'), {
+					message: /Token refresh failed.*502 Bad Gateway/i,
 				});
 			} finally {
 				global.fetch = originalFetch;
@@ -478,19 +598,68 @@ describe('OAuthProvider', () => {
 			}
 		});
 
-		it('should throw on HTTP error during token refresh', async () => {
+		it('should throw with sanitized message on HTTP error during token refresh', async () => {
 			const originalFetch = global.fetch;
 
 			global.fetch = async () => ({
 				ok: false,
 				status: 400,
 				statusText: 'Bad Request',
-				text: async () => 'invalid_grant: The refresh token is invalid',
+				headers: { get: () => null },
 			});
 
 			try {
 				await assert.rejects(async () => await provider.refreshAccessToken('bad-token'), {
-					message: /Token refresh failed.*invalid_grant/i,
+					message: /Token refresh failed.*400 Bad Request/i,
+				});
+			} finally {
+				global.fetch = originalFetch;
+			}
+		});
+
+		it('should drain response body on error to prevent socket leak', async () => {
+			const originalFetch = global.fetch;
+			let bodyCancelled = false;
+
+			global.fetch = async () => ({
+				ok: false,
+				status: 502,
+				statusText: 'Bad Gateway',
+				headers: { get: () => null },
+				body: {
+					cancel: async () => {
+						bodyCancelled = true;
+					},
+				},
+			});
+
+			try {
+				await assert.rejects(async () => await provider.refreshAccessToken('bad-token'), {
+					message: /Token refresh failed/,
+				});
+				assert.ok(bodyCancelled, 'response.body.cancel() should have been called');
+			} finally {
+				global.fetch = originalFetch;
+			}
+		});
+
+		it('should extract error_description from JSON error during token refresh', async () => {
+			const originalFetch = global.fetch;
+
+			global.fetch = async () => ({
+				ok: false,
+				status: 400,
+				statusText: 'Bad Request',
+				headers: { get: (h) => (h === 'content-type' ? 'application/json' : null) },
+				json: async () => ({
+					error: 'invalid_grant',
+					error_description: 'The refresh token is invalid',
+				}),
+			});
+
+			try {
+				await assert.rejects(async () => await provider.refreshAccessToken('bad-token'), {
+					message: /Token refresh failed.*The refresh token is invalid/i,
 				});
 			} finally {
 				global.fetch = originalFetch;

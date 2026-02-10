@@ -56,6 +56,21 @@ export function sanitizeRedirect(redirectParam: string): string {
 }
 
 /**
+ * Build a safe error redirect URL
+ *
+ * Sanitizes the redirect path, then appends error query params using the URL API
+ * so params are always placed before any hash fragment.
+ */
+function buildErrorRedirect(rawUrl: string, params: Record<string, string>): string {
+	const safePath = sanitizeRedirect(rawUrl);
+	const url = new URL(safePath, 'http://localhost');
+	for (const [key, value] of Object.entries(params)) {
+		url.searchParams.set(key, value);
+	}
+	return url.pathname + url.search + url.hash;
+}
+
+/**
  * Handle OAuth login initiation
  */
 export async function handleLogin(
@@ -74,7 +89,8 @@ export async function handleLogin(
 		redirectParam = sanitizeRedirect(redirectParam);
 	}
 
-	const originalUrl = redirectParam || request.headers?.referer || config.postLoginRedirect || '/';
+	const referer = request.headers?.referer ? sanitizeRedirect(request.headers.referer) : undefined;
+	const originalUrl = redirectParam || referer || config.postLoginRedirect || '/';
 
 	// Generate CSRF token with metadata
 	// Bind token to provider to prevent cross-provider CSRF attacks
@@ -118,9 +134,7 @@ export async function handleCallback(
 	// Handle OAuth errors from provider
 	if (error) {
 		logger?.error?.(`OAuth error: ${error} - ${errorDescription}`);
-		// Redirect to original URL or fallback with error
-		const fallbackUrl = config.postLoginRedirect || '/';
-		const errorUrl = `${fallbackUrl}${fallbackUrl.includes('?') ? '&' : '?'}error=oauth_failed&reason=${encodeURIComponent(error)}`;
+		const errorUrl = buildErrorRedirect(config.postLoginRedirect || '/', { error: 'oauth_failed', reason: error });
 		return {
 			status: 302,
 			headers: {
@@ -132,8 +146,7 @@ export async function handleCallback(
 	// Validate parameters
 	if (!code || !state) {
 		logger?.warn?.('Missing required OAuth callback parameters');
-		const fallbackUrl = config.postLoginRedirect || '/';
-		const errorUrl = `${fallbackUrl}${fallbackUrl.includes('?') ? '&' : '?'}error=invalid_request`;
+		const errorUrl = buildErrorRedirect(config.postLoginRedirect || '/', { error: 'invalid_request' });
 		return {
 			status: 302,
 			headers: {
@@ -163,8 +176,10 @@ export async function handleCallback(
 		);
 		// This could be an attack - redirect back to original URL with error
 		// Do NOT redirect to login endpoint as that would restart OAuth flow
-		const redirectUrl = tokenData.originalUrl || config.postLoginRedirect || '/';
-		const errorUrl = `${redirectUrl}${redirectUrl.includes('?') ? '&' : '?'}error=auth_failed&reason=csrf`;
+		const errorUrl = buildErrorRedirect(tokenData.originalUrl || config.postLoginRedirect || '/', {
+			error: 'auth_failed',
+			reason: 'csrf',
+		});
 		return {
 			status: 302,
 			headers: {
@@ -257,20 +272,30 @@ export async function handleCallback(
 			logger?.warn?.('No session available for OAuth user');
 		}
 
-		// Redirect to original URL or default
+		// Redirect to original URL or default (sanitize to prevent open redirect)
 		return {
 			status: 302,
 			headers: {
-				Location: tokenData.originalUrl || config.postLoginRedirect || '/',
+				Location: sanitizeRedirect(tokenData.originalUrl || config.postLoginRedirect || '/'),
 			},
 		};
 	} catch (error) {
 		logger?.error?.('OAuth callback error:', error);
+		// Use a safe, generic reason code — details are in the server log
+		const message = (error as Error).message || '';
+		let reason = 'unknown';
+		if (message.startsWith('Token exchange failed')) reason = 'token_exchange';
+		else if (message.includes('claim')) reason = 'user_mapping';
+		else if (message.includes('user info') || message.includes('userinfo')) reason = 'user_info';
+		else if (message.includes('hook') || message.includes('onLogin')) reason = 'login_hook';
+		const errorUrl = buildErrorRedirect(tokenData.originalUrl || config.postLoginRedirect || '/', {
+			error: 'auth_failed',
+			reason,
+		});
 		return {
-			status: 500,
-			body: {
-				error: 'Authentication failed',
-				message: (error as Error).message,
+			status: 302,
+			headers: {
+				Location: errorUrl,
 			},
 		};
 	}

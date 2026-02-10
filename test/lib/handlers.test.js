@@ -124,7 +124,17 @@ describe('OAuth Handlers', () => {
 			await handleLogin(mockRequest, mockTarget, mockProvider, mockConfig, 'test-provider', mockLogger);
 
 			const csrfCall = mockProvider.generateCSRFToken.mock.calls[0];
-			assert.equal(csrfCall.arguments[0].originalUrl, 'https://app.example.com/page');
+			// Referer is sanitized to a relative path
+			assert.equal(csrfCall.arguments[0].originalUrl, '/page');
+		});
+
+		it('should sanitize referer to prevent open redirect via CSRF token', async () => {
+			mockRequest.headers.referer = 'https://evil.com/steal';
+			await handleLogin(mockRequest, mockTarget, mockProvider, mockConfig, 'test-provider', mockLogger);
+
+			const csrfCall = mockProvider.generateCSRFToken.mock.calls[0];
+			// Must strip the external domain, keeping only the path
+			assert.equal(csrfCall.arguments[0].originalUrl, '/steal');
 		});
 
 		it('should fall back to postLoginRedirect when no redirect param or referer', async () => {
@@ -326,9 +336,9 @@ describe('OAuth Handlers', () => {
 			assert.equal(mockProvider.getUserInfo.mock.calls.length, 1);
 		});
 
-		it('should handle token exchange failure', async () => {
+		it('should redirect with error on token exchange failure', async () => {
 			mockProvider.exchangeCodeForToken = createMockFn(async () => {
-				throw new Error('Invalid client credentials');
+				throw new Error('Token exchange failed: provider returned 500 Internal Server Error');
 			});
 
 			const result = await handleCallback(
@@ -341,9 +351,153 @@ describe('OAuth Handlers', () => {
 				mockLogger
 			);
 
-			assert.equal(result.status, 500);
-			assert.equal(result.body.error, 'Authentication failed');
-			assert.ok(result.body.message.includes('Invalid client credentials'));
+			assert.equal(result.status, 302);
+			assert.ok(result.headers.Location.includes('error=auth_failed'));
+			assert.ok(result.headers.Location.includes('reason=token_exchange'));
+			// Must NOT leak raw error details in the URL
+			assert.ok(!result.headers.Location.includes('500'));
+			assert.ok(!result.headers.Location.includes('Internal'));
+		});
+
+		it('should use user_info reason when getUserInfo fails', async () => {
+			mockProvider.getUserInfo = createMockFn(async () => {
+				throw new Error('Failed to fetch user info: 503 Service Unavailable');
+			});
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				mockLogger
+			);
+
+			assert.equal(result.status, 302);
+			assert.ok(result.headers.Location.includes('reason=user_info'));
+			assert.ok(!result.headers.Location.includes('503'));
+		});
+
+		it('should use user_mapping reason when mapUserToHarper fails', async () => {
+			mockProvider.mapUserToHarper = createMockFn(() => {
+				throw new Error("Username claim 'login' not found in user info");
+			});
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				mockLogger
+			);
+
+			assert.equal(result.status, 302);
+			assert.ok(result.headers.Location.includes('reason=user_mapping'));
+		});
+
+		it('should use unknown reason for unexpected errors', async () => {
+			mockProvider.exchangeCodeForToken = createMockFn(async () => {
+				throw new Error('Something completely unexpected');
+			});
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				mockLogger
+			);
+
+			assert.equal(result.status, 302);
+			assert.ok(result.headers.Location.includes('reason=unknown'));
+			assert.ok(!result.headers.Location.includes('unexpected'));
+		});
+
+		it('should place error params before hash fragment in redirect URL', async () => {
+			mockProvider.exchangeCodeForToken = createMockFn(async () => {
+				throw new Error('Token exchange failed: provider returned 500');
+			});
+			// CSRF token returns a URL with a fragment
+			mockProvider.verifyCSRFToken = createMockFn(async () => ({
+				originalUrl: '/app#section',
+				timestamp: Date.now(),
+				providerName: 'test-provider',
+			}));
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				mockLogger
+			);
+
+			assert.equal(result.status, 302);
+			const loc = result.headers.Location;
+			// Query params must come before the hash fragment
+			const queryIdx = loc.indexOf('?');
+			const hashIdx = loc.indexOf('#');
+			assert.ok(queryIdx < hashIdx, `Query params (${queryIdx}) should be before fragment (${hashIdx}): ${loc}`);
+			assert.ok(loc.includes('error=auth_failed'));
+		});
+
+		it('should sanitize redirect URL in error path to prevent open redirect', async () => {
+			mockProvider.exchangeCodeForToken = createMockFn(async () => {
+				throw new Error('Token exchange failed: provider error');
+			});
+			// CSRF token returns an absolute external URL (from unsanitized referer)
+			mockProvider.verifyCSRFToken = createMockFn(async () => ({
+				originalUrl: 'https://evil.com/phish',
+				timestamp: Date.now(),
+				providerName: 'test-provider',
+			}));
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				mockLogger
+			);
+
+			assert.equal(result.status, 302);
+			// Should NOT redirect to evil.com
+			assert.ok(!result.headers.Location.includes('evil.com'));
+			// Should redirect to the sanitized path
+			assert.ok(result.headers.Location.startsWith('/phish'));
+		});
+
+		it('should not allow open redirect on successful callback via originalUrl', async () => {
+			// CSRF token returns an absolute external URL
+			mockProvider.verifyCSRFToken = createMockFn(async () => ({
+				originalUrl: 'https://evil.com/steal',
+				timestamp: Date.now(),
+				providerName: 'test-provider',
+			}));
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				mockLogger
+			);
+
+			assert.equal(result.status, 302);
+			// Success redirect must NOT go to external domain
+			assert.ok(!result.headers.Location.includes('evil.com'));
+			assert.ok(result.headers.Location.startsWith('/'));
 		});
 
 		it('should handle session without update function', async () => {

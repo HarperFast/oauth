@@ -109,8 +109,20 @@ export class OAuthProvider implements IOAuthProvider {
 		});
 
 		if (!response.ok) {
-			const errorText = await response.text();
-			throw new Error(`Token exchange failed: ${errorText}`);
+			const contentType = response.headers.get('content-type');
+			if (contentType?.includes('application/json')) {
+				try {
+					const errorBody = await response.json();
+					const detail = errorBody.error_description || errorBody.error || response.statusText;
+					throw new Error(`Token exchange failed: ${detail}`);
+				} catch (parseError) {
+					if (parseError instanceof Error && parseError.message.startsWith('Token exchange failed')) throw parseError;
+					// JSON parse failed despite content-type header — fall through to generic error
+				}
+			}
+			// Drain unconsumed body to free the underlying socket (undici connection pool)
+			await response.body?.cancel();
+			throw new Error(`Token exchange failed: provider returned ${response.status} ${response.statusText}`);
 		}
 
 		const contentType = response.headers.get('content-type');
@@ -366,13 +378,24 @@ export class OAuthProvider implements IOAuthProvider {
 		});
 
 		if (!response.ok) {
-			const error = await response.text();
+			const contentType = response.headers.get('content-type');
+			let detail: string = `${response.status} ${response.statusText}`;
+			if (contentType?.includes('application/json')) {
+				try {
+					const errorBody = await response.json();
+					detail = errorBody.error_description || errorBody.error || response.statusText;
+				} catch {
+					// JSON parse failed despite content-type header — use status/statusText
+				}
+			}
+			// Drain unconsumed body to free the underlying socket (undici connection pool)
+			await response.body?.cancel();
 			this.logger?.error?.('Token refresh HTTP error:', {
 				status: response.status,
 				statusText: response.statusText,
-				body: error,
+				detail,
 			});
-			throw new Error(`Token refresh failed: ${error}`);
+			throw new Error(`Token refresh failed: ${detail}`);
 		}
 
 		const contentType = response.headers.get('content-type');
