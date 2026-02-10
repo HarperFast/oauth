@@ -391,6 +391,32 @@ describe('OAuthProvider', () => {
 				global.fetch = originalFetch;
 			}
 		});
+
+		it('should drain response body on non-JSON error to prevent socket leak', async () => {
+			const originalFetch = global.fetch;
+			let bodyCancelled = false;
+
+			global.fetch = async () => ({
+				ok: false,
+				status: 500,
+				statusText: 'Internal Server Error',
+				headers: { get: (h) => (h === 'content-type' ? 'text/html' : null) },
+				body: {
+					cancel: async () => {
+						bodyCancelled = true;
+					},
+				},
+			});
+
+			try {
+				await assert.rejects(async () => await provider.exchangeCodeForToken('code', 'https://callback'), {
+					message: /Token exchange failed/,
+				});
+				assert.ok(bodyCancelled, 'response.body.cancel() should have been called');
+			} finally {
+				global.fetch = originalFetch;
+			}
+		});
 	});
 
 	describe('JSON Parse Safety', () => {
@@ -586,6 +612,32 @@ describe('OAuthProvider', () => {
 				await assert.rejects(async () => await provider.refreshAccessToken('bad-token'), {
 					message: /Token refresh failed.*400 Bad Request/i,
 				});
+			} finally {
+				global.fetch = originalFetch;
+			}
+		});
+
+		it('should drain response body on error to prevent socket leak', async () => {
+			const originalFetch = global.fetch;
+			let bodyCancelled = false;
+
+			global.fetch = async () => ({
+				ok: false,
+				status: 502,
+				statusText: 'Bad Gateway',
+				headers: { get: () => null },
+				body: {
+					cancel: async () => {
+						bodyCancelled = true;
+					},
+				},
+			});
+
+			try {
+				await assert.rejects(async () => await provider.refreshAccessToken('bad-token'), {
+					message: /Token refresh failed/,
+				});
+				assert.ok(bodyCancelled, 'response.body.cancel() should have been called');
 			} finally {
 				global.fetch = originalFetch;
 			}

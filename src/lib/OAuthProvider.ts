@@ -120,6 +120,8 @@ export class OAuthProvider implements IOAuthProvider {
 					// JSON parse failed despite content-type header — fall through to generic error
 				}
 			}
+			// Drain unconsumed body to free the underlying socket (undici connection pool)
+			await response.body?.cancel();
 			throw new Error(`Token exchange failed: provider returned ${response.status} ${response.statusText}`);
 		}
 
@@ -386,6 +388,8 @@ export class OAuthProvider implements IOAuthProvider {
 					// JSON parse failed despite content-type header — use status/statusText
 				}
 			}
+			// Drain unconsumed body to free the underlying socket (undici connection pool)
+			await response.body?.cancel();
 			this.logger?.error?.('Token refresh HTTP error:', {
 				status: response.status,
 				statusText: response.statusText,
