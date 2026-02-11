@@ -129,7 +129,15 @@
 			<li><a href="/oauth" target="_blank">/oauth</a> - List all configured providers</li>
 			<li id="user-endpoint">Loading...</li>
 			<li id="refresh-endpoint" style="display: none">
-				<a href="#" onclick="refreshToken(); return false;">/oauth/{provider}/refresh</a> - Refresh access token
+				<a
+					href="#"
+					onclick="
+						refreshToken();
+						return false;
+					"
+					>/oauth/{provider}/refresh</a
+				>
+				- Refresh access token
 			</li>
 		</ul>
 
