@@ -4,15 +4,14 @@ on:
   release:
     types: [published]
 
-permissions:
-  contents: read
-  id-token: write
-
 jobs:
   release:
     name: Publish to npm
     runs-on: ubuntu-latest
     environment: Release
+    permissions:
+      contents: read
+      id-token: write
 
     steps:
       - name: Checkout code
