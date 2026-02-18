@@ -10,6 +10,7 @@ import { OAuthResource } from './lib/resource.ts';
 import { validateAndRefreshSession } from './lib/sessionValidator.ts';
 import { clearOAuthSession } from './lib/handlers.ts';
 import { HookManager } from './lib/hookManager.ts';
+import { DynamicProviderCache } from './lib/dynamicProviderCache.ts';
 import type { Scope, OAuthPluginConfig, ProviderRegistry, OAuthHooks } from './types.ts';
 
 // Export HookManager class, OAuthResource class, and types
@@ -81,7 +82,7 @@ export async function handleApplication(scope: Scope): Promise<void> {
 	let debugMode = false;
 	let isInitialized = false;
 	let pluginDefaults: any = {}; // Store plugin defaults for dynamic provider resolution
-	let cacheDynamicProviders = true; // Whether to cache providers resolved via onResolveProvider hook
+	const dynamicProviderCache = new DynamicProviderCache(); // TTL cache for dynamically-resolved providers
 
 	// Create hookManager instance scoped to this application
 	const hookManager = new HookManager(logger);
@@ -127,8 +128,8 @@ export async function handleApplication(scope: Scope): Promise<void> {
 		// Extract plugin defaults for dynamic provider resolution
 		pluginDefaults = extractPluginDefaults(options);
 
-		// Cache dynamic providers by default (backward compatible)
-		cacheDynamicProviders = options.cacheDynamicProviders !== false;
+		// Update dynamic provider cache TTL (clears stale entries on config change)
+		dynamicProviderCache.updateTTL(options.cacheDynamicProviders ?? true);
 
 		// Update the resource with new providers
 		if (Object.keys(providers).length === 0) {
@@ -157,7 +158,7 @@ export async function handleApplication(scope: Scope): Promise<void> {
 			});
 		} else {
 			// Configure the OAuth resource with providers and settings
-			OAuthResource.configure(providers, debugMode, hookManager, pluginDefaults, logger, cacheDynamicProviders);
+			OAuthResource.configure(providers, debugMode, hookManager, pluginDefaults, logger, dynamicProviderCache);
 
 			// Register the OAuth resource class
 			scope.resources.set('oauth', OAuthResource);
@@ -189,30 +190,25 @@ export async function handleApplication(scope: Scope): Promise<void> {
 		// Get the provider config ID for this OAuth session
 		// Use providerConfigId (new) or fall back to provider (old) for backwards compatibility
 		const providerConfigId = request.session.oauth.providerConfigId || request.session.oauth.provider;
-		let providerData = providers[providerConfigId];
+		let providerData = providers[providerConfigId] ?? dynamicProviderCache.get(providerConfigId);
 
-		// If provider not found in registry, try to resolve via hook (dynamic providers)
+		// If still not found, try to resolve via hook
 		if (!providerData && hookManager?.hasHook('onResolveProvider')) {
 			try {
-				logger?.debug?.(`Provider config "${providerConfigId}" not in registry, attempting dynamic resolution`);
+				logger?.debug?.(`Provider config "${providerConfigId}" not in registry or cache, attempting dynamic resolution`);
 
 				const hookConfig = await hookManager.callResolveProvider(providerConfigId, logger);
 
 				if (hookConfig) {
-					// Hook resolved provider - build full config and register dynamically
 					const { OAuthProvider } = await import('./lib/OAuthProvider.ts');
 					const { buildProviderConfig } = await import('./lib/config.ts');
 
-					// Build full provider config (handles Okta/Azure/Auth0 domain configuration)
 					const config = buildProviderConfig(hookConfig, providerConfigId, pluginDefaults);
 					const provider = new OAuthProvider(config, logger);
 
 					providerData = { provider, config };
 					logger?.info?.(`Dynamically resolved provider for session validation: ${providerConfigId}`);
-
-					if (cacheDynamicProviders) {
-						providers[providerConfigId] = providerData;
-					}
+					dynamicProviderCache.set(providerConfigId, providerData);
 				}
 			} catch (error) {
 				logger?.error?.(`Error resolving provider ${providerConfigId} for session:`, (error as Error).message);

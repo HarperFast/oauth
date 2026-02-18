@@ -30,8 +30,8 @@ export interface OAuthPluginConfig {
 	defaultRole?: string;
 	/** Lifecycle hooks */
 	hooks?: OAuthHooks;
-	/** Whether to cache providers resolved via onResolveProvider hook. Default: true */
-	cacheDynamicProviders?: boolean;
+	/** Cache providers resolved via onResolveProvider hook. true = forever (default), false = never, number = TTL in seconds */
+	cacheDynamicProviders?: boolean | number;
 }
 
 /**

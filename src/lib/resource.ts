@@ -9,6 +9,7 @@ import type { RequestTarget } from 'harperdb';
 import type { Request, Logger, ProviderRegistry, OAuthProviderConfig } from '../types.ts';
 import { handleLogin, handleCallback, handleLogout, handleUserInfo, handleTestPage } from './handlers.ts';
 import type { HookManager } from './hookManager.ts';
+import type { DynamicProviderCache } from './dynamicProviderCache.ts';
 
 /**
  * Parsed route information from a request target
@@ -31,7 +32,7 @@ export class OAuthResource extends Resource {
 	static debugMode: boolean = false;
 	static hookManager: HookManager | null = null;
 	static pluginDefaults: Partial<OAuthProviderConfig> = {};
-	static cacheDynamicProviders: boolean = true;
+	static dynamicProviderCache: DynamicProviderCache | null = null;
 	static logger: Logger | undefined = undefined;
 
 	/**
@@ -44,14 +45,14 @@ export class OAuthResource extends Resource {
 		hookManager: HookManager,
 		pluginDefaults: Partial<OAuthProviderConfig>,
 		logger?: Logger,
-		cacheDynamicProviders: boolean = true
+		dynamicProviderCache?: DynamicProviderCache
 	): void {
 		OAuthResource.providers = providers;
 		OAuthResource.debugMode = debugMode;
 		OAuthResource.hookManager = hookManager;
 		OAuthResource.pluginDefaults = pluginDefaults;
 		OAuthResource.logger = logger;
-		OAuthResource.cacheDynamicProviders = cacheDynamicProviders;
+		OAuthResource.dynamicProviderCache = dynamicProviderCache ?? null;
 	}
 
 	/**
@@ -304,22 +305,20 @@ export class OAuthResource extends Resource {
 			};
 		}
 
-		// Check if provider exists in registry
-		let providerData = providers[providerName];
+		// Check if provider exists in static registry or dynamic cache
+		let providerData = providers[providerName] ?? OAuthResource.dynamicProviderCache?.get(providerName);
 
 		// If not found, try to resolve via hook
 		if (!providerData && OAuthResource.hookManager?.hasHook('onResolveProvider')) {
 			try {
-				logger?.debug?.(`Provider "${providerName}" not found in registry, calling onResolveProvider hook`);
+				logger?.debug?.(`Provider "${providerName}" not found in registry or cache, calling onResolveProvider hook`);
 
 				const hookConfig = await OAuthResource.hookManager.callResolveProvider(providerName, logger);
 
 				if (hookConfig) {
-					// Hook resolved provider - build full config and register dynamically
 					const { OAuthProvider } = await import('./OAuthProvider.ts');
 					const { buildProviderConfig } = await import('./config.ts');
 
-					// Build full provider config (handles Okta/Azure/Auth0 domain configuration)
 					const pluginDefaults = OAuthResource.pluginDefaults || {};
 					const config = buildProviderConfig(hookConfig, providerName, pluginDefaults);
 
@@ -327,13 +326,9 @@ export class OAuthResource extends Resource {
 
 					providerData = { provider, config };
 					logger?.info?.(`Dynamically resolved provider: ${providerName}`);
-
-					if (OAuthResource.cacheDynamicProviders) {
-						providers[providerName] = providerData;
-					}
+					OAuthResource.dynamicProviderCache?.set(providerName, providerData);
 				}
 			} catch (error) {
-				// Hook threw error - log and return 500
 				logger?.error?.(`Error resolving provider ${providerName}:`, (error as Error).message);
 				return {
 					status: 500,
@@ -432,7 +427,7 @@ export class OAuthResource extends Resource {
 		OAuthResource.debugMode = false;
 		OAuthResource.hookManager = null;
 		OAuthResource.pluginDefaults = {};
-		OAuthResource.cacheDynamicProviders = true;
+		OAuthResource.dynamicProviderCache = null;
 		OAuthResource.logger = undefined;
 	}
 }

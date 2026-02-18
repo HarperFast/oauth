@@ -25,7 +25,7 @@ Complete configuration options for the `@harperfast/oauth` plugin.
 | `debug`                 | boolean | `false`    | Enable debug endpoints and logging                                                                                          |
 | `redirectUri`           | string  | (auto-gen) | OAuth callback URL where providers redirect back to                                                                         |
 | `postLoginRedirect`     | string  | `/`        | Default URL to redirect users after successful OAuth login                                                                  |
-| `cacheDynamicProviders` | boolean | `true`     | Cache providers resolved via `onResolveProvider` hook. Set to `false` for multi-tenant apps where configs change at runtime |
+| `cacheDynamicProviders` | boolean \| number | `true` | Cache providers resolved via `onResolveProvider` hook. `true` = forever, `false` = never, number = TTL in seconds |
 
 ### Provider Configuration
 
