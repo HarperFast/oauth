@@ -195,7 +195,9 @@ export async function handleApplication(scope: Scope): Promise<void> {
 		// If still not found, try to resolve via hook
 		if (!providerData && hookManager?.hasHook('onResolveProvider')) {
 			try {
-				logger?.debug?.(`Provider config "${providerConfigId}" not in registry or cache, attempting dynamic resolution`);
+				logger?.debug?.(
+					`Provider config "${providerConfigId}" not in registry or cache, attempting dynamic resolution`
+				);
 
 				const hookConfig = await hookManager.callResolveProvider(providerConfigId, logger);
 
