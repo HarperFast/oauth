@@ -31,6 +31,7 @@ export class OAuthResource extends Resource {
 	static debugMode: boolean = false;
 	static hookManager: HookManager | null = null;
 	static pluginDefaults: Partial<OAuthProviderConfig> = {};
+	static cacheDynamicProviders: boolean = true;
 	static logger: Logger | undefined = undefined;
 
 	/**
@@ -42,13 +43,15 @@ export class OAuthResource extends Resource {
 		debugMode: boolean,
 		hookManager: HookManager,
 		pluginDefaults: Partial<OAuthProviderConfig>,
-		logger?: Logger
+		logger?: Logger,
+		cacheDynamicProviders: boolean = true
 	): void {
 		OAuthResource.providers = providers;
 		OAuthResource.debugMode = debugMode;
 		OAuthResource.hookManager = hookManager;
 		OAuthResource.pluginDefaults = pluginDefaults;
 		OAuthResource.logger = logger;
+		OAuthResource.cacheDynamicProviders = cacheDynamicProviders;
 	}
 
 	/**
@@ -322,14 +325,12 @@ export class OAuthResource extends Resource {
 
 					const provider = new OAuthProvider(config, logger);
 
-					providers[providerName] = {
-						provider,
-						config,
-					};
+					providerData = { provider, config };
+					logger?.info?.(`Dynamically resolved provider: ${providerName}`);
 
-					providerData = providers[providerName];
-
-					logger?.info?.(`Dynamically registered provider: ${providerName}`);
+					if (OAuthResource.cacheDynamicProviders) {
+						providers[providerName] = providerData;
+					}
 				}
 			} catch (error) {
 				// Hook threw error - log and return 500
@@ -431,6 +432,7 @@ export class OAuthResource extends Resource {
 		OAuthResource.debugMode = false;
 		OAuthResource.hookManager = null;
 		OAuthResource.pluginDefaults = {};
+		OAuthResource.cacheDynamicProviders = true;
 		OAuthResource.logger = undefined;
 	}
 }

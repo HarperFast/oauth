@@ -81,6 +81,7 @@ export async function handleApplication(scope: Scope): Promise<void> {
 	let debugMode = false;
 	let isInitialized = false;
 	let pluginDefaults: any = {}; // Store plugin defaults for dynamic provider resolution
+	let cacheDynamicProviders = true; // Whether to cache providers resolved via onResolveProvider hook
 
 	// Create hookManager instance scoped to this application
 	const hookManager = new HookManager(logger);
@@ -126,6 +127,9 @@ export async function handleApplication(scope: Scope): Promise<void> {
 		// Extract plugin defaults for dynamic provider resolution
 		pluginDefaults = extractPluginDefaults(options);
 
+		// Cache dynamic providers by default (backward compatible)
+		cacheDynamicProviders = options.cacheDynamicProviders !== false;
+
 		// Update the resource with new providers
 		if (Object.keys(providers).length === 0) {
 			// No valid providers configured - register a simple error resource
@@ -153,7 +157,7 @@ export async function handleApplication(scope: Scope): Promise<void> {
 			});
 		} else {
 			// Configure the OAuth resource with providers and settings
-			OAuthResource.configure(providers, debugMode, hookManager, pluginDefaults, logger);
+			OAuthResource.configure(providers, debugMode, hookManager, pluginDefaults, logger, cacheDynamicProviders);
 
 			// Register the OAuth resource class
 			scope.resources.set('oauth', OAuthResource);
@@ -203,13 +207,12 @@ export async function handleApplication(scope: Scope): Promise<void> {
 					const config = buildProviderConfig(hookConfig, providerConfigId, pluginDefaults);
 					const provider = new OAuthProvider(config, logger);
 
-					providers[providerConfigId] = {
-						provider,
-						config,
-					};
+					providerData = { provider, config };
+					logger?.info?.(`Dynamically resolved provider for session validation: ${providerConfigId}`);
 
-					providerData = providers[providerConfigId];
-					logger?.info?.(`Dynamically registered provider for session validation: ${providerConfigId}`);
+					if (cacheDynamicProviders) {
+						providers[providerConfigId] = providerData;
+					}
 				}
 			} catch (error) {
 				logger?.error?.(`Error resolving provider ${providerConfigId} for session:`, (error as Error).message);
