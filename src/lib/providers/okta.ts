@@ -45,7 +45,8 @@ export const OktaProvider: OAuthProviderConfig = {
 			tokenUrl: `https://${hostname}${authServerPath}/token`,
 			userInfoUrl: `https://${hostname}${authServerPath}/userinfo`,
 			jwksUri: `https://${hostname}${authServerPath}/keys`,
-			issuer: `https://${hostname}${authServerPath}`,
+			// Org Authorization Server issuer is the base domain, not the API path
+			issuer: `https://${hostname}`,
 		};
 	},
 };

@@ -37,7 +37,7 @@ describe('Okta Provider', () => {
 		assert.equal(configured.tokenUrl, 'https://dev-12345.okta.com/oauth2/v1/token');
 		assert.equal(configured.userInfoUrl, 'https://dev-12345.okta.com/oauth2/v1/userinfo');
 		assert.equal(configured.jwksUri, 'https://dev-12345.okta.com/oauth2/v1/keys');
-		assert.equal(configured.issuer, 'https://dev-12345.okta.com/oauth2/v1');
+		assert.equal(configured.issuer, 'https://dev-12345.okta.com');
 	});
 
 	it('should handle domain with https:// prefix', () => {
@@ -101,7 +101,7 @@ describe('Okta Provider', () => {
 
 		const configured = okta.configure('dev-12345.okta-emea.com');
 		assert.equal(configured.authorizationUrl, 'https://dev-12345.okta-emea.com/oauth2/v1/authorize');
-		assert.equal(configured.issuer, 'https://dev-12345.okta-emea.com/oauth2/v1');
+		assert.equal(configured.issuer, 'https://dev-12345.okta-emea.com');
 	});
 
 	it('should support oktapreview.com domain', () => {
@@ -109,6 +109,6 @@ describe('Okta Provider', () => {
 
 		const configured = okta.configure('dev-12345.oktapreview.com');
 		assert.equal(configured.authorizationUrl, 'https://dev-12345.oktapreview.com/oauth2/v1/authorize');
-		assert.equal(configured.issuer, 'https://dev-12345.oktapreview.com/oauth2/v1');
+		assert.equal(configured.issuer, 'https://dev-12345.oktapreview.com');
 	});
 });
