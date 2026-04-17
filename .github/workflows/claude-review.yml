@@ -33,12 +33,16 @@ jobs:
         uses: anthropics/claude-code-action@c3d45e8e941e1b2ad7b278c57482d9c5bf1f35b3 # v1.0.99
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          show_full_output: true # TEMP: keep on during calibration so tool denials are visible; revert once reviews run cleanly
           claude_args: |
             --model claude-sonnet-4-6
             --max-turns 8
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Read,Grep,Glob"
           prompt: |
-            You are reviewing a pull request on HarperFast/oauth.
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            The PR branch is already checked out in the current working directory.
 
             Read `CLAUDE.md` in the repo root first — it has the project
             overview, conventions, and (importantly) a "Non-Obvious Gotchas"
@@ -77,21 +81,27 @@ jobs:
             Do NOT comment on style, naming, nits, or personal preference.
             Do NOT restate what the diff does. Do NOT praise.
 
-            Cap the review at 10 findings. The findings list is the
-            entire output. If you found more than 10, pick the top 10
-            by severity and append "(+N more not shown)" to the last
-            finding's fix line.
+            Cap the review at 10 findings.
 
-            ## Output
+            ## How to post the review
+
+            - Use `gh pr comment` for top-level feedback (single consolidated
+              summary comment with all findings).
+            - Use `mcp__github_inline_comment__create_inline_comment`
+              (with `confirmed: true`) for specific code-line annotations.
+            - Only post GitHub comments — do NOT submit review text as SDK
+              messages.
+            - Do NOT use REQUEST_CHANGES or APPROVE during this calibration
+              phase. Stick to comments so the workflow never blocks or
+              auto-approves a merge.
+
+            ## Output format for the top-level comment
 
             If you find zero blockers: post one short comment —
             "No blockers found." — and stop.
 
-            If you find blockers: post one PR review as a COMMENT.
-            Do NOT use REQUEST_CHANGES or APPROVE during this
-            calibration phase — review type stays COMMENT so the
-            workflow never blocks or auto-approves a merge. Include
-            all findings using this structure:
+            If you find blockers: post one summary comment with all findings
+            using this structure, one block per finding:
 
               ### <N>. <concise title>
 
@@ -100,4 +110,4 @@ jobs:
               **Why it matters:** concrete impact
               **Suggested fix:** specific change, not generic advice
 
-            No preamble, no closing summary.
+            No preamble. No closing summary.
