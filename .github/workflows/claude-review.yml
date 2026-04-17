@@ -1,0 +1,103 @@
+# Proposed: .github/workflows/claude-review.yml
+# Phase 2 v1 — baseline PR review, no log-repo write (ships before PAT lands).
+# v2 adds log-repo issue creation once AI_REVIEW_LOG_TOKEN secret is available.
+
+name: Claude PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    # Only review PRs authored by HarperFast org members / collaborators.
+    # External PRs are not auto-reviewed — a maintainer can opt one in later
+    # via an @claude mention (handled by a separate workflow).
+    if: >-
+      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'),
+      github.event.pull_request.author_association)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+
+      - name: Claude review
+        uses: anthropics/claude-code-action@c3d45e8e941e1b2ad7b278c57482d9c5bf1f35b3 # v1.0.99
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          model: claude-sonnet-4-6
+          max_turns: 8
+          prompt: |
+            You are reviewing a pull request on HarperFast/oauth.
+
+            Read `CLAUDE.md` in the repo root first — it has the project
+            overview, conventions, and (importantly) a "Non-Obvious Gotchas"
+            section covering Resource API v2 patterns, GenericTrackedObject
+            spread behavior, `tsc || true` build semantics, and security
+            invariants.
+
+            ## OAuth-specific things to check
+
+            - CSRF state tokens present on every OAuth flow; 10-minute expiry
+              is enforced; state is single-use
+            - Tokens are never logged and never returned in HTTP responses
+            - Redirect URI validation on callback endpoints
+            - Provider-of-record enforcement (cross-provider CSRF protection
+              should redirect with error, not 403)
+            - Session field preservation across token refresh (`provider`,
+              `providerConfigId`, `providerType`)
+            - Resource API v2 conventions (`static loadAsInstance = false`,
+              instance methods)
+            - `GenericTrackedObject` spread gotcha — if code uses `{...obj}`
+              on a session field, flag it
+            - New endpoints include auth checks and context validation
+            - Path length validation (≤ 2048 chars) where user input can
+              reach a path
+
+            ## Review scope and style
+
+            Report **blocker-severity findings only**. Blockers are:
+            - Correctness bugs
+            - Security issues (token exposure, missing CSRF, auth bypass,
+              unvalidated redirect/path, injection)
+            - Broken contracts (public API behavior change without migration)
+            - Missing tests for new behavior or fixed bugs
+            - Documentation drift that would mislead integrators
+
+            Do NOT comment on style, naming, nits, or personal preference.
+            Do NOT restate what the diff does. Do NOT praise.
+
+            Cap the review at 10 findings. If you found more, note it at
+            the bottom and pick the top 10 by severity.
+
+            ## Output
+
+            If you find zero blockers: post one short comment —
+            "No blockers found." — and stop.
+
+            If you find blockers: post one PR review as a COMMENT.
+            Do NOT use REQUEST_CHANGES or APPROVE during this
+            calibration phase — review type stays COMMENT so the
+            workflow never blocks or auto-approves a merge. Include
+            all findings using this structure:
+
+              ### <N>. <concise title>
+
+              **File:** `path/to/file.ts:line`
+              **What:** one or two sentence description
+              **Why it matters:** concrete impact
+              **Suggested fix:** specific change, not generic advice
+
+            No preamble, no closing summary.
