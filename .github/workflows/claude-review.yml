@@ -44,6 +44,20 @@ jobs:
 
             The PR branch is already checked out in the current working directory.
 
+            ## Tools
+
+            For file inspection use the `Read`, `Grep`, and `Glob` tools.
+            Do NOT use `cat`, `head`, `tail`, `grep`, `ls`, or `find`
+            via Bash — those commands are not allowed and waste turns.
+            Do NOT run `bun test`, `npm test`, or any other script
+            that executes PR code — the PR's tests are already checked
+            separately.
+
+            The only allowed Bash commands are:
+            - `gh pr view` / `gh pr diff` — inspect the PR (already run
+              at start, you can re-invoke if needed)
+            - `gh pr comment` — post the final review comment
+
             Read `CLAUDE.md` in the repo root first — it has the project
             overview, conventions, and (importantly) a "Non-Obvious Gotchas"
             section covering Resource API v2 patterns, GenericTrackedObject
