@@ -36,6 +36,7 @@ jobs:
           claude_args: |
             --model claude-sonnet-4-6
             --max-turns 8
+            --allowedTools Read,Grep,Glob
           prompt: |
             You are reviewing a pull request on HarperFast/oauth.
 
