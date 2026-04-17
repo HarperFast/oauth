@@ -5,6 +5,7 @@
 import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { OAuthProvider } from '../../dist/lib/OAuthProvider.js';
+import { resetCSRFTableCache } from '../../dist/lib/CSRFTokenManager.js';
 
 describe('OAuthProvider', () => {
 	let provider;
@@ -43,6 +44,14 @@ describe('OAuthProvider', () => {
 	});
 
 	beforeEach(() => {
+		// Reset CSRFTokenManager's module-level table cache so each test
+		// picks up this iteration's mockTableInstance. Without this, Bun
+		// (which shares module state across tests in a single process)
+		// keeps the first iteration's table reference and writes go to
+		// a stale storedTokens Map. Node hides this by running each file
+		// in a separate process.
+		resetCSRFTableCache();
+
 		// Initialize token storage
 		storedTokens = new Map();
 
