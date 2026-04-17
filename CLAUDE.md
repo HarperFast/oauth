@@ -80,24 +80,29 @@ request.session = {
 ## Non-Obvious Gotchas
 
 **Resource API v2:**
+
 - Classes declare `static loadAsInstance = false`
 - Methods are instance methods; Harper instantiates the class
 - Test mocks must instantiate accordingly
 
 **`GenericTrackedObject` + spread:**
+
 - `{ ...obj }` does NOT work on Harper tracked objects — copies nothing
 - Use explicit property access: `{ provider: oauth.provider, ... }`
 - Affects `request.session.oauth` and any session fields
 
 **Build tolerates TS errors:**
+
 - `npm run build` runs `tsc || true` — passes even with type errors
 - "Build passes" ≠ "types are sound"; rely on editor diagnostics and CI separately
 
 **Lint is ESLint only:**
+
 - `npm run lint` runs ESLint against source. It does NOT type-check.
 - No explicit `typecheck` script exists; `npm run build` is the closest proxy but suppresses errors (see above)
 
 **Security invariants (enforce in any new endpoint):**
+
 - Context validation in `get()` / `post()` methods
 - Path length ≤ 2048 chars
 - Debug endpoints: IP-based access control (localhost by default; `DEBUG_ALLOWED_IPS` env var to allow others)
