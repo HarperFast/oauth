@@ -30,6 +30,7 @@ jobs:
           fetch-depth: 0
 
       - name: Claude review
+        id: claude-review
         uses: anthropics/claude-code-action@c3d45e8e941e1b2ad7b278c57482d9c5bf1f35b3 # v1.0.99
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -125,3 +126,60 @@ jobs:
               **Suggested fix:** specific change, not generic advice
 
             No preamble. No closing summary.
+
+      - name: Log review to ai-review-log
+        # Best-effort — never fail the job if logging fails
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AI_REVIEW_LOG_TOKEN: ${{ secrets.AI_REVIEW_LOG_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          REVIEW_STATUS: ${{ steps.claude-review.outcome }}
+        run: |
+          set -uo pipefail
+
+          if [ -z "${AI_REVIEW_LOG_TOKEN:-}" ]; then
+            echo "::warning::AI_REVIEW_LOG_TOKEN secret not set; skipping log entry."
+            exit 0
+          fi
+
+          # Fetch the latest comment posted by the Claude bot on this PR.
+          CLAUDE_BODY=$(gh pr view "$PR_NUMBER" --json comments \
+            --jq '[.comments[] | select(.author.login == "claude")] | last | .body // empty')
+
+          if [ -z "$CLAUDE_BODY" ]; then
+            echo "No Claude comment found on PR #$PR_NUMBER (review_status=$REVIEW_STATUS); skipping log."
+            exit 0
+          fi
+
+          # Title: count findings (lines starting with `### <digit>`). "No blockers" case has none.
+          if printf '%s' "$CLAUDE_BODY" | grep -qi '^no blockers found'; then
+            TITLE="[oauth] PR #$PR_NUMBER: no blockers"
+          else
+            FINDING_COUNT=$(printf '%s\n' "$CLAUDE_BODY" | grep -c '^### [0-9]' || true)
+            TITLE="[oauth] PR #$PR_NUMBER: ${FINDING_COUNT} finding(s) — triage pending"
+          fi
+
+          BODY=$(printf '**Source:** %s\n**Repo:** oauth\n**PR:** #%s\n**Model:** claude-sonnet-4-6\n**Phase:** baseline\n**Review job status:** %s\n**Date:** %s\n\n---\n\n%s\n' \
+            "$PR_URL" "$PR_NUMBER" "$REVIEW_STATUS" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$CLAUDE_BODY")
+
+          PAYLOAD=$(jq -nc \
+            --arg title "$TITLE" \
+            --arg body "$BODY" \
+            '{title: $title, body: $body, labels: ["repo:oauth", "verdict:pending", "phase:baseline"]}')
+
+          HTTP=$(curl -sS -o /tmp/ai-log-resp.json -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer $AI_REVIEW_LOG_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            https://api.github.com/repos/HarperFast/ai-review-log/issues \
+            -d "$PAYLOAD")
+
+          if [ "$HTTP" -ge 200 ] && [ "$HTTP" -lt 300 ]; then
+            ISSUE_URL=$(jq -r '.html_url' /tmp/ai-log-resp.json)
+            echo "Logged review to $ISSUE_URL"
+          else
+            echo "::warning::ai-review-log POST failed (HTTP $HTTP):"
+            cat /tmp/ai-log-resp.json
+          fi
