@@ -20,4 +20,4 @@ defaultRole: 'user'
 postLoginRedirect: '/'
 
 # Default redirect URI pattern (will be adjusted per provider)
-redirectUri: 'https://localhost:9953/oauth/callback'
+redirectUri: 'http://localhost:9926/oauth/callback'

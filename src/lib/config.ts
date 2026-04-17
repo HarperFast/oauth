@@ -52,7 +52,7 @@ export function buildProviderConfig(
 	const providerPreset = providerType ? getProvider(providerType) : null;
 
 	// Build redirect URI with provider name in path
-	const baseRedirectUri = expandedOptions.redirectUri || pluginDefaults.redirectUri || 'https://localhost:9953/oauth';
+	const baseRedirectUri = expandedOptions.redirectUri || pluginDefaults.redirectUri || 'http://localhost:9926/oauth';
 	const redirectUri = baseRedirectUri
 		.replace('/oauth/callback', `/oauth/${providerName}/callback`)
 		.replace(/\/oauth$/, `/oauth/${providerName}/callback`);

@@ -32,7 +32,7 @@ describe('OAuth Handlers', () => {
 			authorizationUrl: 'https://auth.test.com/authorize',
 			tokenUrl: 'https://auth.test.com/token',
 			userInfoUrl: 'https://auth.test.com/userinfo',
-			redirectUri: 'https://localhost:9953/oauth/test/callback',
+			redirectUri: 'http://localhost:9926/oauth/test/callback',
 			postLoginRedirect: '/dashboard',
 		};
 
