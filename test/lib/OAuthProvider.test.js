@@ -20,7 +20,7 @@ describe('OAuthProvider', () => {
 		authorizationUrl: 'https://auth.example.com/authorize',
 		tokenUrl: 'https://auth.example.com/token',
 		userInfoUrl: 'https://auth.example.com/userinfo',
-		redirectUri: 'https://localhost:9953/oauth/test/callback',
+		redirectUri: 'http://localhost:9926/oauth/test/callback',
 		scope: 'openid profile email',
 		usernameClaim: 'email',
 		defaultRole: 'user',

@@ -96,7 +96,7 @@ describe('OAuth Configuration', () => {
 			assert.equal(config.clientId, 'test-client');
 			assert.equal(config.clientSecret, 'test-secret');
 			assert.equal(config.authorizationUrl, 'https://auth.test.com/authorize');
-			assert.equal(config.redirectUri, 'https://localhost:9953/oauth/test/callback');
+			assert.equal(config.redirectUri, 'http://localhost:9926/oauth/test/callback');
 		});
 
 		it('should expand environment variables', () => {
@@ -189,7 +189,7 @@ describe('OAuth Configuration', () => {
 
 			const config = buildProviderConfig(providerConfig, 'myprovider', {});
 
-			assert.equal(config.redirectUri, 'https://localhost:9953/oauth/myprovider/callback');
+			assert.equal(config.redirectUri, 'http://localhost:9926/oauth/myprovider/callback');
 		});
 
 		it('should handle custom redirect URI', () => {
