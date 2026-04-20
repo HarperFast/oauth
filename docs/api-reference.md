@@ -324,7 +324,7 @@ export class MyResource extends tables.Resource {
 ### Authentication Errors
 
 ```javascript
-import { ClientError } from 'harperdb';
+import { ClientError } from 'harper';
 
 export class ProtectedResource extends tables.Resource {
 	async get(target, request) {

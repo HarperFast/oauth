@@ -19,8 +19,8 @@
 		"email": "opensource@harperdb.io"
 	},
 	"keywords": [
-		"harperdb",
 		"harper",
+		"harperdb",
 		"plugin",
 		"oauth",
 		"oauth2",
@@ -47,7 +47,7 @@
 		"dev": "tsc --watch",
 		"test": "npm run build && node --test \"test/**/*.test.js\"",
 		"test:watch": "npm run build && node --test --watch \"test/**/*.test.js\"",
-		"test:coverage": "npm run build && node --enable-source-maps --test --experimental-test-coverage --test-coverage-exclude='test/**' --test-coverage-exclude='**/harperdb/**' \"test/**/*.test.js\"",
+		"test:coverage": "npm run build && node --enable-source-maps --test --experimental-test-coverage --test-coverage-exclude='test/**' --test-coverage-exclude='**/harper/**' \"test/**/*.test.js\"",
 		"test:node-twenty": "npm run build && node --test test/",
 		"lint": "eslint . --ignore-pattern 'dist/**'",
 		"format": "prettier .",
@@ -64,12 +64,12 @@
 		"@types/jsonwebtoken": "^9.0.5",
 		"@types/node": "^20.11.0",
 		"eslint": "^9.35.0",
-		"harperdb": "^4.7.14",
+		"harper": "^5.0.0",
 		"prettier": "^3.6.2",
 		"typescript": "^5.3.3"
 	},
 	"peerDependencies": {
-		"harperdb": ">=4.6.0"
+		"harper": ">=5.0.0"
 	},
 	"engines": {
 		"node": ">=20",

@@ -7,7 +7,7 @@
 import { readFile } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { RequestTarget } from 'harperdb';
+import type { RequestTarget } from 'harper';
 import type { Request, Logger, IOAuthProvider, OAuthProviderConfig } from '../types.ts';
 import type { HookManager } from './hookManager.ts';
 

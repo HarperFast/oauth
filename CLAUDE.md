@@ -75,7 +75,7 @@ request.session = {
 - Logging: `logger?.info?.()` pattern (optional logger)
 - **Never log tokens; never expose tokens in responses**
 - CSRF protection: all flows use state tokens (10-minute expiry)
-- Harper types: `import type { Scope, User, RequestTarget } from 'harperdb'`
+- Harper types: `import type { Scope, User, RequestTarget } from 'harper'`
 
 ## Non-Obvious Gotchas
 
@@ -110,13 +110,13 @@ request.session = {
 
 ## Testing
 
-Node.js built-in test runner (`node:test`) and Bun. Tests import from compiled `dist/`. Use `node:assert/strict`. Bun uses a preload script (`test/bun-preload.js`) to mock the `harperdb` module.
+Node.js built-in test runner (`node:test`) and Bun. Tests import from compiled `dist/`. Use `node:assert/strict`. Bun uses a preload script (`.bun/preload.js`) to mock the `harper` module.
 
 Test scripts use `$(find test -name '*.test.js' -type f)`-style globbing for Node 20 compatibility; once Node 20 support ends, switch to `node --test test` or `node --test "test/**/*.test.js"` on Node 22+.
 
 ## Dependencies
 
 - **Runtime:** `jsonwebtoken`, `jwks-rsa` (required by Okta / JWT-based providers)
-- **Peer:** `harperdb` (`>=4.6.0`)
-- **Dev:** `typescript`, `eslint`, `prettier`, `@types/node`, `@types/jsonwebtoken`, `@harperdb/code-guidelines`, `harperdb` (for types + test)
+- **Peer:** `harper` (`>=5.0.0`)
+- **Dev:** `typescript`, `eslint`, `prettier`, `@types/node`, `@types/jsonwebtoken`, `@harperdb/code-guidelines`, `harper` (for types + test)
 - **Invariant:** justify any new runtime dependency in the PR; prefer built-ins (`fetch`, `crypto`)

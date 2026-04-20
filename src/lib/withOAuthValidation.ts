@@ -65,11 +65,13 @@ export function withOAuthValidation(resource: any, options: OAuthValidationOptio
 
 			// Return wrapped method with OAuth validation
 			return async function (this: any, ...args: any[]) {
-				// Extract request from arguments (usually last or second argument)
-				const request: Request | undefined = args.find((arg) => arg?.session !== undefined);
+				// Resource API v2: the request lives on the resource context
+				// (`this.getContext()`), not in the method arguments.
+				const context = typeof this?.getContext === 'function' ? this.getContext() : undefined;
+				const request: Request | undefined = context?.session !== undefined ? (context as Request) : undefined;
 
 				if (!request) {
-					// No request object found - just pass through
+					// No request context found - just pass through
 					return originalMethod.apply(this, args);
 				}
 

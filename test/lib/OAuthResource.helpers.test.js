@@ -6,8 +6,8 @@
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 
-// Note: Bun uses test/bun-preload.js to mock the harperdb module
-// Node.js will load the real harperdb module, which may trigger async
+// Note: Bun uses test/bun-preload.js to mock the harper module
+// Node.js will load the real harper module, which may trigger async
 // native module loading that continues after tests complete. This is harmless.
 
 import { OAuthResource } from '../../dist/lib/resource.js';
