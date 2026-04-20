@@ -37,13 +37,26 @@ jobs:
           show_full_output: true # TEMP: keep on during calibration so tool denials are visible; revert once reviews run cleanly
           claude_args: |
             --model claude-sonnet-4-6
-            --max-turns 8
+            --max-turns 16
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Read,Grep,Glob"
           prompt: |
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.pull_request.number }}
 
             The PR branch is already checked out in the current working directory.
+
+            ## What to ignore in the diff
+
+            Skip mechanical, non-reviewable diffs — they waste turns
+            and add no signal:
+
+            - `package-lock.json`, `bun.lock`, `yarn.lock` — lockfile
+              regens are deterministic from `package.json`
+            - `package.json` changes that are ONLY version bumps of
+              existing deps (patch/minor). If `engines`, `peerDependencies`,
+              or new `dependencies` entries change, DO review those.
+            - `dist/` compiled output (shouldn't be in PRs, but if it
+              is, ignore it — source is the source of truth)
 
             ## Tools
 
