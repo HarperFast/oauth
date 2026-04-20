@@ -4,8 +4,8 @@
  * Harper resource class for handling OAuth REST endpoints
  */
 
-import { Resource } from 'harperdb';
-import type { RequestTarget } from 'harperdb';
+import { Resource } from 'harper';
+import type { RequestTarget } from 'harper';
 import type { Request, Logger, ProviderRegistry, OAuthProviderConfig } from '../types.ts';
 import { handleLogin, handleCallback, handleLogout, handleUserInfo, handleTestPage } from './handlers.ts';
 import type { HookManager } from './hookManager.ts';
