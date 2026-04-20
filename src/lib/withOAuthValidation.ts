@@ -25,6 +25,17 @@ export interface OAuthValidationOptions {
  * This wrapper intercepts all resource method calls (get, post, put, patch, delete)
  * and validates/refreshes OAuth tokens before passing the request to the original resource.
  *
+ * Resource API v2: the wrapped resource's methods receive `(target, data)`
+ * and read the request from `this.getContext()`. The `@example` below
+ * reflects that shape; do not reintroduce a `request` method parameter.
+ *
+ * `onValidationError` is invoked for OAuth validation failures where a
+ * request was resolved (no OAuth data, provider not configured, token
+ * invalid, etc.). It is NOT called when the wrapper can't resolve a
+ * request at all (no v2 context, or context without a session); that
+ * path always returns a default 401 when `requireAuth` is true, since
+ * the callback's `request` parameter would be undefined.
+ *
  * @example
  * ```typescript
  * // In your application component:
@@ -34,15 +45,17 @@ export interface OAuthValidationOptions {
  *   // Get OAuth providers from the OAuth plugin
  *   const oauthPlugin = scope.parent.resources.get('oauth');
  *
- *   // Wrap your protected resource
- *   const myResource = {
- *     async get(target, request) {
+ *   // Wrap your protected resource (Resource API v2)
+ *   class MyResource {
+ *     static loadAsInstance = false;
+ *     async get(target) {
+ *       const request = this.getContext();
  *       // This code only runs if OAuth session is valid
  *       return { user: request.session.oauthUser };
  *     }
- *   };
+ *   }
  *
- *   scope.resources.set('protected', withOAuthValidation(myResource, {
+ *   scope.resources.set('protected', withOAuthValidation(MyResource, {
  *     providers: oauthPlugin.providers,
  *     requireAuth: true,
  *     logger: scope.logger
@@ -77,19 +90,18 @@ export function withOAuthValidation(resource: any, options: OAuthValidationOptio
 					// the request (no v2 context, or context without a session),
 					// we can't verify OAuth and must reject rather than silently
 					// invoke the protected method.
+					//
+					// `onValidationError` is deliberately NOT called here: its
+					// signature expects a `Request`, and callers are entitled
+					// to read `request.session` / `.ip` / `.headers`. Passing
+					// `undefined` would break that contract and turn a clean
+					// 401 into a runtime `TypeError` inside user code.
 					if (requireAuth) {
-						const error = 'No request context available';
-						if (onValidationError) {
-							// onValidationError expects a Request; pass `undefined as any`
-							// so handlers that ignore it still work, and those that read
-							// it receive a clear signal.
-							return onValidationError(undefined as any, error);
-						}
 						return {
 							status: 401,
 							body: {
 								error: 'Unauthorized',
-								message: error,
+								message: 'No request context available',
 							},
 						};
 					}
