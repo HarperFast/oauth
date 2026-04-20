@@ -253,7 +253,7 @@ describe('withOAuthValidation', () => {
 	});
 
 	describe('fallthrough: no context available', () => {
-		it('passes through when the resource has no getContext', async () => {
+		it('passes through when requireAuth is false and the resource has no getContext', async () => {
 			// Simulates a method called without v2 context
 			const calls = [];
 			const resource = {
@@ -268,6 +268,31 @@ describe('withOAuthValidation', () => {
 
 			assert.equal(result.status, 200);
 			assert.equal(calls.length, 1);
+		});
+
+		it('returns 401 when requireAuth is true and no context is available (fail-closed)', async () => {
+			// When getContext() is missing (or yields no session) and auth is
+			// required, the wrapper must reject. Passing through would silently
+			// bypass OAuth on any code path that didn't provide a v2 context.
+			const calls = [];
+			const resource = {
+				async get(target) {
+					calls.push({ target });
+					return { status: 200 };
+				},
+			};
+			const wrapped = withOAuthValidation(resource, {
+				providers: mockProviders,
+				logger: mockLogger,
+				requireAuth: true,
+			});
+
+			const result = await wrapped.get({ path: '/protected' });
+
+			assert.equal(result.status, 401, 'must reject rather than silently pass through');
+			assert.equal(result.body.error, 'Unauthorized');
+			assert.match(result.body.message, /context/i);
+			assert.equal(calls.length, 0, 'underlying method must not run');
 		});
 	});
 });

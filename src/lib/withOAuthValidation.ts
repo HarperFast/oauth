@@ -73,7 +73,27 @@ export function withOAuthValidation(resource: any, options: OAuthValidationOptio
 				const request: Request | undefined = context?.session !== undefined ? (context as Request) : undefined;
 
 				if (!request) {
-					// No request context found - just pass through
+					// Fail-closed when auth is required: if we can't identify
+					// the request (no v2 context, or context without a session),
+					// we can't verify OAuth and must reject rather than silently
+					// invoke the protected method.
+					if (requireAuth) {
+						const error = 'No request context available';
+						if (onValidationError) {
+							// onValidationError expects a Request; pass `undefined as any`
+							// so handlers that ignore it still work, and those that read
+							// it receive a clear signal.
+							return onValidationError(undefined as any, error);
+						}
+						return {
+							status: 401,
+							body: {
+								error: 'Unauthorized',
+								message: error,
+							},
+						};
+					}
+					// No auth required — pass through
 					return originalMethod.apply(this, args);
 				}
 
