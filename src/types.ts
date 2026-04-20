@@ -3,7 +3,7 @@
  */
 
 import type { IncomingMessage } from 'node:http';
-import type { Scope, User, RequestTarget } from 'harperdb';
+import type { Scope, User, RequestTarget } from 'harper';
 
 // ============================================================================
 // OAuth Plugin Types
@@ -275,7 +275,7 @@ export interface ProviderRegistry {
 
 // ============================================================================
 // Additional Harper Types
-// These types are not exported by harperdb package but are needed by the plugin
+// These types are not exported by the harper package but are needed by the plugin
 // ============================================================================
 
 /**

@@ -268,4 +268,28 @@ describe('OAuth Plugin Options Watcher', () => {
 		const response = await resources.oauth.get();
 		assert.equal(response.status, 503, 'Should return 503 when all providers invalid');
 	});
+
+	// Harper v5's Scope type marks resources and server as optional, but the
+	// Scope constructor always assigns them. handleApplication() guards against
+	// the invariant being violated — these tests exercise the guard so any
+	// future regression surfaces at startup rather than as scattered failures.
+	it('should throw when scope.resources is missing', async () => {
+		scope.resources = undefined;
+
+		await assert.rejects(
+			handleApplication(scope),
+			(err) => /scope\.resources or scope\.server is unavailable/.test(err.message),
+			'expected an error citing the missing scope field'
+		);
+	});
+
+	it('should throw when scope.server is missing', async () => {
+		scope.server = undefined;
+
+		await assert.rejects(
+			handleApplication(scope),
+			(err) => /scope\.resources or scope\.server is unavailable/.test(err.message),
+			'expected an error citing the missing scope field'
+		);
+	});
 });

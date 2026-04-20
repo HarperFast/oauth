@@ -78,6 +78,20 @@ export function registerHooks(hooks: OAuthHooks): void {
  */
 export async function handleApplication(scope: Scope): Promise<void> {
 	const logger = scope.logger;
+
+	// Harper v5's Scope type declares `resources` and `server` as optional,
+	// but they are always assigned during Scope construction (Scope.ts:70-71).
+	// Narrow once here so downstream code (including the nested
+	// updateConfiguration closure) doesn't need optional chaining or
+	// non-null assertions sprinkled throughout.
+	if (!scope.resources || !scope.server) {
+		throw new Error(
+			'OAuth plugin: scope.resources or scope.server is unavailable. This indicates a Harper initialization problem.'
+		);
+	}
+	const resources = scope.resources;
+	const server = scope.server;
+
 	let providers: ProviderRegistry = {};
 	let debugMode = false;
 	let isInitialized = false;
@@ -134,7 +148,7 @@ export async function handleApplication(scope: Scope): Promise<void> {
 		// Update the resource with new providers
 		if (Object.keys(providers).length === 0) {
 			// No valid providers configured - register a simple error resource
-			scope.resources.set('oauth', {
+			resources.set('oauth', {
 				async get() {
 					return {
 						status: 503,
@@ -161,7 +175,7 @@ export async function handleApplication(scope: Scope): Promise<void> {
 			OAuthResource.configure(providers, debugMode, hookManager, pluginDefaults, logger, dynamicProviderCache);
 
 			// Register the OAuth resource class
-			scope.resources.set('oauth', OAuthResource);
+			resources.set('oauth', OAuthResource);
 
 			// Log all configured providers
 			logger?.info?.('OAuth plugin ready:', {
@@ -181,7 +195,7 @@ export async function handleApplication(scope: Scope): Promise<void> {
 
 	// Register HTTP middleware for automatic OAuth session validation
 	// This runs on every HTTP request after authentication but before REST
-	scope.server.http?.(async (request: any, next: (req: any) => any) => {
+	server.http?.(async (request: any, next: (req: any) => any) => {
 		// Only process requests with sessions that have OAuth data
 		if (!request.session?.oauth) {
 			return next(request);
