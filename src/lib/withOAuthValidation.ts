@@ -196,6 +196,22 @@ async function validateOAuthForRequest(context: MaybeContext, options: OAuthVali
  *   still runs validation, then returns `undefined` — matching
  *   Harper's "method not implemented" behavior. This means validation
  *   runs even on unhandled verbs (defense-in-depth).
+ *
+ * Session-cleanup semantics (intentional divergence — important for
+ * integrators using `requireAuth: false`):
+ * - Stale-provider paths (no provider name on session, or provider
+ *   not in registry): the wrapper clears only the in-memory `oauth`
+ *   and `oauthUser` fields via a local helper. The session record
+ *   itself survives — "provider not configured" may be a recoverable
+ *   config issue.
+ * - Expired-token path (`validateAndRefreshSession` returns
+ *   `{valid: false}`): `validateAndRefreshSession` internally calls
+ *   `clearOAuthSession`, which on a Harper production session
+ *   invokes `session.delete(session.id)` — the DB record is destroyed.
+ *   This is terminal: the user is logged out, not just detached from
+ *   OAuth. `requireAuth: false` resources still receive the
+ *   passthrough call, but they observe a session that is about to
+ *   stop existing on the next request.
  */
 export function withOAuthValidation<T extends abstract new (...args: any[]) => any>(
 	ResourceClass: T,

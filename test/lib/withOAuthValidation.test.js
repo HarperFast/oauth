@@ -57,6 +57,12 @@ describe('withOAuthValidation', () => {
 	}
 
 	function makeSession(overrides = {}) {
+		// IMPORTANT: this session has NO `delete()` method. That matters
+		// for tests that hit `clearOAuthSession` (e.g. expired-token
+		// paths): those tests exercise the in-memory fallback inside
+		// `clearOAuthSession`, not the production `session.delete(id)`
+		// path. For production-shaped behavior use
+		// `makeProductionLikeSession` below.
 		return {
 			id: 'sess-1',
 			oauth: {
@@ -69,6 +75,21 @@ describe('withOAuthValidation', () => {
 			update: async () => {},
 			...overrides,
 		};
+	}
+
+	// A Harper-production-shaped session: provides `delete(id)` like the
+	// real hdb_session record so `clearOAuthSession` takes the
+	// `session.delete(id)` branch (full DB destruction) instead of the
+	// in-memory fallback.
+	function makeProductionLikeSession(overrides = {}) {
+		const base = makeSession(overrides);
+		const deleteCalls = [];
+		base.delete = async (id) => {
+			deleteCalls.push(id);
+		};
+		// Expose the spy ledger for assertions
+		base.__deleteCalls = deleteCalls;
+		return base;
 	}
 
 	describe('Wrapped-class registration surface', () => {
@@ -620,19 +641,28 @@ describe('withOAuthValidation', () => {
 		});
 	});
 
-	describe('Expired token with requireAuth: false passes through and clears the session', () => {
-		// New reachable behavior post-v5: `validateAndRefreshSession`
-		// calls `clearOAuthSession` internally when the token is expired
-		// and no refresh token is available. When `requireAuth` is false
-		// the wrapper falls through to the underlying method — but the
-		// session's oauth data has already been cleared as a side effect.
-		it('underlying method runs; session.oauth is cleared', async () => {
+	describe('Expired token with requireAuth: false passes through — cleanup semantics', () => {
+		// `validateAndRefreshSession` calls `clearOAuthSession` as a side
+		// effect when the token is expired and no refresh token is
+		// available. When `requireAuth` is false the wrapper falls
+		// through to the underlying method, which runs with a session
+		// that's about to be (or has already been) cleaned up.
+		//
+		// `clearOAuthSession` has TWO code paths depending on whether
+		// the session provides a `delete(id)` method:
+		//   - with `delete`:  production path — Harper destroys the DB
+		//                     session record. The in-memory session
+		//                     object's oauth fields are NOT touched.
+		//   - without:        in-memory fallback — deletes `oauth` and
+		//                     `oauthUser` fields directly.
+		//
+		// Both paths are exercised below so behavior is pinned down for
+		// integrators.
+
+		it('fallback path (no session.delete): underlying method runs, oauth fields cleared in-memory', async () => {
 			const calls = [];
 			class MyResource extends MockResource {
 				async get(target) {
-					// Capture session state AT method invocation — by this
-					// point validateAndRefreshSession should have cleared
-					// the stale oauth fields.
 					calls.push({
 						target,
 						oauthAfterValidate: this._context.session.oauth,
@@ -663,15 +693,60 @@ describe('withOAuthValidation', () => {
 			assert.equal(result.status, 200, 'underlying method must run when requireAuth is false');
 			assert.equal(result.body.ran, true);
 			assert.equal(calls.length, 1);
-			assert.equal(
-				calls[0].oauthAfterValidate,
-				undefined,
-				'stale oauth metadata must be cleared before the underlying method observes the session'
+			// In the fallback path, clearOAuthSession deletes the in-memory
+			// oauth fields directly, so the resource observes an empty session.
+			assert.equal(calls[0].oauthAfterValidate, undefined);
+			assert.equal(calls[0].oauthUserAfterValidate, undefined);
+		});
+
+		it('production path (session.delete present): underlying method runs, delete(id) called with session id', async () => {
+			const calls = [];
+			class MyResource extends MockResource {
+				async get(target) {
+					// In the production path, `clearOAuthSession` invokes
+					// `session.delete(session.id)` — it does NOT mutate the
+					// in-memory session object. So by the time the resource
+					// runs, the DB record is doomed but the in-memory oauth
+					// fields may still be populated.
+					calls.push({
+						target,
+						oauthAfterValidate: this._context.session.oauth,
+					});
+					return { status: 200, body: { ran: true } };
+				}
+			}
+			const session = makeProductionLikeSession({
+				oauth: {
+					provider: 'github',
+					accessToken: 'expired-token',
+					expiresAt: Date.now() - 60_000,
+					refreshToken: undefined,
+				},
+			});
+			const context = { session };
+			const Wrapped = withOAuthValidation(MyResource, {
+				providers: mockProviders,
+				logger: mockLogger,
+				requireAuth: false,
+			});
+
+			const instance = new Wrapped('x', context);
+			const result = await instance.get({ path: '/mixed' });
+
+			assert.equal(result.status, 200, 'underlying method must still run when requireAuth is false');
+			assert.equal(result.body.ran, true);
+			assert.equal(calls.length, 1);
+			// The production path destroys the DB record via session.delete(session.id).
+			assert.deepEqual(
+				session.__deleteCalls,
+				['sess-1'],
+				'clearOAuthSession must call session.delete(session.id) in the production path'
 			);
-			assert.equal(
-				calls[0].oauthUserAfterValidate,
-				undefined,
-				'stale oauthUser metadata must be cleared before the underlying method observes the session'
+			// The in-memory session object isn't mutated by the production path —
+			// documenting this so integrators know what the resource observes.
+			assert.ok(
+				calls[0].oauthAfterValidate !== undefined,
+				'production path does not mutate the in-memory session object'
 			);
 		});
 	});
