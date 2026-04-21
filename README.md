@@ -39,6 +39,8 @@ export OAUTH_GITHUB_CLIENT_ID="your-client-id"
 export OAUTH_GITHUB_CLIENT_SECRET="your-client-secret"
 ```
 
+> **Note:** The `export` commands above are for local development and quick testing only. Harper reads environment variables directly from the process environment — it does **not** load `.env` files automatically. For production deployments, set these variables through your deployment platform (systemd unit file, Kubernetes secrets, cloud provider secrets manager, etc.).
+
 ### 3. Configure OAuth Callback
 
 Set your OAuth callback URL in your provider settings:

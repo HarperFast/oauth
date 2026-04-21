@@ -30,6 +30,8 @@ export OAUTH_GITHUB_CLIENT_ID="your_github_client_id"
 export OAUTH_GITHUB_CLIENT_SECRET="your_github_client_secret"
 ```
 
+> **Note:** The `export` commands above are for local development and quick testing only. Harper reads environment variables directly from the process environment — it does **not** load `.env` files automatically. For production deployments, set these variables through your deployment platform (systemd unit file, Kubernetes secrets, cloud provider secrets manager, etc.).
+
 ### 3. (Optional) Register Lifecycle Hooks
 
 If you need to provision users or customize the authentication flow, register hooks in your `resources.js`:
