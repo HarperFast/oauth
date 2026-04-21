@@ -9,7 +9,7 @@
 
 import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { withOAuthValidation } from '../../dist/lib/withOAuthValidation.js';
+import { withOAuthValidation, getOAuthProviders } from '../../dist/lib/withOAuthValidation.js';
 
 describe('withOAuthValidation', () => {
 	let mockProviders;
@@ -525,5 +525,116 @@ describe('withOAuthValidation', () => {
 			const result = await instance.post({ path: '/x' }, { data: 1 });
 			assert.equal(result, undefined);
 		});
+	});
+
+	describe('Expired token with requireAuth: false passes through and clears the session', () => {
+		// New reachable behavior post-v5: `validateAndRefreshSession`
+		// calls `clearOAuthSession` internally when the token is expired
+		// and no refresh token is available. When `requireAuth` is false
+		// the wrapper falls through to the underlying method — but the
+		// session's oauth data has already been cleared as a side effect.
+		it('underlying method runs; session.oauth is cleared', async () => {
+			const calls = [];
+			class MyResource extends MockResource {
+				async get(target) {
+					// Capture session state AT method invocation — by this
+					// point validateAndRefreshSession should have cleared
+					// the stale oauth fields.
+					calls.push({
+						target,
+						oauthAfterValidate: this._context.session.oauth,
+						oauthUserAfterValidate: this._context.session.oauthUser,
+					});
+					return { status: 200, body: { ran: true } };
+				}
+			}
+			const context = {
+				session: makeSession({
+					oauth: {
+						provider: 'github',
+						accessToken: 'expired-token',
+						expiresAt: Date.now() - 60_000,
+						refreshToken: undefined,
+					},
+				}),
+			};
+			const Wrapped = withOAuthValidation(MyResource, {
+				providers: mockProviders,
+				logger: mockLogger,
+				requireAuth: false,
+			});
+
+			const instance = new Wrapped('x', context);
+			const result = await instance.get({ path: '/mixed' });
+
+			assert.equal(result.status, 200, 'underlying method must run when requireAuth is false');
+			assert.equal(result.body.ran, true);
+			assert.equal(calls.length, 1);
+			assert.equal(
+				calls[0].oauthAfterValidate,
+				undefined,
+				'stale oauth metadata must be cleared before the underlying method observes the session'
+			);
+			assert.equal(
+				calls[0].oauthUserAfterValidate,
+				undefined,
+				'stale oauthUser metadata must be cleared before the underlying method observes the session'
+			);
+		});
+	});
+});
+
+describe('getOAuthProviders', () => {
+	const fakeRegistry = { github: { provider: {}, config: { provider: 'github' } } };
+
+	it('returns the provider registry from a parent scope', () => {
+		const oauthResource = { providers: fakeRegistry };
+		const scope = {
+			parent: {
+				resources: {
+					get: (name) => (name === 'oauth' ? oauthResource : undefined),
+				},
+			},
+			resources: {
+				get: () => undefined,
+			},
+		};
+
+		assert.equal(getOAuthProviders(scope), fakeRegistry);
+	});
+
+	it('returns the provider registry from the same scope when no parent lookup matches', () => {
+		const oauthResource = { providers: fakeRegistry };
+		const scope = {
+			parent: { resources: { get: () => undefined } },
+			resources: {
+				get: (name) => (name === 'oauth' ? oauthResource : undefined),
+			},
+		};
+
+		assert.equal(getOAuthProviders(scope), fakeRegistry);
+	});
+
+	it('returns null when no oauth resource is found in either scope', () => {
+		const scope = {
+			parent: { resources: { get: () => undefined } },
+			resources: { get: () => undefined },
+		};
+
+		assert.equal(getOAuthProviders(scope), null);
+	});
+
+	it('returns null when the lookup throws (swallows traversal errors)', () => {
+		const scope = {
+			parent: {
+				resources: {
+					get: () => {
+						throw new Error('boom');
+					},
+				},
+			},
+		};
+
+		assert.equal(getOAuthProviders(scope), null);
 	});
 });
