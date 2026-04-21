@@ -358,6 +358,138 @@ describe('withOAuthValidation', () => {
 		});
 	});
 
+	describe('All five HTTP verbs route through the delegate', () => {
+		// Each override in the wrapper calls `delegate(this, '<verb>', args)`.
+		// The verb string is the only connection between the override and the
+		// prototype lookup — a typo would silently bypass OAuth validation on
+		// that verb. Exercise all five both for enforcement and delegation.
+		for (const method of ['get', 'post', 'put', 'patch', 'delete']) {
+			it(`${method}: returns 401 with requireAuth and no OAuth data`, async () => {
+				const calls = [];
+				class MyResource extends MockResource {
+					async [method]() {
+						calls.push(method);
+						return { status: 200 };
+					}
+				}
+				const Wrapped = withOAuthValidation(MyResource, {
+					providers: mockProviders,
+					logger: mockLogger,
+					requireAuth: true,
+				});
+
+				const instance = new Wrapped('x', { session: { id: 'no-oauth' } });
+				const result = await instance[method]({ path: '/protected' });
+
+				assert.equal(result.status, 401, `${method} must enforce OAuth`);
+				assert.equal(calls.length, 0, `${method} must not run underlying method`);
+			});
+
+			it(`${method}: delegates to parent on valid session`, async () => {
+				const calls = [];
+				class MyResource extends MockResource {
+					async [method](target) {
+						calls.push({ method, target });
+						return { status: 200, verb: method };
+					}
+				}
+				const Wrapped = withOAuthValidation(MyResource, { providers: mockProviders, logger: mockLogger });
+
+				const instance = new Wrapped('x', { session: makeSession() });
+				const result = await instance[method]({ path: '/x' });
+
+				assert.equal(result.status, 200);
+				assert.equal(result.verb, method, `${method} override must call the parent's ${method}`);
+				assert.equal(calls.length, 1);
+			});
+		}
+	});
+
+	describe('onValidationError receives un-mutated request in clearing paths', () => {
+		// The "unknown provider" and "no provider name" branches clear stale
+		// session data. The callback must see the request BEFORE the clear,
+		// or audit/logging handlers reading request.session.oauth / oauthUser
+		// silently get `undefined`.
+		it('unknown-provider branch: callback sees full session, session is cleared after', async () => {
+			class MyResource extends MockResource {
+				async get() {
+					return { status: 200 };
+				}
+			}
+
+			const seen = [];
+			const context = {
+				session: makeSession({
+					oauth: { provider: 'ghost-provider', accessToken: 'stale' },
+				}),
+			};
+
+			const Wrapped = withOAuthValidation(MyResource, {
+				providers: mockProviders, // only has 'github'
+				logger: mockLogger,
+				requireAuth: true,
+				onValidationError: (request, error) => {
+					seen.push({
+						oauthAtCall: request.session.oauth && { ...request.session.oauth },
+						oauthUserAtCall: request.session.oauthUser && { ...request.session.oauthUser },
+						error,
+					});
+					return { status: 401, body: { custom: true } };
+				},
+			});
+
+			const instance = new Wrapped('x', context);
+			const result = await instance.get({ path: '/protected' });
+
+			assert.equal(result.status, 401);
+			assert.equal(seen.length, 1);
+			assert.ok(seen[0].oauthAtCall, 'callback must see oauth metadata BEFORE it is cleared');
+			assert.equal(seen[0].oauthAtCall.provider, 'ghost-provider');
+			assert.ok(seen[0].oauthUserAtCall, 'callback must see oauthUser metadata BEFORE it is cleared');
+			// Session IS cleared after the callback returns
+			assert.equal(context.session.oauth, undefined);
+			assert.equal(context.session.oauthUser, undefined);
+		});
+
+		it('no-provider-name branch: callback sees full session, session is cleared after', async () => {
+			class MyResource extends MockResource {
+				async get() {
+					return { status: 200 };
+				}
+			}
+
+			const seen = [];
+			const context = {
+				session: makeSession({
+					// OAuth data exists but has no `provider` field — invalid state
+					oauth: { accessToken: 'orphan', someOtherField: 'x' },
+				}),
+			};
+
+			const Wrapped = withOAuthValidation(MyResource, {
+				providers: mockProviders,
+				logger: mockLogger,
+				requireAuth: true,
+				onValidationError: (request, error) => {
+					seen.push({
+						oauthAtCall: request.session.oauth && { ...request.session.oauth },
+						oauthUserAtCall: request.session.oauthUser && { ...request.session.oauthUser },
+						error,
+					});
+					return { status: 401, body: { custom: true } };
+				},
+			});
+
+			const instance = new Wrapped('x', context);
+			await instance.get({ path: '/protected' });
+
+			assert.equal(seen.length, 1);
+			assert.ok(seen[0].oauthAtCall, 'callback must see oauth before clearing');
+			assert.equal(seen[0].oauthAtCall.accessToken, 'orphan');
+			assert.equal(context.session.oauth, undefined, 'session cleared after callback');
+		});
+	});
+
 	describe('Undefined super methods', () => {
 		it('returns undefined if the base class does not define the HTTP method', async () => {
 			// Matches Harper's own "method not implemented" behavior:

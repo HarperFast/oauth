@@ -72,32 +72,42 @@ async function validateOAuthForRequest(context: MaybeContext, options: OAuthVali
 		return undefined;
 	}
 
-	const providerName = request.session?.oauth?.provider;
-	if (!providerName) {
+	const clearStaleOAuth = () => {
 		if (request.session) {
 			delete request.session.oauth;
 			delete request.session.oauthUser;
 		}
+	};
+
+	const providerName = request.session?.oauth?.provider;
+	if (!providerName) {
 		if (requireAuth) {
 			const error = 'Invalid OAuth session data';
-			if (onValidationError) return onValidationError(request, error);
-			return { status: 401, body: { error: 'Unauthorized', message: error } };
+			// Invoke the callback BEFORE clearing so it can read
+			// request.session.oauth / .oauthUser (audit logging, etc.).
+			const response = onValidationError
+				? await onValidationError(request, error)
+				: { status: 401, body: { error: 'Unauthorized', message: error } };
+			clearStaleOAuth();
+			return response;
 		}
+		clearStaleOAuth();
 		return undefined;
 	}
 
 	const providerData = providers[providerName];
 	if (!providerData) {
 		logger?.warn?.(`OAuth provider '${providerName}' not found for session validation`);
-		if (request.session) {
-			delete request.session.oauth;
-			delete request.session.oauthUser;
-		}
 		if (requireAuth) {
 			const error = `OAuth provider '${providerName}' not configured`;
-			if (onValidationError) return onValidationError(request, error);
-			return { status: 401, body: { error: 'Unauthorized', message: error } };
+			// Same ordering as above: callback sees un-mutated request.
+			const response = onValidationError
+				? await onValidationError(request, error)
+				: { status: 401, body: { error: 'Unauthorized', message: error } };
+			clearStaleOAuth();
+			return response;
 		}
+		clearStaleOAuth();
 		return undefined;
 	}
 
