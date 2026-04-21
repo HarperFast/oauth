@@ -1,9 +1,10 @@
 /**
  * Tests for withOAuthValidation
  *
- * Covers Resource API v2 integration: the wrapper must find the request
- * via `this.getContext()` because v2 method signatures (`receive(target, data)`,
- * `get(target)`, etc.) do not pass the request as an argument.
+ * Exercises the subclass-based wrapper: `withOAuthValidation(ResourceClass, opts)`
+ * returns a subclass of `ResourceClass`. Harper registers the subclass via
+ * `resources.set(...)` and instantiates it per request; the subclass's
+ * HTTP-method overrides run OAuth validation before delegating to `super`.
  */
 
 import { describe, it, beforeEach } from 'node:test';
@@ -38,21 +39,21 @@ describe('withOAuthValidation', () => {
 	});
 
 	/**
-	 * Build a mock Resource API v2 target: a class instance whose `getContext()`
-	 * returns the request. Method arguments don't contain the request.
+	 * Minimal Resource-like base class for tests. Accepts `(id, context)`
+	 * in the constructor and exposes `getContext()` — matching the real
+	 * Harper Resource base class contract closely enough for wrapper tests.
 	 */
-	function makeV2Resource(methodImpl, context) {
-		return {
-			getContext() {
-				return context;
-			},
-			async get(target, data) {
-				return methodImpl('get', target, data);
-			},
-			async post(target, data) {
-				return methodImpl('post', target, data);
-			},
-		};
+	class MockResource {
+		static loadAsInstance = false;
+
+		constructor(id, context) {
+			this._id = id;
+			this._context = context ?? null;
+		}
+
+		getContext() {
+			return this._context;
+		}
 	}
 
 	function makeSession(overrides = {}) {
@@ -70,246 +71,275 @@ describe('withOAuthValidation', () => {
 		};
 	}
 
-	describe('Resource API v2 (request from this.getContext())', () => {
-		it('passes through to the underlying method when context has a valid OAuth session', async () => {
-			const context = { session: makeSession() };
-			const calls = [];
-			const resource = makeV2Resource((method, target, data) => {
-				calls.push({ method, target, data });
-				return { status: 200, body: { ok: true } };
-			}, context);
+	describe('Wrapped-class registration surface', () => {
+		it('returns a subclass of the input class (instanceof preserved)', () => {
+			class MyResource extends MockResource {
+				async get() {
+					return { status: 200 };
+				}
+			}
+			const Wrapped = withOAuthValidation(MyResource, { providers: mockProviders, logger: mockLogger });
 
-			const wrapped = withOAuthValidation(resource, { providers: mockProviders, logger: mockLogger });
-
-			const result = await wrapped.get({ path: '/x' }, { q: 1 });
-
-			assert.equal(result.status, 200);
-			assert.equal(calls.length, 1);
-			assert.equal(calls[0].method, 'get');
-			assert.deepEqual(calls[0].target, { path: '/x' });
+			const instance = new Wrapped('x', { session: makeSession() });
+			assert.ok(instance instanceof MyResource, 'wrapped instance must be an instance of the base class');
+			assert.ok(instance instanceof MockResource, 'wrapped instance must be an instance of the grand-parent class');
 		});
 
-		it('returns 401 when requireAuth is true and no OAuth data is in the session', async () => {
-			const context = { session: { id: 'sess-no-oauth' } }; // no .oauth field
-			const calls = [];
-			const resource = makeV2Resource((method) => {
-				calls.push({ method });
-				return { status: 200 };
-			}, context);
+		it('inherits static properties from the base class (e.g., loadAsInstance)', () => {
+			class MyResource extends MockResource {
+				static loadAsInstance = false;
+			}
+			const Wrapped = withOAuthValidation(MyResource, { providers: mockProviders, logger: mockLogger });
 
-			const wrapped = withOAuthValidation(resource, {
+			assert.equal(Wrapped.loadAsInstance, false);
+		});
+	});
+
+	describe('HTTP methods run validation before delegating', () => {
+		it('passes through to the underlying method when OAuth session is valid', async () => {
+			const calls = [];
+			class MyResource extends MockResource {
+				async get(target) {
+					calls.push({ target });
+					return { status: 200, body: { ok: true } };
+				}
+			}
+			const Wrapped = withOAuthValidation(MyResource, { providers: mockProviders, logger: mockLogger });
+
+			const instance = new Wrapped('x', { session: makeSession() });
+			const result = await instance.get({ path: '/x' });
+
+			assert.equal(result.status, 200);
+			assert.deepEqual(result.body, { ok: true });
+			assert.equal(calls.length, 1);
+		});
+
+		it('returns 401 when requireAuth is true and session has no OAuth data', async () => {
+			const calls = [];
+			class MyResource extends MockResource {
+				async get() {
+					calls.push('called');
+					return { status: 200 };
+				}
+			}
+			const Wrapped = withOAuthValidation(MyResource, {
 				providers: mockProviders,
 				logger: mockLogger,
 				requireAuth: true,
 			});
 
-			const result = await wrapped.get({ path: '/protected' });
+			const instance = new Wrapped('x', { session: { id: 'no-oauth' } });
+			const result = await instance.get({ path: '/protected' });
 
 			assert.equal(result.status, 401);
 			assert.equal(result.body.error, 'Unauthorized');
-			assert.equal(calls.length, 0, 'underlying method should not be called');
+			assert.equal(calls.length, 0, 'underlying method must not run');
 		});
 
-		it('passes through unvalidated when requireAuth is false and no OAuth data is in the session', async () => {
-			const context = { session: { id: 'sess-no-oauth' } };
+		it('passes through when requireAuth is false and session has no OAuth data', async () => {
 			const calls = [];
-			const resource = makeV2Resource((method) => {
-				calls.push({ method });
-				return { status: 200 };
-			}, context);
-
-			const wrapped = withOAuthValidation(resource, {
+			class MyResource extends MockResource {
+				async get() {
+					calls.push('called');
+					return { status: 200 };
+				}
+			}
+			const Wrapped = withOAuthValidation(MyResource, {
 				providers: mockProviders,
 				logger: mockLogger,
 				requireAuth: false,
 			});
 
-			const result = await wrapped.get({ path: '/public' });
+			const instance = new Wrapped('x', { session: { id: 'no-oauth' } });
+			const result = await instance.get({ path: '/public' });
 
 			assert.equal(result.status, 200);
-			assert.equal(calls.length, 1, 'underlying method should be called');
+			assert.equal(calls.length, 1);
 		});
 
-		it('invokes onValidationError when provided instead of returning a default 401', async () => {
-			const context = { session: { id: 'sess-no-oauth' } };
-			const resource = makeV2Resource(() => ({ status: 200 }), context);
+		it('invokes onValidationError when provided and validation fails', async () => {
+			class MyResource extends MockResource {
+				async get() {
+					return { status: 200 };
+				}
+			}
 
-			const seenErrors = [];
-			const wrapped = withOAuthValidation(resource, {
+			const seen = [];
+			const Wrapped = withOAuthValidation(MyResource, {
 				providers: mockProviders,
 				logger: mockLogger,
 				requireAuth: true,
 				onValidationError: (request, error) => {
-					seenErrors.push({ hasRequest: !!request, error });
+					seen.push({ hasRequest: !!request, error });
 					return { status: 418, body: { custom: true } };
 				},
 			});
 
-			const result = await wrapped.get({ path: '/protected' });
+			const instance = new Wrapped('x', { session: { id: 'no-oauth' } });
+			const result = await instance.get({ path: '/protected' });
 
 			assert.equal(result.status, 418);
 			assert.equal(result.body.custom, true);
-			assert.equal(seenErrors.length, 1);
-			assert.equal(seenErrors[0].hasRequest, true);
-			assert.equal(seenErrors[0].error, 'OAuth authentication required');
+			assert.equal(seen.length, 1);
+			assert.equal(seen[0].hasRequest, true);
+			assert.equal(seen[0].error, 'OAuth authentication required');
 		});
 
-		it('clears stale session data when the provider referenced by session is not configured (requireAuth: false)', async () => {
+		it('clears stale session data when the provider is not in the registry (requireAuth: false)', async () => {
+			const calls = [];
+			class MyResource extends MockResource {
+				async get() {
+					calls.push({ sessionOAuth: this._context.session.oauth });
+					return { status: 200 };
+				}
+			}
+
 			const context = {
 				session: makeSession({ oauth: { provider: 'ghost-provider', accessToken: 'stale' } }),
 			};
-			const calls = [];
-			const resource = makeV2Resource((method) => {
-				calls.push({ method, sessionOAuth: context.session.oauth });
-				return { status: 200 };
-			}, context);
-
-			const wrapped = withOAuthValidation(resource, {
+			const Wrapped = withOAuthValidation(MyResource, {
 				providers: mockProviders, // only has 'github'
 				logger: mockLogger,
 				requireAuth: false,
 			});
 
-			await wrapped.get({ path: '/x' });
+			const instance = new Wrapped('x', context);
+			await instance.get({ path: '/x' });
 
 			assert.equal(calls.length, 1);
 			assert.equal(calls[0].sessionOAuth, undefined, 'stale oauth metadata should be cleared');
 		});
 
-		// The two failure-path cases below are the ones the fix was actually
-		// written to enable: before the v2-context change they wouldn't even
-		// reach `validateAndRefreshSession` (the old `args.find` returned no
-		// request) and the wrapper silently passed through. Now they must
-		// genuinely reject with 401.
-
-		it('returns 401 when the session references a provider not in the registry (requireAuth: true)', async () => {
+		it('returns 401 when the session references an unknown provider (requireAuth: true)', async () => {
+			const calls = [];
+			class MyResource extends MockResource {
+				async get() {
+					calls.push('called');
+					return { status: 200 };
+				}
+			}
 			const context = {
 				session: makeSession({ oauth: { provider: 'ghost-provider', accessToken: 'stale' } }),
 			};
-			const calls = [];
-			const resource = makeV2Resource((method) => {
-				calls.push({ method });
-				return { status: 200 };
-			}, context);
-
-			const wrapped = withOAuthValidation(resource, {
-				providers: mockProviders, // only has 'github'
+			const Wrapped = withOAuthValidation(MyResource, {
+				providers: mockProviders,
 				logger: mockLogger,
 				requireAuth: true,
 			});
 
-			const result = await wrapped.get({ path: '/protected' });
+			const instance = new Wrapped('x', context);
+			const result = await instance.get({ path: '/protected' });
 
-			assert.equal(result.status, 401, 'should reject rather than silently pass through');
-			assert.equal(result.body.error, 'Unauthorized');
+			assert.equal(result.status, 401);
 			assert.match(result.body.message, /not configured/);
-			assert.equal(calls.length, 0, 'underlying method must not run');
+			assert.equal(calls.length, 0);
 			assert.equal(context.session.oauth, undefined, 'stale oauth metadata should be cleared');
 		});
 
 		it('returns 401 when the access token is expired and no refresh token is available (requireAuth: true)', async () => {
+			const calls = [];
+			class MyResource extends MockResource {
+				async get() {
+					calls.push('called');
+					return { status: 200 };
+				}
+			}
 			const context = {
 				session: makeSession({
 					oauth: {
 						provider: 'github',
 						accessToken: 'expired-token',
-						expiresAt: Date.now() - 60_000, // expired one minute ago
+						expiresAt: Date.now() - 60_000,
 						refreshToken: undefined,
 					},
 				}),
 			};
-			const calls = [];
-			const resource = makeV2Resource((method) => {
-				calls.push({ method });
-				return { status: 200 };
-			}, context);
-
-			const wrapped = withOAuthValidation(resource, {
+			const Wrapped = withOAuthValidation(MyResource, {
 				providers: mockProviders,
 				logger: mockLogger,
 				requireAuth: true,
 			});
 
-			const result = await wrapped.get({ path: '/protected' });
+			const instance = new Wrapped('x', context);
+			const result = await instance.get({ path: '/protected' });
 
-			assert.equal(result.status, 401, 'should reject on expired token with no refresh path');
-			assert.equal(result.body.error, 'Unauthorized');
+			assert.equal(result.status, 401);
 			assert.match(result.body.message, /expired/i);
-			assert.equal(calls.length, 0, 'underlying method must not run');
+			assert.equal(calls.length, 0);
 		});
 	});
 
-	describe('non-HTTP methods pass through untouched', () => {
+	describe('Non-HTTP methods pass through untouched', () => {
 		it('does not wrap arbitrary methods', async () => {
-			const context = { session: makeSession() };
-			const resource = {
-				...makeV2Resource(() => ({ status: 200 }), context),
-				helper: () => 'helper-result',
-			};
-			const wrapped = withOAuthValidation(resource, { providers: mockProviders, logger: mockLogger });
+			class MyResource extends MockResource {
+				async get() {
+					return { status: 200 };
+				}
+				helper() {
+					return 'helper-result';
+				}
+			}
+			const Wrapped = withOAuthValidation(MyResource, { providers: mockProviders, logger: mockLogger });
 
-			assert.equal(wrapped.helper(), 'helper-result');
+			const instance = new Wrapped('x', { session: makeSession() });
+			assert.equal(instance.helper(), 'helper-result');
 		});
 	});
 
-	describe('fallthrough: no context available', () => {
-		it('passes through when requireAuth is false and the resource has no getContext', async () => {
-			// Simulates a method called without v2 context
+	describe('No context available', () => {
+		it('passes through when requireAuth is false and there is no session on the context', async () => {
 			const calls = [];
-			const resource = {
-				async get(target, data) {
-					calls.push({ target, data });
+			class MyResource extends MockResource {
+				async get() {
+					calls.push('called');
 					return { status: 200 };
-				},
-			};
-			const wrapped = withOAuthValidation(resource, { providers: mockProviders, logger: mockLogger });
+				}
+			}
+			const Wrapped = withOAuthValidation(MyResource, { providers: mockProviders, logger: mockLogger });
 
-			const result = await wrapped.get({ path: '/noop' }, 'irrelevant');
+			const instance = new Wrapped('x', {}); // context without session
+			const result = await instance.get({ path: '/noop' });
 
 			assert.equal(result.status, 200);
 			assert.equal(calls.length, 1);
 		});
 
-		it('returns 401 when requireAuth is true and no context is available (fail-closed)', async () => {
-			// When getContext() is missing (or yields no session) and auth is
-			// required, the wrapper must reject. Passing through would silently
-			// bypass OAuth on any code path that didn't provide a v2 context.
+		it('returns 401 when requireAuth is true and there is no session on the context (fail-closed)', async () => {
 			const calls = [];
-			const resource = {
-				async get(target) {
-					calls.push({ target });
+			class MyResource extends MockResource {
+				async get() {
+					calls.push('called');
 					return { status: 200 };
-				},
-			};
-			const wrapped = withOAuthValidation(resource, {
+				}
+			}
+			const Wrapped = withOAuthValidation(MyResource, {
 				providers: mockProviders,
 				logger: mockLogger,
 				requireAuth: true,
 			});
 
-			const result = await wrapped.get({ path: '/protected' });
+			const instance = new Wrapped('x', {}); // context without session
+			const result = await instance.get({ path: '/protected' });
 
-			assert.equal(result.status, 401, 'must reject rather than silently pass through');
-			assert.equal(result.body.error, 'Unauthorized');
+			assert.equal(result.status, 401);
 			assert.match(result.body.message, /context/i);
-			assert.equal(calls.length, 0, 'underlying method must not run');
+			assert.equal(calls.length, 0);
 		});
 
-		it('does NOT invoke onValidationError in the no-context path (its signature requires a Request)', async () => {
+		it('does NOT invoke onValidationError in the no-context path', async () => {
 			// The no-context fail-closed branch deliberately skips
-			// onValidationError: the callback's signature is
-			// `(request: Request, error) => any` and callers are entitled
-			// to read `request.session` / `.ip` / `.headers`. Passing
-			// `undefined` as `request` would break the contract and turn
-			// a clean 401 into a runtime TypeError inside user code.
-			const resource = {
+			// onValidationError: the callback signature is
+			// `(request: Request, error) => any` and callers read
+			// `request.session` / `.ip` / `.headers`. Passing `undefined`
+			// would turn a clean 401 into a TypeError in user code.
+			class MyResource extends MockResource {
 				async get() {
 					return { status: 200, passedThrough: true };
-				},
-			};
+				}
+			}
 
 			let handlerCalled = false;
-			const wrapped = withOAuthValidation(resource, {
+			const Wrapped = withOAuthValidation(MyResource, {
 				providers: mockProviders,
 				logger: mockLogger,
 				requireAuth: true,
@@ -319,11 +349,32 @@ describe('withOAuthValidation', () => {
 				},
 			});
 
-			const result = await wrapped.get({ path: '/protected' });
+			const instance = new Wrapped('x', {}); // no session
+			const result = await instance.get({ path: '/protected' });
 
 			assert.equal(handlerCalled, false, 'onValidationError must not be called without a valid request');
-			assert.equal(result.status, 401, 'must return the default 401, not the custom handler response');
+			assert.equal(result.status, 401);
 			assert.equal(result.body.error, 'Unauthorized');
+		});
+	});
+
+	describe('Undefined super methods', () => {
+		it('returns undefined if the base class does not define the HTTP method', async () => {
+			// Matches Harper's own "method not implemented" behavior:
+			// `resource.<method>?.(…)` short-circuits to undefined, and
+			// Harper renders that as 404 / method-not-allowed. The
+			// wrapper still runs validation first so unreachable verbs
+			// are defense-in-depth protected.
+			class GetOnly extends MockResource {
+				async get() {
+					return { status: 200 };
+				}
+			}
+			const Wrapped = withOAuthValidation(GetOnly, { providers: mockProviders, logger: mockLogger });
+
+			const instance = new Wrapped('x', { session: makeSession() });
+			const result = await instance.post({ path: '/x' }, { data: 1 });
+			assert.equal(result, undefined);
 		});
 	});
 });

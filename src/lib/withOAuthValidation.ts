@@ -1,10 +1,16 @@
 /**
  * OAuth Session Validation Wrapper
  *
- * Wraps Harper resources to add automatic OAuth session validation and token refresh
- * before handling any request. This enables transparent token management for protected endpoints.
+ * Wraps a Harper Resource **class** so HTTP methods run OAuth session
+ * validation (and automatic token refresh) before the wrapped method
+ * executes. The returned value is a subclass of the input class: Harper
+ * registers it via `resources.set(...)` and invokes it through the
+ * standard `static getResource` lifecycle. Per-request instances inherit
+ * `getContext()` from the user's base `Resource`, so the validation runs
+ * against the real request context with no extra plumbing.
  */
 
+import type { Context, SourceContext } from 'harper';
 import type { Request, Logger, ProviderRegistry } from '../types.ts';
 import { validateAndRefreshSession } from './sessionValidator.ts';
 
@@ -19,208 +25,188 @@ export interface OAuthValidationOptions {
 	onValidationError?: (request: Request, error: string) => any;
 }
 
+type MaybeContext = Context | SourceContext | undefined;
+
 /**
- * Wraps a Harper resource to add automatic OAuth session validation
+ * Run OAuth validation for a request context.
  *
- * This wrapper intercepts all resource method calls (get, post, put, patch, delete)
- * and validates/refreshes OAuth tokens before passing the request to the original resource.
+ * Returns `undefined` when the wrapped method should continue. Returns
+ * a response object (or the result of `onValidationError`) when the
+ * wrapped method should be short-circuited.
  *
- * Resource API v2: the wrapped resource's methods receive `(target, data)`
- * and read the request from `this.getContext()`. The `@example` below
- * reflects that shape; do not reintroduce a `request` method parameter.
- *
- * `onValidationError` is invoked for OAuth validation failures where a
- * request was resolved (no OAuth data, provider not configured, token
- * invalid, etc.). It is NOT called when the wrapper can't resolve a
- * request at all (no v2 context, or context without a session); that
- * path always returns a default 401 when `requireAuth` is true, since
- * the callback's `request` parameter would be undefined.
+ * `onValidationError` is called only on paths where a concrete `request`
+ * exists and validation failed semantically (no OAuth data, invalid
+ * provider, expired session, etc.). It is **not** invoked on the
+ * no-context path, since the callback's signature requires a `Request`
+ * and callers are entitled to read `request.session` / `.ip` / `.headers`.
+ */
+async function validateOAuthForRequest(context: MaybeContext, options: OAuthValidationOptions): Promise<any> {
+	const { providers, logger, requireAuth = false, onValidationError } = options;
+	const request: Request | undefined =
+		(context as any)?.session !== undefined ? (context as unknown as Request) : undefined;
+
+	// No v2 context / no session → fail-closed when requireAuth, otherwise passthrough.
+	// We do NOT call onValidationError here: the callback signature requires
+	// a Request, and callers read request.session / .ip / .headers. Passing
+	// `undefined` would turn a clean 401 into a TypeError in user code.
+	if (!request) {
+		if (requireAuth) {
+			return {
+				status: 401,
+				body: {
+					error: 'Unauthorized',
+					message: 'No request context available',
+				},
+			};
+		}
+		return undefined;
+	}
+
+	const hasOAuth = request.session?.oauth !== undefined;
+	if (!hasOAuth) {
+		if (requireAuth) {
+			const error = 'OAuth authentication required';
+			if (onValidationError) return onValidationError(request, error);
+			return { status: 401, body: { error: 'Unauthorized', message: error } };
+		}
+		return undefined;
+	}
+
+	const providerName = request.session?.oauth?.provider;
+	if (!providerName) {
+		if (request.session) {
+			delete request.session.oauth;
+			delete request.session.oauthUser;
+		}
+		if (requireAuth) {
+			const error = 'Invalid OAuth session data';
+			if (onValidationError) return onValidationError(request, error);
+			return { status: 401, body: { error: 'Unauthorized', message: error } };
+		}
+		return undefined;
+	}
+
+	const providerData = providers[providerName];
+	if (!providerData) {
+		logger?.warn?.(`OAuth provider '${providerName}' not found for session validation`);
+		if (request.session) {
+			delete request.session.oauth;
+			delete request.session.oauthUser;
+		}
+		if (requireAuth) {
+			const error = `OAuth provider '${providerName}' not configured`;
+			if (onValidationError) return onValidationError(request, error);
+			return { status: 401, body: { error: 'Unauthorized', message: error } };
+		}
+		return undefined;
+	}
+
+	const validation = await validateAndRefreshSession(request, providerData.provider, logger);
+	if (!validation.valid) {
+		logger?.info?.(`OAuth session validation failed: ${validation.error}`);
+		if (requireAuth) {
+			const error = validation.error || 'OAuth session expired';
+			if (onValidationError) return onValidationError(request, error);
+			return {
+				status: 401,
+				body: {
+					error: 'Unauthorized',
+					message: 'OAuth session expired. Please log in again.',
+					details: validation.error,
+				},
+			};
+		}
+		return undefined;
+	}
+
+	if (validation.refreshed) {
+		logger?.debug?.(`OAuth token refreshed for ${providerName} session`);
+	}
+
+	return undefined;
+}
+
+/**
+ * Wrap a Harper `Resource` class so each HTTP method runs OAuth session
+ * validation before the user-defined method executes.
  *
  * @example
  * ```typescript
  * // In your application component:
+ * import { Resource } from 'harper';
  * import { withOAuthValidation } from '@harperfast/oauth';
  *
  * export function handleApplication(scope) {
- *   // Get OAuth providers from the OAuth plugin
  *   const oauthPlugin = scope.parent.resources.get('oauth');
  *
- *   // Wrap your protected resource (Resource API v2).
- *   //
- *   // Note: the wrapper Proxy intercepts property access on the object
- *   // you pass in, so pass an instance (or a plain object with methods)
- *   // — NOT a class constructor. Methods on a class constructor live on
- *   // `.prototype`, which the Proxy's `get` trap can't see; wrapping the
- *   // class directly would silently bypass OAuth validation.
- *   class MyResource {
+ *   class MyResource extends Resource {
+ *     static loadAsInstance = false;
  *     async get(target) {
  *       const request = this.getContext();
- *       // This code only runs if OAuth session is valid
  *       return { user: request.session.oauthUser };
  *     }
  *   }
  *
- *   scope.resources.set('protected', withOAuthValidation(new MyResource(), {
+ *   const Protected = withOAuthValidation(MyResource, {
  *     providers: oauthPlugin.providers,
  *     requireAuth: true,
- *     logger: scope.logger
- *   }));
+ *     logger: scope.logger,
+ *   });
+ *
+ *   // Register the wrapped class — Harper handles instantiation per request
+ *   scope.resources.set('protected', Protected);
  * }
  * ```
+ *
+ * Notes:
+ * - The wrapper returns a **subclass** of `ResourceClass`. All static
+ *   properties (including `loadAsInstance`) and static methods
+ *   (including `getResource`) are inherited, so Harper's registration
+ *   and dispatch lifecycle works unchanged.
+ * - The five standard HTTP methods — `get`, `post`, `put`, `patch`,
+ *   `delete` — are overridden to run validation first. Other methods
+ *   (subscriptions, helpers, etc.) pass through untouched.
+ * - If the parent class does not define an HTTP method, the wrapper
+ *   still runs validation, then returns `undefined` — matching
+ *   Harper's "method not implemented" behavior. This means validation
+ *   runs even on unhandled verbs (defense-in-depth).
  */
-export function withOAuthValidation(resource: any, options: OAuthValidationOptions): any {
-	const { providers, logger, requireAuth = false, onValidationError } = options;
+export function withOAuthValidation<T extends abstract new (...args: any[]) => any>(
+	ResourceClass: T,
+	options: OAuthValidationOptions
+): T {
+	// Capture the parent prototype so we can look up HTTP methods directly
+	// without using `super` (TypeScript doesn't allow optional chaining on
+	// `super` member access, and the `delete` keyword as a method name via
+	// `super` trips up some compilation targets). Prototype lookup walks
+	// the chain, so inherited methods are found too.
+	const parentProto = (ResourceClass as any).prototype;
 
-	// Create a proxy that wraps all resource methods
-	return new Proxy(resource, {
-		get(target, prop: string) {
-			const originalMethod = target[prop];
+	const delegate = async (instance: any, method: string, args: any[]) => {
+		const deny = await validateOAuthForRequest(instance.getContext?.(), options);
+		if (deny !== undefined) return deny;
+		const parentMethod = parentProto?.[method];
+		return typeof parentMethod === 'function' ? parentMethod.apply(instance, args) : undefined;
+	};
 
-			// Only wrap HTTP methods
-			if (!['get', 'post', 'put', 'patch', 'delete'].includes(prop)) {
-				return originalMethod;
-			}
-
-			// Return wrapped method with OAuth validation
-			return async function (this: any, ...args: any[]) {
-				// Resource API v2: the request lives on the resource context
-				// (`this.getContext()`), not in the method arguments. Method
-				// signatures like `get(target)` / `receive(target, data)` do
-				// not pass the request directly.
-				const context = typeof this?.getContext === 'function' ? this.getContext() : undefined;
-				const request: Request | undefined = context?.session !== undefined ? (context as Request) : undefined;
-
-				if (!request) {
-					// Fail-closed when auth is required: if we can't identify
-					// the request (no v2 context, or context without a session),
-					// we can't verify OAuth and must reject rather than silently
-					// invoke the protected method.
-					//
-					// `onValidationError` is deliberately NOT called here: its
-					// signature expects a `Request`, and callers are entitled
-					// to read `request.session` / `.ip` / `.headers`. Passing
-					// `undefined` would break that contract and turn a clean
-					// 401 into a runtime `TypeError` inside user code.
-					if (requireAuth) {
-						return {
-							status: 401,
-							body: {
-								error: 'Unauthorized',
-								message: 'No request context available',
-							},
-						};
-					}
-					// No auth required — pass through
-					return originalMethod.apply(this, args);
-				}
-
-				// Check if session has OAuth data
-				const hasOAuth = request.session?.oauth !== undefined;
-
-				if (!hasOAuth) {
-					if (requireAuth) {
-						// OAuth authentication required but not present
-						const error = 'OAuth authentication required';
-						if (onValidationError) {
-							return onValidationError(request, error);
-						}
-						return {
-							status: 401,
-							body: {
-								error: 'Unauthorized',
-								message: error,
-							},
-						};
-					}
-					// OAuth not required, pass through
-					return originalMethod.apply(this, args);
-				}
-
-				// Get provider for this OAuth session
-				const providerName = request.session?.oauth?.provider;
-				if (!providerName) {
-					// No provider name in session - invalid OAuth data
-					if (request.session) {
-						delete request.session.oauth;
-						delete request.session.oauthUser;
-					}
-					if (requireAuth) {
-						const error = 'Invalid OAuth session data';
-						if (onValidationError) {
-							return onValidationError(request, error);
-						}
-						return {
-							status: 401,
-							body: {
-								error: 'Unauthorized',
-								message: error,
-							},
-						};
-					}
-					return originalMethod.apply(this, args);
-				}
-
-				const providerData = providers[providerName];
-
-				if (!providerData) {
-					logger?.warn?.(`OAuth provider '${providerName}' not found for session validation`);
-					// Provider not found - clear OAuth data and continue
-					if (request.session) {
-						delete request.session.oauth;
-						delete request.session.oauthUser;
-					}
-					if (requireAuth) {
-						const error = `OAuth provider '${providerName}' not configured`;
-						if (onValidationError) {
-							return onValidationError(request, error);
-						}
-						return {
-							status: 401,
-							body: {
-								error: 'Unauthorized',
-								message: error,
-							},
-						};
-					}
-					return originalMethod.apply(this, args);
-				}
-
-				// Validate and refresh session
-				const validation = await validateAndRefreshSession(request, providerData.provider, logger);
-
-				if (!validation.valid) {
-					// Session validation failed
-					logger?.info?.(`OAuth session validation failed: ${validation.error}`);
-
-					if (requireAuth) {
-						const error = validation.error || 'OAuth session expired';
-						if (onValidationError) {
-							return onValidationError(request, error);
-						}
-						return {
-							status: 401,
-							body: {
-								error: 'Unauthorized',
-								message: 'OAuth session expired. Please log in again.',
-								details: validation.error,
-							},
-						};
-					}
-
-					// Not requiring auth, but validation failed - continue without OAuth
-					return originalMethod.apply(this, args);
-				}
-
-				// Session is valid (and possibly refreshed)
-				if (validation.refreshed) {
-					logger?.debug?.(`OAuth token refreshed for ${providerName} session`);
-				}
-
-				// Call original method with validated/refreshed session
-				return originalMethod.apply(this, args);
-			};
-		},
-	});
+	const Wrapped = class extends (ResourceClass as any) {
+		async get(...args: any[]) {
+			return delegate(this, 'get', args);
+		}
+		async post(...args: any[]) {
+			return delegate(this, 'post', args);
+		}
+		async put(...args: any[]) {
+			return delegate(this, 'put', args);
+		}
+		async patch(...args: any[]) {
+			return delegate(this, 'patch', args);
+		}
+		async delete(...args: any[]) {
+			return delegate(this, 'delete', args);
+		}
+	};
+	return Wrapped as unknown as T;
 }
 
 /**
