@@ -429,9 +429,23 @@ describe('withOAuthValidation', () => {
 				logger: mockLogger,
 				requireAuth: true,
 				onValidationError: (request, error) => {
+					// Explicit property access — Harper's GenericTrackedObject
+					// does NOT support `{ ...obj }` spread (per CLAUDE.md
+					// Non-Obvious Gotchas). Tests that snapshot via spread
+					// would silently yield empty objects in production and
+					// mislead integrators who copy the callback pattern.
+					const oauth = request.session.oauth;
+					const oauthUser = request.session.oauthUser;
 					seen.push({
-						oauthAtCall: request.session.oauth && { ...request.session.oauth },
-						oauthUserAtCall: request.session.oauthUser && { ...request.session.oauthUser },
+						oauthAtCall: oauth && {
+							provider: oauth.provider,
+							accessToken: oauth.accessToken,
+						},
+						oauthUserAtCall: oauthUser && {
+							username: oauthUser.username,
+							email: oauthUser.email,
+							role: oauthUser.role,
+						},
 						error,
 					});
 					return { status: 401, body: { custom: true } };
@@ -471,9 +485,12 @@ describe('withOAuthValidation', () => {
 				logger: mockLogger,
 				requireAuth: true,
 				onValidationError: (request, error) => {
+					const oauth = request.session.oauth;
 					seen.push({
-						oauthAtCall: request.session.oauth && { ...request.session.oauth },
-						oauthUserAtCall: request.session.oauthUser && { ...request.session.oauthUser },
+						oauthAtCall: oauth && {
+							accessToken: oauth.accessToken,
+							someOtherField: oauth.someOtherField,
+						},
 						error,
 					});
 					return { status: 401, body: { custom: true } };
