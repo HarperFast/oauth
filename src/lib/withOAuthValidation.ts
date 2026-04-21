@@ -45,9 +45,14 @@ export interface OAuthValidationOptions {
  *   // Get OAuth providers from the OAuth plugin
  *   const oauthPlugin = scope.parent.resources.get('oauth');
  *
- *   // Wrap your protected resource (Resource API v2)
+ *   // Wrap your protected resource (Resource API v2).
+ *   //
+ *   // Note: the wrapper Proxy intercepts property access on the object
+ *   // you pass in, so pass an instance (or a plain object with methods)
+ *   // — NOT a class constructor. Methods on a class constructor live on
+ *   // `.prototype`, which the Proxy's `get` trap can't see; wrapping the
+ *   // class directly would silently bypass OAuth validation.
  *   class MyResource {
- *     static loadAsInstance = false;
  *     async get(target) {
  *       const request = this.getContext();
  *       // This code only runs if OAuth session is valid
@@ -55,7 +60,7 @@ export interface OAuthValidationOptions {
  *     }
  *   }
  *
- *   scope.resources.set('protected', withOAuthValidation(MyResource, {
+ *   scope.resources.set('protected', withOAuthValidation(new MyResource(), {
  *     providers: oauthPlugin.providers,
  *     requireAuth: true,
  *     logger: scope.logger

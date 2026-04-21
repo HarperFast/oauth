@@ -294,5 +294,36 @@ describe('withOAuthValidation', () => {
 			assert.match(result.body.message, /context/i);
 			assert.equal(calls.length, 0, 'underlying method must not run');
 		});
+
+		it('does NOT invoke onValidationError in the no-context path (its signature requires a Request)', async () => {
+			// The no-context fail-closed branch deliberately skips
+			// onValidationError: the callback's signature is
+			// `(request: Request, error) => any` and callers are entitled
+			// to read `request.session` / `.ip` / `.headers`. Passing
+			// `undefined` as `request` would break the contract and turn
+			// a clean 401 into a runtime TypeError inside user code.
+			const resource = {
+				async get() {
+					return { status: 200, passedThrough: true };
+				},
+			};
+
+			let handlerCalled = false;
+			const wrapped = withOAuthValidation(resource, {
+				providers: mockProviders,
+				logger: mockLogger,
+				requireAuth: true,
+				onValidationError: () => {
+					handlerCalled = true;
+					return { status: 418, body: { shouldNotSeeThis: true } };
+				},
+			});
+
+			const result = await wrapped.get({ path: '/protected' });
+
+			assert.equal(handlerCalled, false, 'onValidationError must not be called without a valid request');
+			assert.equal(result.status, 401, 'must return the default 401, not the custom handler response');
+			assert.equal(result.body.error, 'Unauthorized');
+		});
 	});
 });
