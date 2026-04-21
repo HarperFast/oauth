@@ -62,12 +62,27 @@ async function validateOAuthForRequest(context: MaybeContext, options: OAuthVali
 		return undefined;
 	}
 
+	// When onValidationError is provided, we still always need a
+	// fall-back 401 to return if the handler returns `undefined` — e.g.
+	// a plain logging callback like `async (req, err) => { log(err) }`.
+	// Without the fallback, `undefined` would propagate as "no problem"
+	// and silently bypass auth. We use `??` everywhere the handler is
+	// invoked so a no-return handler is indistinguishable, security-wise,
+	// from no handler at all.
+	const callCallbackOrDeny = async (request: Request, error: string, defaultDeny: any): Promise<any> => {
+		if (!onValidationError) return defaultDeny;
+		const result = await onValidationError(request, error);
+		return result ?? defaultDeny;
+	};
+
 	const hasOAuth = request.session?.oauth !== undefined;
 	if (!hasOAuth) {
 		if (requireAuth) {
 			const error = 'OAuth authentication required';
-			if (onValidationError) return onValidationError(request, error);
-			return { status: 401, body: { error: 'Unauthorized', message: error } };
+			return callCallbackOrDeny(request, error, {
+				status: 401,
+				body: { error: 'Unauthorized', message: error },
+			});
 		}
 		return undefined;
 	}
@@ -85,9 +100,10 @@ async function validateOAuthForRequest(context: MaybeContext, options: OAuthVali
 			const error = 'Invalid OAuth session data';
 			// Invoke the callback BEFORE clearing so it can read
 			// request.session.oauth / .oauthUser (audit logging, etc.).
-			const response = onValidationError
-				? await onValidationError(request, error)
-				: { status: 401, body: { error: 'Unauthorized', message: error } };
+			const response = await callCallbackOrDeny(request, error, {
+				status: 401,
+				body: { error: 'Unauthorized', message: error },
+			});
 			clearStaleOAuth();
 			return response;
 		}
@@ -101,9 +117,10 @@ async function validateOAuthForRequest(context: MaybeContext, options: OAuthVali
 		if (requireAuth) {
 			const error = `OAuth provider '${providerName}' not configured`;
 			// Same ordering as above: callback sees un-mutated request.
-			const response = onValidationError
-				? await onValidationError(request, error)
-				: { status: 401, body: { error: 'Unauthorized', message: error } };
+			const response = await callCallbackOrDeny(request, error, {
+				status: 401,
+				body: { error: 'Unauthorized', message: error },
+			});
 			clearStaleOAuth();
 			return response;
 		}
@@ -116,15 +133,14 @@ async function validateOAuthForRequest(context: MaybeContext, options: OAuthVali
 		logger?.info?.(`OAuth session validation failed: ${validation.error}`);
 		if (requireAuth) {
 			const error = validation.error || 'OAuth session expired';
-			if (onValidationError) return onValidationError(request, error);
-			return {
+			return callCallbackOrDeny(request, error, {
 				status: 401,
 				body: {
 					error: 'Unauthorized',
 					message: 'OAuth session expired. Please log in again.',
 					details: validation.error,
 				},
-			};
+			});
 		}
 		return undefined;
 	}

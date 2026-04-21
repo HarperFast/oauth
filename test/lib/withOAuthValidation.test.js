@@ -527,6 +527,99 @@ describe('withOAuthValidation', () => {
 		});
 	});
 
+	describe('Expired token with requireAuth: true invokes onValidationError', () => {
+		// The !validation.valid path is the most common real-world
+		// failure: a logged-in user's token has expired and can't be
+		// refreshed. Two cases matter here:
+		//
+		// (a) Handler returns a custom response → that response is what
+		//     the caller sees.
+		// (b) Handler returns undefined (plausible — a pure logging
+		//     callback). The wrapper MUST fall back to the default 401
+		//     rather than propagating `undefined` as a "no problem"
+		//     sentinel, which would silently invoke the protected method.
+		it('handler returns a response — wrapper returns it verbatim', async () => {
+			const calls = [];
+			class MyResource extends MockResource {
+				async get() {
+					calls.push('called');
+					return { status: 200 };
+				}
+			}
+			const context = {
+				session: makeSession({
+					oauth: {
+						provider: 'github',
+						accessToken: 'expired',
+						expiresAt: Date.now() - 60_000,
+						refreshToken: undefined,
+					},
+				}),
+			};
+			const seen = [];
+			const Wrapped = withOAuthValidation(MyResource, {
+				providers: mockProviders,
+				logger: mockLogger,
+				requireAuth: true,
+				onValidationError: (request, error) => {
+					seen.push({ error, hasRequest: !!request });
+					return { status: 418, body: { custom: true } };
+				},
+			});
+
+			const instance = new Wrapped('x', context);
+			const result = await instance.get({ path: '/protected' });
+
+			assert.equal(result.status, 418);
+			assert.equal(result.body.custom, true);
+			assert.equal(calls.length, 0, 'protected method must not run');
+			assert.equal(seen.length, 1);
+			assert.match(seen[0].error, /expired/i);
+		});
+
+		it('handler returns undefined — wrapper falls back to default 401 (no silent bypass)', async () => {
+			const calls = [];
+			class MyResource extends MockResource {
+				async get() {
+					calls.push('called');
+					return { status: 200, shouldNeverHappen: true };
+				}
+			}
+			const context = {
+				session: makeSession({
+					oauth: {
+						provider: 'github',
+						accessToken: 'expired',
+						expiresAt: Date.now() - 60_000,
+						refreshToken: undefined,
+					},
+				}),
+			};
+			let handlerCalled = false;
+			const Wrapped = withOAuthValidation(MyResource, {
+				providers: mockProviders,
+				logger: mockLogger,
+				requireAuth: true,
+				// Plausible real-world shape: a pure logging callback
+				// that happens to return void. Must NOT be interpreted
+				// as "continue."
+				onValidationError: () => {
+					handlerCalled = true;
+					// no return — returns undefined
+				},
+			});
+
+			const instance = new Wrapped('x', context);
+			const result = await instance.get({ path: '/protected' });
+
+			assert.equal(handlerCalled, true, 'handler must be invoked');
+			assert.equal(result.status, 401, 'must fail closed on undefined handler return');
+			assert.equal(result.body.error, 'Unauthorized');
+			assert.match(result.body.message, /expired/i);
+			assert.equal(calls.length, 0, 'protected method must NOT run — this is the silent-bypass case');
+		});
+	});
+
 	describe('Expired token with requireAuth: false passes through and clears the session', () => {
 		// New reachable behavior post-v5: `validateAndRefreshSession`
 		// calls `clearOAuthSession` internally when the token is expired
