@@ -72,6 +72,13 @@ jobs:
               at start, you can re-invoke if needed)
             - `gh pr comment` — post the final review comment
 
+            Do NOT write files during the review — not to `.claude-pr/`,
+            not to `/tmp/`, not anywhere. The `Write` and `Edit` tools
+            are not allowed. If you want to organize notes, keep them
+            in-memory and assemble the final PR comment; saving
+            intermediate drafts to disk wastes turns on permission
+            denials.
+
             Read `CLAUDE.md` in the repo root first — it has the project
             overview, conventions, and (importantly) a "Non-Obvious Gotchas"
             section covering Resource API v2 patterns, GenericTrackedObject
@@ -149,6 +156,10 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_URL: ${{ github.event.pull_request.html_url }}
           REVIEW_STATUS: ${{ steps.claude-review.outcome }}
+          # Short repo name for log title/label (e.g. "oauth" in
+          # "HarperFast/oauth"). Interpolated so this workflow can be
+          # copied to other HarperFast repos without source edits.
+          REPO_SHORT: ${{ github.event.repository.name }}
         run: |
           set -uo pipefail
 
@@ -199,18 +210,19 @@ jobs:
           # didn't complete cleanly (e.g., max_turns). Findings posted before
           # the cutoff are still logged but flagged as potentially incomplete.
           if [ "$REVIEW_STATUS" = "success" ]; then
-            TITLE="[oauth] PR #$PR_NUMBER: $COUNT_PART"
+            TITLE="[$REPO_SHORT] PR #$PR_NUMBER: $COUNT_PART"
           else
-            TITLE="[oauth] PR #$PR_NUMBER: $COUNT_PART (review $REVIEW_STATUS — may be incomplete)"
+            TITLE="[$REPO_SHORT] PR #$PR_NUMBER: $COUNT_PART (review $REVIEW_STATUS — may be incomplete)"
           fi
 
-          BODY=$(printf '**Source:** %s\n**Repo:** oauth\n**PR:** #%s\n**Model:** claude-sonnet-4-6\n**Phase:** baseline\n**Review job status:** %s\n**Date:** %s\n\n---\n\n%s\n' \
-            "$PR_URL" "$PR_NUMBER" "$REVIEW_STATUS" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$CLAUDE_BODY")
+          BODY=$(printf '**Source:** %s\n**Repo:** %s\n**PR:** #%s\n**Model:** claude-sonnet-4-6\n**Phase:** baseline\n**Review job status:** %s\n**Date:** %s\n\n---\n\n%s\n' \
+            "$PR_URL" "$REPO_SHORT" "$PR_NUMBER" "$REVIEW_STATUS" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$CLAUDE_BODY")
 
           PAYLOAD=$(jq -nc \
             --arg title "$TITLE" \
+            --arg repo_label "repo:$REPO_SHORT" \
             --arg body "$BODY" \
-            '{title: $title, body: $body, labels: ["repo:oauth", "verdict:pending", "phase:baseline"]}')
+            '{title: $title, body: $body, labels: [$repo_label, "verdict:pending", "phase:baseline"]}')
 
           HTTP=$(curl -sS -o /tmp/ai-log-resp.json -w '%{http_code}' -X POST \
             -H "Authorization: Bearer $AI_REVIEW_LOG_TOKEN" \
