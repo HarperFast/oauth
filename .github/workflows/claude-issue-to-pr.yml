@@ -75,7 +75,7 @@ jobs:
           show_full_output: true
           claude_args: |
             --model claude-sonnet-4-6
-            --max-turns 40
+            --max-turns 72
             --allowedTools "Read,Write,Edit,Grep,Glob,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(gh pr create:*),Bash(gh issue view:*),Bash(gh issue comment:*),Bash(git:*),Bash(npm install:*),Bash(npm ci:*),Bash(npm run:*),Bash(npm test:*),Bash(bun install:*),Bash(bun run:*),Bash(bun test:*),Bash(npx:*)"
           prompt: |
             You were invoked because issue #${{ github.event.issue.number }}
@@ -135,8 +135,25 @@ jobs:
             1. Create a branch named `claude/fix-${{ github.event.issue.number }}`
                (or append `-<short-desc>` if useful).
             2. Make the change scoped to the label.
-            3. Run `npm run build && npm run lint && npm run format:check && npm test`
-               and `bun test`. Fix anything that fails.
+            3. Validate, scaling to the kind of change you made.
+
+               **`config.yaml` is NOT doc-only** — it holds the plugin
+               entry point (`pluginModule`) and runtime OAuth defaults.
+               Any change that touches `config.yaml` requires the full
+               validation path regardless of the `claude-fix:*` label.
+
+               - `claude-fix:typo` / `claude-fix:docs` (doc-only
+                 changes to `*.md`, `docs/**`, or `package.json`
+                 keyword/description fields): run
+                 `npm run format:check` and `npm run lint`. Skip
+                 `npm run build` / `npm test` / `bun test` — they
+                 are not affected and waste turns.
+               - `claude-fix:deps` / `claude-fix:bug` or any change
+                 that touches code or `config.yaml`: run
+                 `npm run build && npm run lint && npm run format:check && npm test`
+                 and `bun test`. Fix anything that fails.
+
+               When in doubt, err toward the fuller validation.
             4. Commit with a descriptive message.
             5. Push the branch and open a PR via `gh pr create` with a
                body that says `Closes #${{ github.event.issue.number }}`.

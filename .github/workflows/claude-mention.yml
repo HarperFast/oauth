@@ -81,7 +81,7 @@ jobs:
           show_full_output: true
           claude_args: |
             --model claude-sonnet-4-6
-            --max-turns 30
+            --max-turns 48
             --allowedTools "Read,Write,Edit,Grep,Glob,mcp__github_inline_comment__create_inline_comment,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(gh pr checkout:*),Bash(gh pr create:*),Bash(gh issue view:*),Bash(gh issue comment:*),Bash(git:*),Bash(npm install:*),Bash(npm ci:*),Bash(npm run:*),Bash(npm test:*),Bash(bun install:*),Bash(bun run:*),Bash(bun test:*),Bash(npx:*)"
           # In agent mode the action uses the triggering comment as the
           # prompt. The text below layers supplemental context on top.
@@ -107,9 +107,22 @@ jobs:
 
             ## Before committing
 
-            Run `npm run build && npm run lint && npm run format:check && npm test`
-            in the workspace. Also run `bun test` — Bun is installed in
-            the runner. Fix anything that fails before committing.
+            Scale validation to the kind of change you made:
+
+            - Doc-only change (only `*.md`, `docs/**`, or
+              `package.json` keyword/description edits): run
+              `npm run format:check` and `npm run lint`. Do NOT run
+              `npm run build` / `npm test` / `bun test` — they are
+              not affected and waste turns.
+
+              `config.yaml` is NOT doc-only — it holds the plugin
+              entry point (`pluginModule`) and runtime OAuth defaults.
+              Treat any change there as a code/config change.
+            - Code or config change that affects behavior: run
+              `npm run build && npm run lint && npm run format:check && npm test`
+              and `bun test`. Fix anything that fails.
+
+            When in doubt, err toward the fuller validation.
 
             ## Output
 
