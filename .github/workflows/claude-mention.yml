@@ -109,11 +109,15 @@ jobs:
 
             Scale validation to the kind of change you made:
 
-            - Doc-only change (only `*.md`, `docs/**`, `config.yaml`,
-              or `package.json` keyword/description edits): run
+            - Doc-only change (only `*.md`, `docs/**`, or
+              `package.json` keyword/description edits): run
               `npm run format:check` and `npm run lint`. Do NOT run
               `npm run build` / `npm test` / `bun test` — they are
               not affected and waste turns.
+
+              `config.yaml` is NOT doc-only — it holds the plugin
+              entry point (`pluginModule`) and runtime OAuth defaults.
+              Treat any change there as a code/config change.
             - Code or config change that affects behavior: run
               `npm run build && npm run lint && npm run format:check && npm test`
               and `bun test`. Fix anything that fails.

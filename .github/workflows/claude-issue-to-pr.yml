@@ -137,14 +137,18 @@ jobs:
             2. Make the change scoped to the label.
             3. Validate, scaling to the kind of change you made:
                - `claude-fix:typo` / `claude-fix:docs` (doc-only
-                 changes to `*.md`, `docs/**`, `config.yaml`):
-                 run `npm run format:check` and `npm run lint`.
-                 Skip `npm run build` / `npm test` / `bun test` —
-                 they are not affected and waste turns.
+                 changes to `*.md`, `docs/**`, or `package.json`
+                 keyword/description fields): run
+                 `npm run format:check` and `npm run lint`. Skip
+                 `npm run build` / `npm test` / `bun test` — they
+                 are not affected and waste turns.
                - `claude-fix:deps` / `claude-fix:bug` or any change
-                 that touches code: run
+                 that touches code OR `config.yaml` (plugin entry
+                 point + runtime OAuth defaults — not doc-only): run
                  `npm run build && npm run lint && npm run format:check && npm test`
                  and `bun test`. Fix anything that fails.
+
+               When in doubt, err toward the fuller validation.
             4. Commit with a descriptive message.
             5. Push the branch and open a PR via `gh pr create` with a
                body that says `Closes #${{ github.event.issue.number }}`.
