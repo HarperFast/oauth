@@ -51,6 +51,8 @@ export interface OAuthValidationOptions {
 
 type MaybeContext = Context | SourceContext | undefined;
 
+const HTTP_METHODS = ['get', 'post', 'put', 'patch', 'delete'] as const;
+
 /**
  * Run OAuth validation for a request context.
  *
@@ -213,13 +215,23 @@ async function validateOAuthForRequest(context: MaybeContext, options: OAuthVali
  *   properties (including `loadAsInstance`) and static methods
  *   (including `getResource`) are inherited, so Harper's registration
  *   and dispatch lifecycle works unchanged.
- * - The five standard HTTP methods — `get`, `post`, `put`, `patch`,
- *   `delete` — are overridden to run validation first. Other methods
- *   (subscriptions, helpers, etc.) pass through untouched.
- * - If the parent class does not define an HTTP method, the wrapper
- *   still runs validation, then returns `undefined` — matching
- *   Harper's "method not implemented" behavior. This means validation
- *   runs even on unhandled verbs (defense-in-depth).
+ * - Validation is installed at BOTH static and instance levels so
+ *   either Harper v5 dispatch pattern is intercepted:
+ *   - User defines `async get(target)` (instance method): Harper's
+ *     Resource base static `get` creates a Wrapped instance and
+ *     invokes the instance method, which runs validation first.
+ *   - User defines `static async get(target)` (v5-recommended pattern
+ *     per Harper's migration guide): Harper calls `Wrapped.get`
+ *     directly at the static level. Our static override catches this
+ *     and runs validation before delegating.
+ * - Only the verbs the parent class actually implements get
+ *   overridden. Unimplemented verbs remain undefined on the wrapper,
+ *   so Harper's built-in "405 Method Not Allowed" response is
+ *   preserved for them rather than being masked as a 204.
+ * - Validation is de-duplicated across the static→instance call chain
+ *   via a per-request `WeakSet`. `validateAndRefreshSession` can hit
+ *   the network for token refresh; running it twice per request would
+ *   waste a round-trip.
  *
  * Session-cleanup semantics (intentional divergence — important for
  * integrators using `requireAuth: false`):
@@ -241,37 +253,71 @@ export function withOAuthValidation<T extends abstract new (...args: any[]) => a
 	ResourceClass: T,
 	options: OAuthValidationOptions
 ): T {
-	// Capture the parent prototype so we can look up HTTP methods directly
-	// without using `super` (TypeScript doesn't allow optional chaining on
-	// `super` member access, and the `delete` keyword as a method name via
-	// `super` trips up some compilation targets). Prototype lookup walks
-	// the chain, so inherited methods are found too.
 	const parentProto = (ResourceClass as any).prototype;
 
-	const delegate = async (instance: any, method: string, args: any[]) => {
-		const deny = await validateOAuthForRequest(instance.getContext?.(), options);
+	// Dedupe validation across the static→instance call chain. When Harper's
+	// dispatch calls our static override, validation runs. If the parent
+	// static is Resource's base transactional wrapper, it will then create
+	// an instance and call the instance method — which is ALSO one of our
+	// overrides (when we added one). Without dedupe, validation runs twice
+	// per request and refreshAccessToken may hit the network twice.
+	//
+	// A WeakSet keyed by the request/context is the cleanest signal:
+	// non-mutating, garbage-collected with the request, and safe even if
+	// the context is a frozen object.
+	const validated = new WeakSet<object>();
+
+	const validateOnce = async (context: any): Promise<any> => {
+		if (context && typeof context === 'object' && validated.has(context)) {
+			return undefined; // already validated in this request
+		}
+		const deny = await validateOAuthForRequest(context, options);
 		if (deny !== undefined) return deny;
-		const parentMethod = parentProto?.[method];
-		return typeof parentMethod === 'function' ? parentMethod.apply(instance, args) : undefined;
+		if (context && typeof context === 'object') validated.add(context);
+		return undefined;
 	};
 
-	const Wrapped = class extends (ResourceClass as any) {
-		async get(...args: any[]) {
-			return delegate(this, 'get', args);
+	const Wrapped = class extends (ResourceClass as any) {};
+
+	// Instance-method overrides — ONLY for verbs the parent actually
+	// implements. If the parent has no `post`, leaving Wrapped.prototype.post
+	// undefined preserves Harper's "method not implemented" response
+	// (405 Allow-header) for unimplemented verbs. Defining an override for
+	// every verb unconditionally would cause Harper to invoke our wrapper,
+	// see `undefined` returned from the missing parent method, and serialize
+	// that as 204 No Content — the wrong wire-level signal.
+	for (const method of HTTP_METHODS) {
+		if (typeof parentProto?.[method] === 'function') {
+			const parentInstanceMethod = parentProto[method];
+			(Wrapped.prototype as any)[method] = async function (this: any, ...args: any[]) {
+				const context = typeof this?.getContext === 'function' ? this.getContext() : undefined;
+				const deny = await validateOnce(context);
+				if (deny !== undefined) return deny;
+				return parentInstanceMethod.apply(this, args);
+			};
 		}
-		async post(...args: any[]) {
-			return delegate(this, 'post', args);
+	}
+
+	// Static-method overrides — intercept Harper's direct class-level
+	// dispatch. Harper's REST dispatcher calls `Class.get(target, request)`
+	// at the STATIC level. When a user follows Harper v5's documented
+	// pattern (`static async get(target)`), static inheritance means
+	// Wrapped.get resolves to the user's static — our instance-method
+	// overrides are bypassed. Overriding statics too catches this case.
+	//
+	// Args from Harper's dispatch are `(target, request)`; the request
+	// (which carries `.session`) is what validation needs.
+	for (const method of HTTP_METHODS) {
+		const parentStatic = (ResourceClass as any)[method];
+		if (typeof parentStatic === 'function') {
+			(Wrapped as any)[method] = async function (target: any, request: any) {
+				const deny = await validateOnce(request);
+				if (deny !== undefined) return deny;
+				return parentStatic.call(Wrapped, target, request);
+			};
 		}
-		async put(...args: any[]) {
-			return delegate(this, 'put', args);
-		}
-		async patch(...args: any[]) {
-			return delegate(this, 'patch', args);
-		}
-		async delete(...args: any[]) {
-			return delegate(this, 'delete', args);
-		}
-	};
+	}
+
 	return Wrapped as unknown as T;
 }
 

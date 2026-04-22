@@ -528,13 +528,13 @@ describe('withOAuthValidation', () => {
 		});
 	});
 
-	describe('Undefined super methods', () => {
-		it('returns undefined if the base class does not define the HTTP method', async () => {
-			// Matches Harper's own "method not implemented" behavior:
-			// `resource.<method>?.(…)` short-circuits to undefined, and
-			// Harper renders that as 404 / method-not-allowed. The
-			// wrapper still runs validation first so unreachable verbs
-			// are defense-in-depth protected.
+	describe('Unimplemented verbs preserve 405 semantics', () => {
+		// When the parent class doesn't implement an HTTP verb, the
+		// wrapper MUST NOT define one either — otherwise Harper's REST
+		// dispatcher sees a callable method that returns `undefined`
+		// and serializes that as 204 No Content (wrong), masking the
+		// correct 405 Method Not Allowed signal.
+		it('leaves Wrapped.prototype.<verb> undefined when the parent does not define it', () => {
 			class GetOnly extends MockResource {
 				async get() {
 					return { status: 200 };
@@ -543,8 +543,149 @@ describe('withOAuthValidation', () => {
 			const Wrapped = withOAuthValidation(GetOnly, { providers: mockProviders, logger: mockLogger });
 
 			const instance = new Wrapped('x', { session: makeSession() });
-			const result = await instance.post({ path: '/x' }, { data: 1 });
-			assert.equal(result, undefined);
+			assert.equal(typeof instance.get, 'function', 'get is defined — Wrapped wraps it');
+			assert.equal(typeof instance.post, 'undefined', 'post is NOT wrapped — preserves 405');
+			assert.equal(typeof instance.put, 'undefined');
+			assert.equal(typeof instance.patch, 'undefined');
+			assert.equal(typeof instance.delete, 'undefined');
+		});
+
+		it('leaves Wrapped.<verb> static undefined when the parent has no static for it', () => {
+			// MockResource only defines the instance get. It has no
+			// static get/post/etc. on itself (test-shape base). Wrapped
+			// must match.
+			class GetOnly extends MockResource {
+				async get() {
+					return { status: 200 };
+				}
+			}
+			const Wrapped = withOAuthValidation(GetOnly, { providers: mockProviders, logger: mockLogger });
+
+			// No static methods installed — MockResource doesn't have any.
+			assert.equal(typeof Wrapped.get, 'undefined');
+			assert.equal(typeof Wrapped.post, 'undefined');
+		});
+	});
+
+	describe('Static-method dispatch bypass is closed', () => {
+		// Harper v5's migration guide recommends `static async get(target)`
+		// on Resource classes. When a user follows that pattern, Harper
+		// dispatches at the STATIC level — our instance-method overrides
+		// alone can't intercept, so validation would be silently skipped.
+		// The wrapper installs static overrides for exactly this reason.
+
+		// A Resource-shaped base that also exposes statics (closer to the
+		// real Harper Resource base than plain `MockResource`). Each
+		// static dispatches to an instance method when present.
+		class StaticCapableResource {
+			static loadAsInstance = false;
+			constructor(id, context) {
+				this._id = id;
+				this._context = context ?? null;
+			}
+			getContext() {
+				return this._context;
+			}
+		}
+		for (const method of ['get', 'post', 'put', 'patch', 'delete']) {
+			StaticCapableResource[method] = function (target, request) {
+				const instance = new this(target?.id ?? 'sid', request);
+				return instance[method]?.(target);
+			};
+		}
+
+		it('intercepts user-defined static get (v5-recommended pattern)', async () => {
+			let staticRan = false;
+			class StaticUser extends StaticCapableResource {
+				// User-defined STATIC method — this would bypass the
+				// previous Proxy/instance-only wrapper. The wrapper's
+				// static override must fire validation BEFORE this runs.
+				static async get(target, request) {
+					staticRan = true;
+					return { status: 200, body: { user: request.session.oauthUser.email } };
+				}
+			}
+			const Wrapped = withOAuthValidation(StaticUser, {
+				providers: mockProviders,
+				logger: mockLogger,
+				requireAuth: true,
+			});
+
+			// Call at the static level exactly like Harper does
+			const result = await Wrapped.get({ path: '/protected' }, { session: makeSession() });
+
+			assert.equal(result.status, 200);
+			assert.equal(result.body.user, 'alice@example.com');
+			assert.equal(staticRan, true, 'user static ran (validation let it through)');
+		});
+
+		it('returns 401 at the static entry when requireAuth is true and no OAuth data', async () => {
+			let staticRan = false;
+			class StaticUser extends StaticCapableResource {
+				static async get() {
+					staticRan = true;
+					return { status: 200, body: { shouldNotSeeThis: true } };
+				}
+			}
+			const Wrapped = withOAuthValidation(StaticUser, {
+				providers: mockProviders,
+				logger: mockLogger,
+				requireAuth: true,
+			});
+
+			// No OAuth on the session — must be rejected at static entry,
+			// before the user's static runs.
+			const result = await Wrapped.get({ path: '/protected' }, { session: { id: 'no-oauth' } });
+
+			assert.equal(result.status, 401, 'static entry must enforce OAuth for user-static case');
+			assert.equal(staticRan, false, 'user static must NOT run on auth failure');
+		});
+
+		it('validation runs only once per request across the static→instance chain', async () => {
+			// Instance-method case: Harper calls the static (Resource
+			// base's transactional dispatch), which creates an instance
+			// and calls instance get. Both layers go through the wrapper.
+			// The WeakSet dedup must keep validation to a single network
+			// hit per request.
+			let validateCalls = 0;
+			const countingProvider = {
+				provider: {
+					refreshAccessToken: async () => ({ access_token: 'new', expires_in: 3600, token_type: 'Bearer' }),
+					config: { provider: 'github' },
+				},
+				config: { provider: 'github' },
+			};
+			let instanceRan = 0;
+			class InstanceUser extends StaticCapableResource {
+				async get() {
+					instanceRan += 1;
+					return { status: 200 };
+				}
+			}
+			// Spy on validation: count how many times mockProviders.github is consulted.
+			// We approximate by counting how often the validation helper reaches the
+			// provider lookup — every validation pass reads providers[providerName].
+			const spiedProviders = new Proxy(
+				{ github: countingProvider },
+				{
+					get(target, prop) {
+						if (prop === 'github') validateCalls += 1;
+						return target[prop];
+					},
+				}
+			);
+
+			const Wrapped = withOAuthValidation(InstanceUser, {
+				providers: spiedProviders,
+				logger: mockLogger,
+				requireAuth: true,
+			});
+
+			// Static entry, the realistic Harper dispatch path
+			await Wrapped.get({ path: '/x' }, { session: makeSession() });
+
+			assert.equal(instanceRan, 1, 'instance method runs exactly once');
+			assert.equal(validateCalls, 1, 'validation runs exactly once (no double-hit)');
 		});
 	});
 
