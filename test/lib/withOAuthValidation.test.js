@@ -639,6 +639,129 @@ describe('withOAuthValidation', () => {
 			assert.match(result.body.message, /expired/i);
 			assert.equal(calls.length, 0, 'protected method must NOT run — this is the silent-bypass case');
 		});
+
+		it('production-path session: callback sees full oauth data (not mutated by clearOAuthSession)', async () => {
+			// `validateAndRefreshSession` calls `clearOAuthSession` as a
+			// side effect before returning `{valid: false}`. In the
+			// production path (session with a `delete()` method),
+			// `clearOAuthSession` calls `session.delete(session.id)` and
+			// does NOT mutate the in-memory session object. So the
+			// `onValidationError` callback — invoked after that —
+			// still observes the full oauth/oauthUser data. Pin this
+			// behavior so it can't regress silently.
+			const session = makeProductionLikeSession({
+				oauth: {
+					provider: 'github',
+					accessToken: 'expired',
+					expiresAt: Date.now() - 60_000,
+					refreshToken: undefined,
+				},
+			});
+			const calls = [];
+			class MyResource extends MockResource {
+				async get() {
+					calls.push('called');
+					return { status: 200 };
+				}
+			}
+
+			const seen = [];
+			const Wrapped = withOAuthValidation(MyResource, {
+				providers: mockProviders,
+				logger: mockLogger,
+				requireAuth: true,
+				onValidationError: (request) => {
+					const oauth = request.session.oauth;
+					const oauthUser = request.session.oauthUser;
+					seen.push({
+						oauthProvider: oauth?.provider,
+						oauthAccessToken: oauth?.accessToken,
+						oauthUserEmail: oauthUser?.email,
+					});
+					return { status: 401, body: { ok: true } };
+				},
+			});
+
+			const instance = new Wrapped('x', { session });
+			await instance.get({ path: '/protected' });
+
+			assert.equal(calls.length, 0, 'protected method must not run');
+			assert.equal(seen.length, 1);
+			assert.equal(seen[0].oauthProvider, 'github', 'oauth.provider must be readable in production path');
+			assert.equal(seen[0].oauthAccessToken, 'expired', 'oauth.accessToken must be readable in production path');
+			assert.equal(seen[0].oauthUserEmail, 'alice@example.com', 'oauthUser.email must be readable');
+			assert.deepEqual(session.__deleteCalls, ['sess-1'], 'session.delete(id) was called');
+		});
+	});
+
+	describe('onValidationError is only invoked when requireAuth is true', () => {
+		// `onValidationError` exists to let integrators customize the
+		// 401 response (or add logging). It is documented to fire ONLY
+		// when `requireAuth` is true: with `requireAuth: false` the
+		// wrapper's contract is "pass through; clean up stale state as
+		// a side effect" and the callback is explicitly NOT called.
+		// Integrators reading the JSDoc should not expect to use
+		// `onValidationError` as an audit hook for mixed-auth resources.
+
+		it('stale-provider + requireAuth: false → callback NOT invoked (session still cleaned)', async () => {
+			class MyResource extends MockResource {
+				async get() {
+					return { status: 200 };
+				}
+			}
+			const context = {
+				session: makeSession({ oauth: { provider: 'ghost-provider', accessToken: 'stale' } }),
+			};
+			let handlerCalled = false;
+			const Wrapped = withOAuthValidation(MyResource, {
+				providers: mockProviders,
+				logger: mockLogger,
+				requireAuth: false,
+				onValidationError: () => {
+					handlerCalled = true;
+					return { status: 500, body: { shouldNotSeeThis: true } };
+				},
+			});
+
+			const instance = new Wrapped('x', context);
+			const result = await instance.get({ path: '/mixed' });
+
+			assert.equal(handlerCalled, false, 'callback must NOT fire when requireAuth is false');
+			assert.equal(result.status, 200, 'underlying method runs');
+			assert.equal(context.session.oauth, undefined, 'stale session data still cleaned up');
+		});
+
+		it('expired-token + requireAuth: false → callback NOT invoked (passthrough)', async () => {
+			class MyResource extends MockResource {
+				async get() {
+					return { status: 200 };
+				}
+			}
+			const session = makeProductionLikeSession({
+				oauth: {
+					provider: 'github',
+					accessToken: 'expired',
+					expiresAt: Date.now() - 60_000,
+					refreshToken: undefined,
+				},
+			});
+			let handlerCalled = false;
+			const Wrapped = withOAuthValidation(MyResource, {
+				providers: mockProviders,
+				logger: mockLogger,
+				requireAuth: false,
+				onValidationError: () => {
+					handlerCalled = true;
+					return { status: 500, body: { shouldNotSeeThis: true } };
+				},
+			});
+
+			const instance = new Wrapped('x', { session });
+			const result = await instance.get({ path: '/mixed' });
+
+			assert.equal(handlerCalled, false, 'callback must NOT fire when requireAuth is false');
+			assert.equal(result.status, 200, 'underlying method runs');
+		});
 	});
 
 	describe('Expired token with requireAuth: false passes through — cleanup semantics', () => {

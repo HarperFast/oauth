@@ -21,7 +21,31 @@ export interface OAuthValidationOptions {
 	logger?: Logger;
 	/** Whether to require OAuth authentication (401 if not present) */
 	requireAuth?: boolean;
-	/** Custom error handler for validation failures */
+	/**
+	 * Custom error handler for validation failures.
+	 *
+	 * **Only invoked when `requireAuth` is `true`**. When `requireAuth`
+	 * is `false` the wrapper passes through silently on any validation
+	 * failure (cleaning up stale session data as a side effect) — this
+	 * callback is not called. If you need audit logging on a mixed-auth
+	 * resource, set `requireAuth: true` on that resource, or log from
+	 * your own `logger` (which IS always invoked).
+	 *
+	 * **Session state visibility depending on the failure path:**
+	 * - `!hasOAuth` — `request.session.oauth` is already `undefined`
+	 *   (there never was any).
+	 * - `!providerName` / `!providerData` (stale-provider paths) — the
+	 *   callback is invoked BEFORE session cleanup, so
+	 *   `request.session.oauth` and `.oauthUser` are readable.
+	 * - `!validation.valid` (expired token with no refresh token) —
+	 *   `validateAndRefreshSession` has ALREADY called
+	 *   `clearOAuthSession` internally before the callback runs. On a
+	 *   production Harper session this calls `session.delete(session.id)`
+	 *   (DB record destroyed; in-memory fields untouched). On a session
+	 *   without a `delete()` method it falls back to in-memory deletion
+	 *   of `.oauth` / `.oauthUser`. The callback is still invoked, but
+	 *   the session state it observes depends on which path ran.
+	 */
 	onValidationError?: (request: Request, error: string) => any;
 }
 
