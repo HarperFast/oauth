@@ -135,7 +135,13 @@ jobs:
             1. Create a branch named `claude/fix-${{ github.event.issue.number }}`
                (or append `-<short-desc>` if useful).
             2. Make the change scoped to the label.
-            3. Validate, scaling to the kind of change you made:
+            3. Validate, scaling to the kind of change you made.
+
+               **`config.yaml` is NOT doc-only** — it holds the plugin
+               entry point (`pluginModule`) and runtime OAuth defaults.
+               Any change that touches `config.yaml` requires the full
+               validation path regardless of the `claude-fix:*` label.
+
                - `claude-fix:typo` / `claude-fix:docs` (doc-only
                  changes to `*.md`, `docs/**`, or `package.json`
                  keyword/description fields): run
@@ -143,8 +149,7 @@ jobs:
                  `npm run build` / `npm test` / `bun test` — they
                  are not affected and waste turns.
                - `claude-fix:deps` / `claude-fix:bug` or any change
-                 that touches code OR `config.yaml` (plugin entry
-                 point + runtime OAuth defaults — not doc-only): run
+                 that touches code or `config.yaml`: run
                  `npm run build && npm run lint && npm run format:check && npm test`
                  and `bun test`. Fix anything that fails.
 
