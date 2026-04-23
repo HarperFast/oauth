@@ -21,3 +21,17 @@ Version-agnostic review guidance for repos in the Harper ecosystem. The repo's o
 - **`scope.resources` / `scope.server` usage.** Declared optional in the Harper type but always assigned in the Scope constructor. Code should either guard once at entry or use narrowed locals, not sprinkle `?.` / `!` throughout.
 - **`static loadAsInstance = false` (Resource API v2).** Harper instantiates the class per request; do NOT rely on shared mutable instance state across requests. If per-request state is stored, it belongs on the context (`this.getContext()`).
 - **Unused runtime dependencies.** Harper repos target minimal runtime deps. New ones require explicit justification in the PR description (some repos maintain a `dependencies.md` for this).
+
+## Documentation boundary (defer to Harper docs)
+
+Harper maintains its own documentation at [docs.harperdb.io](https://docs.harperdb.io) covering core, pro, and fabric. App, sample, and plugin repos should:
+
+- Document what is specific to the app/plugin itself — env var names, config shape, setup flow, integration API.
+- **Link** to the Harper documentation for anything not app/component-specific: deployment mechanics, runtime env var handling, Fabric configuration, core database behavior, SQL translator, replication, etc.
+
+Flag PRs that re-explain Harper behavior in-repo when a link to the authoritative Harper docs would be more maintainable. Re-explanation creates drift — Harper updates its docs, the copy doesn't.
+
+Borderline calls (judgment, not a blocker):
+
+- Short factual reminders where a link alone is too thin (e.g. "Harper reads env vars directly from the process environment — see [...]") are fine.
+- Duplicating whole Harper docs sections inline is not — link.

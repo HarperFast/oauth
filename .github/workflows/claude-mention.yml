@@ -137,6 +137,25 @@ jobs:
             Kubernetes, cloud secrets managers) without first checking
             whether a Harper-specific path applies.
 
+            ## Documentation scope boundary
+
+            Harper maintains authoritative documentation at
+            https://docs.harperdb.io covering core, pro, and fabric. This
+            repo's docs should NOT re-explain Harper mechanics that the
+            Harper docs already cover — they drift out of sync when the
+            Harper docs update.
+
+            When writing or revising docs here:
+
+            - Document what's specific to THIS component — env var names,
+              config shape, setup flow, integration API.
+            - For anything not component-specific (deployment mechanics,
+              runtime env var handling, Fabric configuration, core Harper
+              behavior, SQL, replication), LINK to the Harper docs rather
+              than re-explaining.
+
+            This is a general rule, not specific to any one area.
+
             ## Before committing
 
             Scale validation to the kind of change you made:
