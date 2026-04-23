@@ -76,7 +76,18 @@ jobs:
           claude_args: |
             --model claude-sonnet-4-6
             --max-turns 72
-            --allowedTools "Read,Write,Edit,Grep,Glob,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(gh pr create:*),Bash(gh issue view:*),Bash(gh issue comment:*),Bash(git:*),Bash(npm install:*),Bash(npm ci:*),Bash(npm run:*),Bash(npm test:*),Bash(bun install:*),Bash(bun run:*),Bash(bun test:*),Bash(npx:*)"
+            # Tool allowlist is a security boundary — every entry is a
+            # potential RCE primitive if a prompt injection succeeds.
+            # Deliberately ABSENT:
+            #   * `Bash(npx:*)` — would let an injected instruction run
+            #     arbitrary published packages. Whose subprocess reads
+            #     GITHUB_TOKEN from env.
+            # Deliberately TIGHTENED:
+            #   * `Bash(npm install)` (no-arg, not `Bash(npm install:*)`) —
+            #     the `claude-fix:deps` path needs to regenerate the
+            #     lockfile from an edited package.json. Bare form does
+            #     that; the :* glob would let `npm install @attacker/x`.
+            --allowedTools "Read,Write,Edit,Grep,Glob,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(gh pr create:*),Bash(gh issue view:*),Bash(gh issue comment:*),Bash(git:*),Bash(npm install),Bash(npm ci:*),Bash(npm run:*),Bash(npm test:*),Bash(bun install:*),Bash(bun run:*),Bash(bun test:*)"
           prompt: |
             You were invoked because issue #${{ github.event.issue.number }}
             on ${{ github.repository }} was labeled
@@ -84,7 +95,7 @@ jobs:
 
             ## The ask
 
-            Title: ${{ github.event.issue.title }}
+            Title: `${{ github.event.issue.title }}`
 
             Body (verbatim, including any multi-line content):
 
@@ -115,9 +126,10 @@ jobs:
 
             ## Conventions
 
-            Read `CLAUDE.md` in the repo root. Its "Code Conventions"
-            and "Non-Obvious Gotchas" sections apply. Match the repo's
-            style.
+            Read the repo's agent context files first (commonly
+            `CLAUDE.md`, `AGENTS.md`, or similar at the repo root). Their
+            "Code Conventions" and "Non-Obvious Gotchas" sections apply.
+            Match the repo's style.
 
             For docs and deployment-related changes — especially doc
             issues like env-var / config / production-setup guidance —
