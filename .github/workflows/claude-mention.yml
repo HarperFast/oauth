@@ -89,6 +89,10 @@ jobs:
           # request — without these, the agent has been observed to respond
           # "I don't see a specific task in this mention, could you share
           # the PR number?" which defeats the whole point of the workflow.
+          #
+          # TODO: revisit if a future claude-code-action release reliably
+          # forwards the triggering comment as the prompt. This inline
+          # injection can then collapse back to supplemental context.
           prompt: |
             You were invoked via an `@claude` mention on ${{ github.repository }}.
 
@@ -100,9 +104,11 @@ jobs:
             - Target kind: ${{ github.event.issue.pull_request && 'pull request' || (github.event.pull_request && 'pull request' || 'issue') }}
             - Commenter: @${{ github.event.comment.user.login }}
 
-            The commenter wrote:
+            The commenter wrote (verbatim, including any multi-line content):
 
-            > ${{ github.event.comment.body }}
+            ```
+            ${{ github.event.comment.body }}
+            ```
 
             Start by reading the target so you have real context:
             - For a PR: `gh pr view <N>` then `gh pr diff <N>` if you need
