@@ -672,20 +672,12 @@ describe('withOAuthValidation', () => {
 
 			// Unauthenticated 3-arg call — validation must fire against args[2]
 			// (the real request), not args[1] (the body).
-			const denied = await Wrapped.post(
-				{ path: '/items' },
-				{ name: 'new-item' },
-				{ session: { id: 'no-oauth' } }
-			);
+			const denied = await Wrapped.post({ path: '/items' }, { name: 'new-item' }, { session: { id: 'no-oauth' } });
 			assert.equal(denied.status, 401, '3-arg dispatch must enforce OAuth against the request arg');
 			assert.equal(staticRan, false, 'user static must NOT run on auth failure');
 
 			// Authenticated 3-arg call — user static runs and receives the body.
-			const ok = await Wrapped.post(
-				{ path: '/items' },
-				{ name: 'new-item' },
-				{ session: makeSession() }
-			);
+			const ok = await Wrapped.post({ path: '/items' }, { name: 'new-item' }, { session: makeSession() });
 			assert.equal(ok.status, 201);
 			assert.equal(ok.body.user, 'alice@example.com');
 			assert.deepEqual(seenData, { name: 'new-item' }, 'data arg (args[1]) must survive the wrapper');
