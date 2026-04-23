@@ -30,14 +30,18 @@ Applies to every PR regardless of the repo. Read this first and apply everything
 
 ## Testing
 
-- **New public APIs have tests.** For each new exported symbol: at least one test exercising the happy path and one for the primary failure path.
-- **Tests exercise real code paths, not only mocks.** If the code has a "production path" and a "test/fallback path" (e.g. `if (typeof session.delete === 'function') { ... } else { ... }`), both need coverage. A test that only lands in the fallback gives false confidence.
-- **Failure-path coverage matches the severity.** Security-relevant branches (deny paths, 401 returns, auth-required enforcement) need explicit tests, not implicit "it probably works."
-- **String identifiers and verb lists.** If the code iterates over a list of method names (`'get'`, `'post'`, etc.) and a typo in one name would silently disable a feature, each name needs direct coverage.
+Only flag gaps the PR **itself** creates. Pre-existing coverage gaps in code the PR merely touches are NOT this PR's problem — flagging them is a scaling trap on repos that are still catching up on coverage.
+
+- **NEW public API symbols need a happy-path test.** If the PR adds a new export from `src/index.ts` (or equivalent) and no test file exercises it at all, that's a blocker. A missing *edge-case* test on an otherwise-tested new API is a nit — don't post it.
+- **NEW security-critical branches need explicit tests.** Deny paths, 401 returns, auth-required enforcement, silent-bypass guards — if the PR adds one, the branch needs to be directly exercised (including that the protected method is NOT invoked on the deny path). Blocker.
+- **NEW "production vs fallback" splits.** If the PR introduces a runtime-shape branch (e.g. `if (typeof x.delete === 'function')`), both legs need coverage. A test that only lands in the fallback gives false confidence on the production path. Blocker.
+- **NEW iterated string identifiers.** If the PR adds code that iterates over method names, verb lists, event names, etc. and a typo in one would silently disable a feature, each name needs direct coverage. Blocker.
+
+Pre-existing gaps are NOT findings. "This function has no tests" on code the PR touches but didn't add is a repo-maintenance issue, not a PR blocker.
 
 ## Documentation
 
-- **JSDoc examples match the current API.** If the signature changed, the example changed too.
+- **JSDoc examples match the current API.** If the signature changed, the example changed too. Blocker when the example would mislead; prose polish is not.
 - **Code that references a doc path** (`CLAUDE.md`, migration guides, skills) — verify the referenced section still exists.
 - **Gotchas section updates.** If this PR introduces a new foot-gun, it belongs in the repo's `CLAUDE.md` or equivalent.
 
@@ -49,7 +53,27 @@ Applies to every PR regardless of the repo. Read this first and apply everything
 
 ## Output discipline
 
-- Blocker-severity findings only. No nits, no style, no "consider adding a comment."
+**What counts as a blocker:**
+
+- Correctness bugs (the code does the wrong thing)
+- Security issues (auth bypass, token exposure, missing CSRF, unvalidated redirect or path, injection)
+- Broken public API contracts (signature / return shape / error type changed without a migration path)
+- Missing tests the PR itself should have added — per the scoping rules in the Testing section above
+- Documentation drift that would actively mislead integrators
+
+**What is NOT a blocker** (do not post these, even if they're true):
+
+- Pre-existing coverage gaps in code the PR merely touches but didn't add
+- Style, naming, or formatting preferences
+- "Consider adding a comment" / "Could be more readable"
+- Missing edge-case tests when happy-path and primary failure-path are covered
+- Minor JSDoc prose polish (the *example matching the API* is a blocker; wording is not)
+- Architectural suggestions the current code doesn't call for
+
+If a finding doesn't have concrete impact on correctness, security, contract, or integrator experience — it's a nit. Don't post it.
+
+**How to post:**
+
 - Structured format: `### <N>. <title>` + `**File:** path:line` + `**What:** …` + `**Why it matters:** …` + `**Suggested fix:** …`.
-- If zero blockers: one short comment, "No blockers found.", then stop.
+- If zero blockers: one short comment — "No blockers found." — then stop.
 - Never `REQUEST_CHANGES` or `APPROVE` during calibration — comments only.
