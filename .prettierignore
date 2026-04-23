@@ -1,0 +1,6 @@
+dist/
+node_modules/
+
+# Vendored from HarperFast/ai-review-log — keep byte-identical to upstream
+# so future syncs are trivial. See .github/review-scopes/README.md.
+.github/review-scopes/
