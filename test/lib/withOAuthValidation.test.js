@@ -687,6 +687,64 @@ describe('withOAuthValidation', () => {
 			assert.equal(instanceRan, 1, 'instance method runs exactly once');
 			assert.equal(validateCalls, 1, 'validation runs exactly once (no double-hit)');
 		});
+
+		it('405 preservation: unimplemented verbs shadowed with undefined when base exposes all statics', () => {
+			// Harper's real Resource base defines `static <verb> = transactional(...)`
+			// for every HTTP verb — every user subclass INHERITS a truthy
+			// static for every verb. A simple `typeof ResourceClass[method] ===
+			// 'function'` check would cause the wrapper to install an auth
+			// override for every verb, turning an expected 405 (from Harper's
+			// `missingMethod` branch in server/REST.ts:117) into a 401 when
+			// requireAuth is true, or a 204 passthrough otherwise. The wrapper
+			// MUST shadow unimplemented verbs with `undefined` so REST
+			// dispatch's `resource.<verb> ? ... : missingMethod(...)` check
+			// takes the 405 branch.
+			class GetOnly extends StaticCapableResource {
+				async get() {
+					return { status: 200 };
+				}
+			}
+			const Wrapped = withOAuthValidation(GetOnly, {
+				providers: mockProviders,
+				logger: mockLogger,
+				requireAuth: true,
+			});
+
+			// User implements GET via instance method — wrapped (static leg
+			// intercepts for validation; inherited transactional reaches the
+			// instance method).
+			assert.equal(typeof Wrapped.get, 'function');
+			// All other verbs: inherited from StaticCapableResource (mimicking
+			// Harper's Resource base). The wrapper MUST explicitly shadow
+			// these with `undefined`, otherwise Harper's REST dispatcher sees
+			// a truthy static and skips the 405 branch.
+			assert.equal(typeof Wrapped.post, 'undefined', 'post must be undefined to preserve Harper 405');
+			assert.equal(typeof Wrapped.put, 'undefined', 'put must be undefined to preserve Harper 405');
+			assert.equal(typeof Wrapped.patch, 'undefined', 'patch must be undefined to preserve Harper 405');
+			assert.equal(typeof Wrapped.delete, 'undefined', 'delete must be undefined to preserve Harper 405');
+		});
+
+		it('405 preservation: user-owned static overrides inherited shadowing', () => {
+			// When the user defines their OWN static for a verb (Harper v5
+			// migration guide's recommended pattern), the wrapper must
+			// install a validation override — not shadow to undefined.
+			class PostAsStatic extends StaticCapableResource {
+				static async post(_target, request) {
+					return { status: 201, body: { email: request.session.oauthUser.email } };
+				}
+			}
+			const Wrapped = withOAuthValidation(PostAsStatic, {
+				providers: mockProviders,
+				logger: mockLogger,
+			});
+
+			assert.equal(typeof Wrapped.post, 'function', 'user own-static gets wrapped for validation');
+			// Verbs the user neither declared as own-static nor as instance
+			// method remain shadowed, even though the base class exposes them.
+			assert.equal(typeof Wrapped.get, 'undefined', 'get still shadowed');
+			assert.equal(typeof Wrapped.put, 'undefined', 'put still shadowed');
+			assert.equal(typeof Wrapped.delete, 'undefined', 'delete still shadowed');
+		});
 	});
 
 	describe('Expired token with requireAuth: true invokes onValidationError', () => {
@@ -779,6 +837,81 @@ describe('withOAuthValidation', () => {
 			assert.equal(result.body.error, 'Unauthorized');
 			assert.match(result.body.message, /expired/i);
 			assert.equal(calls.length, 0, 'protected method must NOT run — this is the silent-bypass case');
+		});
+
+		// The expired-token path has explicit fail-closed coverage above.
+		// The `!providerName` and `!providerData` stale-provider paths use
+		// the SAME `callCallbackOrDeny` helper with the SAME `?? defaultDeny`
+		// semantics — but each path deserves its own direct test, because a
+		// future refactor that inlines the callback invocation on ONE branch
+		// without `defaultDeny` would silently bypass auth there and the
+		// expired-token test would still pass, giving false confidence.
+		it('no-provider-name branch: handler returns undefined — wrapper falls back to default 401', async () => {
+			const calls = [];
+			class MyResource extends MockResource {
+				async get() {
+					calls.push('called');
+					return { status: 200, shouldNeverHappen: true };
+				}
+			}
+			const context = {
+				// Session has an oauth object but no `provider` — hits the
+				// `!providerName` branch in validateOAuthForRequest.
+				session: makeSession({ oauth: { accessToken: 'stale', provider: undefined } }),
+			};
+			let handlerCalled = false;
+			const Wrapped = withOAuthValidation(MyResource, {
+				providers: mockProviders,
+				logger: mockLogger,
+				requireAuth: true,
+				onValidationError: () => {
+					handlerCalled = true;
+					// no return — returns undefined
+				},
+			});
+
+			const instance = new Wrapped('x', context);
+			const result = await instance.get({ path: '/protected' });
+
+			assert.equal(handlerCalled, true, 'handler must be invoked on stale-session branch');
+			assert.equal(result.status, 401, 'must fail closed on undefined handler return');
+			assert.equal(result.body.error, 'Unauthorized');
+			assert.match(result.body.message, /invalid/i);
+			assert.equal(calls.length, 0, 'protected method must NOT run — silent-bypass guard');
+		});
+
+		it('unknown-provider branch: handler returns undefined — wrapper falls back to default 401', async () => {
+			const calls = [];
+			class MyResource extends MockResource {
+				async get() {
+					calls.push('called');
+					return { status: 200, shouldNeverHappen: true };
+				}
+			}
+			const context = {
+				// Session references a provider that's not in the registry —
+				// hits the `!providerData` branch in validateOAuthForRequest.
+				session: makeSession({ oauth: { provider: 'ghost-provider', accessToken: 'stale' } }),
+			};
+			let handlerCalled = false;
+			const Wrapped = withOAuthValidation(MyResource, {
+				providers: mockProviders,
+				logger: mockLogger,
+				requireAuth: true,
+				onValidationError: () => {
+					handlerCalled = true;
+					// no return — returns undefined
+				},
+			});
+
+			const instance = new Wrapped('x', context);
+			const result = await instance.get({ path: '/protected' });
+
+			assert.equal(handlerCalled, true, 'handler must be invoked on unknown-provider branch');
+			assert.equal(result.status, 401, 'must fail closed on undefined handler return');
+			assert.equal(result.body.error, 'Unauthorized');
+			assert.match(result.body.message, /not configured/i);
+			assert.equal(calls.length, 0, 'protected method must NOT run — silent-bypass guard');
 		});
 
 		it('production-path session: callback sees full oauth data (not mutated by clearOAuthSession)', async () => {
