@@ -53,17 +53,10 @@ jobs:
           ref: d2db99bb37a6dde868cbc5ac81ca4146be8956fb # 1.3.0 (2026-04-16)
           path: .harper-skills
 
-      - name: Clone review scopes
-        # Pinned to the merge SHA of HarperFast/ai-review-log#19 so updates to
-        # the layered review prompts are intentional, not silent.
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          repository: HarperFast/ai-review-log
-          ref: ef8d99458c27094a6fac97f373ebddee2abc5376
-          path: .ai-review
-          token: ${{ secrets.AI_REVIEW_LOG_TOKEN }}
-
       - name: Compose review scope from layers
+        # Layer files live in .github/review-scopes/ in this repo — see its
+        # README for provenance and the plan around eventually sharing them
+        # across HarperFast repos.
         id: scope
         env:
           LAYERS: ${{ env.REVIEW_LAYERS }}
@@ -75,7 +68,7 @@ jobs:
             # Trim whitespace around each layer name
             layer="$(printf '%s' "$raw_layer" | awk '{$1=$1;print}')"
             [ -z "$layer" ] && continue
-            file=".ai-review/review-scopes/${layer}.md"
+            file=".github/review-scopes/${layer}.md"
             if [ ! -f "$file" ]; then
               echo "::warning::Review layer '$layer' not found at $file; skipping."
               continue
