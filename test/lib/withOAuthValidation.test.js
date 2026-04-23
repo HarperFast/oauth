@@ -641,6 +641,56 @@ describe('withOAuthValidation', () => {
 			assert.equal(staticRan, false, 'user static must NOT run on auth failure');
 		});
 
+		it('intercepts user-defined static post (3-arg shape: target, data, request)', async () => {
+			// Harper's REST dispatcher uses two distinct arg shapes:
+			//   GET/DELETE            → (target, request)          — 2 args
+			//   POST/PUT/PATCH        → (target, data, request)    — 3 args
+			// The wrapper picks the request up from `args[args.length - 1]`
+			// so both shapes work. The other static-dispatch tests only
+			// exercise the 2-arg GET shape, so a refactor that changes the
+			// extraction to `args[1]` ("always the second arg") would break
+			// 3-arg verbs silently — it'd read `data` into the context check
+			// and either 401 unconditionally (breaking requireAuth: false) or
+			// pass through without validation. Pin the 3-arg path directly.
+			let staticRan = false;
+			let seenData;
+			class PostResource extends StaticCapableResource {
+				static async post(_target, data, request) {
+					staticRan = true;
+					seenData = data;
+					return {
+						status: 201,
+						body: { user: request.session.oauthUser.email, created: data },
+					};
+				}
+			}
+			const Wrapped = withOAuthValidation(PostResource, {
+				providers: mockProviders,
+				logger: mockLogger,
+				requireAuth: true,
+			});
+
+			// Unauthenticated 3-arg call — validation must fire against args[2]
+			// (the real request), not args[1] (the body).
+			const denied = await Wrapped.post(
+				{ path: '/items' },
+				{ name: 'new-item' },
+				{ session: { id: 'no-oauth' } }
+			);
+			assert.equal(denied.status, 401, '3-arg dispatch must enforce OAuth against the request arg');
+			assert.equal(staticRan, false, 'user static must NOT run on auth failure');
+
+			// Authenticated 3-arg call — user static runs and receives the body.
+			const ok = await Wrapped.post(
+				{ path: '/items' },
+				{ name: 'new-item' },
+				{ session: makeSession() }
+			);
+			assert.equal(ok.status, 201);
+			assert.equal(ok.body.user, 'alice@example.com');
+			assert.deepEqual(seenData, { name: 'new-item' }, 'data arg (args[1]) must survive the wrapper');
+		});
+
 		it('validation runs only once per request across the static→instance chain', async () => {
 			// Instance-method case: Harper calls the static (Resource
 			// base's transactional dispatch), which creates an instance
