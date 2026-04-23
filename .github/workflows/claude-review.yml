@@ -17,17 +17,81 @@ jobs:
       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'),
       github.event.pull_request.author_association)
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Bumped from 10 to 15. We've observed the Claude review step stall on a
+    # single long-running API call inside the 10-min window on substantial
+    # diffs, producing a "cancelled" status with partial output. 15 gives
+    # headroom without letting a runaway loop burn forever (max-turns=24 is
+    # the real cost ceiling).
+    timeout-minutes: 15
     permissions:
       contents: read
       pull-requests: write
       id-token: write # required by claude-code-action even with API-key auth
+    env:
+      # Layered review scope — see .github/review-scopes/README.md for what
+      # each layer covers and the provenance of the vendored files. Order
+      # matters: most-general first, most-specific last. Composed into a
+      # single prompt block by the "Compose review scope from layers" step.
+      REVIEW_LAYERS: |
+        universal
+        harper/common
+        harper/v5
+        repo-type/plugin
 
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0
+
+      - name: Clone shared Harper skills
+        # Pinned to a specific SHA (not `main`) so review behavior is
+        # reproducible across runs — updates to the skills repo require
+        # an explicit pin bump in this workflow.
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: HarperFast/skills
+          ref: d2db99bb37a6dde868cbc5ac81ca4146be8956fb # 1.3.0 (2026-04-16)
+          path: .harper-skills
+
+      - name: Compose review scope from layers
+        # Layer files live in .github/review-scopes/ in this repo — see its
+        # README for provenance and the plan around eventually sharing them
+        # across HarperFast repos.
+        id: scope
+        env:
+          LAYERS: ${{ env.REVIEW_LAYERS }}
+        run: |
+          set -euo pipefail
+          OUT=/tmp/composed-scope.md
+          : > "$OUT"
+          while IFS= read -r raw_layer; do
+            # Trim whitespace around each layer name
+            layer="$(printf '%s' "$raw_layer" | awk '{$1=$1;print}')"
+            [ -z "$layer" ] && continue
+            file=".github/review-scopes/${layer}.md"
+            if [ ! -f "$file" ]; then
+              echo "::warning::Review layer '$layer' not found at $file; skipping."
+              continue
+            fi
+            {
+              cat "$file"
+              printf '\n\n'
+            } >> "$OUT"
+          done <<< "$LAYERS"
+
+          BYTES=$(wc -c < "$OUT")
+          echo "Composed ${BYTES} bytes from review layers"
+          if [ "$BYTES" -eq 0 ]; then
+            echo "::error::Composed review scope is empty — all layers missing or unreadable."
+            exit 1
+          fi
+
+          {
+            echo 'composed<<CLAUDE_SCOPE_EOF'
+            cat "$OUT"
+            echo 'CLAUDE_SCOPE_EOF'
+          } >> "$GITHUB_OUTPUT"
 
       - name: Claude review
         id: claude-review
@@ -45,18 +109,9 @@ jobs:
 
             The PR branch is already checked out in the current working directory.
 
-            ## What to ignore in the diff
-
-            Skip mechanical, non-reviewable diffs — they waste turns
-            and add no signal:
-
-            - `package-lock.json`, `bun.lock`, `yarn.lock` — lockfile
-              regens are deterministic from `package.json`
-            - `package.json` changes that are ONLY version bumps of
-              existing deps (patch/minor). If `engines`, `peerDependencies`,
-              or new `dependencies` entries change, DO review those.
-            - `dist/` compiled output (shouldn't be in PRs, but if it
-              is, ignore it — source is the source of truth)
+            Read `CLAUDE.md` in the repo root first — it has the project
+            overview, conventions, and repo-specific gotchas. Then apply
+            the layered review scope below.
 
             ## Tools
 
@@ -72,73 +127,53 @@ jobs:
               at start, you can re-invoke if needed)
             - `gh pr comment` — post the final review comment
 
-            Read `CLAUDE.md` in the repo root first — it has the project
-            overview, conventions, and (importantly) a "Non-Obvious Gotchas"
-            section covering Resource API v2 patterns, GenericTrackedObject
-            spread behavior, `tsc || true` build semantics, and security
-            invariants.
+            Do NOT write files during the review — not to `.claude-pr/`,
+            not to `/tmp/`, not anywhere. The `Write` and `Edit` tools
+            are not allowed. If you want to organize notes, keep them
+            in-memory and assemble the final PR comment; saving
+            intermediate drafts to disk wastes turns on permission
+            denials.
 
-            ## OAuth-specific things to check
+            Shared Harper best-practices are mirrored on disk at
+            `.harper-skills/harper-best-practices/rules/*.md` if a layer
+            references them and you want to drill into the customer-facing
+            source.
 
-            - CSRF state tokens present on every OAuth flow; 10-minute expiry
-              is enforced; state is single-use
-            - Tokens are never logged and never returned in HTTP responses
+            ## Layered review scope
+
+            The sections below are composed from
+            HarperFast/ai-review-log/review-scopes (universal + Harper +
+            repo-type). They are the authoritative review checklist —
+            the OAuth-specific bullets further down stack ON TOP of them,
+            they do not replace them.
+
+            ${{ steps.scope.outputs.composed }}
+
+            ## Repo-specific checks (OAuth plugin)
+
+            On top of the layered scope above, these are OAuth-only
+            semantics not covered by the shared layers:
+
+            - CSRF state tokens present on every OAuth flow; 10-minute
+              expiry is enforced; state is single-use
             - Redirect URI validation on callback endpoints
-            - Provider-of-record enforcement (cross-provider CSRF protection
-              should redirect with error, not 403)
-            - Session field preservation across token refresh (`provider`,
-              `providerConfigId`, `providerType`)
-            - Resource API v2 conventions (`static loadAsInstance = false`,
-              instance methods)
-            - `GenericTrackedObject` spread gotcha — if code uses `{...obj}`
-              on a session field, flag it
-            - New endpoints include auth checks and context validation
-            - Path length validation (≤ 2048 chars) where user input can
-              reach a path
-
-            ## Review scope and style
-
-            Report **blocker-severity findings only**. Blockers are:
-            - Correctness bugs
-            - Security issues (token exposure, missing CSRF, auth bypass,
-              unvalidated redirect/path, injection)
-            - Broken contracts (public API behavior change without migration)
-            - Missing tests for new behavior or fixed bugs
-            - Documentation drift that would mislead integrators
-
-            Do NOT comment on style, naming, nits, or personal preference.
-            Do NOT restate what the diff does. Do NOT praise.
-
-            Cap the review at 10 findings.
+            - Provider-of-record enforcement (cross-provider CSRF
+              protection should redirect with error, not 403)
+            - Session field preservation across token refresh
+              (`provider`, `providerConfigId`, `providerType`)
+            - Path length validation (≤ 2048 chars) where user input
+              can reach a path
 
             ## How to post the review
 
-            - Use `gh pr comment` for top-level feedback (single consolidated
-              summary comment with all findings).
+            - Use `gh pr comment` for the single consolidated top-level
+              summary comment.
             - Use `mcp__github_inline_comment__create_inline_comment`
               (with `confirmed: true`) for specific code-line annotations.
             - Only post GitHub comments — do NOT submit review text as SDK
               messages.
-            - Do NOT use REQUEST_CHANGES or APPROVE during this calibration
-              phase. Stick to comments so the workflow never blocks or
-              auto-approves a merge.
 
-            ## Output format for the top-level comment
-
-            If you find zero blockers: post one short comment —
-            "No blockers found." — and stop.
-
-            If you find blockers: post one summary comment with all findings
-            using this structure, one block per finding:
-
-              ### <N>. <concise title>
-
-              **File:** `path/to/file.ts:line`
-              **What:** one or two sentence description
-              **Why it matters:** concrete impact
-              **Suggested fix:** specific change, not generic advice
-
-            No preamble. No closing summary.
+            Cap the review at 10 findings.
 
       - name: Log review to ai-review-log
         # Best-effort — never fail the job if logging fails
@@ -149,6 +184,10 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_URL: ${{ github.event.pull_request.html_url }}
           REVIEW_STATUS: ${{ steps.claude-review.outcome }}
+          # Short repo name for log title/label (e.g. "oauth" in
+          # "HarperFast/oauth"). Interpolated so this workflow can be
+          # copied to other HarperFast repos without source edits.
+          REPO_SHORT: ${{ github.event.repository.name }}
         run: |
           set -uo pipefail
 
@@ -199,18 +238,19 @@ jobs:
           # didn't complete cleanly (e.g., max_turns). Findings posted before
           # the cutoff are still logged but flagged as potentially incomplete.
           if [ "$REVIEW_STATUS" = "success" ]; then
-            TITLE="[oauth] PR #$PR_NUMBER: $COUNT_PART"
+            TITLE="[$REPO_SHORT] PR #$PR_NUMBER: $COUNT_PART"
           else
-            TITLE="[oauth] PR #$PR_NUMBER: $COUNT_PART (review $REVIEW_STATUS — may be incomplete)"
+            TITLE="[$REPO_SHORT] PR #$PR_NUMBER: $COUNT_PART (review $REVIEW_STATUS — may be incomplete)"
           fi
 
-          BODY=$(printf '**Source:** %s\n**Repo:** oauth\n**PR:** #%s\n**Model:** claude-sonnet-4-6\n**Phase:** baseline\n**Review job status:** %s\n**Date:** %s\n\n---\n\n%s\n' \
-            "$PR_URL" "$PR_NUMBER" "$REVIEW_STATUS" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$CLAUDE_BODY")
+          BODY=$(printf '**Source:** %s\n**Repo:** %s\n**PR:** #%s\n**Model:** claude-sonnet-4-6\n**Phase:** baseline\n**Review job status:** %s\n**Date:** %s\n\n---\n\n%s\n' \
+            "$PR_URL" "$REPO_SHORT" "$PR_NUMBER" "$REVIEW_STATUS" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$CLAUDE_BODY")
 
           PAYLOAD=$(jq -nc \
             --arg title "$TITLE" \
+            --arg repo_label "repo:$REPO_SHORT" \
             --arg body "$BODY" \
-            '{title: $title, body: $body, labels: ["repo:oauth", "verdict:pending", "phase:baseline"]}')
+            '{title: $title, body: $body, labels: [$repo_label, "verdict:pending", "phase:baseline"]}')
 
           HTTP=$(curl -sS -o /tmp/ai-log-resp.json -w '%{http_code}' -X POST \
             -H "Authorization: Bearer $AI_REVIEW_LOG_TOKEN" \
