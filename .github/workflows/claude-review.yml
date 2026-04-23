@@ -10,12 +10,15 @@ concurrency:
 
 jobs:
   review:
-    # Only review PRs authored by HarperFast org members / collaborators.
-    # External PRs are not auto-reviewed — a maintainer can opt one in later
-    # via an @claude mention (handled by a separate workflow).
+    # Review PRs authored by HarperFast org members / collaborators AND
+    # PRs opened by our own issue-to-PR bot (claude[bot]) — AI-authored PRs
+    # need review MOST, not least. External human PRs are not auto-reviewed;
+    # a maintainer can opt one in via an `@claude` mention (handled by a
+    # separate workflow).
     if: >-
       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'),
       github.event.pull_request.author_association)
+      || github.event.pull_request.user.login == 'claude[bot]'
     runs-on: ubuntu-latest
     # Bumped from 10 to 15. We've observed the Claude review step stall on a
     # single long-running API call inside the 10-min window on substantial
