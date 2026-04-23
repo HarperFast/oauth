@@ -86,8 +86,11 @@ jobs:
 
             Title: ${{ github.event.issue.title }}
 
-            Body:
+            Body (verbatim, including any multi-line content):
+
+            ```
             ${{ github.event.issue.body }}
+            ```
 
             Source: ${{ github.event.issue.html_url }}
 
