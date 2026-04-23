@@ -25,12 +25,16 @@ Add the plugin to your Harper application's `config.yaml`:
 
 ### 2. Set Environment Variables
 
+For **local development**, export variables in your terminal session:
+
 ```bash
 export OAUTH_GITHUB_CLIENT_ID="your_github_client_id"
 export OAUTH_GITHUB_CLIENT_SECRET="your_github_client_secret"
 ```
 
-> **Note:** The `export` commands above are for local development and quick testing only. Harper reads environment variables directly from the process environment — it does **not** load `.env` files automatically. For production deployments, set these variables through your deployment platform (systemd unit file, Kubernetes secrets, cloud provider secrets manager, etc.).
+> **Note:** These `export` commands are for local development only. Harper reads environment variables directly from the process environment — it does **not** load `.env` files automatically. Do not store OAuth secrets in a `.env` file; Harper's `.env` convention is used by `dotenv-cli` for deploy CLI credentials (`CLI_TARGET`, etc.), not for runtime application secrets.
+>
+> For **Harper Fabric** deployments, inject secrets through your CI/CD pipeline as environment variables (e.g., GitHub repository secrets passed via the `env:` block in your workflow) rather than committing them to any file.
 
 ### 3. (Optional) Register Lifecycle Hooks
 
