@@ -28,8 +28,9 @@ jobs:
       pull-requests: write
       id-token: write # required by claude-code-action even with API-key auth
     env:
-      # Layered review scope — see HarperFast/ai-review-log/review-scopes/README.md.
-      # Order matters: most-general first, most-specific last. Composed into a
+      # Layered review scope — see .github/review-scopes/README.md for what
+      # each layer covers and the provenance of the vendored files. Order
+      # matters: most-general first, most-specific last. Composed into a
       # single prompt block by the "Compose review scope from layers" step.
       REVIEW_LAYERS: |
         universal
