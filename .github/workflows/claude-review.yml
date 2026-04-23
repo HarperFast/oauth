@@ -101,6 +101,14 @@ jobs:
         uses: anthropics/claude-code-action@c3d45e8e941e1b2ad7b278c57482d9c5bf1f35b3 # v1.0.99
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Allow our issue-to-PR bot's PRs to be reviewed. The job-level
+          # `if:` gate above lets the workflow start, but claude-code-action
+          # has its own bot-actor check that refuses with "Workflow initiated
+          # by non-human actor" unless the bot is on this allowlist. We
+          # specifically allow `claude` (slug match — no `[bot]` suffix here)
+          # rather than `*`, so any OTHER bot that somehow triggers this
+          # workflow is still refused.
+          allowed_bots: claude
           show_full_output: true # TEMP: keep on during calibration so tool denials are visible; revert once reviews run cleanly
           claude_args: |
             --model claude-sonnet-4-6
