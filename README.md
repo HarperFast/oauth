@@ -39,7 +39,7 @@ export OAUTH_GITHUB_CLIENT_ID="your-client-id"
 export OAUTH_GITHUB_CLIENT_SECRET="your-client-secret"
 ```
 
-> **Note:** The `export` commands above are for local development and quick testing only. You can also use a `.env` file with `dotenv-cli` for local dev — just don't commit it. For **Harper Fabric** deployments, inject secrets through your CI/CD pipeline as environment variables (e.g., GitHub repository secrets passed via the `env:` block in your workflow) rather than committing them to any file.
+> **Note:** The `export` commands above are for local development and quick testing only. You can also use a `.env` file with `dotenv-cli` for local dev — just don't commit it. For **Harper Fabric** deployments, see the [Harper Fabric documentation](https://docs.harperdb.io/docs/fabric/managing-applications) for managing runtime environment variables.
 
 ### 3. Configure OAuth Callback
 
