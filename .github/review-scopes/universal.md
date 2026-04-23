@@ -75,5 +75,5 @@ If a finding doesn't have concrete impact on correctness, security, contract, or
 **How to post:**
 
 - Structured format: `### <N>. <title>` + `**File:** path:line` + `**What:** …` + `**Why it matters:** …` + `**Suggested fix:** …`.
-- If zero blockers: one short comment — "No blockers found." — then stop.
+- If zero blockers: lead with "No blockers found." A short "here's what I traced" summary is welcome during calibration — it lets maintainers spot-check whether the bot reasoned through the right surfaces vs. hand-waved a pass. Keep it tight: one line per surface verified, not a full re-derivation.
 - Never `REQUEST_CHANGES` or `APPROVE` during calibration — comments only.
