@@ -43,6 +43,13 @@ jobs:
 
     steps:
       - name: Checkout
+        # Full history so the review agent can use `git blame` / `git log`
+        # / `git diff <base>...HEAD` for context — who wrote a line, how
+        # old it is, whether this PR's author has touched it before. Those
+        # signals materially improve review quality on non-trivial diffs.
+        # Paired with a tightly-scoped `Bash(git <subcommand>:*)` allowlist
+        # below (no `Bash(git:*)` — that would allow `git push --force`,
+        # `git reset --hard`, etc.).
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0
@@ -119,7 +126,11 @@ jobs:
           claude_args: |
             --model claude-sonnet-4-6
             --max-turns 24
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Read,Grep,Glob"
+            # Read-only allowlist. Git subcommands are scoped individually —
+            # deliberately NOT `Bash(git:*)`, which would permit `git push
+            # --force`, `git reset --hard`, etc. The subcommands listed here
+            # are all strictly read-only.
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr view:*),Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git blame:*),Bash(git show:*)"
           prompt: |
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.pull_request.number }}
@@ -149,10 +160,26 @@ jobs:
             that executes PR code — the PR's tests are already checked
             separately.
 
-            The only allowed Bash commands are:
-            - `gh pr view` / `gh pr diff` — inspect the PR (already run
-              at start, you can re-invoke if needed)
-            - `gh pr comment` — post the final review comment
+            The allowed Bash commands are:
+            - `git diff <base>...HEAD` — the PR diff, local (no API
+              round-trip). `<base>` is typically `origin/main`.
+            - `git log`, `git show` — history context. Use these to
+              understand WHY a line is the way it is before flagging
+              it. "This load-bearing check was added 3 years ago in
+              commit abc123 with a fix for bug X" is often the
+              difference between a blocker finding and a non-finding.
+            - `git blame <file>` (or with `-L start,end`) — who wrote
+              which lines, when. Especially useful for judging whether
+              a changed line is new code from this PR (fair review
+              target) or pre-existing code the PR merely touched
+              (per the layered scope, pre-existing gaps are NOT
+              blockers).
+            - `gh pr view` — PR metadata (title, body, author,
+              labels). Already run at start; re-invoke if needed.
+            - `gh pr comment` — post the top-level summary comment.
+
+            Git subcommands are scoped individually on purpose — no
+            write operations are permitted.
 
             Do NOT write files during the review — not to `.claude-pr/`,
             not to `/tmp/`, not anywhere. The `Write` and `Edit` tools

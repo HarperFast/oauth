@@ -45,9 +45,11 @@ jobs:
 
     steps:
       - name: Checkout
+        # Default shallow fetch (depth 1). The agent can commit and push on
+        # a shallow clone; `git log` / `git blame` aren't reached for by
+        # the current prompt. Bump to a deeper fetch only if we see the
+        # agent blocked on history lookups.
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          fetch-depth: 0
 
       - name: Clone shared Harper skills
         # Pinned to a SHA (not `main`) so agent behavior is reproducible
