@@ -3,7 +3,7 @@
 # Importantly, **the last matching pattern takes precedence**
 
 # By default, everything must be reviewed by someone in the core engineering team
-*          @HarperFast/development
+*          @HarperFast/developers
 
 # Otherwise, certain paths may require other reviewers as well
-/.github/  @HarperFast/development @HarperFast/devops
+/.github/  @HarperFast/developers @HarperFast/devops
