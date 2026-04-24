@@ -35,6 +35,10 @@ export {
 // Export provider utilities
 export { getProvider } from './lib/providers/index.ts';
 
+// Export OAuth session validation wrapper
+export { withOAuthValidation, getOAuthProviders } from './lib/withOAuthValidation.ts';
+export type { OAuthValidationOptions } from './lib/withOAuthValidation.ts';
+
 // Store hooks registered at module load time and active hookManager
 let pendingHooks: OAuthHooks | null = null;
 let activeHookManager: HookManager | null = null;
