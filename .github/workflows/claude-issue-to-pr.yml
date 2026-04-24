@@ -39,9 +39,11 @@ jobs:
 
     steps:
       - name: Checkout
+        # Default shallow fetch (depth 1). The agent can commit and push on
+        # a shallow clone; `git log` / `git blame` aren't reached for by
+        # the current prompt. Bump to a deeper fetch only if we see the
+        # agent blocked on history lookups.
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          fetch-depth: 0
 
       - name: Clone shared Harper skills
         # Pinned to a SHA (not `main`) so agent behavior is reproducible
@@ -76,7 +78,18 @@ jobs:
           claude_args: |
             --model claude-sonnet-4-6
             --max-turns 72
-            --allowedTools "Read,Write,Edit,Grep,Glob,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(gh pr create:*),Bash(gh issue view:*),Bash(gh issue comment:*),Bash(git:*),Bash(npm install:*),Bash(npm ci:*),Bash(npm run:*),Bash(npm test:*),Bash(bun install:*),Bash(bun run:*),Bash(bun test:*),Bash(npx:*)"
+            # Tool allowlist is a security boundary — every entry is a
+            # potential RCE primitive if a prompt injection succeeds.
+            # Deliberately ABSENT:
+            #   * `Bash(npx:*)` — would let an injected instruction run
+            #     arbitrary published packages. Whose subprocess reads
+            #     GITHUB_TOKEN from env.
+            # Deliberately TIGHTENED:
+            #   * `Bash(npm install)` (no-arg, not `Bash(npm install:*)`) —
+            #     the `claude-fix:deps` path needs to regenerate the
+            #     lockfile from an edited package.json. Bare form does
+            #     that; the :* glob would let `npm install @attacker/x`.
+            --allowedTools "Read,Write,Edit,Grep,Glob,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(gh pr create:*),Bash(gh issue view:*),Bash(gh issue comment:*),Bash(git:*),Bash(npm install),Bash(npm ci:*),Bash(npm run:*),Bash(npm test:*),Bash(bun install:*),Bash(bun run:*),Bash(bun test:*)"
           prompt: |
             You were invoked because issue #${{ github.event.issue.number }}
             on ${{ github.repository }} was labeled
@@ -84,10 +97,13 @@ jobs:
 
             ## The ask
 
-            Title: ${{ github.event.issue.title }}
+            Title: `${{ github.event.issue.title }}`
 
-            Body:
+            Body (verbatim, including any multi-line content):
+
+            ```
             ${{ github.event.issue.body }}
+            ```
 
             Source: ${{ github.event.issue.html_url }}
 
@@ -112,9 +128,10 @@ jobs:
 
             ## Conventions
 
-            Read `CLAUDE.md` in the repo root. Its "Code Conventions"
-            and "Non-Obvious Gotchas" sections apply. Match the repo's
-            style.
+            Read the repo's agent context files first (commonly
+            `CLAUDE.md`, `AGENTS.md`, or similar at the repo root). Their
+            "Code Conventions" and "Non-Obvious Gotchas" sections apply.
+            Match the repo's style.
 
             For docs and deployment-related changes — especially doc
             issues like env-var / config / production-setup guidance —
@@ -129,6 +146,25 @@ jobs:
             don't cover the ask and the issue body doesn't specify,
             comment on the issue asking for clarification rather than
             guessing.
+
+            ## Documentation scope boundary
+
+            Harper maintains authoritative documentation at
+            https://docs.harperdb.io covering core, pro, and fabric. This
+            repo's docs should NOT re-explain Harper mechanics that the
+            Harper docs already cover — they drift out of sync when the
+            Harper docs update.
+
+            When writing or revising docs here:
+
+            - Document what's specific to THIS component — env var names,
+              config shape, setup flow, integration API.
+            - For anything not component-specific (deployment mechanics,
+              runtime env var handling, Fabric configuration, core Harper
+              behavior, SQL, replication), LINK to the Harper docs rather
+              than re-explaining.
+
+            This is a general rule, not specific to any one area.
 
             ## Process
 

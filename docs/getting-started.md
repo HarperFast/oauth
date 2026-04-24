@@ -25,10 +25,16 @@ Add the plugin to your Harper application's `config.yaml`:
 
 ### 2. Set Environment Variables
 
+For **local development**, export variables in your terminal session:
+
 ```bash
 export OAUTH_GITHUB_CLIENT_ID="your_github_client_id"
 export OAUTH_GITHUB_CLIENT_SECRET="your_github_client_secret"
 ```
+
+> **Note:** These `export` commands are for local development only. You can also use a `.env` file with `dotenv-cli` for local dev — just don't commit it to source control.
+>
+> For **Harper Fabric** deployments, your app-root `.env` is deployed alongside your component, so the same `.env` you use locally works in production — see the [Harper Fabric documentation](https://docs.harperdb.io/docs/fabric/managing-applications) for managing runtime environment variables.
 
 ### 3. (Optional) Register Lifecycle Hooks
 
