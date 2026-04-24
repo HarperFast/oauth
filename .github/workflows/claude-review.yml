@@ -31,10 +31,10 @@ jobs:
       pull-requests: write
       id-token: write # required by claude-code-action even with API-key auth
     env:
-      # Layered review scope — see .github/review-scopes/README.md for what
-      # each layer covers and the provenance of the vendored files. Order
-      # matters: most-general first, most-specific last. Composed into a
-      # single prompt block by the "Compose review scope from layers" step.
+      # Layered review scope — sourced from HarperFast/ai-review-prompts
+      # (public). Order matters: most-general first, most-specific last.
+      # Composed into a single prompt block by the "Compose review scope
+      # from layers" step.
       REVIEW_LAYERS: |
         universal
         harper/common
@@ -57,10 +57,16 @@ jobs:
           ref: d2db99bb37a6dde868cbc5ac81ca4146be8956fb # 1.3.0 (2026-04-16)
           path: .harper-skills
 
+      - name: Clone review prompts
+        # Layer files live in HarperFast/ai-review-prompts (public).
+        # Pinned to a merge SHA — bump this deliberately to adopt updates.
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: HarperFast/ai-review-prompts
+          ref: 752c5da8f1a7746e8202dba8aba4c28bd17d14c4 # main at seed merge
+          path: .ai-review-prompts
+
       - name: Compose review scope from layers
-        # Layer files live in .github/review-scopes/ in this repo — see its
-        # README for provenance and the plan around eventually sharing them
-        # across HarperFast repos.
         id: scope
         env:
           LAYERS: ${{ env.REVIEW_LAYERS }}
@@ -72,7 +78,7 @@ jobs:
             # Trim whitespace around each layer name
             layer="$(printf '%s' "$raw_layer" | awk '{$1=$1;print}')"
             [ -z "$layer" ] && continue
-            file=".github/review-scopes/${layer}.md"
+            file=".ai-review-prompts/${layer}.md"
             if [ ! -f "$file" ]; then
               echo "::warning::Review layer '$layer' not found at $file; skipping."
               continue
@@ -162,11 +168,10 @@ jobs:
 
             ## Layered review scope
 
-            The sections below are composed from
-            HarperFast/ai-review-log/review-scopes (universal + Harper +
-            repo-type). They are the authoritative review checklist —
-            the OAuth-specific bullets further down stack ON TOP of them,
-            they do not replace them.
+            The sections below are composed from HarperFast/ai-review-prompts
+            (universal + Harper + repo-type). They are the authoritative
+            review checklist — the OAuth-specific bullets further down stack
+            ON TOP of them, they do not replace them.
 
             ${{ steps.scope.outputs.composed }}
 
