@@ -25,8 +25,11 @@ jobs:
     # opened by a HarperFast org member or collaborator. Labels added
     # to issues opened by outside contributors are ignored to keep
     # the trigger surface tight during calibration.
+    # Explicit whitelist of allowed labels — `startsWith('claude-fix:')`
+    # would match typoed variants (`claude-fix:typos`, `claude-fix:foo`)
+    # and the agent would waste turns trying to interpret them.
     if: >-
-      startsWith(github.event.label.name, 'claude-fix:') &&
+      contains(fromJSON('["claude-fix:typo","claude-fix:docs","claude-fix:deps","claude-fix:bug"]'), github.event.label.name) &&
       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'),
       github.event.issue.author_association)
     runs-on: ubuntu-latest
@@ -84,11 +87,18 @@ jobs:
             #   * `Bash(npx:*)` — would let an injected instruction run
             #     arbitrary published packages. Whose subprocess reads
             #     GITHUB_TOKEN from env.
-            # Deliberately TIGHTENED:
+            # Partial mitigation (NOT a full boundary):
             #   * `Bash(npm install)` (no-arg, not `Bash(npm install:*)`) —
-            #     the `claude-fix:deps` path needs to regenerate the
-            #     lockfile from an edited package.json. Bare form does
-            #     that; the :* glob would let `npm install @attacker/x`.
+            #     blocks `npm install @attacker/<name>`. BUT: the agent
+            #     also has `Write`/`Edit` on package.json. A successful
+            #     injection could add a malicious `postinstall` script
+            #     and then invoke bare `npm install` to execute it, with
+            #     GITHUB_TOKEN + the claude[bot] installation token
+            #     reachable from the subprocess. Branch protection + the
+            #     author_association gate are what actually bound blast
+            #     radius. A future PR may add `ignore-scripts=true` via
+            #     .npmrc and/or drop `Bash(npm install)` entirely,
+            #     deferring installs to a separate CI job.
             --allowedTools "Read,Write,Edit,Grep,Glob,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(gh pr create:*),Bash(gh issue view:*),Bash(gh issue comment:*),Bash(git:*),Bash(npm install),Bash(npm ci:*),Bash(npm run:*),Bash(npm test:*),Bash(bun install:*),Bash(bun run:*),Bash(bun test:*)"
           prompt: |
             You were invoked because issue #${{ github.event.issue.number }}

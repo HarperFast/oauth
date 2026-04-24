@@ -51,10 +51,41 @@ jobs:
         # agent blocked on history lookups.
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
+      - name: Parse mention
+        # Real precision gate (the job-level `if:` is a cheap pre-filter).
+        # Enforces:
+        #   1. `@claude` must be the FIRST non-whitespace token (word-
+        #      boundary after) — rules out `@claudette`, inline prose
+        #      mentions ("saw @claude's fix"), and quoted replies
+        #      (`> @claude ...`) where the reply is addressing a human.
+        #   2. Case-insensitive word-boundary `deep` anywhere in the body
+        #      → escalate to Opus. Sonnet is the default.
+        id: mention
+        env:
+          BODY: ${{ github.event.comment.body }}
+        run: |
+          set -uo pipefail
+
+          if ! printf '%s' "$BODY" | grep -Pqz '\A\s*@claude\b'; then
+            echo "Comment does not start with @claude; skipping."
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if printf '%s' "$BODY" | grep -Piq '\bdeep\b'; then
+            echo "model=claude-opus-4-7" >> "$GITHUB_OUTPUT"
+            echo "Selected claude-opus-4-7 (deep requested)"
+          else
+            echo "model=claude-sonnet-4-6" >> "$GITHUB_OUTPUT"
+            echo "Selected claude-sonnet-4-6 (default)"
+          fi
+          echo "proceed=true" >> "$GITHUB_OUTPUT"
+
       - name: Clone shared Harper skills
         # Pinned to a SHA (not `main`) so agent behavior is reproducible
         # across runs — updates to the skills repo require an explicit
         # pin bump in this workflow.
+        if: steps.mention.outputs.proceed == 'true'
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           repository: HarperFast/skills
@@ -62,27 +93,33 @@ jobs:
           path: .harper-skills
 
       - name: Setup Node.js
+        # Needed so the agent can run `npm ci` / `npm run <script>` when a
+        # specific mention actually requires it. We DON'T eagerly `npm ci`
+        # here — most mentions (explain, review, tiny edits) don't need
+        # deps, and ~35-60s install cost × every mention adds up. The
+        # prompt tells the agent to run `npm ci` itself before any script
+        # that needs dependencies.
+        if: steps.mention.outputs.proceed == 'true'
         uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238 # v6.2.0
         with:
           node-version: '22'
           cache: 'npm'
 
       - name: Setup Bun
+        if: steps.mention.outputs.proceed == 'true'
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: latest
 
-      - name: Install dependencies
-        run: npm ci
-
       - name: Claude (agent mode)
+        if: steps.mention.outputs.proceed == 'true'
         id: claude-agent
         uses: anthropics/claude-code-action@c3d45e8e941e1b2ad7b278c57482d9c5bf1f35b3 # v1.0.99
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           show_full_output: true
           claude_args: |
-            --model claude-opus-4-7
+            --model ${{ steps.mention.outputs.model }}
             --max-turns 48
             # Tool allowlist is a security boundary — every entry is a
             # potential RCE primitive if a prompt injection succeeds.
@@ -91,8 +128,17 @@ jobs:
             #     arbitrary published packages.
             # Deliberately TIGHTENED:
             #   * `Bash(npm install)` (no-arg, not `Bash(npm install:*)`) —
-            #     allows lockfile regeneration from an edited package.json
-            #     but NOT `npm install @attacker/<name>`.
+            #     blocks `npm install @attacker/<name>`. BUT: the agent
+            #     also has `Write`/`Edit` on package.json. A successful
+            #     injection could add a malicious `postinstall` script
+            #     and then invoke bare `npm install` to execute it, with
+            #     GITHUB_TOKEN + the claude[bot] installation token
+            #     reachable from the subprocess. This allowlist ALONE
+            #     does not close that path — branch protection + the
+            #     author_association gate are what actually bound blast
+            #     radius. A future PR may add `ignore-scripts=true` via
+            #     .npmrc and/or drop `Bash(npm install)` entirely,
+            #     deferring installs to a separate CI job.
             --allowedTools "Read,Write,Edit,Grep,Glob,mcp__github_inline_comment__create_inline_comment,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(gh pr checkout:*),Bash(gh pr create:*),Bash(gh issue view:*),Bash(gh issue comment:*),Bash(git:*),Bash(npm install),Bash(npm ci:*),Bash(npm run:*),Bash(npm test:*),Bash(bun install:*),Bash(bun run:*),Bash(bun test:*)"
           # In agent mode the action can use the triggering comment as the
           # prompt, but we inline it explicitly below to guarantee the agent
@@ -181,7 +227,8 @@ jobs:
               `config.yaml` is NOT doc-only — it holds the plugin
               entry point (`pluginModule`) and runtime OAuth defaults.
               Treat any change there as a code/config change.
-            - Code or config change that affects behavior: run
+            - Code or config change that affects behavior: run `npm ci`
+              first (deps aren't pre-installed in this workflow), then
               `npm run build && npm run lint && npm run format:check && npm test`
               and `bun test`. Fix anything that fails.
 
