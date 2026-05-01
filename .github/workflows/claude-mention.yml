@@ -21,16 +21,61 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  authorize:
+    # Single source of truth for "is this commenter allowed to trigger
+    # Claude on this repo?". The `work` job below has ONE `if:` that
+    # depends on this — no step-level guards, no individual user list.
+    #
+    # Cheap pre-filter at job level: comment must mention `@claude`.
+    # The first-non-whitespace-token precision check is in the work
+    # job's `Parse mention` step.
+    #
+    # Trust set: the @HarperFast teams listed in this repo's
+    # `.github/CODEOWNERS`. Defaults to `@HarperFast/developers` if the
+    # file is missing, empty, or has no HarperFast handles. External-
+    # org handles are deliberately ignored — we only admit HarperFast
+    # members.
+    #
+    # Required (organization-level) secrets:
+    #   - HARPERFAST_AI_CLIENT_ID       (the App's Client ID, like Iv23li…)
+    #   - HARPERFAST_AI_APP_PRIVATE_KEY (.pem file contents)
+    if: contains(github.event.comment.body, '@claude')
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    permissions:
+      # contents: read for the .github/CODEOWNERS fetch via default token.
+      contents: read
+    outputs:
+      authorized: ${{ steps.check.outputs.authorized }}
+    steps:
+      - name: Mint org-read token
+        id: app-token
+        uses: actions/create-github-app-token@1b10c78c7865c340bc4f6099eb2f838309f1e8c3 # v3.1.1
+        with:
+          client-id: ${{ secrets.HARPERFAST_AI_CLIENT_ID }}
+          private-key: ${{ secrets.HARPERFAST_AI_APP_PRIVATE_KEY }}
+          owner: HarperFast
+
+      - name: Checkout (for CODEOWNERS read)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          sparse-checkout: |
+            .github/CODEOWNERS
+            .github/scripts/authorize-claude-workflow.sh
+          sparse-checkout-cone-mode: false
+
+      - name: Check commenter authorization
+        id: check
+        env:
+          DEFAULT_TOKEN: ${{ github.token }}
+          ORG_TOKEN: ${{ steps.app-token.outputs.token }}
+          ADMIT_CLAUDE_BOT: 'false'
+          USERS_TO_CHECK: ${{ github.event.comment.user.login }}
+        run: bash .github/scripts/authorize-claude-workflow.sh
+
   work:
-    # Belt-and-suspenders gate:
-    # 1. Comment must contain the trigger phrase.
-    # 2. Commenter must be HarperFast org OWNER / MEMBER or a repo
-    #    COLLABORATOR (the action also performs its own write-access
-    #    check on the actor as a fallback).
-    if: >-
-      contains(github.event.comment.body, '@claude') &&
-      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'),
-      github.event.comment.author_association)
+    needs: authorize
+    if: needs.authorize.outputs.authorized == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -63,23 +108,7 @@ jobs:
         id: mention
         env:
           BODY: ${{ github.event.comment.body }}
-        run: |
-          set -uo pipefail
-
-          if ! printf '%s' "$BODY" | grep -Pqz '\A\s*@claude\b'; then
-            echo "Comment does not start with @claude; skipping."
-            echo "proceed=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          if printf '%s' "$BODY" | grep -Piq '\bdeep\b'; then
-            echo "model=claude-opus-4-7" >> "$GITHUB_OUTPUT"
-            echo "Selected claude-opus-4-7 (deep requested)"
-          else
-            echo "model=claude-sonnet-4-6" >> "$GITHUB_OUTPUT"
-            echo "Selected claude-sonnet-4-6 (default)"
-          fi
-          echo "proceed=true" >> "$GITHUB_OUTPUT"
+        run: bash .github/scripts/parse-claude-mention.sh
 
       - name: Clone shared Harper skills
         # Pinned to a SHA (not `main`) so agent behavior is reproducible
