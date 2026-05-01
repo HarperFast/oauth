@@ -45,10 +45,9 @@
 	"scripts": {
 		"build": "tsc || true",
 		"dev": "tsc --watch",
-		"test": "npm run build && node --test \"test/**/*.test.js\"",
-		"test:watch": "npm run build && node --test --watch \"test/**/*.test.js\"",
-		"test:coverage": "npm run build && node --enable-source-maps --test --experimental-test-coverage --test-coverage-exclude='test/**' --test-coverage-exclude='**/harper/**' \"test/**/*.test.js\"",
-		"test:node-twenty": "npm run build && node --test test/",
+		"test": "npm run build && node --import ./test/helpers/harper-mock.mjs --test \"test/**/*.test.js\"",
+		"test:watch": "npm run build && node --import ./test/helpers/harper-mock.mjs --test --watch \"test/**/*.test.js\"",
+		"test:coverage": "npm run build && node --import ./test/helpers/harper-mock.mjs --enable-source-maps --test --experimental-test-coverage --test-coverage-exclude='test/**' --test-coverage-exclude='**/harper/**' \"test/**/*.test.js\"",
 		"test:integration": "harper-integration-test-run \"integrationTests/**/*.test.ts\"",
 		"install:fixtures": "node scripts/install-fixtures.js",
 		"lint": "eslint . --ignore-pattern 'dist/**' --ignore-pattern 'integrationTests/fixtures/**'",
@@ -65,7 +64,7 @@
 		"@harperdb/code-guidelines": "^0.0.5",
 		"@harperfast/integration-testing": "0.3.0",
 		"@types/jsonwebtoken": "^9.0.5",
-		"@types/node": "^20.11.0",
+		"@types/node": "^22.0.0",
 		"eslint": "^9.35.0",
 		"harper": "5.0.7",
 		"prettier": "^3.6.2",
@@ -75,13 +74,13 @@
 		"harper": ">=5.0.0"
 	},
 	"engines": {
-		"node": ">=20",
+		"node": ">=22",
 		"bun": ">=1.0"
 	},
 	"devEngines": {
 		"runtime": {
 			"name": "node",
-			"version": ">=20",
+			"version": ">=22",
 			"onFail": "error"
 		},
 		"packageManager": {

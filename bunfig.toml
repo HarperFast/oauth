@@ -1,2 +1,5 @@
 [test]
 preload = ["./.bun/preload.js"]
+# integrationTests/ uses @harperfast/integration-testing's harper-integration-test-run
+# (Node test runner only); they are not unit tests and should not run under `bun test`.
+root = "./test"

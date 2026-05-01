@@ -13,7 +13,7 @@ jobs:
 
     strategy:
       matrix:
-        node-version: [20, 22, 24]
+        node-version: [22, 24]
 
     steps:
       - name: Checkout code
@@ -34,14 +34,8 @@ jobs:
       - name: Check formatting
         run: npm run format:check
 
-      # Coverage was failing to run on Node 20, so run it only on 22+
-      - name: Run tests with coverage (Node 22+)
-        if: matrix.node-version >= 22
+      - name: Run tests with coverage
         run: npm run test:coverage
-
-      - name: Run tests (Node 20)
-        if: matrix.node-version == 20
-        run: npm run test:node-twenty
 
   test-bun:
     name: Test with Bun

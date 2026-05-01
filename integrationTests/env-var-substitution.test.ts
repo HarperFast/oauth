@@ -9,11 +9,7 @@ import { suite, test, before, after } from 'node:test';
 import { strictEqual } from 'node:assert/strict';
 import { join, dirname } from 'node:path';
 import { createRequire } from 'node:module';
-import {
-	setupHarperWithFixture,
-	teardownHarper,
-	type ContextWithHarper,
-} from '@harperfast/integration-testing';
+import { setupHarperWithFixture, teardownHarper, type ContextWithHarper } from '@harperfast/integration-testing';
 
 const require = createRequire(import.meta.url);
 
