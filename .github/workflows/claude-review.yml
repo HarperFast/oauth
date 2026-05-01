@@ -158,7 +158,7 @@ jobs:
           show_full_output: true # TEMP: keep on during calibration so tool denials are visible
           claude_args: |
             --model claude-sonnet-4-6
-            --max-turns 24
+            --max-turns 48
             # This workflow is READ-ONLY by design — the agent reviews and
             # comments, it does not modify the repo. Git subcommands are
             # scoped individually to strictly read-only operations.
@@ -224,9 +224,26 @@ jobs:
 
             ## Tools
 
-            For file inspection use the `Read`, `Grep`, and `Glob` tools.
+            **Turn budget:** you have 48 turns total per review. Plan
+            accordingly: 1–2 turns to read agent context files, 1 turn
+            to identify changed files, ~1 turn per changed file via
+            `Read`, the rest for targeted searches and posting
+            findings. Most reviews finish well under that. Running
+            out of turns means no review gets posted at all — the
+            log step skips when no marker'd review comment exists.
+
+            **The single biggest turn-burner is repo-wide search.**
+            Use the dedicated `Grep` tool with a tight `path` parameter
+            scoping to the changed files or the specific subdirectory
+            you need. Do NOT do `grep -rn …` (or `Bash(grep …)`) over
+            the whole repo — that pattern returned ~20 hits per call
+            in a recent harper run that timed out before posting
+            anything. For file inspection use `Read`, `Grep`, and
+            `Glob` tools.
+
             Do NOT use `cat`, `head`, `tail`, `grep`, `ls`, or `find`
-            via Bash — those commands are not allowed and waste turns.
+            via Bash. The Bash allowlist below excludes them on
+            purpose, and the equivalent dedicated tools are faster.
             Do NOT run `bun test`, `npm test`, or any other script
             that executes PR code — the PR's tests are already
             checked separately.
