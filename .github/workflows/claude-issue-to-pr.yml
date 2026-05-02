@@ -20,18 +20,65 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  authorize:
+    # Single source of truth for "is this label trigger allowed to
+    # spawn Claude on this repo?". The `work` job below has ONE `if:`
+    # that depends on this — no step-level guards, no individual user
+    # list.
+    #
+    # Cheap pre-filter at job level: explicit whitelist of allowed
+    # labels (NOT `startsWith('claude-fix:')`, which would match typoed
+    # variants like `claude-fix:typos`).
+    #
+    # We check the LABELER (`github.actor`), not the issue author. The
+    # labeler must already have at least triage permission to apply a
+    # label; a maintainer labeling an external-author issue is a
+    # legitimate way to invoke the agent on community reports.
+    #
+    # Trust set: the @HarperFast teams listed in this repo's
+    # `.github/CODEOWNERS`. Defaults to `@HarperFast/developers` if the
+    # file is missing, empty, or has no HarperFast handles. External-
+    # org handles are deliberately ignored.
+    #
+    # Required (organization-level) secrets:
+    #   - HARPERFAST_AI_CLIENT_ID       (the App's Client ID, like Iv23li…)
+    #   - HARPERFAST_AI_APP_PRIVATE_KEY (.pem file contents)
+    if: contains(fromJSON('["claude-fix:typo","claude-fix:docs","claude-fix:deps","claude-fix:bug"]'), github.event.label.name)
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    permissions:
+      contents: read # for the .github/CODEOWNERS fetch
+    outputs:
+      authorized: ${{ steps.check.outputs.authorized }}
+    steps:
+      - name: Mint org-read token
+        id: app-token
+        uses: actions/create-github-app-token@1b10c78c7865c340bc4f6099eb2f838309f1e8c3 # v3.1.1
+        with:
+          client-id: ${{ secrets.HARPERFAST_AI_CLIENT_ID }}
+          private-key: ${{ secrets.HARPERFAST_AI_APP_PRIVATE_KEY }}
+          owner: HarperFast
+
+      - name: Checkout (for CODEOWNERS read)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          sparse-checkout: |
+            .github/CODEOWNERS
+            .github/scripts/authorize-claude-workflow.sh
+          sparse-checkout-cone-mode: false
+
+      - name: Check labeler authorization
+        id: check
+        env:
+          DEFAULT_TOKEN: ${{ github.token }}
+          ORG_TOKEN: ${{ steps.app-token.outputs.token }}
+          ADMIT_CLAUDE_BOT: 'false'
+          USERS_TO_CHECK: ${{ github.actor }}
+        run: bash .github/scripts/authorize-claude-workflow.sh
+
   work:
-    # Only trigger for `claude-fix:*` labels AND when the issue was
-    # opened by a HarperFast org member or collaborator. Labels added
-    # to issues opened by outside contributors are ignored to keep
-    # the trigger surface tight during calibration.
-    # Explicit whitelist of allowed labels — `startsWith('claude-fix:')`
-    # would match typoed variants (`claude-fix:typos`, `claude-fix:foo`)
-    # and the agent would waste turns trying to interpret them.
-    if: >-
-      contains(fromJSON('["claude-fix:typo","claude-fix:docs","claude-fix:deps","claude-fix:bug"]'), github.event.label.name) &&
-      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'),
-      github.event.issue.author_association)
+    needs: authorize
+    if: needs.authorize.outputs.authorized == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     permissions:
