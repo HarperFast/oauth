@@ -110,9 +110,19 @@ request.session = {
 
 ## Testing
 
-Node.js built-in test runner (`node:test`) and Bun. Tests import from compiled `dist/`. Use `node:assert/strict`. Bun uses a preload script (`.bun/preload.js`) to mock the `harper` module.
+**Unit tests** (`test/`): Node.js built-in test runner (`node:test`) and Bun. Tests import from compiled `dist/`. Use `node:assert/strict`. Both runners mock the `harper` module to keep unit tests off the real RocksDB:
 
-Test scripts use `$(find test -name '*.test.js' -type f)`-style globbing for Node 20 compatibility; once Node 20 support ends, switch to `node --test test` or `node --test "test/**/*.test.js"` on Node 22+.
+- Bun: `.bun/preload.js` (`mock.module`).
+- Node: `test/helpers/harper-mock.mjs` registered via `--import` in the npm test scripts. Importing real `harper` opens the system RocksDB at module-load time, and RocksDB doesn't allow multi-process read-write access — so `node --test`'s per-file subprocesses contend for the LOCK and surface flaky errors. Drop this mock once harper exposes a read-only RocksDB mode (in flight); RocksDB does support multi-process read-only access.
+
+**Integration tests** (`integrationTests/`): Boot a real Harper child process with the plugin installed, via `@harperfast/integration-testing` (`harper-integration-test-run`). Tests are `.test.ts` (Node 22+ type stripping). Run order:
+
+```bash
+npm run install:fixtures   # npm pack + install the plugin into each fixture
+npm run test:integration
+```
+
+The fixture install uses `npm pack` (not a `file:` symlink) because Harper's default VM sandbox rejects symlinked plugins with "Can not load module outside of allowed path". Adding a new fixture: drop a directory under `integrationTests/fixtures/` with a `config.yaml` and a `package.json` (no deps — install-fixtures injects the OAuth tarball).
 
 ## Dependencies
 

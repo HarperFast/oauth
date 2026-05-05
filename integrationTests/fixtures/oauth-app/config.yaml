@@ -1,0 +1,19 @@
+# Integration test fixture: exercises ${VAR} substitution in OAuth provider config.
+#
+# The plugin's config.ts/expandEnvVar replaces ${VAR} placeholders with values
+# from process.env. The test harness sets OAUTH_TEST_CLIENT_ID etc. on the
+# Harper child process before boot; we then assert that the values reach the
+# generated authorization URL.
+rest: true
+
+'@harperfast/oauth':
+  package: '@harperfast/oauth'
+  providers:
+    test-provider:
+      provider: generic
+      clientId: ${OAUTH_TEST_CLIENT_ID}
+      clientSecret: ${OAUTH_TEST_CLIENT_SECRET}
+      authorizationUrl: 'http://example.test/authorize'
+      tokenUrl: 'http://example.test/token'
+      userInfoUrl: 'http://example.test/userinfo'
+      scope: 'openid profile email'

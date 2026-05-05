@@ -1,0 +1,6 @@
+{
+	"name": "oauth-app-fixture",
+	"private": true,
+	"type": "module",
+	"description": "Integration-test fixture. The @harperfast/oauth dep is installed at test setup time via scripts/install-fixtures.js (npm pack + install) so the plugin lives as real files under node_modules — required because Harper's default VM sandbox rejects symlinked file: deps with 'Can not load module outside of allowed path'."
+}

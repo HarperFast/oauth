@@ -21,3 +21,7 @@ dist/
 .env
 .env.*
 !.env.example
+
+# Integration test fixtures
+integrationTests/fixtures/**/node_modules
+integrationTests/fixtures/**/package-lock.json
