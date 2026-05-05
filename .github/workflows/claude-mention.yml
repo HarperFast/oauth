@@ -150,24 +150,49 @@ jobs:
           claude_args: |
             --model ${{ steps.mention.outputs.model }}
             --max-turns 48
-            # Tool allowlist is a security boundary — every entry is a
-            # potential RCE primitive if a prompt injection succeeds.
-            # Deliberately ABSENT:
-            #   * `Bash(npx:*)` — would let an injected instruction run
-            #     arbitrary published packages.
-            # Deliberately TIGHTENED:
+            # `--allowedTools` is convenience pre-approval, not a
+            # security boundary. Per claude-code-action's
+            # `docs/configuration.md` (v1.0.110): "The base GitHub
+            # tools are always included. Use `--allowedTools` to add
+            # additional tools, and `--disallowedTools` to prevent
+            # specific tools from being used." Tools NOT listed below
+            # will still execute — in CI's non-interactive mode (no
+            # `canUseTool` callback), the SDK's `default` permission
+            # mode falls through to "execute" rather than prompting.
+            #
+            # Real containment for this workflow (mention mode does
+            # AUTHORING work — file edits, commits, pushes — so the
+            # agent has broader git/npm/bun access than the review
+            # path):
+            #   * Token scope: `contents: write`, `pull-requests: write`,
+            #     `issues: write`, `id-token: write`. Repo-scoped only.
+            #   * Branch protection on protected refs (`main` /
+            #     `release_*` / `v*.x`) — the agent CAN run
+            #     `git push --force` if it tries; what stops protected-
+            #     ref damage is GitHub's ruleset.
+            #   * Auth gate (CODEOWNERS-driven HarperFast team
+            #     check) — only trusted commenters trigger the
+            #     workflow at all.
+            #   * Runner ephemerality.
+            #   * Prompt-injection guards in the prompt itself.
+            #
+            # The "deliberately absent / tightened" entries below are
+            # PROMPT-LEVEL discipline, not allowlist enforcement. They
+            # document our intent for the agent and the expected
+            # surface; an injected instruction running them would
+            # still execute, bounded only by the containment bullets
+            # above.
+            #
+            # Notable absences in spirit (containment is elsewhere):
+            #   * `Bash(npx:*)` — would let an injected instruction
+            #     run arbitrary published packages. Containment:
+            #     runner ephemerality + token scope.
             #   * `Bash(npm install)` (no-arg, not `Bash(npm install:*)`) —
-            #     blocks `npm install @attacker/<name>`. BUT: the agent
-            #     also has `Write`/`Edit` on package.json. A successful
-            #     injection could add a malicious `postinstall` script
-            #     and then invoke bare `npm install` to execute it, with
-            #     GITHUB_TOKEN + the claude[bot] installation token
-            #     reachable from the subprocess. This allowlist ALONE
-            #     does not close that path — branch protection + the
-            #     author_association gate are what actually bound blast
-            #     radius. A future PR may add `ignore-scripts=true` via
-            #     .npmrc and/or drop `Bash(npm install)` entirely,
-            #     deferring installs to a separate CI job.
+            #     "tightening" is illusory: the agent has `Write`/`Edit`
+            #     on package.json and can construct an injected
+            #     `postinstall` script + bare `npm install` chain.
+            #     Future: `ignore-scripts=true` via `.npmrc` and/or
+            #     defer installs to a separate CI job.
             --allowedTools "Read,Write,Edit,Grep,Glob,mcp__github_inline_comment__create_inline_comment,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(gh pr checkout:*),Bash(gh pr create:*),Bash(gh issue view:*),Bash(gh issue comment:*),Bash(git:*),Bash(npm install),Bash(npm ci:*),Bash(npm run:*),Bash(npm test:*),Bash(bun install:*),Bash(bun run:*),Bash(bun test:*)"
           # In agent mode the action can use the triggering comment as the
           # prompt, but we inline it explicitly below to guarantee the agent
