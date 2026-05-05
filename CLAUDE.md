@@ -113,7 +113,7 @@ request.session = {
 **Unit tests** (`test/`): Node.js built-in test runner (`node:test`) and Bun. Tests import from compiled `dist/`. Use `node:assert/strict`. Both runners mock the `harper` module to keep unit tests off the real RocksDB:
 
 - Bun: `.bun/preload.js` (`mock.module`).
-- Node: `test/helpers/harper-mock.mjs` registered via `--import` in the npm test scripts. Required because importing real `harper` (5.0.7+) eagerly opens the system RocksDB — fine when running Harper, but in unit tests it surfaces async lock-contention errors after tests finish. Remove this once harper provides an opt-in deferred init.
+- Node: `test/helpers/harper-mock.mjs` registered via `--import` in the npm test scripts. Importing real `harper` opens the system RocksDB at module-load time, and RocksDB doesn't allow multi-process read-write access — so `node --test`'s per-file subprocesses contend for the LOCK and surface flaky errors. Drop this mock once harper exposes a read-only RocksDB mode (in flight); RocksDB does support multi-process read-only access.
 
 **Integration tests** (`integrationTests/`): Boot a real Harper child process with the plugin installed, via `@harperfast/integration-testing` (`harper-integration-test-run`). Tests are `.test.ts` (Node 22+ type stripping). Run order:
 

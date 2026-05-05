@@ -3,16 +3,19 @@
  *
  * Mirrors the Bun preload (../../.bun/preload.js) so Node and Bun see the
  * same Resource shape under unit tests. Importing the real `harper` package
- * eagerly opens RocksDB (regressed in harper 5.0.7's `dist/resources/
- * databases.js` line 113 — open() became an instance method that opens
- * synchronously). With multiple test-file subprocesses or any other process
- * holding the system DB lock, the eager open fails and surfaces an async
- * "Cannot read properties of undefined (reading 'localhost')" rejection that
- * the Node test runner reports as a flaky test failure.
+ * opens the system RocksDB at module-load time, and RocksDB does not
+ * support multiple processes accessing the same database read-write — so
+ * `node --test` running test files as parallel subprocesses contends for
+ * the LOCK file, surfacing as a flaky `IO error: ... Resource temporarily
+ * unavailable opening database` (sometimes via a downstream
+ * `TypeError: Cannot read properties of undefined (reading 'localhost')`
+ * unhandled rejection that the test runner reports as a failed test).
  *
  * Wired in via `--import ./test/helpers/harper-mock.mjs` in npm test
- * scripts. Removing this once harper provides a lazy / opt-in DB init
- * mode is the right long-term fix.
+ * scripts. Once harper exposes a read-only RocksDB mode (in flight) this
+ * mock can be dropped — RocksDB *does* support multi-process access in
+ * read-only mode, so plugin unit tests could open the real DB read-only
+ * without contention.
  */
 import { register } from 'node:module';
 
