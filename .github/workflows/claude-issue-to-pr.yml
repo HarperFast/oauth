@@ -128,24 +128,29 @@ jobs:
           claude_args: |
             --model claude-sonnet-4-6
             --max-turns 72
-            # Tool allowlist is a security boundary — every entry is a
-            # potential RCE primitive if a prompt injection succeeds.
-            # Deliberately ABSENT:
-            #   * `Bash(npx:*)` — would let an injected instruction run
-            #     arbitrary published packages. Whose subprocess reads
-            #     GITHUB_TOKEN from env.
-            # Partial mitigation (NOT a full boundary):
-            #   * `Bash(npm install)` (no-arg, not `Bash(npm install:*)`) —
-            #     blocks `npm install @attacker/<name>`. BUT: the agent
-            #     also has `Write`/`Edit` on package.json. A successful
-            #     injection could add a malicious `postinstall` script
-            #     and then invoke bare `npm install` to execute it, with
-            #     GITHUB_TOKEN + the claude[bot] installation token
-            #     reachable from the subprocess. Branch protection + the
-            #     author_association gate are what actually bound blast
-            #     radius. A future PR may add `ignore-scripts=true` via
-            #     .npmrc and/or drop `Bash(npm install)` entirely,
-            #     deferring installs to a separate CI job.
+            # `--allowedTools` is convenience pre-approval, not a
+            # security boundary — see claude-mention.yml for the full
+            # rationale. Tools NOT listed below will still execute in
+            # CI; the entries here document the expected surface.
+            #
+            # Real containment for this workflow (issue-to-PR mode
+            # does AUTHORING work — branch creation, file edits,
+            # commits, push):
+            #   * Token scope: `contents: write`, `pull-requests: write`,
+            #     `issues: write`, `id-token: write`. Repo-scoped only.
+            #   * Branch protection on protected refs (`main` /
+            #     `release_*` / `v*.x`) — prevents pushes to those
+            #     refs even with broader git access.
+            #   * Auth gate — only trusted labelers (HarperFast team
+            #     members) trigger the workflow at all.
+            #   * Allowed labels list (`claude-fix:typo` / `:docs` /
+            #     `:deps` / `:bug`) — narrow trigger surface.
+            #   * Runner ephemerality.
+            #
+            # Notable absences in spirit (`Bash(npx:*)` deliberately
+            # not listed; `Bash(npm install)` no-arg) are prompt-level
+            # signals, not enforcement — same caveat as in
+            # claude-mention.yml.
             --allowedTools "Read,Write,Edit,Grep,Glob,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(gh pr create:*),Bash(gh issue view:*),Bash(gh issue comment:*),Bash(git:*),Bash(npm install),Bash(npm ci:*),Bash(npm run:*),Bash(npm test:*),Bash(bun install:*),Bash(bun run:*),Bash(bun test:*)"
           prompt: |
             You were invoked because issue #${{ github.event.issue.number }}
