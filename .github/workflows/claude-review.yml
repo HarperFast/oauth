@@ -26,6 +26,18 @@ jobs:
   review:
     uses: HarperFast/ai-review-prompts/.github/workflows/_claude-review.yml@0a5ccbc6daf746472be16ac6cea0a96277bf38e4 # main 2026-05-05 (incl. resolution-status sharpening + honest allowlist comment + reusable workflow)
     with:
+      # Pass the same SHA the `uses:` ref above is pinned to. The reusable
+      # uses this to check out HarperFast/ai-review-prompts (for layer
+      # files + bash scripts) at the SAME ref as the workflow logic
+      # itself — keeps the upgrade motion atomic (bump the pin in both
+      # places at once).
+      #
+      # We can't auto-derive this in the reusable: in a `workflow_call`
+      # context, `github.workflow_ref` resolves to the CALLER's ref
+      # (e.g. `refs/pull/72/merge`), not the called workflow's ref.
+      # Until GitHub exposes the called-workflow ref to reusables, the
+      # caller has to pass it explicitly.
+      ai-review-prompts-ref: 0a5ccbc6daf746472be16ac6cea0a96277bf38e4
       review-layers: |
         universal
         harper/common
