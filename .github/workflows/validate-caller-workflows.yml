@@ -9,25 +9,19 @@ name: Validate caller workflows
 #   * Mutable refs in `uses:` or `with.ai-review-prompts-ref` — both
 #     must pin to a 40-char SHA.
 #
-# Companion to the local `auth-gate-invariants.yml` here, which still
-# validates the inline-pattern workflows (claude-mention.yml,
-# claude-issue-to-pr.yml). Once those migrate to caller-pattern in a
-# follow-up, the local validator can be retired and this becomes the
-# only caller-side check.
+# Runs on every PR and every push to `main` — no `paths:` filter.
+# A required status check that only fires on workflow-touching PRs
+# stays permanently pending on every other PR (GitHub has no
+# "required if it runs" semantic). The validator's runtime is
+# trivial (yq-parses a few caller files), so unconditional firing
+# is the right trade-off for satisfiability.
 #
-# The `validate` job should be a REQUIRED status check on `main`
-# (defense in depth alongside the local `auth-gate-invariants.yml`).
+# Make this `validate` job a REQUIRED status check on `main`.
 
 on:
   pull_request:
-    paths:
-      - '.github/workflows/claude-*.yml'
-      - '.github/workflows/validate-caller-workflows.yml'
   push:
     branches: [main]
-    paths:
-      - '.github/workflows/claude-*.yml'
-      - '.github/workflows/validate-caller-workflows.yml'
 
 jobs:
   validate:
