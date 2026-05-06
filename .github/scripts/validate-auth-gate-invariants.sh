@@ -38,9 +38,33 @@ for f in "${files[@]}"; do
   echo ""
   echo "=== Validating $f ==="
 
-  # 1. The authorize job exists.
-  yq -e '.jobs.authorize' "$f" >/dev/null \
-    || fail "$f: missing 'authorize' job"
+  # 0. Caller-pattern handling. Workflows that delegate to the reusable
+  # in HarperFast/ai-review-prompts (`.github/workflows/_claude-*.yml`)
+  # have no inline authorize job — the reusable owns that. The reusable's
+  # structural invariants are validated by ai-review-prompts' own
+  # auth-gate-invariants.yml. Here we just enforce that the caller pins
+  # to a 40-char SHA, not a branch or tag (mutable refs are a supply-chain
+  # risk — a tag could be silently repointed to weaken the auth gate).
+  if ! yq -e '.jobs.authorize' "$f" >/dev/null 2>&1; then
+    echo "  ↪ no inline authorize job; treating as caller-pattern workflow"
+    callers=$(yq -r '.jobs[].uses | select(. != null)' "$f" 2>/dev/null | grep '^HarperFast/' || true)
+    if [ -z "$callers" ]; then
+      fail "$f: no inline authorize job AND no HarperFast/ reusable invocation — workflow has nothing gating it"
+    fi
+    while IFS= read -r caller; do
+      [ -z "$caller" ] && continue
+      ref="${caller##*@}"
+      if ! [[ "$ref" =~ ^[0-9a-f]{40}$ ]]; then
+        fail "$f: caller invocation '$caller' must pin to a 40-char SHA (got ref '$ref')"
+      fi
+      echo "    ✓ pinned: $caller"
+    done <<< "$callers"
+    echo "  ✓ $f passed (caller-pattern)"
+    continue
+  fi
+
+  # 1. The authorize job exists. (Already verified above; the rest of
+  # these checks apply only to inline-authorize workflows.)
 
   # 2. authorize.outputs.authorized is wired to some step output.
   output_expr=$(yq -r '.jobs.authorize.outputs.authorized // ""' "$f")
