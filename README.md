@@ -141,6 +141,8 @@ Complete documentation is available in the [docs](./docs) directory:
 - **[Configuration](./docs/configuration.md)** - Complete configuration reference
 - **[OAuth Providers](./docs/providers.md)** - Provider setup guides
 - **[Lifecycle Hooks](./docs/lifecycle-hooks.md)** - User provisioning and custom logic
+- **[Multi-Tenant SSO](./docs/multi-tenant-sso.md)** - Per-organization OAuth providers for B2B SaaS
+- **[Token Refresh and Sessions](./docs/token-refresh-and-sessions.md)** - How OAuth tokens and Harper sessions interact
 - **[API Reference](./docs/api-reference.md)** - Endpoints and programmatic API
 
 ## Development
