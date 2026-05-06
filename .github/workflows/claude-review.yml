@@ -24,20 +24,18 @@ concurrency:
 
 jobs:
   review:
-    uses: HarperFast/ai-review-prompts/.github/workflows/_claude-review.yml@0a5ccbc6daf746472be16ac6cea0a96277bf38e4 # main 2026-05-05 (incl. resolution-status sharpening + honest allowlist comment + reusable workflow)
+    uses: HarperFast/ai-review-prompts/.github/workflows/_claude-review.yml@bac5e456147e987dd9dfed7d8293c86455f9921e # main 2026-05-06 (drop broken auto-derive; ai-review-prompts-ref now required)
     with:
-      # Pass the same SHA the `uses:` ref above is pinned to. The reusable
-      # uses this to check out HarperFast/ai-review-prompts (for layer
-      # files + bash scripts) at the SAME ref as the workflow logic
-      # itself — keeps the upgrade motion atomic (bump the pin in both
-      # places at once).
+      # Same SHA as the `uses:` ref above. The reusable uses this to
+      # check out HarperFast/ai-review-prompts (layer files + bash
+      # scripts) at the same ref as the workflow logic itself — keeps
+      # the upgrade motion atomic.
       #
-      # We can't auto-derive this in the reusable: in a `workflow_call`
-      # context, `github.workflow_ref` resolves to the CALLER's ref
-      # (e.g. `refs/pull/72/merge`), not the called workflow's ref.
-      # Until GitHub exposes the called-workflow ref to reusables, the
-      # caller has to pass it explicitly.
-      ai-review-prompts-ref: 0a5ccbc6daf746472be16ac6cea0a96277bf38e4
+      # The duplication is unavoidable: reusable workflows can't
+      # introspect their own ref (`github.workflow_ref` resolves to the
+      # CALLER's ref in `workflow_call` context), and `uses: …@<ref>`
+      # is parsed literally so we can't interpolate a variable.
+      ai-review-prompts-ref: bac5e456147e987dd9dfed7d8293c86455f9921e
       review-layers: |
         universal
         harper/common
