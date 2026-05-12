@@ -41,6 +41,12 @@ jobs:
       # (reusable workflows can't introspect their own ref in
       # workflow_call context).
       ai-review-prompts-ref: 9471cd8026bbbf6b0eb2a75143071c533811c52e
+      # Match Claude's tier (Sonnet) — Flash is Gemini's mid-tier
+      # peer. The reusable's current default is `gemini-2.5-pro`
+      # (flagship), which is the tier mismatch we want to avoid for
+      # routine review duty. Once the reusable's default flips to
+      # Flash this override becomes redundant.
+      model: gemini-2.5-flash
       review-layers: |
         universal
         harper/common
