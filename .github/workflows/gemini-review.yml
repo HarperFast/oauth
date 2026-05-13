@@ -34,13 +34,13 @@ concurrency:
 
 jobs:
   review:
-    uses: HarperFast/ai-review-prompts/.github/workflows/_gemini-review.yml@d446b4c68bb02068ede471ad5ac34c9af380bdfb # main 2026-05-13 (post #30/#31/#32 — MCP pivot + debug-iteration: gemini_debug=true, no tools.core allowlist, maxSessionTurns=30 to surface what's happening with MCP registration and shell denials)
+    uses: HarperFast/ai-review-prompts/.github/workflows/_gemini-review.yml@fa9ba10643037ef9d42b2a6b954617cd411317b3 # main 2026-05-13 (post #30/#31/#32/#33 — atomic submission via pull_request_review_write create+COMMENT; strict scope-to-diff prompt; minimal tools.core allowlist back; maxSessionTurns=20; gemini_debug=true kept for one more verification cycle)
     with:
       # Same SHA as the `uses:` ref above. See claude-review.yml
       # in this repo for why the duplication is unavoidable
       # (reusable workflows can't introspect their own ref in
       # workflow_call context).
-      ai-review-prompts-ref: d446b4c68bb02068ede471ad5ac34c9af380bdfb
+      ai-review-prompts-ref: fa9ba10643037ef9d42b2a6b954617cd411317b3
       review-layers: |
         universal
         harper/common
