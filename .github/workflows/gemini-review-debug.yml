@@ -1,0 +1,201 @@
+name: Gemini PR Review (debug)
+
+# Single-repo debug spike to isolate why MCP tools never propagate to
+# the model's function-call surface in our production `gemini-review.yml`
+# (despite the github-mcp-server starting fine and registering session-
+# side). This workflow runs in PARALLEL with the production caller —
+# different concurrency group, no shared steps.
+#
+# Hypothesis under test:
+#   Our production caller pins `ghcr.io/github/github-mcp-server@sha256:
+#   e3816a4...` which is the v1.0.4 image (released 2026-05-11). v1.0.0
+#   (2026-04-16) bumped the modelcontextprotocol/go-sdk to v1.5.0 and
+#   reorganized toolsets, introducing feature-flagged tool groups gated
+#   by `dynamicToolsets` (visible in our server logs as
+#   `dynamicToolsets=false`). Upstream's example pins to `:v0.27.0`
+#   (2026-02-03 era) which predates that reorganization. The bump to
+#   v1.0.x was Harper-side and well-intended but likely the regression.
+#
+# This workflow mirrors upstream's tip-of-main example as closely as
+# practical:
+#   https://github.com/google-github-actions/run-gemini-cli/tree/main/examples/workflows/pr-review
+#
+# Deviations from upstream main, kept minimal:
+#   - Auth: skip the App-token-mint step entirely. Use the workflow's
+#     default GITHUB_TOKEN. This loses the auth gate but we're on a
+#     single-repo debug branch — only Nathan / org members push here.
+#     Backport will reintroduce the gate via the existing reusable.
+#   - Model: hardcoded `gemini-3-flash-preview` (no `vars.GEMINI_MODEL`).
+#   - Layered Harper scope: NOT applied. Goal is to prove MCP propagates
+#     before reintroducing scope complexity. ADDITIONAL_CONTEXT is empty.
+#   - Visibility: same failure-path artifact upload + summary-tail steps
+#     we added to the reusable in #36 (with the pipefail / SIGPIPE bug
+#     fixed). Upstream's inner upload step still doesn't gate on
+#     `if: always()` so we need our own failure-path upload.
+#
+# Iteration model:
+#   Edit this file → push → wait ~90s for run. No PR ceremony on
+#   ai-review-prompts. When we identify the working config, backport
+#   to `_gemini-review.yml` in one focused PR.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+concurrency:
+  # Distinct from `gemini-review-${pr}` so the production caller and
+  # this debug workflow run in parallel on the same PR without
+  # cancelling each other.
+  group: gemini-review-debug-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.2
+        with:
+          persist-credentials: 'false'
+
+      - name: Prepare prompt context
+        # Mirrors upstream main's pattern. Writes a JSON file the
+        # agent can `@{...}`-include or read directly. The currently-
+        # released `/pr-code-review` slash command (extension @ main)
+        # doesn't actually read this file — it references $REPOSITORY
+        # / $PULL_REQUEST_NUMBER / $ADDITIONAL_CONTEXT in its prompt
+        # body — but upstream main's workflow still writes the file,
+        # so we follow.
+        shell: bash
+        run: |-
+          mkdir -p .gemini
+          jq -n \
+            --arg repo "${REPOSITORY}" \
+            --arg pr "${PULL_REQUEST_NUMBER}" \
+            --arg context "${ADDITIONAL_CONTEXT}" \
+            '{repository: $repo, pull_request_number: $pr, additional_context: $context}' \
+            > .gemini/context.json
+        env:
+          REPOSITORY: ${{ github.repository }}
+          PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}
+          ADDITIONAL_CONTEXT: ''
+
+      - name: Run Gemini pull request review
+        id: gemini-review
+        uses: google-github-actions/run-gemini-cli@f77273f4c914e4bf38440cf36a0369cb64a37489 # v0.1.22
+        env:
+          GEMINI_CLI_TRUST_WORKSPACE: 'true'
+          GITHUB_TOKEN: ${{ github.token }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # Upstream main keeps these as env vars too, alongside the
+          # context.json file. The currently-released `/pr-code-review`
+          # slash command reads them via shell echo at runtime.
+          PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}
+          REPOSITORY: ${{ github.repository }}
+          ISSUE_TITLE: ${{ github.event.pull_request.title }}
+          ISSUE_BODY: ${{ github.event.pull_request.body }}
+          ADDITIONAL_CONTEXT: ''
+        with:
+          gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
+          gemini_model: 'gemini-3-flash-preview'
+          gemini_cli_version: 'latest'
+          gemini_debug: 'true'
+          upload_artifacts: 'true'
+          github_pr_number: ${{ github.event.pull_request.number }}
+          extensions: |
+            [
+              "https://github.com/gemini-cli-extensions/code-review"
+            ]
+          # MCP server pinned to TAG `:v0.27.0` — the version upstream
+          # tests with. Debug-spike-only deviation from our SHA-pinning
+          # discipline; when we backport to the reusable we'll resolve
+          # to a digest. No `modelConfigs`, no `tools.core` shell access
+          # (forces all I/O through MCP — proves whether MCP works).
+          settings: |-
+            {
+              "model": {
+                "maxSessionTurns": 25
+              },
+              "telemetry": {
+                "enabled": true,
+                "target": "local",
+                "outfile": ".gemini/telemetry.log"
+              },
+              "mcpServers": {
+                "github": {
+                  "command": "docker",
+                  "args": [
+                    "run",
+                    "-i",
+                    "--rm",
+                    "-e",
+                    "GITHUB_PERSONAL_ACCESS_TOKEN",
+                    "ghcr.io/github/github-mcp-server:v0.27.0"
+                  ],
+                  "includeTools": [
+                    "add_comment_to_pending_review",
+                    "pull_request_read",
+                    "pull_request_review_write"
+                  ],
+                  "env": {
+                    "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"
+                  }
+                }
+              },
+              "tools": {
+                "core": []
+              }
+            }
+          prompt: '/pr-code-review'
+
+      - name: Upload gemini-artifacts (failure path)
+        # Same workaround as in _gemini-review.yml (post-#36): the
+        # run-gemini-cli action's inner upload step is `if: upload_
+        # artifacts == 'true'` but not `if: always()`, so on the failure
+        # path the upload is skipped. The wrapper writes the artifact
+        # files BEFORE its exit 1, so we just upload them ourselves.
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: gemini-debug-output-failure
+          path: gemini-artifacts/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Append gemini logs tail to job summary
+        # Pipefail-safe: `tail | head -c N` exits SIGPIPE under pipefail;
+        # we drop pipefail for this step and use `|| true` to swallow.
+        if: failure()
+        shell: bash
+        run: |
+          set -eu
+          if [ ! -d gemini-artifacts ]; then
+            {
+              echo "## ⚠️ Gemini debug run failed (no gemini-artifacts/ directory)"
+              echo
+              echo "The gemini-cli wrapper exited before writing logs to disk."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          {
+            echo "## ⚠️ Gemini debug run failed — log tails"
+            echo
+            echo "Full logs uploaded as the \`gemini-debug-output-failure\` artifact."
+            echo
+            for f in stdout.log stderr.log telemetry.log; do
+              if [ -f "gemini-artifacts/$f" ] && [ -s "gemini-artifacts/$f" ]; then
+                echo "### \`gemini-artifacts/$f\` (last 200 lines)"
+                echo
+                echo '```'
+                (tail -n 200 "gemini-artifacts/$f" | head -c 50000) || true
+                echo
+                echo '```'
+                echo
+              fi
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
