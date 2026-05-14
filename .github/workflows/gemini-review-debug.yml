@@ -151,7 +151,17 @@ jobs:
                 "core": []
               }
             }
-          prompt: '/pr-code-review'
+          # Experiment: switch from `/pr-code-review` (which got the
+          # model into INVALID_STREAM with 0 output tokens across 4
+          # API requests, despite MCP tools registering successfully
+          # under v0.27.0) to `/pr-review`. The extension's
+          # GEMINI.md (loaded into the agent's context at startup)
+          # documents `/pr-review` as the top-level command for
+          # "user requests that pr to be reviewed", though it's not
+          # in the extension's `commands/` directory — suggesting
+          # it might be a routing alias or skill-registered command.
+          # If it doesn't exist, gemini-cli will fail clearly.
+          prompt: '/pr-review'
 
       - name: Upload gemini-artifacts (failure path)
         # Same workaround as in _gemini-review.yml (post-#36): the
