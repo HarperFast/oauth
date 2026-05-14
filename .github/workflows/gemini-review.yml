@@ -34,13 +34,13 @@ concurrency:
 
 jobs:
   review:
-    uses: HarperFast/ai-review-prompts/.github/workflows/_gemini-review.yml@832d8e6bb1ab2068585ded4288797ac191b21360 # main 2026-05-14 (post #30..#34 — atomic submission + scope-to-diff + PR-context env vars (PULL_REQUEST_NUMBER/REPOSITORY/ISSUE_TITLE/ISSUE_BODY) so the agent stops thrashing on context discovery; tools.core widened to match upstream (cat/echo/git/grep/head/tail); gemini_debug=true for one more verification cycle)
+    uses: HarperFast/ai-review-prompts/.github/workflows/_gemini-review.yml@e1f8d434aafbd71943649ba7a8c6727638a1f5a3 # main 2026-05-14 (post #30..#35 — pivot to upstream /pr-code-review slash command; Harper scope layered via ADDITIONAL_CONTEXT env var; tools.core matches upstream exactly (cat/echo/grep/head/tail, no git); gemini_debug=true for one more verification cycle)
     with:
       # Same SHA as the `uses:` ref above. See claude-review.yml
       # in this repo for why the duplication is unavoidable
       # (reusable workflows can't introspect their own ref in
       # workflow_call context).
-      ai-review-prompts-ref: 832d8e6bb1ab2068585ded4288797ac191b21360
+      ai-review-prompts-ref: e1f8d434aafbd71943649ba7a8c6727638a1f5a3
       review-layers: |
         universal
         harper/common
