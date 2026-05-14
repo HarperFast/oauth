@@ -24,7 +24,7 @@ concurrency:
 
 jobs:
   review:
-    uses: HarperFast/ai-review-prompts/.github/workflows/_claude-review.yml@fa9ba10643037ef9d42b2a6b954617cd411317b3 # main 2026-05-13 (post #30/#31/#32/#33 — symmetric pin with gemini-review.yml; Claude has no functional change from any of these; pin just stays in lockstep)
+    uses: HarperFast/ai-review-prompts/.github/workflows/_claude-review.yml@832d8e6bb1ab2068585ded4288797ac191b21360 # main 2026-05-14 (post #30..#34 — symmetric pin with gemini-review.yml; Claude has no functional change from any of these; pin just stays in lockstep)
     with:
       # Same SHA as the `uses:` ref above. The reusable uses this to
       # check out HarperFast/ai-review-prompts (layer files + bash
@@ -35,7 +35,7 @@ jobs:
       # introspect their own ref (`github.workflow_ref` resolves to the
       # CALLER's ref in `workflow_call` context), and `uses: …@<ref>`
       # is parsed literally so we can't interpolate a variable.
-      ai-review-prompts-ref: fa9ba10643037ef9d42b2a6b954617cd411317b3
+      ai-review-prompts-ref: 832d8e6bb1ab2068585ded4288797ac191b21360
       review-layers: |
         universal
         harper/common
