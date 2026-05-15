@@ -1,51 +1,30 @@
 name: Gemini PR Review (debug)
 
-# Single-repo debug spike to isolate why MCP tools never propagate to
-# the model's function-call surface in our production `gemini-review.yml`
-# (despite the github-mcp-server starting fine and registering session-
-# side). This workflow runs in PARALLEL with the production caller —
-# different concurrency group, no shared steps.
+# Pragmatic shell-based Gemini reviewer. After 3 debug iterations
+# proving MCP tool propagation is unreliable (v1.0.x server bug,
+# umbrella-tool-shape mismatch with model's training, INVALID_STREAM
+# on /pr-code-review, hallucinated review on /pr-review), pivoting
+# to what the model wants to do anyway: use the `gh` CLI.
 #
-# Hypothesis under test:
-#   Our production caller pins `ghcr.io/github/github-mcp-server@sha256:
-#   e3816a4...` which is the v1.0.4 image (released 2026-05-11). v1.0.0
-#   (2026-04-16) bumped the modelcontextprotocol/go-sdk to v1.5.0 and
-#   reorganized toolsets, introducing feature-flagged tool groups gated
-#   by `dynamicToolsets` (visible in our server logs as
-#   `dynamicToolsets=false`). Upstream's example pins to `:v0.27.0`
-#   (2026-02-03 era) which predates that reorganization. The bump to
-#   v1.0.x was Harper-side and well-intended but likely the regression.
+# Goal: produce A working Gemini review on PR #83 to compare against
+# Claude. Architectural elegance is a non-goal for this iteration.
 #
-# This workflow mirrors upstream's tip-of-main example as closely as
-# practical:
-#   https://github.com/google-github-actions/run-gemini-cli/tree/main/examples/workflows/pr-review
-#
-# Deviations from upstream main, kept minimal:
-#   - Auth: skip the App-token-mint step entirely. Use the workflow's
-#     default GITHUB_TOKEN. This loses the auth gate but we're on a
-#     single-repo debug branch — only Nathan / org members push here.
-#     Backport will reintroduce the gate via the existing reusable.
-#   - Model: hardcoded `gemini-3-flash-preview` (no `vars.GEMINI_MODEL`).
-#   - Layered Harper scope: NOT applied. Goal is to prove MCP propagates
-#     before reintroducing scope complexity. ADDITIONAL_CONTEXT is empty.
-#   - Visibility: same failure-path artifact upload + summary-tail steps
-#     we added to the reusable in #36 (with the pipefail / SIGPIPE bug
-#     fixed). Upstream's inner upload step still doesn't gate on
-#     `if: always()` so we need our own failure-path upload.
-#
-# Iteration model:
-#   Edit this file → push → wait ~90s for run. No PR ceremony on
-#   ai-review-prompts. When we identify the working config, backport
-#   to `_gemini-review.yml` in one focused PR.
+# Architecture:
+#   - No MCP. No upstream `code-review` extension. No custom slash
+#     command file. Just an inline prompt.
+#   - tools.core allows `gh`, `git`, `cat`, `echo`, `grep`, `head`,
+#     `tail`. The agent uses these natively.
+#   - Agent reads the diff via `gh pr diff`, generates a review,
+#     posts it via `gh pr review --comment --body`.
+#   - Body-anchored findings (no per-line inline comments — would
+#     require MCP, which we just spent 3 iterations failing to wire).
+#     Findings reference file:line as `**File:** path:N` plain text.
 
 on:
   pull_request:
     types: [opened, synchronize, reopened]
 
 concurrency:
-  # Distinct from `gemini-review-${pr}` so the production caller and
-  # this debug workflow run in parallel on the same PR without
-  # cancelling each other.
   group: gemini-review-debug-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
@@ -63,28 +42,6 @@ jobs:
         with:
           persist-credentials: 'false'
 
-      - name: Prepare prompt context
-        # Mirrors upstream main's pattern. Writes a JSON file the
-        # agent can `@{...}`-include or read directly. The currently-
-        # released `/pr-code-review` slash command (extension @ main)
-        # doesn't actually read this file — it references $REPOSITORY
-        # / $PULL_REQUEST_NUMBER / $ADDITIONAL_CONTEXT in its prompt
-        # body — but upstream main's workflow still writes the file,
-        # so we follow.
-        shell: bash
-        run: |-
-          mkdir -p .gemini
-          jq -n \
-            --arg repo "${REPOSITORY}" \
-            --arg pr "${PULL_REQUEST_NUMBER}" \
-            --arg context "${ADDITIONAL_CONTEXT}" \
-            '{repository: $repo, pull_request_number: $pr, additional_context: $context}' \
-            > .gemini/context.json
-        env:
-          REPOSITORY: ${{ github.repository }}
-          PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}
-          ADDITIONAL_CONTEXT: ''
-
       - name: Run Gemini pull request review
         id: gemini-review
         uses: google-github-actions/run-gemini-cli@f77273f4c914e4bf38440cf36a0369cb64a37489 # v0.1.22
@@ -92,83 +49,101 @@ jobs:
           GEMINI_CLI_TRUST_WORKSPACE: 'true'
           GITHUB_TOKEN: ${{ github.token }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          # Upstream main keeps these as env vars too, alongside the
-          # context.json file. The currently-released `/pr-code-review`
-          # slash command reads them via shell echo at runtime.
+          GH_TOKEN: ${{ github.token }}
           PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}
           REPOSITORY: ${{ github.repository }}
-          ISSUE_TITLE: ${{ github.event.pull_request.title }}
-          ISSUE_BODY: ${{ github.event.pull_request.body }}
-          ADDITIONAL_CONTEXT: ''
         with:
           gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
           gemini_model: 'gemini-3-flash-preview'
           gemini_cli_version: 'latest'
           gemini_debug: 'true'
           upload_artifacts: 'true'
-          github_pr_number: ${{ github.event.pull_request.number }}
-          extensions: |
-            [
-              "https://github.com/gemini-cli-extensions/code-review"
-            ]
-          # MCP server pinned to TAG `:v0.27.0` — the version upstream
-          # tests with. Debug-spike-only deviation from our SHA-pinning
-          # discipline; when we backport to the reusable we'll resolve
-          # to a digest. No `modelConfigs`, no `tools.core` shell access
-          # (forces all I/O through MCP — proves whether MCP works).
           settings: |-
             {
               "model": {
-                "maxSessionTurns": 25
+                "maxSessionTurns": 15
               },
               "telemetry": {
                 "enabled": true,
                 "target": "local",
                 "outfile": ".gemini/telemetry.log"
               },
-              "mcpServers": {
-                "github": {
-                  "command": "docker",
-                  "args": [
-                    "run",
-                    "-i",
-                    "--rm",
-                    "-e",
-                    "GITHUB_PERSONAL_ACCESS_TOKEN",
-                    "ghcr.io/github/github-mcp-server:v0.27.0"
-                  ],
-                  "includeTools": [
-                    "add_comment_to_pending_review",
-                    "pull_request_read",
-                    "pull_request_review_write"
-                  ],
-                  "env": {
-                    "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"
-                  }
-                }
-              },
               "tools": {
-                "core": []
+                "core": [
+                  "run_shell_command(gh)",
+                  "run_shell_command(git)",
+                  "run_shell_command(cat)",
+                  "run_shell_command(echo)",
+                  "run_shell_command(grep)",
+                  "run_shell_command(head)",
+                  "run_shell_command(tail)"
+                ]
               }
             }
-          # Experiment: switch from `/pr-code-review` (which got the
-          # model into INVALID_STREAM with 0 output tokens across 4
-          # API requests, despite MCP tools registering successfully
-          # under v0.27.0) to `/pr-review`. The extension's
-          # GEMINI.md (loaded into the agent's context at startup)
-          # documents `/pr-review` as the top-level command for
-          # "user requests that pr to be reviewed", though it's not
-          # in the extension's `commands/` directory — suggesting
-          # it might be a routing alias or skill-registered command.
-          # If it doesn't exist, gemini-cli will fail clearly.
-          prompt: '/pr-review'
+          prompt: |
+            You are a senior software engineer reviewing pull request
+            #${{ github.event.pull_request.number }} on
+            ${{ github.repository }}.
+
+            Step 1 — Read the diff. Run:
+
+                gh pr diff ${{ github.event.pull_request.number }} \
+                  --repo ${{ github.repository }}
+
+            Step 2 — Decide if the diff is trivial. Trivial means
+            dependency version bumps, CI workflow pin updates,
+            lockfile-only churn, prose-only doc edits, version-string
+            changes. If trivial, skip to Step 4 with the no-blockers
+            template.
+
+            Step 3 — For substantive diffs, review for BLOCKERS only.
+            A blocker is a 🔴 Critical (security vulnerability,
+            data-loss bug, broken public API contract) or 🟠 High
+            (clear correctness/security issue likely to bite in
+            production) finding. Do NOT post 🟡 Medium or 🟢 Low
+            findings. Cap at 10 findings. Reference each finding's
+            file:line as plain-text `**File:** path:LINE`.
+
+            Step 4 — Post the review via:
+
+                gh pr review ${{ github.event.pull_request.number }} \
+                  --repo ${{ github.repository }} \
+                  --comment \
+                  --body "$REVIEW_BODY"
+
+            Where REVIEW_BODY is your review markdown formatted as:
+
+                <!-- gemini-review:v1 -->
+
+                ## 📋 Review Summary
+
+                <one paragraph; for trivial diffs: "Reviewed; no blockers found.">
+
+                ## 🔍 Findings
+
+                ### 1. 🔴 <title>
+
+                **File:** `path/to/file.ext:LINE`
+
+                **What:** <one or two sentences>
+
+                **Why it matters:** <impact>
+
+                **Suggested fix:** <concrete change or fenced code block>
+
+                ### 2. ...
+
+            Omit the `## 🔍 Findings` section entirely if you have
+            zero blockers.
+
+            The `<!-- gemini-review:v1 -->` marker on the first line
+            is REQUIRED — it's how the team's tooling threads runs
+            together across pushes.
+
+            After posting, your job is done. Do not post a duplicate.
+            Do not edit the review.
 
       - name: Upload gemini-artifacts (failure path)
-        # Same workaround as in _gemini-review.yml (post-#36): the
-        # run-gemini-cli action's inner upload step is `if: upload_
-        # artifacts == 'true'` but not `if: always()`, so on the failure
-        # path the upload is skipped. The wrapper writes the artifact
-        # files BEFORE its exit 1, so we just upload them ourselves.
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -178,8 +153,6 @@ jobs:
           retention-days: 14
 
       - name: Append gemini logs tail to job summary
-        # Pipefail-safe: `tail | head -c N` exits SIGPIPE under pipefail;
-        # we drop pipefail for this step and use `|| true` to swallow.
         if: failure()
         shell: bash
         run: |
@@ -187,8 +160,6 @@ jobs:
           if [ ! -d gemini-artifacts ]; then
             {
               echo "## ⚠️ Gemini debug run failed (no gemini-artifacts/ directory)"
-              echo
-              echo "The gemini-cli wrapper exited before writing logs to disk."
             } >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
