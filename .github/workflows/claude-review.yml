@@ -16,7 +16,9 @@ name: Claude PR Review
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    # `labeled` admits the `claude-review` label gesture for
+    # bot-authored PRs (renovate, dependabot). See ai-review-prompts#38.
+    types: [opened, synchronize, reopened, labeled]
 
 concurrency:
   group: claude-review-${{ github.event.pull_request.number }}
@@ -24,7 +26,21 @@ concurrency:
 
 jobs:
   review:
-    uses: HarperFast/ai-review-prompts/.github/workflows/_claude-review.yml@128656e40c87c0e1293c542a5500df4f68dbff85 # main 2026-05-12 (post #25 — symmetric pin with gemini-review.yml; picks up shared-script refactor and authorize-ai-workflow.sh rename)
+    uses: HarperFast/ai-review-prompts/.github/workflows/_claude-review.yml@f22bf7dcb7d22d5de94c938daa9d790f2b5c776b # main 2026-05-18 (post #37 + #38 + #40 — calibration layer update + label-gated bot-PR review; gemini-review.yml pin intentionally NOT in lockstep here — Gemini reviewer has known issues being worked separately, no need to drag it along)
+    # Caller-side permissions, scoped at the calling-job level (NOT
+    # workflow-level — that placement caps the reusable's per-job
+    # grants below what they need and breaks the workflow at startup;
+    # see ai-review-prompts#39/#40 for the incident). Union of what
+    # the reusable's `authorize` (`contents: read`) and `review`
+    # (`contents: read + pull-requests: write + id-token: write`)
+    # jobs declare. GitHub's rule: caller's GITHUB_TOKEN permissions
+    # can only be DOWNGRADED (not elevated) by the called workflow,
+    # so the caller must grant at least the union the reusable needs.
+    # Reference: https://docs.github.com/en/actions/reference/workflows-and-actions/reusing-workflow-configurations
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
     with:
       # Same SHA as the `uses:` ref above. The reusable uses this to
       # check out HarperFast/ai-review-prompts (layer files + bash
@@ -35,7 +51,7 @@ jobs:
       # introspect their own ref (`github.workflow_ref` resolves to the
       # CALLER's ref in `workflow_call` context), and `uses: …@<ref>`
       # is parsed literally so we can't interpolate a variable.
-      ai-review-prompts-ref: 128656e40c87c0e1293c542a5500df4f68dbff85
+      ai-review-prompts-ref: f22bf7dcb7d22d5de94c938daa9d790f2b5c776b
       review-layers: |
         universal
         harper/common
