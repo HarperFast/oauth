@@ -138,9 +138,14 @@ jobs:
         id: prior_body
         # Single-shot Gemini has no shell/API access from inside the prompt,
         # so any awareness of the prior review has to be pre-fetched and
-        # injected. The find-prior step above returned a comment ID; this
-        # step fetches the body and emits it as an output the prompt can
-        # interpolate. Skipped cleanly on first reviews (no prior id).
+        # injected. Inject ONLY when the prior comment had findings
+        # (### N. headers present). Empty / "no blockers" priors are
+        # uninformative context that primes the model to hunt for issues
+        # without giving it anything real to evaluate — observed in
+        # PR #87 round 3, where injecting a "no blockers" prior pushed
+        # Gemini into a meta-critical mode that produced two weak findings
+        # against the prompt itself. Skipped cleanly on first reviews
+        # (no prior id) and on prior-no-blocker runs (empty body output).
         if: steps.prior_review.outputs.id != ''
         env:
           GH_TOKEN: ${{ github.token }}
@@ -148,6 +153,10 @@ jobs:
         run: |
           set -euo pipefail
           body=$(gh api "repos/${GITHUB_REPOSITORY}/issues/comments/${PRIOR_ID}" --jq .body)
+          if ! printf '%s\n' "$body" | grep -qE '^### [0-9]+\.'; then
+            echo "Prior review had no findings — not injecting (review the current diff fresh)."
+            exit 0
+          fi
           DELIM="EOF_$(openssl rand -hex 16)"
           {
             echo "body<<${DELIM}"
@@ -233,32 +242,22 @@ jobs:
             - Path length validation (≤ 2048 chars) where user input
               can reach a path
 
-            ## Prior review (if any)
+            ## Continuity reference (if any)
 
-            If the section below is empty, this is the first review
-            run on this PR — review the diff fresh.
+            The section below is empty unless this PR has a prior
+            review on it with unresolved findings. If non-empty,
+            those findings were flagged by an earlier run of this
+            workflow — for any that no longer apply to the current
+            diff, your summary line can cite the resolving commit
+            SHA instead of re-posting them. New findings introduced
+            since are posted normally.
 
-            If non-empty, it is your own prior review comment on
-            this PR. New commits may have resolved findings, added
-            new ones, or changed the scope. After completing your
-            normal review of the current diff:
+            If the section is empty, ignore it and review the
+            current diff normally.
 
-            - For each finding in the prior review, decide whether
-              it is still present in the current state. If
-              resolved, do NOT re-post it. Briefly cite the resolving
-              commit SHA in your summary line (`git log` is
-              available in the checked-out repo — look for the
-              commit that touched the relevant file:line).
-            - For each finding you flag now that was NOT in the
-              prior review, treat it as new and post normally.
-            - If nothing remains and no new findings appeared, the
-              "no blockers" summary should briefly note what
-              changed (e.g. "Reviewed; no blockers found. The prior
-              blocker (X) is resolved by commit <sha>.").
-
-            <!-- begin prior review body -->
+            <!-- begin prior findings -->
             ${{ steps.prior_body.outputs.body }}
-            <!-- end prior review body -->
+            <!-- end prior findings -->
 
             ## Output discipline
 
