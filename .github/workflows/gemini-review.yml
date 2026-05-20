@@ -134,6 +134,27 @@ jobs:
           MARKER: '<!-- gemini-review:v1 -->'
         run: bash .github/scripts/find-prior-review-comment.sh
 
+      - name: Fetch prior review body (for continuity)
+        id: prior_body
+        # Single-shot Gemini has no shell/API access from inside the prompt,
+        # so any awareness of the prior review has to be pre-fetched and
+        # injected. The find-prior step above returned a comment ID; this
+        # step fetches the body and emits it as an output the prompt can
+        # interpolate. Skipped cleanly on first reviews (no prior id).
+        if: steps.prior_review.outputs.id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRIOR_ID: ${{ steps.prior_review.outputs.id }}
+        run: |
+          set -euo pipefail
+          body=$(gh api "repos/${GITHUB_REPOSITORY}/issues/comments/${PRIOR_ID}" --jq .body)
+          DELIM="EOF_$(openssl rand -hex 16)"
+          {
+            echo "body<<${DELIM}"
+            printf '%s\n' "$body"
+            echo "${DELIM}"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Run Gemini review
         id: gemini-review
         # run-gemini-cli@v0.1.22 invokes `gemini --prompt … --output-format json`
@@ -211,6 +232,33 @@ jobs:
               (`provider`, `providerConfigId`, `providerType`)
             - Path length validation (≤ 2048 chars) where user input
               can reach a path
+
+            ## Prior review (if any)
+
+            If the section below is empty, this is the first review
+            run on this PR — review the diff fresh.
+
+            If non-empty, it is your own prior review comment on
+            this PR. New commits may have resolved findings, added
+            new ones, or changed the scope. After completing your
+            normal review of the current diff:
+
+            - For each finding in the prior review, decide whether
+              it is still present in the current state. If
+              resolved, do NOT re-post it. Briefly cite the resolving
+              commit SHA in your summary line (`git log` is
+              available in the checked-out repo — look for the
+              commit that touched the relevant file:line).
+            - For each finding you flag now that was NOT in the
+              prior review, treat it as new and post normally.
+            - If nothing remains and no new findings appeared, the
+              "no blockers" summary should briefly note what
+              changed (e.g. "Reviewed; no blockers found. The prior
+              blocker (X) is resolved by commit <sha>.").
+
+            <!-- begin prior review body -->
+            ${{ steps.prior_body.outputs.body }}
+            <!-- end prior review body -->
 
             ## Output discipline
 
