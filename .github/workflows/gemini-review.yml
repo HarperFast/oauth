@@ -205,10 +205,14 @@ jobs:
             ## Your output IS the PR comment
 
             Your **entire output** is the body of the PR review
-            comment. The workflow will post it verbatim. There is
-            no tool-use phase in this workflow — do NOT attempt to
-            call shell commands, `gh`, or any API. Just produce the
-            review text.
+            comment. The workflow will post it verbatim — do NOT
+            attempt to post the review yourself (no `gh pr comment`,
+            no `gh api` POST/PATCH against PR endpoints, no
+            workflow-side comment manipulation). Researching the
+            diff is encouraged: read files in the checked-out repo,
+            use `git log` / `git blame` / `git diff` to gather
+            context, search across the codebase as needed. Just
+            make the review TEXT your final output.
 
             **Your output must begin with the literal first line
             `<!-- gemini-review:v1 -->`**, followed by a newline,

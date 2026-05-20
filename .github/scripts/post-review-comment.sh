@@ -39,11 +39,14 @@ if [ -z "${BODY:-}" ]; then
   exit 0
 fi
 
-# Trim leading whitespace before checking the marker. The Gemini
-# CLI's JSON-mode response is whitespace-stable on the leading
-# edge in practice, but trim defensively in case any provider
-# wraps the output.
-TRIMMED=$(printf '%s' "$BODY" | sed -e '1,/[^[:space:]]/{/^[[:space:]]*$/d;}')
+# Trim leading blank lines AND leading whitespace on the first
+# non-blank line before checking the marker. The Gemini CLI's
+# JSON-mode response is whitespace-stable on the leading edge in
+# practice, but if any provider ever indents the first line the
+# marker check would refuse to post a perfectly valid review.
+TRIMMED=$(printf '%s' "$BODY" \
+  | sed -e '1,/[^[:space:]]/{/^[[:space:]]*$/d;}' \
+  | sed -e '1s/^[[:space:]]*//')
 
 FIRST_LINE=$(printf '%s' "$TRIMMED" | head -1)
 case "$FIRST_LINE" in
