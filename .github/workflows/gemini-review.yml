@@ -35,16 +35,6 @@ name: Gemini PR Review (inline calibration)
 on:
   pull_request:
     types: [opened, synchronize, reopened]
-  workflow_dispatch:
-    inputs:
-      model:
-        description: 'Gemini model id (e.g. gemini-3-flash-preview, gemini-3-pro)'
-        type: string
-        default: 'gemini-3-flash-preview'
-      gemini-cli-version:
-        description: 'Gemini CLI version pin (tag / branch / SHA / latest)'
-        type: string
-        default: 'latest'
 
 concurrency:
   # Different group key from claude-review so the two providers can run in
@@ -158,8 +148,8 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         with:
           gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
-          gemini_model: ${{ inputs.model || 'gemini-3-flash-preview' }}
-          gemini_cli_version: ${{ inputs.gemini-cli-version || 'latest' }}
+          gemini_model: 'gemini-3-flash-preview'
+          gemini_cli_version: 'latest'
           upload_artifacts: 'true'
           prompt: |
             You are reviewing pull request
@@ -296,7 +286,7 @@ jobs:
           REVIEW_STATUS: ${{ steps.gemini-review.outcome }}
           REPO_SHORT: ${{ github.event.repository.name }}
           MARKER: '<!-- gemini-review:v1 -->'
-          MODEL: ${{ inputs.model || 'gemini-3-flash-preview' }}
+          MODEL: 'gemini-3-flash-preview'
           PROVIDER_LABEL: gemini
           NOTES_FILE_BASENAME: gemini-review-notes.md
         run: bash .github/scripts/log-review-to-ai-review-log.sh
