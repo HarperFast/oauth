@@ -9,6 +9,31 @@ type csrf_tokens @table(database: "oauth", expiration: 600) {
 	created_at: Float
 }
 
+## MCP Dynamic Client Registration table (RFC 7591)
+## Stores OAuth client registrations for MCP clients (Claude Desktop, Cursor,
+## mcp-remote, etc.). No expiration: clients like Claude Desktop cache their
+## issued client_id across launches, so registrations must survive restarts.
+## Array-valued fields (redirect_uris, contacts, grant_types, response_types)
+## are stored as JSON-encoded strings to match the existing csrf_tokens pattern.
+type harper_oauth_mcp_clients @table(database: "oauth") {
+	client_id: ID @primaryKey
+	client_secret: String
+	redirect_uris: String # JSON array of allowed redirect URIs
+	client_name: String
+	client_uri: String
+	logo_uri: String
+	scope: String
+	contacts: String # JSON array
+	grant_types: String # JSON array; default ["authorization_code", "refresh_token"]
+	response_types: String # JSON array; default ["code"]
+	token_endpoint_auth_method: String # "none" for public clients (default), "client_secret_basic", "client_secret_post"
+	application_type: String # "web" (default) or "native"
+	software_id: String
+	software_version: String
+	client_id_issued_at: Float
+	client_secret_expires_at: Float # 0 = never expires
+}
+
 ## OAuth User Session table (optional, for future use)
 ## Could store OAuth-specific user data
 # type oauth_sessions @table(database: "oauth") {

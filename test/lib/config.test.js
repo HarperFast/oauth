@@ -9,6 +9,7 @@ import {
 	extractPluginDefaults,
 	initializeProviders,
 	expandEnvVar,
+	expandEnvVarsDeep,
 } from '../../dist/lib/config.js';
 
 describe('OAuth Configuration', () => {
@@ -78,6 +79,42 @@ describe('OAuth Configuration', () => {
 			process.env.EMPTY_VAR = '';
 			const result = expandEnvVar('${EMPTY_VAR}');
 			assert.equal(result, '');
+		});
+	});
+
+	describe('expandEnvVarsDeep', () => {
+		it('expands string leaves on nested objects', () => {
+			process.env.TEST_TOKEN = 'secret-123';
+			const input = {
+				enabled: true,
+				dynamicClientRegistration: {
+					initialAccessToken: '${TEST_TOKEN}',
+					allowedRedirectUriHosts: ['app.example.com', '${TEST_NOT_SET}'],
+				},
+			};
+			const result = expandEnvVarsDeep(input);
+			assert.equal(result.dynamicClientRegistration.initialAccessToken, 'secret-123');
+			assert.equal(result.dynamicClientRegistration.allowedRedirectUriHosts[0], 'app.example.com');
+			// Unset env vars retain their placeholder
+			assert.equal(result.dynamicClientRegistration.allowedRedirectUriHosts[1], '${TEST_NOT_SET}');
+		});
+
+		it('passes non-string, non-object scalars through', () => {
+			const input = { a: 1, b: true, c: null };
+			assert.deepEqual(expandEnvVarsDeep(input), input);
+		});
+
+		it('returns the input unchanged when there are no placeholders', () => {
+			const input = { foo: 'bar', baz: { qux: 'quux' } };
+			assert.deepEqual(expandEnvVarsDeep(input), input);
+		});
+
+		it('does not mutate the input object', () => {
+			process.env.TEST_X = 'expanded';
+			const input = { nested: { value: '${TEST_X}' } };
+			const result = expandEnvVarsDeep(input);
+			assert.equal(input.nested.value, '${TEST_X}', 'input should be untouched');
+			assert.equal(result.nested.value, 'expanded');
 		});
 	});
 
