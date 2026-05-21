@@ -26,6 +26,7 @@ Complete configuration options for the `@harperfast/oauth` plugin.
 | `redirectUri`           | string            | (auto-gen) | OAuth callback URL where providers redirect back to                                                               |
 | `postLoginRedirect`     | string            | `/`        | Default URL to redirect users after successful OAuth login                                                        |
 | `cacheDynamicProviders` | boolean \| number | `true`     | Cache providers resolved via `onResolveProvider` hook. `true` = forever, `false` = never, number = TTL in seconds |
+| `mcp`                   | object            | (off)      | MCP OAuth flow configuration. See [MCP OAuth](#mcp-oauth-work-in-progress) below                                  |
 
 ### Provider Configuration
 
@@ -53,6 +54,32 @@ Each provider requires:
 - `tokenUrl` - Token endpoint URL (required)
 - `userInfoUrl` - User info endpoint URL (required)
 - `jwksUrl` - JWKS endpoint URL (required for ID token verification)
+
+### MCP OAuth (work in progress)
+
+Opt-in support for the Model Context Protocol authorization flow ([issue #86](https://github.com/HarperFast/oauth/issues/86)). The first stage adds Dynamic Client Registration at `POST /oauth/mcp/register` (RFC 7591) so MCP clients (Claude Desktop, Cursor, `mcp-remote`) can register themselves at runtime. `/authorize`, `/token`, and the `withMCPAuth` wrapper land in subsequent releases.
+
+```yaml
+'@harperfast/oauth':
+  mcp:
+    enabled: true
+    dynamicClientRegistration:
+      # Optional: require Authorization: Bearer <token> on /register.
+      # Without this, registration is OPEN per RFC 7591 — anyone can register.
+      initialAccessToken: ${OAUTH_MCP_REGISTRATION_TOKEN}
+      # Optional: restrict redirect_uri hosts (localhost always allowed).
+      allowedRedirectUriHosts:
+        - app.example.com
+```
+
+| Option                                                  | Type     | Default | Description                                                                                |
+| ------------------------------------------------------- | -------- | ------- | ------------------------------------------------------------------------------------------ |
+| `mcp.enabled`                                           | boolean  | `false` | Master switch for the MCP OAuth endpoints                                                  |
+| `mcp.dynamicClientRegistration.enabled`                 | boolean  | `true`  | Enable the `/register` endpoint when `mcp.enabled` is true                                 |
+| `mcp.dynamicClientRegistration.initialAccessToken`      | string   | (none)  | If set, registration requires `Authorization: Bearer <token>`. Otherwise open per RFC 7591 |
+| `mcp.dynamicClientRegistration.allowedRedirectUriHosts` | string[] | (none)  | Allowlist for redirect_uri hosts. Localhost always allowed per RFC 8252                    |
+
+Sensitive leaves inside `mcp` support `${ENV_VAR}` expansion (e.g., `initialAccessToken: ${OAUTH_MCP_REGISTRATION_TOKEN}`), the same way provider credentials do.
 
 ## Environment Variables
 

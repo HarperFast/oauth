@@ -186,6 +186,8 @@ type CSRFToken @table {
 
 Tokens automatically expire after 10 minutes.
 
+When MCP OAuth is enabled (see [issue #86](https://github.com/HarperFast/oauth/issues/86)), the plugin also creates a `harper_oauth_mcp_clients` table for RFC 7591 Dynamic Client Registration. Registrations persist indefinitely so `client_id`s cached by MCP clients (Claude Desktop, Cursor, `mcp-remote`) survive Harper restarts.
+
 ## Security Considerations
 
 - **HTTPS required** - OAuth requires HTTPS in production
@@ -193,6 +195,7 @@ Tokens automatically expire after 10 minutes.
 - **ID token verification** - OIDC providers verify token signatures
 - **Secure sessions** - Use Harper's secure session configuration
 - **Token storage** - Tokens stored in session (configure secure cookies)
+- **MCP client registration (when `mcp.enabled` is true)** - The `/oauth/mcp/register` endpoint defaults to **open registration** per RFC 7591. Set `mcp.dynamicClientRegistration.initialAccessToken` to require a bearer token on registration, or `mcp.dynamicClientRegistration.allowedRedirectUriHosts` to restrict which hosts may register `redirect_uri`s. See [`docs/configuration.md`](./docs/configuration.md).
 
 ## Debug Mode
 
