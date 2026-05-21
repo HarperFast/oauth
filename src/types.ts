@@ -49,6 +49,16 @@ export interface OAuthPluginConfig {
 export interface MCPConfig {
 	/** Master switch for MCP OAuth endpoints */
 	enabled?: boolean;
+	/**
+	 * Canonical resource URI advertised in PRM and validated as the `aud` claim
+	 * on issued tokens (RFC 8707). Defaults to `<request-origin>/mcp` when unset.
+	 */
+	resource?: string;
+	/**
+	 * Authorization-server issuer URI advertised in AS metadata. Defaults to
+	 * the request origin (scheme + host) when unset.
+	 */
+	issuer?: string;
 	/** Dynamic Client Registration settings (RFC 7591) */
 	dynamicClientRegistration?: MCPDynamicClientRegistrationConfig;
 }
