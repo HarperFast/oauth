@@ -11,6 +11,7 @@ import { validateAndRefreshSession } from './lib/sessionValidator.ts';
 import { clearOAuthSession } from './lib/handlers.ts';
 import { HookManager } from './lib/hookManager.ts';
 import { DynamicProviderCache } from './lib/dynamicProviderCache.ts';
+import { registerWellKnownHandlers } from './lib/mcp/wellKnown.ts';
 import type { Scope, OAuthPluginConfig, ProviderRegistry, OAuthHooks } from './types.ts';
 
 // Export HookManager class, OAuthResource class, and types
@@ -298,6 +299,12 @@ export async function handleApplication(scope: Scope): Promise<void> {
 
 	// Initial configuration (errors propagate to plugin loader)
 	await updateConfiguration();
+
+	// Register MCP well-known metadata endpoints once. The handlers read the
+	// current mcpConfig from OAuthResource at request time, so live config
+	// changes apply without re-registering routes (Harper's server.http does
+	// not support deregistration).
+	registerWellKnownHandlers(server, () => OAuthResource.mcpConfig, logger);
 
 	// Watch for configuration changes (errors caught internally)
 	scope.options.on('change', () => {
