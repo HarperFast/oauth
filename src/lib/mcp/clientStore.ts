@@ -39,36 +39,75 @@ export function resetMCPClientsTableCache(): void {
 	clientsTable = undefined;
 }
 
-const ARRAY_FIELDS = ['redirect_uris', 'contacts', 'grant_types', 'response_types'] as const;
-
-function encodeRecord(record: MCPClientRecord): Record<string, any> {
-	const encoded: Record<string, any> = { ...record };
-	for (const field of ARRAY_FIELDS) {
-		const value = record[field];
-		encoded[field] = value === undefined ? undefined : JSON.stringify(value);
-	}
-	return encoded;
+function serializeArrayField(value: unknown): string | undefined {
+	return value === undefined ? undefined : JSON.stringify(value);
 }
 
-function decodeRecord(raw: Record<string, any>): MCPClientRecord {
-	const decoded: Record<string, any> = { ...raw };
-	for (const field of ARRAY_FIELDS) {
-		const value = raw[field];
-		if (typeof value === 'string') {
-			try {
-				const parsed = JSON.parse(value);
-				decoded[field] = Array.isArray(parsed) ? parsed : undefined;
-			} catch {
-				// Malformed stored data — treat as absent to avoid crashing callers.
-				decoded[field] = undefined;
-			}
-		} else if (value === null) {
-			// Normalize null (e.g. from a DB column default) to undefined
-			// so the decoded record matches the `string[] | undefined` type.
-			decoded[field] = undefined;
-		}
+function parseArrayField(value: unknown): string[] | undefined {
+	if (typeof value !== 'string') {
+		// null, undefined, or anything else from the DB collapses to undefined.
+		return undefined;
 	}
-	return decoded as MCPClientRecord;
+	try {
+		const parsed = JSON.parse(value);
+		return Array.isArray(parsed) ? parsed : undefined;
+	} catch {
+		// Malformed stored data — treat as absent rather than crashing callers.
+		return undefined;
+	}
+}
+
+/**
+ * Encode the record for storage. Explicit field access (no spread) so we
+ * write a well-typed record even if a caller hands us a tracked object —
+ * per CLAUDE.md's "GenericTrackedObject + spread" gotcha.
+ */
+function encodeRecord(record: MCPClientRecord): Record<string, any> {
+	return {
+		client_id: record.client_id,
+		client_secret: record.client_secret,
+		client_name: record.client_name,
+		client_uri: record.client_uri,
+		logo_uri: record.logo_uri,
+		scope: record.scope,
+		token_endpoint_auth_method: record.token_endpoint_auth_method,
+		application_type: record.application_type,
+		software_id: record.software_id,
+		software_version: record.software_version,
+		client_id_issued_at: record.client_id_issued_at,
+		client_secret_expires_at: record.client_secret_expires_at,
+		redirect_uris: serializeArrayField(record.redirect_uris),
+		contacts: serializeArrayField(record.contacts),
+		grant_types: serializeArrayField(record.grant_types),
+		response_types: serializeArrayField(record.response_types),
+	};
+}
+
+/**
+ * Decode a stored row. Must use explicit property access — Harper returns
+ * GenericTrackedObject Proxies whose own-keys are empty, so { ...raw } drops
+ * every scalar field (client_id, client_secret, …) and breaks retrieval.
+ * Caught by Gemini review on PR #89; documented in CLAUDE.md.
+ */
+function decodeRecord(raw: Record<string, any>): MCPClientRecord {
+	return {
+		client_id: raw.client_id,
+		client_secret: raw.client_secret,
+		client_name: raw.client_name,
+		client_uri: raw.client_uri,
+		logo_uri: raw.logo_uri,
+		scope: raw.scope,
+		token_endpoint_auth_method: raw.token_endpoint_auth_method,
+		application_type: raw.application_type,
+		software_id: raw.software_id,
+		software_version: raw.software_version,
+		client_id_issued_at: raw.client_id_issued_at,
+		client_secret_expires_at: raw.client_secret_expires_at,
+		redirect_uris: parseArrayField(raw.redirect_uris) as string[],
+		contacts: parseArrayField(raw.contacts),
+		grant_types: parseArrayField(raw.grant_types),
+		response_types: parseArrayField(raw.response_types),
+	};
 }
 
 export class MCPClientStore {

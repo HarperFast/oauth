@@ -10,7 +10,7 @@
  * grants, response_type=code. Confidential clients can opt in explicitly.
  */
 
-import { randomUUID, randomBytes } from 'node:crypto';
+import { randomUUID, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { Logger, MCPClientMetadata, MCPClientRecord, MCPConfig } from '../../types.ts';
 import { MCPClientStore } from './clientStore.ts';
 
@@ -40,7 +40,12 @@ function checkInitialAccessToken(authHeader: string | undefined, configured: str
 		};
 	}
 	const presented = authHeader.slice('Bearer '.length).trim();
-	if (presented !== configured) {
+	// Constant-time comparison — `!==` leaks per-character timing and lets a
+	// precise-latency attacker progressively recover initialAccessToken.
+	// timingSafeEqual requires equal-length buffers, so length-check first.
+	const presentedBuf = Buffer.from(presented);
+	const configuredBuf = Buffer.from(configured);
+	if (presentedBuf.length !== configuredBuf.length || !timingSafeEqual(presentedBuf, configuredBuf)) {
 		return {
 			status: 401,
 			body: { error: 'invalid_token', error_description: 'Invalid initial access token' },

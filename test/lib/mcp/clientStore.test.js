@@ -6,6 +6,23 @@ import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { MCPClientStore, resetMCPClientsTableCache } from '../../../dist/lib/mcp/clientStore.js';
 
+/**
+ * Simulate Harper's GenericTrackedObject: property access works, but
+ * own-keys / spread / Object.keys see the object as empty. Wrapping
+ * stored records in this Proxy in tests ensures decodeRecord can never
+ * regress to relying on { ...raw } and silently dropping scalar fields.
+ */
+function asTrackedObject(plain) {
+	return new Proxy(plain, {
+		ownKeys() {
+			return [];
+		},
+		getOwnPropertyDescriptor() {
+			return undefined;
+		},
+	});
+}
+
 describe('MCPClientStore', () => {
 	let store;
 	let originalDatabases;
@@ -25,7 +42,12 @@ describe('MCPClientStore', () => {
 		store = new MCPClientStore();
 		storedRecords = new Map();
 		mockTable = {
-			get: async (id) => storedRecords.get(id) || null,
+			// Wrap returned rows in a tracked-object Proxy so spread / Object.keys
+			// see them as empty (matches production GenericTrackedObject behavior).
+			get: async (id) => {
+				const raw = storedRecords.get(id);
+				return raw ? asTrackedObject(raw) : null;
+			},
 			put: async (record) => {
 				storedRecords.set(record.client_id, record);
 			},
@@ -113,6 +135,29 @@ describe('MCPClientStore', () => {
 			const stored = storedRecords.get('minimal');
 			assert.equal(stored.contacts, undefined);
 			assert.equal(stored.grant_types, undefined);
+		});
+
+		it('preserves scalar fields when the table returns a tracked-object Proxy', async () => {
+			// Regression guard for the spread-on-tracked-object bug:
+			// production rows return as Proxies whose own-keys are [], so
+			// { ...raw } would drop client_id and every other scalar.
+			await store.set({
+				client_id: 'proxy-test',
+				client_secret: 'secret-abc',
+				client_id_issued_at: 1700000000,
+				client_secret_expires_at: 0,
+				redirect_uris: ['https://example.com/cb'],
+				client_name: 'Proxy Test',
+				token_endpoint_auth_method: 'client_secret_basic',
+			});
+
+			const retrieved = await store.get('proxy-test');
+			assert.equal(retrieved.client_id, 'proxy-test');
+			assert.equal(retrieved.client_secret, 'secret-abc');
+			assert.equal(retrieved.client_name, 'Proxy Test');
+			assert.equal(retrieved.token_endpoint_auth_method, 'client_secret_basic');
+			assert.equal(retrieved.client_id_issued_at, 1700000000);
+			assert.deepEqual(retrieved.redirect_uris, ['https://example.com/cb']);
 		});
 
 		it('returns null when the underlying get call throws', async () => {
