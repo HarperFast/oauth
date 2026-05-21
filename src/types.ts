@@ -59,6 +59,14 @@ export interface MCPConfig {
 	 * the request origin (scheme + host) when unset.
 	 */
 	issuer?: string;
+	/**
+	 * Subset of upstream providers eligible to complete the MCP auth flow.
+	 * v1 requires exactly one effective provider — if the list (or, when
+	 * unset, the full provider registry) resolves to 0 or >1 candidates,
+	 * /oauth/mcp/authorize returns a configuration error. Multi-provider
+	 * chooser UI is v1.1.
+	 */
+	providers?: string[];
 	/** Dynamic Client Registration settings (RFC 7591) */
 	dynamicClientRegistration?: MCPDynamicClientRegistrationConfig;
 }
@@ -124,6 +132,48 @@ export interface MCPClientRecord extends MCPClientMetadata {
 	client_id_issued_at: number;
 	/** Unix timestamp (seconds) when client_secret expires; 0 = never */
 	client_secret_expires_at?: number;
+}
+
+/**
+ * MCP authorization-request state carried through the upstream IdP round-trip.
+ *
+ * Stored inside the CSRF token (which the upstream provider echoes back as
+ * `state`); the callback handler reads this back to determine whether to mint
+ * an MCP authorization code (this object present) or fall through to the
+ * standard human-session flow (this object absent).
+ */
+export interface MCPAuthorizeState {
+	/** DCR client_id from /oauth/mcp/authorize */
+	clientId: string;
+	/** RFC 8707 canonical resource URI */
+	resource: string;
+	/** PKCE challenge (RFC 7636); verified at /oauth/mcp/token */
+	codeChallenge: string;
+	/** PKCE method — only "S256" supported (OAuth 2.1 §7.5.2) */
+	codeChallengeMethod: 'S256';
+	/** Exact redirect_uri the MCP client wants the code delivered to */
+	redirectUri: string;
+	/** Requested scope, space-separated (may be empty) */
+	scope?: string;
+	/** Original `state` parameter from the MCP client; echoed verbatim on redirect */
+	clientState?: string;
+}
+
+/**
+ * MCP authorization code record (table `mcp_auth_codes`, `expiration: 300`).
+ *
+ * One-time use: /oauth/mcp/token (Stage 4) reads-then-deletes.
+ */
+export interface MCPAuthCodeRecord {
+	code: string;
+	client_id: string;
+	user: string;
+	resource: string;
+	code_challenge: string;
+	code_challenge_method: string;
+	redirect_uri: string;
+	scope?: string;
+	created_at: number;
 }
 
 /**

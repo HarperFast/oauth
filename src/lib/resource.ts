@@ -8,7 +8,7 @@ import { Resource } from 'harper';
 import type { RequestTarget } from 'harper';
 import type { Request, Logger, MCPConfig, ProviderRegistry, OAuthProviderConfig } from '../types.ts';
 import { handleLogin, handleCallback, handleLogout, handleUserInfo, handleTestPage } from './handlers.ts';
-import { handleMCPPost } from './mcp/index.ts';
+import { handleMCPGet, handleMCPPost } from './mcp/index.ts';
 import type { HookManager } from './hookManager.ts';
 import type { DynamicProviderCache } from './dynamicProviderCache.ts';
 
@@ -307,6 +307,12 @@ export class OAuthResource extends Resource {
 				status: 400,
 				body: { error: 'Invalid provider name format' },
 			};
+		}
+
+		// Handle MCP endpoints (/oauth/mcp/<action>) — `mcp` is not a regular
+		// provider so it bypasses the provider lookup below.
+		if (providerName === 'mcp') {
+			return handleMCPGet(action, request, target, OAuthResource.mcpConfig, providers, logger);
 		}
 
 		// Check if provider exists in static registry or dynamic cache

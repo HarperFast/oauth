@@ -8,7 +8,7 @@
 
 import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { handleMCPPost } from '../../../dist/lib/mcp/index.js';
+import { handleMCPGet, handleMCPPost } from '../../../dist/lib/mcp/index.js';
 import { resetMCPClientsTableCache } from '../../../dist/lib/mcp/clientStore.js';
 
 const VALID_BODY = {
@@ -108,5 +108,34 @@ describe('handleMCPPost (dispatcher)', () => {
 			assert.equal(response.status, 404);
 			assert.equal(storedRecords.size, 0);
 		});
+	});
+});
+
+describe('handleMCPGet (dispatcher)', () => {
+	function makeTarget(params = {}) {
+		return {
+			get(name) {
+				return Object.prototype.hasOwnProperty.call(params, name) ? params[name] : undefined;
+			},
+		};
+	}
+
+	it('returns 404 when MCP is disabled', async () => {
+		const response = await handleMCPGet('authorize', makeRequest(), makeTarget(), undefined, {});
+		assert.equal(response.status, 404);
+	});
+
+	it('returns 404 for an unknown action', async () => {
+		const response = await handleMCPGet('not-a-thing', makeRequest(), makeTarget(), { enabled: true }, {});
+		assert.equal(response.status, 404);
+	});
+
+	it('dispatches authorize through handleAuthorize (verified via 400 invalid_request on empty query)', async () => {
+		// handleAuthorize will hit phase-1 client_id validation; getting that 400
+		// confirms the dispatcher routed us into authorize rather than the
+		// catch-all 404.
+		const response = await handleMCPGet('authorize', makeRequest(), makeTarget(), { enabled: true }, {});
+		assert.equal(response.status, 400);
+		assert.equal(response.body.error, 'invalid_request');
 	});
 });
