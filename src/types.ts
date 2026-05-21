@@ -32,6 +32,88 @@ export interface OAuthPluginConfig {
 	hooks?: OAuthHooks;
 	/** Cache providers resolved via onResolveProvider hook. true = forever (default), false = never, number = TTL in seconds */
 	cacheDynamicProviders?: boolean | number;
+	/** MCP OAuth flow configuration (RFC 9728 PRM, RFC 7591 DCR, RFC 8707 audience binding) */
+	mcp?: MCPConfig;
+}
+
+// ============================================================================
+// MCP OAuth Types (RFCs 7591, 8707, 9728; MCP authorization spec 2025-06-18)
+// ============================================================================
+
+/**
+ * MCP OAuth Configuration
+ *
+ * Opt-in configuration for serving the MCP authorization-server flow alongside
+ * the existing human-OAuth (relying party) flow.
+ */
+export interface MCPConfig {
+	/** Master switch for MCP OAuth endpoints */
+	enabled?: boolean;
+	/** Dynamic Client Registration settings (RFC 7591) */
+	dynamicClientRegistration?: MCPDynamicClientRegistrationConfig;
+}
+
+/**
+ * Dynamic Client Registration configuration (RFC 7591)
+ *
+ * Defaults to enabled because Claude Desktop, Cursor, and mcp-remote all
+ * register at runtime with no pre-baked client_id. Restricting registration
+ * is opt-in via initialAccessToken or allowedRedirectUriHosts.
+ */
+export interface MCPDynamicClientRegistrationConfig {
+	/** Enable the /register endpoint. Default: true. */
+	enabled?: boolean;
+	/**
+	 * If set, registration requests must present `Authorization: Bearer <token>`
+	 * matching this value. Default: open registration per RFC 7591.
+	 */
+	initialAccessToken?: string;
+	/**
+	 * If set, redirect_uris hosts must match an entry in this list. localhost
+	 * is always allowed for native clients per RFC 8252. Default: unrestricted.
+	 */
+	allowedRedirectUriHosts?: string[];
+}
+
+/**
+ * MCP client metadata (RFC 7591 §2)
+ *
+ * Request body shape for POST /oauth/mcp/register. Fields with defaults are
+ * optional in the request and populated by the registration handler.
+ */
+export interface MCPClientMetadata {
+	/** Required: array of allowed redirect URIs (exact-match validated on /authorize) */
+	redirect_uris: string[];
+	client_name?: string;
+	client_uri?: string;
+	logo_uri?: string;
+	scope?: string;
+	contacts?: string[];
+	/** Default: ["authorization_code", "refresh_token"] */
+	grant_types?: string[];
+	/** Default: ["code"] */
+	response_types?: string[];
+	/** Default: "none" (public clients). Other values: "client_secret_basic", "client_secret_post". */
+	token_endpoint_auth_method?: string;
+	/** "web" (default) or "native" */
+	application_type?: string;
+	software_id?: string;
+	software_version?: string;
+}
+
+/**
+ * MCP client record as returned from /register and stored in the
+ * harper_oauth_mcp_clients table.
+ */
+export interface MCPClientRecord extends MCPClientMetadata {
+	/** Server-issued client identifier */
+	client_id: string;
+	/** Server-issued secret (only for confidential clients) */
+	client_secret?: string;
+	/** Unix timestamp (seconds) when the client was registered */
+	client_id_issued_at: number;
+	/** Unix timestamp (seconds) when client_secret expires; 0 = never */
+	client_secret_expires_at?: number;
 }
 
 /**

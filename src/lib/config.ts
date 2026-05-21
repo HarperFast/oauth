@@ -32,6 +32,30 @@ export function expandEnvVar(value: any): any {
 }
 
 /**
+ * Recursively expand `${ENV_VAR}` placeholders on every string leaf of a value.
+ *
+ * Used for structured config blocks (like `mcp`) where sensitive leaves
+ * (e.g., `mcp.dynamicClientRegistration.initialAccessToken`) still need
+ * env-var expansion but the block itself isn't a flat property bag.
+ */
+export function expandEnvVarsDeep<T>(value: T): T {
+	if (typeof value === 'string') {
+		return expandEnvVar(value);
+	}
+	if (Array.isArray(value)) {
+		return value.map(expandEnvVarsDeep) as unknown as T;
+	}
+	if (value !== null && typeof value === 'object') {
+		const expanded: Record<string, any> = {};
+		for (const [key, item] of Object.entries(value as Record<string, any>)) {
+			expanded[key] = expandEnvVarsDeep(item);
+		}
+		return expanded as T;
+	}
+	return value;
+}
+
+/**
  * Build configuration for a specific provider
  */
 export function buildProviderConfig(
@@ -117,9 +141,11 @@ export function buildProviderConfig(
 export function extractPluginDefaults(options: OAuthPluginConfig): Partial<OAuthProviderConfig> {
 	const pluginDefaults: Partial<OAuthProviderConfig> = {};
 
-	// Copy all non-provider config to defaults, expanding environment variables
+	// Copy all non-provider config to defaults, expanding environment variables.
+	// `mcp` is a structured top-level config block (not a provider-level default)
+	// so it's excluded; it's threaded through OAuthResource.configure separately.
 	for (const [key, value] of Object.entries(options)) {
-		if (key !== 'providers' && key !== 'debug') {
+		if (key !== 'providers' && key !== 'debug' && key !== 'mcp') {
 			pluginDefaults[key as keyof OAuthProviderConfig] = expandEnvVar(value);
 		}
 	}

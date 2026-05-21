@@ -5,7 +5,7 @@
  * Supports any standard OAuth 2.0 provider through configuration.
  */
 
-import { initializeProviders, expandEnvVar, extractPluginDefaults } from './lib/config.ts';
+import { initializeProviders, expandEnvVar, expandEnvVarsDeep, extractPluginDefaults } from './lib/config.ts';
 import { OAuthResource } from './lib/resource.ts';
 import { validateAndRefreshSession } from './lib/sessionValidator.ts';
 import { clearOAuthSession } from './lib/handlers.ts';
@@ -175,8 +175,19 @@ export async function handleApplication(scope: Scope): Promise<void> {
 				},
 			});
 		} else {
-			// Configure the OAuth resource with providers and settings
-			OAuthResource.configure(providers, debugMode, hookManager, pluginDefaults, logger, dynamicProviderCache);
+			// Configure the OAuth resource with providers and settings.
+			// expandEnvVarsDeep on the mcp block so sensitive leaves like
+			// mcp.dynamicClientRegistration.initialAccessToken support ${ENV_VAR}.
+			const mcpConfig = options.mcp ? expandEnvVarsDeep(options.mcp) : undefined;
+			OAuthResource.configure(
+				providers,
+				debugMode,
+				hookManager,
+				pluginDefaults,
+				logger,
+				dynamicProviderCache,
+				mcpConfig
+			);
 
 			// Register the OAuth resource class
 			resources.set('oauth', OAuthResource);

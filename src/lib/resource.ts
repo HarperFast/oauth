@@ -6,8 +6,9 @@
 
 import { Resource } from 'harper';
 import type { RequestTarget } from 'harper';
-import type { Request, Logger, ProviderRegistry, OAuthProviderConfig } from '../types.ts';
+import type { Request, Logger, MCPConfig, ProviderRegistry, OAuthProviderConfig } from '../types.ts';
 import { handleLogin, handleCallback, handleLogout, handleUserInfo, handleTestPage } from './handlers.ts';
+import { handleMCPPost } from './mcp/index.ts';
 import type { HookManager } from './hookManager.ts';
 import type { DynamicProviderCache } from './dynamicProviderCache.ts';
 
@@ -34,6 +35,7 @@ export class OAuthResource extends Resource {
 	static pluginDefaults: Partial<OAuthProviderConfig> = {};
 	static dynamicProviderCache: DynamicProviderCache | null = null;
 	static logger: Logger | undefined = undefined;
+	static mcpConfig: MCPConfig | undefined = undefined;
 
 	/**
 	 * Configure the OAuth resource with providers and settings
@@ -45,7 +47,8 @@ export class OAuthResource extends Resource {
 		hookManager: HookManager,
 		pluginDefaults: Partial<OAuthProviderConfig>,
 		logger?: Logger,
-		dynamicProviderCache?: DynamicProviderCache
+		dynamicProviderCache?: DynamicProviderCache,
+		mcpConfig?: MCPConfig
 	): void {
 		OAuthResource.providers = providers;
 		OAuthResource.debugMode = debugMode;
@@ -53,6 +56,7 @@ export class OAuthResource extends Resource {
 		OAuthResource.pluginDefaults = pluginDefaults;
 		OAuthResource.logger = logger;
 		OAuthResource.dynamicProviderCache = dynamicProviderCache ?? null;
+		OAuthResource.mcpConfig = mcpConfig;
 	}
 
 	/**
@@ -375,13 +379,13 @@ export class OAuthResource extends Resource {
 	 * Handle POST requests to OAuth endpoints
 	 * Resource API v2 signature: post(target, data)
 	 */
-	async post(target: RequestTarget, _data: any): Promise<any> {
+	async post(target: RequestTarget, data: any): Promise<any> {
 		const logger = OAuthResource.logger;
 		const hookManager = OAuthResource.hookManager!;
 
 		// Parse the route
 		const route = OAuthResource.parseRoute(target);
-		const { providerName } = route;
+		const { providerName, action } = route;
 
 		// Get request from context (HarperDB provides the HTTP request here)
 		const context = this.getContext();
@@ -397,6 +401,11 @@ export class OAuthResource extends Resource {
 		// Handle logout endpoint
 		if (providerName === 'logout') {
 			return handleLogout(request, hookManager, logger);
+		}
+
+		// Handle MCP endpoints (/oauth/mcp/<action>)
+		if (providerName === 'mcp') {
+			return handleMCPPost(action, request, data, OAuthResource.mcpConfig, logger);
 		}
 
 		// All other POST endpoints are not supported
@@ -429,5 +438,6 @@ export class OAuthResource extends Resource {
 		OAuthResource.pluginDefaults = {};
 		OAuthResource.dynamicProviderCache = null;
 		OAuthResource.logger = undefined;
+		OAuthResource.mcpConfig = undefined;
 	}
 }
