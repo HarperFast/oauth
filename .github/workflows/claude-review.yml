@@ -26,7 +26,7 @@ concurrency:
 
 jobs:
   review:
-    uses: HarperFast/ai-review-prompts/.github/workflows/_claude-review.yml@ea190091328bcee674c4739ccc97dda177ecf0c5 # main 2026-05-20 (post #41 — Gemini calibration promoted; both reviewers back in lockstep on the same ai-review-prompts SHA, no _claude-review.yml changes vs the prior pin)
+    uses: HarperFast/ai-review-prompts/.github/workflows/_claude-review.yml@533f841137114315b0b4d02dabf367e376d9922e # main 2026-05-21 (post #42 — log-script counts from "N blockers found" line + tolerates markdown wrapping, fixing Claude-recap titles undercounting; _claude-review.yml itself unchanged)
     # Caller-side permissions, scoped at the calling-job level (NOT
     # workflow-level — that placement caps the reusable's per-job
     # grants below what they need and breaks the workflow at startup;
@@ -51,7 +51,7 @@ jobs:
       # introspect their own ref (`github.workflow_ref` resolves to the
       # CALLER's ref in `workflow_call` context), and `uses: …@<ref>`
       # is parsed literally so we can't interpolate a variable.
-      ai-review-prompts-ref: ea190091328bcee674c4739ccc97dda177ecf0c5
+      ai-review-prompts-ref: 533f841137114315b0b4d02dabf367e376d9922e
       review-layers: |
         universal
         harper/common
