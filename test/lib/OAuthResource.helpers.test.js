@@ -102,6 +102,22 @@ describe('OAuthResource - Helper Methods', () => {
 			assert.equal(route.providerName, 'oac-abc123');
 			assert.equal(route.action, 'login');
 		});
+
+		it('should handle /oauth prefix only', () => {
+			const target = { id: '/oauth', pathname: '' };
+			const route = OAuthResource.parseRoute(target);
+
+			assert.equal(route.providerName, '');
+			assert.equal(route.action, '');
+		});
+
+		it('should handle case-insensitive /Oauth prefix', () => {
+			const target = { id: '/Oauth/github/login', pathname: '' };
+			const route = OAuthResource.parseRoute(target);
+
+			assert.equal(route.providerName, 'github');
+			assert.equal(route.action, 'login');
+		});
 	});
 
 	describe('isDebugOnlyRoute()', () => {

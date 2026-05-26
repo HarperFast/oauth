@@ -79,8 +79,8 @@ export class OAuthResource extends Resource {
 
 		let pathParts = path.split('/').filter((p) => p);
 
-		// Handle /oauth prefix if present
-		if (pathParts[0] === 'oauth' && pathParts.length > 1) {
+		// Handle /oauth prefix if present (case-insensitive)
+		if (pathParts[0]?.toLowerCase() === 'oauth') {
 			pathParts = pathParts.slice(1);
 		}
 
