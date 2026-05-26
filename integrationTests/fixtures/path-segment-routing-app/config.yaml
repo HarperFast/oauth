@@ -3,9 +3,19 @@
 #
 # Two providers are configured with distinctive client_ids. A request to
 # /oauth/<name>/login should redirect with that provider's client_id. If
-# parseRoute were to extract the literal "oauth" path segment (the symptom
-# Dawson reported on 2026-05-22 from CM/Studio), the request would route
-# to the provider literally named "oauth" and we'd see the wrong client_id.
+# parseRoute were to extract the literal "oauth" path segment as providerName
+# (the symptom Dawson reported on 2026-05-22 from CM/Studio), the request
+# would NOT produce a tenant-shaped 302 — it would either route to the
+# oauth-named decoy provider with action='oac-oauth-tenant' (an unknown
+# action → 404) or route to some other unintended state. The exact failure
+# shape depends on parseRoute's specific regression; the assertion only
+# requires that the tenant.test authorizationUrl + tenant client_id
+# appear in the redirect.
+#
+# The tenant provider name deliberately contains the substring "oauth" so
+# this fixture also guards against an over-aggressive stripping regression
+# (e.g., parseRoute mangling /oauth/ matches that occur inside the segment
+# rather than only at the prefix).
 
 rest: true
 
@@ -14,7 +24,7 @@ rest: true
   providers:
     # Provider literally named "oauth" — present specifically as a decoy.
     # If parseRoute is broken and treats "oauth" as the providerName, this
-    # is what would (incorrectly) handle requests for other tenants.
+    # is what would (incorrectly) be selected as the provider.
     oauth:
       provider: generic
       clientId: ${OAUTH_DECOY_CLIENT_ID}
@@ -23,7 +33,9 @@ rest: true
       tokenUrl: 'http://decoy.test/token'
       userInfoUrl: 'http://decoy.test/userinfo'
     # Tenant-style provider with a distinctive client_id we can assert on.
-    oac-tenant-acme:
+    # The name contains "oauth" as a substring to catch over-aggressive
+    # path-stripping regressions in addition to the prefix-extraction case.
+    oac-oauth-tenant:
       provider: generic
       clientId: ${OAUTH_TENANT_CLIENT_ID}
       clientSecret: tenant-secret

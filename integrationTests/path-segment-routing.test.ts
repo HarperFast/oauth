@@ -4,17 +4,18 @@
  *
  *   "providerName is 'oauth', not the {configId} described, that isn't passed"
  *
- * Diagnosis would be that the plugin extracts the literal "oauth" path
- * prefix as providerName instead of the segment after it. If true, requests
- * to /oauth/<tenantId>/login would dispatch to the provider literally named
- * "oauth" regardless of what tenantId the caller asked for.
+ * If parseRoute extracted the literal "oauth" path prefix as providerName
+ * (rather than the segment after it), requests to /oauth/<tenantId>/login
+ * would resolve to whatever provider is registered under the name "oauth" —
+ * with the rest of the URL becoming the action — and would NOT produce the
+ * expected tenant-shaped 302.
  *
- * This test configures TWO providers — one literally named "oauth" (a
- * decoy) and one named "oac-tenant-acme" — with distinctive client_ids,
- * then asserts a request to /oauth/oac-tenant-acme/login redirects with
- * the TENANT's client_id, not the decoy's. If parseRoute ever regresses
- * into returning the literal "oauth" segment, the assertion will fail
- * because the decoy provider's authorization URL would be used.
+ * This test configures two providers — one literally named "oauth" (a decoy)
+ * and one named "oac-oauth-tenant" (deliberately containing the substring
+ * "oauth" to also catch over-aggressive stripping) — with distinctive
+ * client_ids, then asserts that /oauth/oac-oauth-tenant/login redirects to
+ * the tenant provider's authorizationUrl with the tenant's client_id. Any
+ * regression that breaks path-segment routing will fail this assertion.
  */
 import { suite, test, before, after } from 'node:test';
 import { strictEqual } from 'node:assert/strict';
@@ -30,7 +31,7 @@ function getHarperBinPath(): string {
 
 const fixturePath = join(import.meta.dirname, 'fixtures', 'path-segment-routing-app');
 
-const TENANT_CLIENT_ID = 'tenant-acme-client-id';
+const TENANT_CLIENT_ID = 'oauth-tenant-client-id';
 const DECOY_CLIENT_ID = 'decoy-oauth-client-id';
 
 suite('OAuth Resource routes by URL path segment (not literal "oauth")', (ctx: ContextWithHarper) => {
@@ -49,8 +50,8 @@ suite('OAuth Resource routes by URL path segment (not literal "oauth")', (ctx: C
 		await teardownHarper(ctx);
 	});
 
-	test('/oauth/oac-tenant-acme/login dispatches to the tenant provider', async () => {
-		const response = await fetch(`${ctx.harper.httpURL}/oauth/oac-tenant-acme/login`, {
+	test('/oauth/oac-oauth-tenant/login dispatches to the tenant provider', async () => {
+		const response = await fetch(`${ctx.harper.httpURL}/oauth/oac-oauth-tenant/login`, {
 			redirect: 'manual',
 		});
 
@@ -60,13 +61,11 @@ suite('OAuth Resource routes by URL path segment (not literal "oauth")', (ctx: C
 		const url = new URL(location!);
 
 		// The tenant provider's authorizationUrl is http://tenant.test/authorize;
-		// the decoy's is http://decoy.test/authorize. If parseRoute returned
-		// "oauth" instead of "oac-tenant-acme", we'd land at decoy.test.
-		strictEqual(
-			url.origin + url.pathname,
-			'http://tenant.test/authorize',
-			`request was routed to ${url.origin} — expected tenant.test (decoy is decoy.test)`
-		);
+		// the decoy's is http://decoy.test/authorize. A parseRoute that returned
+		// "oauth" as providerName would either 404 (action mismatch) or pull
+		// the decoy's client_id — both fail these assertions.
+		strictEqual(url.origin, 'http://tenant.test');
+		strictEqual(url.pathname, '/authorize');
 		strictEqual(
 			url.searchParams.get('client_id'),
 			TENANT_CLIENT_ID,
