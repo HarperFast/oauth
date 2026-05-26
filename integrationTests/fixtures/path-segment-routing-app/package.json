@@ -1,0 +1,6 @@
+{
+	"name": "path-segment-routing-app-fixture",
+	"private": true,
+	"type": "module",
+	"description": "Integration-test fixture for OAuth Resource path-segment routing. The @harperfast/oauth dep is installed at test setup time via scripts/install-fixtures.js (npm pack + install); harper is resolved from the repo root."
+}
