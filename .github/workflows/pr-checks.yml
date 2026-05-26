@@ -13,14 +13,14 @@ jobs:
 
     strategy:
       matrix:
-        node-version: [20, 22, 24]
+        node-version: [22, 24]
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Setup Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: ${{ matrix.node-version }}
           cache: 'npm'
@@ -34,14 +34,8 @@ jobs:
       - name: Check formatting
         run: npm run format:check
 
-      # Coverage was failing to run on Node 20, so run it only on 22+
-      - name: Run tests with coverage (Node 22+)
-        if: matrix.node-version >= 22
+      - name: Run tests with coverage
         run: npm run test:coverage
-
-      - name: Run tests (Node 20)
-        if: matrix.node-version == 20
-        run: npm run test:node-twenty
 
   test-bun:
     name: Test with Bun
@@ -49,10 +43,10 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: latest
 
