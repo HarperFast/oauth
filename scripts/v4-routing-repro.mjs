@@ -33,7 +33,7 @@
  *
  * Set KEEP_TEMP=1 to preserve the temp dir for inspection.
  */
-import { mkdtempSync, writeFileSync, rmSync, readFileSync, existsSync, copyFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, rmSync, existsSync, copyFileSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -257,7 +257,9 @@ async function main() {
 			log('PASS: routed to tenant provider — parseRoute extracted the URL path segment');
 			exitCode = 0;
 		} else if (target === 'http://decoy.test/authorize' && clientId === DECOY_CLIENT_ID) {
-			log('FAIL: routed to DECOY provider — parseRoute extracted literal "oauth" segment (bug confirmed on this stack)');
+			log(
+				'FAIL: routed to DECOY provider — parseRoute extracted literal "oauth" segment (bug confirmed on this stack)'
+			);
 			exitCode = 1;
 		} else {
 			log(`UNEXPECTED: target=${target} client_id=${clientId}`);
