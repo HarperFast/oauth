@@ -86,6 +86,22 @@ describe('OAuthResource - Helper Methods', () => {
 			assert.equal(route.providerName, 'github');
 			assert.equal(route.action, 'login');
 		});
+
+		it('should handle /oauth prefix', () => {
+			const target = { id: '/oauth/github/login', pathname: '' };
+			const route = OAuthResource.parseRoute(target);
+
+			assert.equal(route.providerName, 'github');
+			assert.equal(route.action, 'login');
+		});
+
+		it('should handle /oauth prefix with tenant ID', () => {
+			const target = { id: '/oauth/oac-abc123/login', pathname: '' };
+			const route = OAuthResource.parseRoute(target);
+
+			assert.equal(route.providerName, 'oac-abc123');
+			assert.equal(route.action, 'login');
+		});
 	});
 
 	describe('isDebugOnlyRoute()', () => {

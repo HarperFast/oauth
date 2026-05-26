@@ -77,7 +77,12 @@ export class OAuthResource extends Resource {
 			};
 		}
 
-		const pathParts = path.split('/').filter((p) => p);
+		let pathParts = path.split('/').filter((p) => p);
+
+		// Handle /oauth prefix if present
+		if (pathParts[0] === 'oauth' && pathParts.length > 1) {
+			pathParts = pathParts.slice(1);
+		}
 
 		return {
 			providerName: pathParts[0] || '',
