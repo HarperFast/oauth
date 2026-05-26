@@ -1,8 +1,24 @@
 name: Claude PR Review
 
+# Thin caller of the reusable in HarperFast/ai-review-prompts. The single
+# `uses:` ref pin below controls everything that moves together — workflow
+# logic, layer files, bash scripts, auth-gate behavior. Bumping the pin
+# is the entire upgrade motion.
+#
+# Pre-requisites (org-level secrets, configured once on HarperFast):
+#   - HARPERFAST_AI_CLIENT_ID       (the App's Client ID, like Iv23li…)
+#   - HARPERFAST_AI_APP_PRIVATE_KEY (.pem file contents)
+#
+# Plus the per-repo / inherited:
+#   - ANTHROPIC_API_KEY             (required)
+#   - AI_REVIEW_LOG_TOKEN           (optional — if set, threads each run
+#                                   into a per-PR issue in HarperFast/ai-review-log)
+
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    # `labeled` admits the `claude-review` label gesture for
+    # bot-authored PRs (renovate, dependabot). See ai-review-prompts#38.
+    types: [opened, synchronize, reopened, labeled]
 
 concurrency:
   group: claude-review-${{ github.event.pull_request.number }}
@@ -10,176 +26,54 @@ concurrency:
 
 jobs:
   review:
-    # Only review PRs authored by HarperFast org members / collaborators.
-    # External PRs are not auto-reviewed — a maintainer can opt one in later
-    # via an @claude mention (handled by a separate workflow).
-    if: >-
-      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'),
-      github.event.pull_request.author_association)
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    uses: HarperFast/ai-review-prompts/.github/workflows/_claude-review.yml@533f841137114315b0b4d02dabf367e376d9922e # main 2026-05-21 (post #42 — log-script counts from "N blockers found" line + tolerates markdown wrapping, fixing Claude-recap titles undercounting; _claude-review.yml itself unchanged)
+    # Caller-side permissions, scoped at the calling-job level (NOT
+    # workflow-level — that placement caps the reusable's per-job
+    # grants below what they need and breaks the workflow at startup;
+    # see ai-review-prompts#39/#40 for the incident). Union of what
+    # the reusable's `authorize` (`contents: read`) and `review`
+    # (`contents: read + pull-requests: write + id-token: write`)
+    # jobs declare. GitHub's rule: caller's GITHUB_TOKEN permissions
+    # can only be DOWNGRADED (not elevated) by the called workflow,
+    # so the caller must grant at least the union the reusable needs.
+    # Reference: https://docs.github.com/en/actions/reference/workflows-and-actions/reusing-workflow-configurations
     permissions:
       contents: read
       pull-requests: write
-      id-token: write # required by claude-code-action even with API-key auth
+      id-token: write
+    with:
+      # Same SHA as the `uses:` ref above. The reusable uses this to
+      # check out HarperFast/ai-review-prompts (layer files + bash
+      # scripts) at the same ref as the workflow logic itself — keeps
+      # the upgrade motion atomic.
+      #
+      # The duplication is unavoidable: reusable workflows can't
+      # introspect their own ref (`github.workflow_ref` resolves to the
+      # CALLER's ref in `workflow_call` context), and `uses: …@<ref>`
+      # is parsed literally so we can't interpolate a variable.
+      ai-review-prompts-ref: 533f841137114315b0b4d02dabf367e376d9922e
+      review-layers: |
+        universal
+        harper/common
+        harper/v5
+        repo-type/plugin
+      repo-specific-checks: |
+        ## Repo-specific checks (OAuth plugin)
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          fetch-depth: 0
+        On top of the layered scope above, these are OAuth-only
+        semantics not covered by the shared layers:
 
-      - name: Claude review
-        id: claude-review
-        uses: anthropics/claude-code-action@c3d45e8e941e1b2ad7b278c57482d9c5bf1f35b3 # v1.0.99
-        with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          show_full_output: true # TEMP: keep on during calibration so tool denials are visible; revert once reviews run cleanly
-          claude_args: |
-            --model claude-sonnet-4-6
-            --max-turns 8
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Read,Grep,Glob"
-          prompt: |
-            REPO: ${{ github.repository }}
-            PR NUMBER: ${{ github.event.pull_request.number }}
-
-            The PR branch is already checked out in the current working directory.
-
-            ## Tools
-
-            For file inspection use the `Read`, `Grep`, and `Glob` tools.
-            Do NOT use `cat`, `head`, `tail`, `grep`, `ls`, or `find`
-            via Bash — those commands are not allowed and waste turns.
-            Do NOT run `bun test`, `npm test`, or any other script
-            that executes PR code — the PR's tests are already checked
-            separately.
-
-            The only allowed Bash commands are:
-            - `gh pr view` / `gh pr diff` — inspect the PR (already run
-              at start, you can re-invoke if needed)
-            - `gh pr comment` — post the final review comment
-
-            Read `CLAUDE.md` in the repo root first — it has the project
-            overview, conventions, and (importantly) a "Non-Obvious Gotchas"
-            section covering Resource API v2 patterns, GenericTrackedObject
-            spread behavior, `tsc || true` build semantics, and security
-            invariants.
-
-            ## OAuth-specific things to check
-
-            - CSRF state tokens present on every OAuth flow; 10-minute expiry
-              is enforced; state is single-use
-            - Tokens are never logged and never returned in HTTP responses
-            - Redirect URI validation on callback endpoints
-            - Provider-of-record enforcement (cross-provider CSRF protection
-              should redirect with error, not 403)
-            - Session field preservation across token refresh (`provider`,
-              `providerConfigId`, `providerType`)
-            - Resource API v2 conventions (`static loadAsInstance = false`,
-              instance methods)
-            - `GenericTrackedObject` spread gotcha — if code uses `{...obj}`
-              on a session field, flag it
-            - New endpoints include auth checks and context validation
-            - Path length validation (≤ 2048 chars) where user input can
-              reach a path
-
-            ## Review scope and style
-
-            Report **blocker-severity findings only**. Blockers are:
-            - Correctness bugs
-            - Security issues (token exposure, missing CSRF, auth bypass,
-              unvalidated redirect/path, injection)
-            - Broken contracts (public API behavior change without migration)
-            - Missing tests for new behavior or fixed bugs
-            - Documentation drift that would mislead integrators
-
-            Do NOT comment on style, naming, nits, or personal preference.
-            Do NOT restate what the diff does. Do NOT praise.
-
-            Cap the review at 10 findings.
-
-            ## How to post the review
-
-            - Use `gh pr comment` for top-level feedback (single consolidated
-              summary comment with all findings).
-            - Use `mcp__github_inline_comment__create_inline_comment`
-              (with `confirmed: true`) for specific code-line annotations.
-            - Only post GitHub comments — do NOT submit review text as SDK
-              messages.
-            - Do NOT use REQUEST_CHANGES or APPROVE during this calibration
-              phase. Stick to comments so the workflow never blocks or
-              auto-approves a merge.
-
-            ## Output format for the top-level comment
-
-            If you find zero blockers: post one short comment —
-            "No blockers found." — and stop.
-
-            If you find blockers: post one summary comment with all findings
-            using this structure, one block per finding:
-
-              ### <N>. <concise title>
-
-              **File:** `path/to/file.ts:line`
-              **What:** one or two sentence description
-              **Why it matters:** concrete impact
-              **Suggested fix:** specific change, not generic advice
-
-            No preamble. No closing summary.
-
-      - name: Log review to ai-review-log
-        # Best-effort — never fail the job if logging fails
-        if: always()
-        env:
-          GH_TOKEN: ${{ github.token }}
-          AI_REVIEW_LOG_TOKEN: ${{ secrets.AI_REVIEW_LOG_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_URL: ${{ github.event.pull_request.html_url }}
-          REVIEW_STATUS: ${{ steps.claude-review.outcome }}
-        run: |
-          set -uo pipefail
-
-          if [ -z "${AI_REVIEW_LOG_TOKEN:-}" ]; then
-            echo "::warning::AI_REVIEW_LOG_TOKEN secret not set; skipping log entry."
-            exit 0
-          fi
-
-          # Fetch the latest comment posted by the Claude bot on this PR.
-          CLAUDE_BODY=$(gh pr view "$PR_NUMBER" --json comments \
-            --jq '[.comments[] | select(.author.login == "claude")] | last | .body // empty')
-
-          if [ -z "$CLAUDE_BODY" ]; then
-            echo "No Claude comment found on PR #$PR_NUMBER (review_status=$REVIEW_STATUS); skipping log."
-            exit 0
-          fi
-
-          # Title: count findings (lines starting with `### <digit>`). "No blockers" case has none.
-          if printf '%s' "$CLAUDE_BODY" | grep -qi '^no blockers found'; then
-            TITLE="[oauth] PR #$PR_NUMBER: no blockers"
-          else
-            FINDING_COUNT=$(printf '%s\n' "$CLAUDE_BODY" | grep -c '^### [0-9]' || true)
-            TITLE="[oauth] PR #$PR_NUMBER: ${FINDING_COUNT} finding(s) — triage pending"
-          fi
-
-          BODY=$(printf '**Source:** %s\n**Repo:** oauth\n**PR:** #%s\n**Model:** claude-sonnet-4-6\n**Phase:** baseline\n**Review job status:** %s\n**Date:** %s\n\n---\n\n%s\n' \
-            "$PR_URL" "$PR_NUMBER" "$REVIEW_STATUS" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$CLAUDE_BODY")
-
-          PAYLOAD=$(jq -nc \
-            --arg title "$TITLE" \
-            --arg body "$BODY" \
-            '{title: $title, body: $body, labels: ["repo:oauth", "verdict:pending", "phase:baseline"]}')
-
-          HTTP=$(curl -sS -o /tmp/ai-log-resp.json -w '%{http_code}' -X POST \
-            -H "Authorization: Bearer $AI_REVIEW_LOG_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            https://api.github.com/repos/HarperFast/ai-review-log/issues \
-            -d "$PAYLOAD")
-
-          if [ "$HTTP" -ge 200 ] && [ "$HTTP" -lt 300 ]; then
-            ISSUE_URL=$(jq -r '.html_url' /tmp/ai-log-resp.json)
-            echo "Logged review to $ISSUE_URL"
-          else
-            echo "::warning::ai-review-log POST failed (HTTP $HTTP):"
-            cat /tmp/ai-log-resp.json
-          fi
+        - CSRF state tokens present on every OAuth flow; 10-minute
+          expiry is enforced; state is single-use
+        - Redirect URI validation on callback endpoints
+        - Provider-of-record enforcement (cross-provider CSRF
+          protection should redirect with error, not 403)
+        - Session field preservation across token refresh
+          (`provider`, `providerConfigId`, `providerType`)
+        - Path length validation (≤ 2048 chars) where user input
+          can reach a path
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      AI_REVIEW_LOG_TOKEN: ${{ secrets.AI_REVIEW_LOG_TOKEN }}
+      HARPERFAST_AI_CLIENT_ID: ${{ secrets.HARPERFAST_AI_CLIENT_ID }}
+      HARPERFAST_AI_APP_PRIVATE_KEY: ${{ secrets.HARPERFAST_AI_APP_PRIVATE_KEY }}

@@ -1,0 +1,77 @@
+name: Claude Issue to PR
+
+# Thin caller of the reusable in HarperFast/ai-review-prompts. The
+# single `uses:` ref pin below controls everything that moves
+# together — workflow logic, auth script, agent prompt, allowed-
+# labels list. Bumping the pin is the entire upgrade motion.
+#
+# Pre-requisites (org-level secrets, configured once on HarperFast):
+#   - HARPERFAST_AI_CLIENT_ID
+#   - HARPERFAST_AI_APP_PRIVATE_KEY
+#
+# Plus the per-repo / inherited:
+#   - ANTHROPIC_API_KEY             (required)
+
+on:
+  issues:
+    types: [labeled]
+
+concurrency:
+  group: claude-issue-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  work:
+    uses: HarperFast/ai-review-prompts/.github/workflows/_claude-issue-to-pr.yml@f6daed301f8a7ece74593506de38c6e80820b00b # main 2026-05-06 (post #11/#12/#14)
+    with:
+      # Same SHA as the `uses:` ref above. See the comment in
+      # claude-mention.yml for why the duplication is unavoidable.
+      ai-review-prompts-ref: f6daed301f8a7ece74593506de38c6e80820b00b
+      # Plugin repo — bun is part of the test path.
+      setup-bun: true
+      repo-specific-conventions: |
+        ## OAuth-specific notes
+
+        - `config.yaml` holds the plugin entry point (`pluginModule`)
+          and runtime OAuth defaults. NOT doc-only — any change
+          there is a code/config change.
+        - Tests run under both Node (`npm test`) and Bun
+          (`bun test`); both must pass.
+
+        ## Documentation scope boundary
+
+        Harper maintains authoritative docs at
+        https://docs.harperdb.io covering core, pro, and fabric.
+        This repo's docs should NOT re-explain Harper mechanics
+        those docs already cover — they drift out of sync when the
+        Harper docs update.
+
+        When writing or revising docs here:
+
+        - Document what's specific to THIS component — env var
+          names, config shape, setup flow, integration API.
+        - For anything not component-specific (deployment mechanics,
+          runtime env var handling, Fabric configuration, core
+          Harper behavior, SQL, replication), LINK to the Harper
+          docs rather than re-explaining.
+      pre-commit-validation: |
+        **`config.yaml` is NOT doc-only** — it holds the plugin
+        entry point (`pluginModule`) and runtime OAuth defaults.
+        Any change touching `config.yaml` requires the full
+        validation path regardless of the `claude-fix:*` label.
+
+        - `claude-fix:typo` / `claude-fix:docs` (doc-only changes
+          to `*.md`, `docs/**`, or `package.json`
+          keyword/description fields): run `npm run format:check`
+          and `npm run lint`. Skip `npm run build` / `npm test` /
+          `bun test` — they are not affected and waste turns.
+        - `claude-fix:deps` / `claude-fix:bug` or any change that
+          touches code or `config.yaml`: run
+          `npm run build && npm run lint && npm run format:check && npm test`
+          and `bun test`. Fix anything that fails.
+
+        When in doubt, err toward the fuller validation.
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      HARPERFAST_AI_CLIENT_ID: ${{ secrets.HARPERFAST_AI_CLIENT_ID }}
+      HARPERFAST_AI_APP_PRIVATE_KEY: ${{ secrets.HARPERFAST_AI_APP_PRIVATE_KEY }}
