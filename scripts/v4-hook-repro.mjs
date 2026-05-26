@@ -93,7 +93,10 @@ jsResource:
 `.trimStart();
 
 // resources.js mirrors CM's pattern: top-level registerHooks call, hook
-// returns a provider config for oac-prefixed IDs.
+// resolves oac-prefixed IDs. The 'oac-throw-test' branch deliberately
+// throws so we can assert the plugin surfaces a 500 — the same shape
+// Dawson saw when CM's real handleResolveProvider threw (e.g., on a
+// SecretManager.decrypt failure or a corrupted record).
 const RESOURCES_JS = `
 import { registerHooks } from '@harperfast/oauth';
 
@@ -101,6 +104,12 @@ registerHooks({
 	async onResolveProvider(providerName, logger) {
 		// Visible in stdout so we can tell empirically whether the hook fires.
 		console.log('[hook-repro] onResolveProvider called with: ' + providerName);
+		if (providerName === 'oac-throw-test') {
+			// Simulates the inside-the-hook failure mode Dawson hit (the
+			// plugin's catch block converts a thrown hook into a 500 with
+			// body { error: 'Failed to resolve OAuth provider' }).
+			throw new Error('simulated downstream failure (e.g., decrypt / DB)');
+		}
 		if (providerName.startsWith('oac-')) {
 			return {
 				provider: 'generic',
@@ -333,41 +342,85 @@ async function main() {
 		log('waiting for ready...');
 		await waitForReady(cleanupState.harperProc, 60_000);
 
-		// Hit a configId that is NOT in the static registry. If the hook
-		// fires we get a 302 to hook-resolved.test/authorize with the
-		// hook's client_id. If the hook doesn't fire we get 404.
-		const url = `http://${hostname}:${httpPort}/oauth/oac-test-config/login`;
-		log(`fetching ${url}`);
-		const response = await fetch(url, { redirect: 'manual' });
-		log(`status: ${response.status}`);
-		const location = response.headers.get('location');
-		log(`location: ${location}`);
+		const base = `http://${hostname}:${httpPort}`;
+		const results = [];
 
-		if (response.status === 404) {
-			log('FAIL: 404 — hook did not fire (likely module isolation; CM would be broken too?)');
-			exitCode = 1;
-		} else if (response.status !== 302 || !location) {
-			const body = await response.text().catch(() => '<unreadable>');
-			log(`FAIL: expected 302, got ${response.status}: ${body}`);
-			exitCode = 1;
-		} else {
-			const redirectUrl = new URL(location);
-			const target = redirectUrl.origin + redirectUrl.pathname;
-			const clientId = redirectUrl.searchParams.get('client_id');
-			log(`redirect target: ${target}`);
-			log(`client_id: ${clientId}`);
+		// Test 1: hook returns a config → plugin redirects to it.
+		{
+			const url = `${base}/oauth/oac-test-config/login`;
+			log(`[case 1] fetching ${url}`);
+			const response = await fetch(url, { redirect: 'manual' });
+			log(`[case 1] status: ${response.status}`);
+			const location = response.headers.get('location');
+			log(`[case 1] location: ${location}`);
 
-			if (target === 'http://hook-resolved.test/authorize' && clientId === HOOK_CLIENT_ID) {
-				log('PASS: hook fired and returned config; the plugin built the authorize URL from it');
-				exitCode = 0;
-			} else if (target === 'http://static.test/authorize' && clientId === STATIC_DECOY_CLIENT_ID) {
-				log('FAIL: routed to the static decoy provider — parseRoute regression returned literal "oauth"');
-				exitCode = 1;
+			let result;
+			if (response.status === 404) {
+				result = 'FAIL: 404 — hook did not fire (module isolation? CM would be broken too)';
+			} else if (response.status !== 302 || !location) {
+				const body = await response.text().catch(() => '<unreadable>');
+				result = `FAIL: expected 302, got ${response.status}: ${body}`;
 			} else {
-				log(`UNEXPECTED: target=${target} client_id=${clientId}`);
-				exitCode = 1;
+				const redirectUrl = new URL(location);
+				const target = redirectUrl.origin + redirectUrl.pathname;
+				const clientId = redirectUrl.searchParams.get('client_id');
+				log(`[case 1] redirect target: ${target}, client_id: ${clientId}`);
+				if (target === 'http://hook-resolved.test/authorize' && clientId === HOOK_CLIENT_ID) {
+					result = 'PASS: hook fired and returned config; plugin built the authorize URL from it';
+				} else if (target === 'http://static.test/authorize' && clientId === STATIC_DECOY_CLIENT_ID) {
+					result = 'FAIL: routed to the static decoy — parseRoute regression returned literal "oauth"';
+				} else {
+					result = `FAIL UNEXPECTED: target=${target} client_id=${clientId}`;
+				}
 			}
+			log(`[case 1] ${result}`);
+			results.push(result);
 		}
+
+		// Test 2: hook throws → plugin emits its 500 error envelope. This
+		// mirrors Dawson's actual failure shape (his handleResolveProvider
+		// throws somewhere downstream — likely a SecretManager.decrypt or
+		// DB error). The OAuth Resource returns `{ status: 500, body: ...}`
+		// from a Resource method; harperdb v4 surfaces that as an HTTP 200
+		// with the envelope as the JSON body. The string Dawson pasted in
+		// the Slack thread:
+		//
+		//   {"status":500,"body":{"error":"Failed to resolve OAuth provider"}}
+		//
+		// is exactly that body, NOT an HTTP 500. Asserting on the inner
+		// envelope is the right shape for this stack. (If/when CM migrates
+		// to harper v5, the outer HTTP status would also be 500; a v5
+		// counterpart of this script should assert on response.status.)
+		{
+			const url = `${base}/oauth/oac-throw-test/login`;
+			log(`[case 2] fetching ${url}`);
+			const response = await fetch(url, { redirect: 'manual' });
+			log(`[case 2] http status: ${response.status}`);
+			const body = await response.json().catch(() => null);
+			log(`[case 2] body: ${JSON.stringify(body)}`);
+
+			let result;
+			if (response.status !== 200) {
+				result = `FAIL: expected HTTP 200 (harperdb v4 envelope), got ${response.status}`;
+			} else if (!body || body.status !== 500) {
+				result = `FAIL: expected envelope body.status === 500, got ${JSON.stringify(body)}`;
+			} else if (body.body?.error !== 'Failed to resolve OAuth provider') {
+				result = `FAIL: expected body.body.error === 'Failed to resolve OAuth provider', got ${JSON.stringify(body)}`;
+			} else {
+				result =
+					'PASS: thrown hook surfaces as v4 envelope { status:500, body:{ error:"Failed to resolve OAuth provider" } } — exactly Dawson\'s symptom';
+			}
+			log(`[case 2] ${result}`);
+			results.push(result);
+		}
+
+		// Aggregate result
+		const allPassed = results.every((r) => r.startsWith('PASS'));
+		exitCode = allPassed ? 0 : 1;
+		log('');
+		log('=== Summary ===');
+		results.forEach((r, i) => log(`  case ${i + 1}: ${r}`));
+		log(`overall: ${allPassed ? 'PASS' : 'FAIL'}`);
 	} catch (err) {
 		log('error:', err.message);
 		exitCode = 1;
