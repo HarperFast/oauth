@@ -10,26 +10,30 @@
  * harperdb ^4.7.28.
  *
  * Spawns harperdb v4 against a temp fixture that configures two providers —
- * one literally named "oauth" (decoy) and one named "oac-tenant-acme" with
- * a distinctive client_id — then fires /oauth/oac-tenant-acme/login and
- * inspects the resulting redirect.
+ * one literally named "oauth" (decoy) and one named "oac-oauth-tenant" (the
+ * substring "oauth" inside this name also guards against an over-aggressive
+ * stripping regression, not just the prefix-extraction case). Fires
+ * /oauth/oac-oauth-tenant/login and inspects the resulting redirect.
  *
  * Outcomes:
  *   - Redirect to tenant.test/authorize with the tenant client_id → parseRoute
  *     correctly extracted the URL path segment. This is the current behavior
- *     on Harper v4.7.19 + v1.4.0 plugin source — Dawson's diagnosis does not
- *     reproduce on this stack.
- *   - Redirect to decoy.test/authorize → parseRoute extracted the literal
- *     "oauth" prefix as providerName. Bug confirmed (regression).
+ *     on harperdb 4.7.19 + the in-tree plugin source — Dawson's diagnosis
+ *     does not reproduce on this stack.
+ *   - Anything else (404, decoy redirect, malformed URL) → the assertion
+ *     fails; investigate parseRoute / the resource dispatch path.
  *
  * Side effects — harperdb's installer rewrites ~/.harperdb/hdb_boot_properties.file
- * to point at the temp ROOTPATH. The script saves the original contents (if any)
- * before launch and restores them in a finally block, so an existing local
- * `harperdb` install is left intact across runs. If the script is killed
- * uncleanly, manually restore the file from ${BOOT_BACKUP_PATH}.
+ * to point at the temp ROOTPATH. The script backs that file up (into the
+ * run's tempRoot) before launch and restores it in a single cleanup path
+ * shared by the normal `finally` block and the signal/exit handlers, so an
+ * existing local `harperdb` install is left intact across runs. If the
+ * script is SIGKILL'd between backup and the harperdb install actually
+ * touching the file, the backup is collocated with tempRoot and may be
+ * left orphaned in $TMPDIR until OS cleanup; check there for recovery.
  *
  * Not wired into CI. Run manually:
- *   npm run build && node scripts/v4-routing-repro.mjs
+ *   node scripts/v4-routing-repro.mjs
  *
  * Set KEEP_TEMP=1 to preserve the temp dir for inspection.
  */
@@ -40,12 +44,19 @@ import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 
 const BOOT_PROPS_PATH = join(homedir(), '.harperdb', 'hdb_boot_properties.file');
-const BOOT_BACKUP_PATH = join(tmpdir(), 'oauth-v4-repro-hdb_boot_properties.file.bak');
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const harperBin = join(repoRoot, 'node_modules', '.bin', 'harperdb');
+const tscBin = join(repoRoot, 'node_modules', '.bin', 'tsc');
 
-const TENANT_CLIENT_ID = 'tenant-acme-client-id';
+// Pin the fixture's harperdb peer to the exact version we're spawning so
+// `npm install` doesn't resolve a drifted version from the registry.
+// Sourced from node_modules/harperdb/package.json at script-write time;
+// kept in sync via the SOURCE-OF-TRUTH comment so a Renovate / manual bump
+// of the repo's harperdb dep has a single human-readable place to update.
+const HARPERDB_PIN = '4.7.19'; // SOURCE-OF-TRUTH: node_modules/harperdb/package.json
+
+const TENANT_CLIENT_ID = 'oauth-tenant-client-id';
 const DECOY_CLIENT_ID = 'decoy-oauth-client-id';
 
 const CONFIG_YAML = `
@@ -61,7 +72,7 @@ rest: true
       authorizationUrl: 'http://decoy.test/authorize'
       tokenUrl: 'http://decoy.test/token'
       userInfoUrl: 'http://decoy.test/userinfo'
-    oac-tenant-acme:
+    oac-oauth-tenant:
       provider: generic
       clientId: ${TENANT_CLIENT_ID}
       clientSecret: tenant-secret
@@ -75,6 +86,10 @@ const PACKAGE_JSON = JSON.stringify(
 		name: 'oauth-v4-routing-repro',
 		private: true,
 		type: 'module',
+		// Pin to the exact harperdb being spawned by this script so the
+		// fixture's npm install can't resolve a drifted registry version
+		// of the >=4.6.0 peer range.
+		devDependencies: { harperdb: HARPERDB_PIN },
 	},
 	null,
 	2
@@ -108,6 +123,10 @@ async function waitForReady(harperProc, timeoutMs) {
 			cleanup();
 			reject(new Error(`harperdb exited prematurely with code ${code}`));
 		};
+		const onError = (err) => {
+			cleanup();
+			reject(new Error(`harperdb spawn error: ${err.message}`));
+		};
 		const onTimeout = () => {
 			cleanup();
 			reject(new Error(`harperdb did not become ready within ${timeoutMs}ms`));
@@ -118,64 +137,145 @@ async function waitForReady(harperProc, timeoutMs) {
 			harperProc.stdout?.off('data', onData);
 			harperProc.stderr?.off('data', onData);
 			harperProc.off('exit', onExit);
+			harperProc.off('error', onError);
 		};
 		harperProc.stdout?.on('data', onData);
 		harperProc.stderr?.on('data', onData);
 		harperProc.once('exit', onExit);
+		harperProc.once('error', onError);
 	});
 }
 
+// Single cleanup state — populated as we go, consulted by both the
+// finally block and the signal handlers so they don't redundantly try
+// to restore boot props or kill harperdb.
+const cleanupState = {
+	bootBackupPath: null, // set once tempRoot exists
+	bootState: 'pending', // 'pending' | 'existed' | 'absent'
+	tempRoot: null,
+	harperProc: null,
+	cleaned: false,
+};
+
 function backupBootProps() {
+	// If a backup file already exists at this run's path it means tempRoot
+	// is being reused (impossible — mkdtemp is fresh each run), so existsSync
+	// here should always be false on a healthy invocation. The check is a
+	// belt-and-suspenders guard.
+	if (existsSync(cleanupState.bootBackupPath)) {
+		log(`WARNING: backup at ${cleanupState.bootBackupPath} already exists; treating as authoritative`);
+		cleanupState.bootState = 'existed';
+		return;
+	}
 	if (existsSync(BOOT_PROPS_PATH)) {
-		copyFileSync(BOOT_PROPS_PATH, BOOT_BACKUP_PATH);
-		log(`saved boot props to ${BOOT_BACKUP_PATH}`);
-		return 'existed';
+		copyFileSync(BOOT_PROPS_PATH, cleanupState.bootBackupPath);
+		log(`saved boot props to ${cleanupState.bootBackupPath}`);
+		cleanupState.bootState = 'existed';
+		return;
 	}
 	log('no existing boot props file to back up');
-	return 'absent';
+	cleanupState.bootState = 'absent';
 }
 
-function restoreBootProps(state) {
+function restoreBootProps() {
+	const { bootBackupPath, bootState } = cleanupState;
 	try {
-		if (state === 'existed') {
-			if (existsSync(BOOT_BACKUP_PATH)) {
-				copyFileSync(BOOT_BACKUP_PATH, BOOT_PROPS_PATH);
-				rmSync(BOOT_BACKUP_PATH, { force: true });
+		if (bootState === 'existed') {
+			if (bootBackupPath && existsSync(bootBackupPath)) {
+				copyFileSync(bootBackupPath, BOOT_PROPS_PATH);
 				log(`restored boot props from backup`);
 			} else {
-				log(`WARNING: backup at ${BOOT_BACKUP_PATH} missing — leaving boot props as-is`);
+				log(`WARNING: backup at ${bootBackupPath} missing — leaving boot props as-is`);
 			}
-		} else if (state === 'absent') {
+		} else if (bootState === 'absent') {
+			// harperdb's installer creates the file even if it wasn't there
+			// before. Remove it to restore the original "no boot props" state.
 			rmSync(BOOT_PROPS_PATH, { force: true });
 			log(`removed boot props (none existed before)`);
 		}
 	} catch (err) {
-		log(`WARNING: failed to restore boot props: ${err.message}. Original backup at ${BOOT_BACKUP_PATH}`);
+		log(`WARNING: failed to restore boot props: ${err.message}. Backup may be at ${bootBackupPath}`);
+	}
+}
+
+function cleanup() {
+	if (cleanupState.cleaned) return;
+	cleanupState.cleaned = true;
+
+	const { harperProc, tempRoot } = cleanupState;
+
+	if (harperProc && harperProc.exitCode === null) {
+		log('killing harperdb...');
+		try {
+			harperProc.kill('SIGINT');
+		} catch {
+			// Already exited between the check and the kill — fine.
+		}
+		// Best-effort follow-up SIGKILL; we can't await an async timer from
+		// a synchronous signal handler, so accept the brief inconsistency.
+		setTimeout(() => {
+			if (harperProc.exitCode === null) {
+				try {
+					harperProc.kill('SIGKILL');
+				} catch {
+					// Already exited; nothing to do.
+				}
+			}
+		}, 1000);
+	}
+
+	restoreBootProps();
+
+	if (tempRoot && !process.env.KEEP_TEMP) {
+		log(`cleaning up ${tempRoot}`);
+		try {
+			rmSync(tempRoot, { recursive: true, force: true });
+		} catch (err) {
+			log(`WARNING: failed to remove ${tempRoot}: ${err.message}`);
+		}
+	} else if (tempRoot) {
+		log(`KEEP_TEMP set; leaving ${tempRoot}`);
 	}
 }
 
 async function main() {
-	const tempRoot = mkdtempSync(join(tmpdir(), 'oauth-v4-repro-'));
-	const fixtureDir = join(tempRoot, 'app');
-	const hdbRoot = join(tempRoot, 'hdb-root');
-	log(`temp root: ${tempRoot}`);
+	if (!existsSync(harperBin)) {
+		throw new Error(`harperdb binary not found at ${harperBin}. Run "npm install" in the repo root first.`);
+	}
+	if (!existsSync(tscBin)) {
+		throw new Error(`tsc binary not found at ${tscBin}. Run "npm install" in the repo root first.`);
+	}
+
+	cleanupState.tempRoot = mkdtempSync(join(tmpdir(), 'oauth-v4-repro-'));
+	cleanupState.bootBackupPath = join(cleanupState.tempRoot, 'hdb_boot_properties.file.bak');
+	const componentsRoot = join(cleanupState.tempRoot, 'components');
+	const componentAppDir = join(componentsRoot, 'app');
+	const hdbRoot = join(cleanupState.tempRoot, 'hdb-root');
+	log(`temp root: ${cleanupState.tempRoot}`);
 
 	// Save the current boot props before harperdb's installer rewrites them.
 	// Done outside the try so the backup is in place if anything below throws
 	// before harperdb spawns.
-	const bootState = backupBootProps();
+	backupBootProps();
 
-	let harperProc = null;
 	let exitCode = 1;
 
 	try {
-		// 1. Build the plugin (so dist/ is current)
-		log('building plugin...');
-		run('npm', ['run', 'build'], { cwd: repoRoot });
+		// 1. Build the plugin with a stricter invocation than `npm run build`
+		// (which is `tsc || true` — silent failures can leave stale dist/).
+		// Clear dist/ first so a TS emission failure is visible by the
+		// missing dist/index.js after.
+		log('rebuilding plugin (strict)...');
+		rmSync(join(repoRoot, 'dist'), { recursive: true, force: true });
+		run(tscBin, [], { cwd: repoRoot });
+		const distEntry = join(repoRoot, 'dist', 'index.js');
+		if (!existsSync(distEntry)) {
+			throw new Error(`build did not emit ${distEntry}`);
+		}
 
 		// 2. npm pack the local plugin into the temp dir
 		log('packing local plugin...');
-		const packResult = spawnSync('npm', ['pack', '--pack-destination', tempRoot, '--json'], {
+		const packResult = spawnSync('npm', ['pack', '--pack-destination', cleanupState.tempRoot, '--json'], {
 			cwd: repoRoot,
 			encoding: 'utf8',
 		});
@@ -184,25 +284,22 @@ async function main() {
 			throw new Error(`npm pack failed (exit ${packResult.status})`);
 		}
 		const tarballName = JSON.parse(packResult.stdout)[0].filename;
-		const tarballPath = join(tempRoot, tarballName);
+		const tarballPath = join(cleanupState.tempRoot, tarballName);
 
-		// 3. Set up the fixture
-		log(`writing fixture to ${fixtureDir}...`);
-		spawnSync('mkdir', ['-p', fixtureDir], { stdio: 'inherit' });
-		writeFileSync(join(fixtureDir, 'config.yaml'), CONFIG_YAML);
-		writeFileSync(join(fixtureDir, 'package.json'), PACKAGE_JSON);
+		// 3. Set up the fixture component directly under components/app
+		// (avoids a wasteful cp -r of node_modules later).
+		log(`writing fixture to ${componentAppDir}...`);
+		run('mkdir', ['-p', componentAppDir]);
+		writeFileSync(join(componentAppDir, 'config.yaml'), CONFIG_YAML);
+		writeFileSync(join(componentAppDir, 'package.json'), PACKAGE_JSON);
 
-		log('installing plugin into fixture...');
-		run('npm', ['install', '--no-save', '--no-audit', '--no-fund', tarballPath], { cwd: fixtureDir });
+		log('installing plugin into fixture component dir...');
+		run('npm', ['install', '--no-save', '--no-audit', '--no-fund', tarballPath], { cwd: componentAppDir });
 
 		// 4. Spawn harperdb with CLI-arg config — modeled on
 		// @harperfast/integration-testing@0.3.0 (v5). Same argument names
 		// exist in v4's bundled binary (ROOTPATH, HDB_ADMIN_*, HTTP_PORT,
 		// OPERATIONSAPI_*, etc.).
-		//
-		// Also point Harper at the fixture directory as its componentsRoot
-		// so the OAuth plugin loads from there (the fixture has the plugin
-		// installed via npm pack above).
 		const httpPort = 19926;
 		const opsPort = 19925;
 		const hostname = '127.0.0.1';
@@ -220,22 +317,17 @@ async function main() {
 			`--LOGGING_LEVEL=debug`,
 			`--LOGGING_STDSTREAMS=true`,
 			`--CLUSTERING_ENABLED=false`,
-			`--COMPONENTSROOT=${tempRoot}/components`,
+			`--COMPONENTSROOT=${componentsRoot}`,
 		];
 
-		// Move the fixture into a `components/` subdir so harperdb finds it
-		// as a component by directory name.
-		run('mkdir', ['-p', join(tempRoot, 'components')]);
-		run('cp', ['-r', fixtureDir, join(tempRoot, 'components', 'app')]);
-
 		log(`spawning: ${harperBin} ${args.join(' ')}`);
-		harperProc = spawn(harperBin, args);
+		cleanupState.harperProc = spawn(harperBin, args);
 
 		log('waiting for ready...');
-		await waitForReady(harperProc, 60_000);
+		await waitForReady(cleanupState.harperProc, 60_000);
 
 		// 5. Fire the request and check the redirect.
-		const url = `http://${hostname}:${httpPort}/oauth/oac-tenant-acme/login`;
+		const url = `http://${hostname}:${httpPort}/oauth/oac-oauth-tenant/login`;
 		log(`fetching ${url}`);
 		const response = await fetch(url, { redirect: 'manual' });
 		log(`status: ${response.status}`);
@@ -269,49 +361,27 @@ async function main() {
 		log('error:', err.message);
 		exitCode = 1;
 	} finally {
-		if (harperProc && harperProc.exitCode === null) {
-			log('killing harperdb...');
-			harperProc.kill('SIGINT');
-			await new Promise((r) => setTimeout(r, 1000));
-			if (harperProc.exitCode === null) harperProc.kill('SIGKILL');
-		}
-		restoreBootProps(bootState);
-		if (!process.env.KEEP_TEMP) {
-			log(`cleaning up ${tempRoot}`);
-			rmSync(tempRoot, { recursive: true, force: true });
-		} else {
-			log(`KEEP_TEMP set; leaving ${tempRoot}`);
-		}
+		cleanup();
+		// Give the post-cleanup SIGKILL timer a moment to land before exiting.
+		await new Promise((r) => setTimeout(r, 1100));
 	}
 
 	process.exit(exitCode);
 }
 
-// Restore boot props on unclean exits too — Ctrl+C, kill, uncaught exceptions.
-let signaled = false;
-function emergencyRestore() {
-	if (signaled) return;
-	signaled = true;
-	try {
-		if (existsSync(BOOT_BACKUP_PATH)) {
-			copyFileSync(BOOT_BACKUP_PATH, BOOT_PROPS_PATH);
-			rmSync(BOOT_BACKUP_PATH, { force: true });
-			console.log(`[v4-repro] emergency: restored boot props from ${BOOT_BACKUP_PATH}`);
-		}
-	} catch (err) {
-		console.error(`[v4-repro] emergency restore failed: ${err.message}`);
-	}
+// Route signal exits through the shared cleanup path so harperdb is killed,
+// tempRoot is removed, and boot props are restored before we leave.
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT']) {
+	process.on(sig, () => {
+		cleanup();
+		const code = sig === 'SIGINT' ? 130 : sig === 'SIGTERM' ? 143 : sig === 'SIGHUP' ? 129 : 131;
+		// Brief delay so the cleanup's async timer can fire if needed.
+		setTimeout(() => process.exit(code), 1100).unref();
+	});
 }
-process.on('SIGINT', () => {
-	emergencyRestore();
-	process.exit(130);
-});
-process.on('SIGTERM', () => {
-	emergencyRestore();
-	process.exit(143);
-});
 
 main().catch((err) => {
 	console.error('[v4-repro] fatal:', err);
+	cleanup();
 	process.exit(1);
 });
