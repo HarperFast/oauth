@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * v4-routing-repro.mjs — lightweight repro for the symptom Dawson reported
+ * v4-routing-repro.mjs — regression guard for the symptom Dawson reported
  * on 2026-05-22 (CM/Studio Okta SSO):
  *
  *   "providerName is 'oauth', not the {configId} described, that isn't passed"
@@ -14,35 +14,33 @@
  * a distinctive client_id — then fires /oauth/oac-tenant-acme/login and
  * inspects the resulting redirect.
  *
- * Expected outcomes once boot works:
+ * Outcomes:
  *   - Redirect to tenant.test/authorize with the tenant client_id → parseRoute
- *     correctly extracted the URL path segment. Dawson's diagnosis would not
+ *     correctly extracted the URL path segment. This is the current behavior
+ *     on Harper v4.7.19 + v1.4.0 plugin source — Dawson's diagnosis does not
  *     reproduce on this stack.
  *   - Redirect to decoy.test/authorize → parseRoute extracted the literal
- *     "oauth" prefix as providerName. Bug confirmed on this stack.
+ *     "oauth" prefix as providerName. Bug confirmed (regression).
  *
- * STATUS — WIP, does NOT currently boot harperdb v4.
+ * Side effects — harperdb's installer rewrites ~/.harperdb/hdb_boot_properties.file
+ * to point at the temp ROOTPATH. The script saves the original contents (if any)
+ * before launch and restores them in a finally block, so an existing local
+ * `harperdb` install is left intact across runs. If the script is killed
+ * uncleanly, manually restore the file from ${BOOT_BACKUP_PATH}.
  *
- *   harperdb v4 reads its root path from ~/.harperdb/hdb_boot_properties.file
- *   (written by `harperdb install`). The CLI doesn't accept ROOTPATH /
- *   HDB_ROOT env vars to override it, and any non-default install would
- *   overwrite Nathan's existing /Users/nathan/harper pointer. Need either:
- *   (a) scripted `harperdb install` to a temp dir + atomic save/restore of
- *       the boot-properties file, OR
- *   (b) find the correct env var(s) harperdb v4 honors (likely
- *       HARPER_<SECTION>_<KEY> like Harper v5's HARPER_SET_CONFIG; not yet
- *       verified for v4)
- *
- * Run manually (once it works):
+ * Not wired into CI. Run manually:
  *   npm run build && node scripts/v4-routing-repro.mjs
  *
  * Set KEEP_TEMP=1 to preserve the temp dir for inspection.
  */
-import { mkdtempSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdtempSync, writeFileSync, rmSync, readFileSync, existsSync, copyFileSync } from 'node:fs';
+import { tmpdir, homedir } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
+
+const BOOT_PROPS_PATH = join(homedir(), '.harperdb', 'hdb_boot_properties.file');
+const BOOT_BACKUP_PATH = join(tmpdir(), 'oauth-v4-repro-hdb_boot_properties.file.bak');
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const harperBin = join(repoRoot, 'node_modules', '.bin', 'harperdb');
@@ -127,11 +125,45 @@ async function waitForReady(harperProc, timeoutMs) {
 	});
 }
 
+function backupBootProps() {
+	if (existsSync(BOOT_PROPS_PATH)) {
+		copyFileSync(BOOT_PROPS_PATH, BOOT_BACKUP_PATH);
+		log(`saved boot props to ${BOOT_BACKUP_PATH}`);
+		return 'existed';
+	}
+	log('no existing boot props file to back up');
+	return 'absent';
+}
+
+function restoreBootProps(state) {
+	try {
+		if (state === 'existed') {
+			if (existsSync(BOOT_BACKUP_PATH)) {
+				copyFileSync(BOOT_BACKUP_PATH, BOOT_PROPS_PATH);
+				rmSync(BOOT_BACKUP_PATH, { force: true });
+				log(`restored boot props from backup`);
+			} else {
+				log(`WARNING: backup at ${BOOT_BACKUP_PATH} missing — leaving boot props as-is`);
+			}
+		} else if (state === 'absent') {
+			rmSync(BOOT_PROPS_PATH, { force: true });
+			log(`removed boot props (none existed before)`);
+		}
+	} catch (err) {
+		log(`WARNING: failed to restore boot props: ${err.message}. Original backup at ${BOOT_BACKUP_PATH}`);
+	}
+}
+
 async function main() {
 	const tempRoot = mkdtempSync(join(tmpdir(), 'oauth-v4-repro-'));
 	const fixtureDir = join(tempRoot, 'app');
 	const hdbRoot = join(tempRoot, 'hdb-root');
 	log(`temp root: ${tempRoot}`);
+
+	// Save the current boot props before harperdb's installer rewrites them.
+	// Done outside the try so the backup is in place if anything below throws
+	// before harperdb spawns.
+	const bootState = backupBootProps();
 
 	let harperProc = null;
 	let exitCode = 1;
@@ -163,25 +195,47 @@ async function main() {
 		log('installing plugin into fixture...');
 		run('npm', ['install', '--no-save', '--no-audit', '--no-fund', tarballPath], { cwd: fixtureDir });
 
-		// 4. Spawn harperdb dev <fixtureDir>
-		// Using HDB_ROOT to direct harperdb's data dir to a temp location so we
-		// don't touch ~/hdb. Plain HTTP on 9926 by default (securePort overrides
-		// but dev mode usually serves plain HTTP for ease of testing).
-		log(`spawning: ${harperBin} dev ${fixtureDir}`);
-		harperProc = spawn(harperBin, ['dev', fixtureDir], {
-			env: {
-				...process.env,
-				HDB_ROOT: hdbRoot,
-				ROOTPATH: hdbRoot,
-			},
-		});
+		// 4. Spawn harperdb with CLI-arg config — modeled on
+		// @harperfast/integration-testing@0.3.0 (v5). Same argument names
+		// exist in v4's bundled binary (ROOTPATH, HDB_ADMIN_*, HTTP_PORT,
+		// OPERATIONSAPI_*, etc.).
+		//
+		// Also point Harper at the fixture directory as its componentsRoot
+		// so the OAuth plugin loads from there (the fixture has the plugin
+		// installed via npm pack above).
+		const httpPort = 19926;
+		const opsPort = 19925;
+		const hostname = '127.0.0.1';
+		const args = [
+			`--ROOTPATH=${hdbRoot}`,
+			`--TC_AGREEMENT=yes`,
+			`--HDB_ADMIN_USERNAME=admin`,
+			`--HDB_ADMIN_PASSWORD=Abc1234!`,
+			`--DEFAULTS_MODE=dev`,
+			`--REPLICATION_HOSTNAME=localhost`,
+			`--HTTP_PORT=${hostname}:${httpPort}`,
+			`--OPERATIONSAPI_NETWORK_PORT=${hostname}:${opsPort}`,
+			`--NODE_HOSTNAME=${hostname}`,
+			`--THREADS_COUNT=1`,
+			`--LOGGING_LEVEL=debug`,
+			`--LOGGING_STDSTREAMS=true`,
+			`--CLUSTERING_ENABLED=false`,
+			`--COMPONENTSROOT=${tempRoot}/components`,
+		];
+
+		// Move the fixture into a `components/` subdir so harperdb finds it
+		// as a component by directory name.
+		run('mkdir', ['-p', join(tempRoot, 'components')]);
+		run('cp', ['-r', fixtureDir, join(tempRoot, 'components', 'app')]);
+
+		log(`spawning: ${harperBin} ${args.join(' ')}`);
+		harperProc = spawn(harperBin, args);
 
 		log('waiting for ready...');
 		await waitForReady(harperProc, 60_000);
 
-		// 5. Fire the request and check the redirect
-		// Try plain HTTP on 9926 first; harperdb dev usually exposes it.
-		const url = 'http://localhost:9926/oauth/oac-tenant-acme/login';
+		// 5. Fire the request and check the redirect.
+		const url = `http://${hostname}:${httpPort}/oauth/oac-tenant-acme/login`;
 		log(`fetching ${url}`);
 		const response = await fetch(url, { redirect: 'manual' });
 		log(`status: ${response.status}`);
@@ -219,6 +273,7 @@ async function main() {
 			await new Promise((r) => setTimeout(r, 1000));
 			if (harperProc.exitCode === null) harperProc.kill('SIGKILL');
 		}
+		restoreBootProps(bootState);
 		if (!process.env.KEEP_TEMP) {
 			log(`cleaning up ${tempRoot}`);
 			rmSync(tempRoot, { recursive: true, force: true });
@@ -229,6 +284,30 @@ async function main() {
 
 	process.exit(exitCode);
 }
+
+// Restore boot props on unclean exits too — Ctrl+C, kill, uncaught exceptions.
+let signaled = false;
+function emergencyRestore() {
+	if (signaled) return;
+	signaled = true;
+	try {
+		if (existsSync(BOOT_BACKUP_PATH)) {
+			copyFileSync(BOOT_BACKUP_PATH, BOOT_PROPS_PATH);
+			rmSync(BOOT_BACKUP_PATH, { force: true });
+			console.log(`[v4-repro] emergency: restored boot props from ${BOOT_BACKUP_PATH}`);
+		}
+	} catch (err) {
+		console.error(`[v4-repro] emergency restore failed: ${err.message}`);
+	}
+}
+process.on('SIGINT', () => {
+	emergencyRestore();
+	process.exit(130);
+});
+process.on('SIGTERM', () => {
+	emergencyRestore();
+	process.exit(143);
+});
 
 main().catch((err) => {
 	console.error('[v4-repro] fatal:', err);
