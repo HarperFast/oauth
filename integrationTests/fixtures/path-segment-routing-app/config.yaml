@@ -1,0 +1,32 @@
+# Integration test fixture: verifies the OAuth Resource correctly extracts
+# the providerName from the URL path segment, NOT the literal "oauth" prefix.
+#
+# Two providers are configured with distinctive client_ids. A request to
+# /oauth/<name>/login should redirect with that provider's client_id. If
+# parseRoute were to extract the literal "oauth" path segment (the symptom
+# Dawson reported on 2026-05-22 from CM/Studio), the request would route
+# to the provider literally named "oauth" and we'd see the wrong client_id.
+
+rest: true
+
+'@harperfast/oauth':
+  package: '@harperfast/oauth'
+  providers:
+    # Provider literally named "oauth" — present specifically as a decoy.
+    # If parseRoute is broken and treats "oauth" as the providerName, this
+    # is what would (incorrectly) handle requests for other tenants.
+    oauth:
+      provider: generic
+      clientId: ${OAUTH_DECOY_CLIENT_ID}
+      clientSecret: decoy-secret
+      authorizationUrl: 'http://decoy.test/authorize'
+      tokenUrl: 'http://decoy.test/token'
+      userInfoUrl: 'http://decoy.test/userinfo'
+    # Tenant-style provider with a distinctive client_id we can assert on.
+    oac-tenant-acme:
+      provider: generic
+      clientId: ${OAUTH_TENANT_CLIENT_ID}
+      clientSecret: tenant-secret
+      authorizationUrl: 'http://tenant.test/authorize'
+      tokenUrl: 'http://tenant.test/token'
+      userInfoUrl: 'http://tenant.test/userinfo'
