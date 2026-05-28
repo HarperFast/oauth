@@ -30,7 +30,7 @@ export interface OAuthPluginConfig {
 	defaultRole?: string;
 	/** Lifecycle hooks */
 	hooks?: OAuthHooks;
-	/** Cache providers resolved via onResolveProvider hook. true = forever (default), false = never, number = TTL in seconds */
+	/** Cache providers resolved via onResolveProvider hook. true = forever, false = never, number = TTL in seconds. Default: 300s (bounded, so disabled/rotated providers stop being served without a restart). */
 	cacheDynamicProviders?: boolean | number;
 	/** MCP OAuth flow configuration (RFC 9728 PRM, RFC 7591 DCR, RFC 8707 audience binding) */
 	mcp?: MCPConfig;

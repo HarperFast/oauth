@@ -26,11 +26,26 @@ function advanceTime(ms) {
 
 describe('DynamicProviderCache', () => {
 	describe('constructor TTL parsing', () => {
-		it('defaults to cache forever (true)', () => {
+		it('defaults to a bounded 300s TTL (not forever)', () => {
 			const cache = new DynamicProviderCache();
 			const entry = mockEntry('okta');
 			cache.set('okta-org1', entry);
-			assert.strictEqual(cache.get('okta-org1'), entry);
+
+			// Within the default window — entry is served
+			const restoreWithin = advanceTime(299_000);
+			try {
+				assert.strictEqual(cache.get('okta-org1'), entry);
+			} finally {
+				restoreWithin();
+			}
+
+			// Past the default window — entry has expired (proves it is NOT forever)
+			const restorePast = advanceTime(301_000);
+			try {
+				assert.strictEqual(cache.get('okta-org1'), undefined);
+			} finally {
+				restorePast();
+			}
 		});
 
 		it('true caches forever', () => {
@@ -184,6 +199,25 @@ describe('DynamicProviderCache', () => {
 			} finally {
 				restore();
 			}
+		});
+	});
+
+	describe('delete', () => {
+		it('evicts a single entry and reports whether it was present', () => {
+			const cache = new DynamicProviderCache(60);
+			const entry = mockEntry('okta');
+			cache.set('okta-org1', entry);
+			cache.set('azure-org2', mockEntry('azure'));
+
+			assert.strictEqual(cache.delete('okta-org1'), true);
+			assert.strictEqual(cache.get('okta-org1'), undefined);
+			// Other entries are untouched
+			assert.strictEqual(cache.size, 1);
+		});
+
+		it('returns false when the key is not present', () => {
+			const cache = new DynamicProviderCache(60);
+			assert.strictEqual(cache.delete('nonexistent'), false);
 		});
 	});
 
