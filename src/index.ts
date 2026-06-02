@@ -44,36 +44,6 @@ export type { OAuthValidationOptions } from './lib/withOAuthValidation.ts';
 let pendingHooks: OAuthHooks | null = null;
 let activeHookManager: HookManager | null = null;
 
-// Active dynamic-provider cache for the loaded plugin instance, so consumers
-// can invalidate entries when their backing config changes. Per-worker-thread:
-// this references the cache in the thread that ran handleApplication.
-let activeDynamicProviderCache: DynamicProviderCache | null = null;
-
-/**
- * Invalidate a single dynamically-resolved provider in the in-memory cache.
- * Call this from application code after the backing config for `providerConfigId`
- * changes (disabled, deleted, or credentials rotated) so the next request
- * re-resolves it via the `onResolveProvider` hook instead of serving stale data.
- *
- * NOTE: the cache is per-worker-thread, so this evicts only in the thread that
- * runs the call. Other threads converge within the configured TTL
- * (`cacheDynamicProviders`, default {@link DEFAULT_DYNAMIC_PROVIDER_CACHE_TTL_SECONDS}s).
- * For immediate cluster-wide effect, pair invalidation with a short TTL.
- *
- * @returns true if an entry was present and removed in this thread.
- */
-export function invalidateDynamicProvider(providerConfigId: string): boolean {
-	return activeDynamicProviderCache?.delete(providerConfigId) ?? false;
-}
-
-/**
- * Clear every dynamically-resolved provider from the in-memory cache (this
- * worker thread only — see {@link invalidateDynamicProvider} for cross-thread notes).
- */
-export function clearDynamicProviderCache(): void {
-	activeDynamicProviderCache?.clear();
-}
-
 /**
  * Register OAuth hooks programmatically
  * Call this from your application code to register lifecycle hooks
@@ -132,9 +102,6 @@ export async function handleApplication(scope: Scope): Promise<void> {
 	let isInitialized = false;
 	let pluginDefaults: any = {}; // Store plugin defaults for dynamic provider resolution
 	const dynamicProviderCache = new DynamicProviderCache(); // TTL cache for dynamically-resolved providers
-
-	// Expose this thread's cache for consumer-driven invalidation
-	activeDynamicProviderCache = dynamicProviderCache;
 
 	// Create hookManager instance scoped to this application
 	const hookManager = new HookManager(logger);
@@ -351,8 +318,5 @@ export async function handleApplication(scope: Scope): Promise<void> {
 	// Clean up on scope close
 	scope.on('close', () => {
 		logger?.info?.('OAuth plugin shutting down');
-		if (activeDynamicProviderCache === dynamicProviderCache) {
-			activeDynamicProviderCache = null;
-		}
 	});
 }
