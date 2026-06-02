@@ -1,31 +1,32 @@
 /**
  * TTL cache for dynamically-resolved OAuth providers.
  *
- * Sits between the static provider registry and the onResolveProvider hook
- * to avoid a database lookup on every request while still picking up
- * config changes within a bounded window.
+ * Sits between the static provider registry and the onResolveProvider hook so
+ * the hook (a database lookup, decryption, etc.) doesn't run on every request.
+ * It is in-memory and per-worker-thread, and freshness is controlled solely by
+ * the TTL: an entry is re-resolved once it expires, so a config change (disabled
+ * provider, rotated credentials, etc.) takes effect within one TTL window.
+ *
+ * There is intentionally no manual eviction API. A per-thread evict would clear
+ * only one worker's copy, leaving the others stale — a partial, confusing state.
+ * The uniform TTL is the single, predictable convergence mechanism; tune it (or
+ * disable the cache) rather than reaching for invalidation.
  *
  * cacheDynamicProviders values:
- *   true     — cache forever (no eviction except explicit invalidate/clear)
- *   false    — never cache, always call hook
- *   <number> — cache for N seconds
- *   (unset)  — DEFAULT_DYNAMIC_PROVIDER_CACHE_TTL_SECONDS (bounded)
- *
- * The cache is in-memory and per-worker-thread. A resolved provider therefore
- * only goes stale when its TTL elapses (each thread re-resolves on its own) or
- * when a consumer explicitly evicts it via `delete`/`clear`. Because an explicit
- * eviction reaches only the thread that runs it, the TTL is the cross-thread
- * convergence mechanism — keep it bounded so config changes (disable / delete /
- * credential rotation) take effect cluster-wide.
+ *   <number> — cache for N seconds (use a low value for fresher config)
+ *   false    — never cache; call the hook every request. Prefer this if your
+ *              onResolveProvider already caches at the lookup layer.
+ *   true     — cache forever (no expiry); only safe if a resolved config never
+ *              changes for the life of the process.
+ *   (unset)  — DEFAULT_DYNAMIC_PROVIDER_CACHE_TTL_SECONDS (bounded; see below)
  */
 
 import type { ProviderRegistryEntry } from '../types.ts';
 
 /**
  * Default TTL (seconds) when `cacheDynamicProviders` is not set. Bounded rather
- * than infinite so a changed backing config is picked up within the window even
- * without an explicit invalidation. The previous default was `true` (forever),
- * which left disabled/rotated providers serving stale data until restart.
+ * than forever, so a changed backing config is picked up within the window with
+ * no manual step.
  */
 export const DEFAULT_DYNAMIC_PROVIDER_CACHE_TTL_SECONDS = 300;
 
@@ -65,14 +66,6 @@ export class DynamicProviderCache {
 	set(name: string, entry: ProviderRegistryEntry): void {
 		if (this.ttlMs === 0) return;
 		this.cache.set(name, { entry, cachedAt: Date.now() });
-	}
-
-	/**
-	 * Evict a single entry. Returns true if it was present. Use when the backing
-	 * config for `name` changes so the next request re-resolves it via the hook.
-	 */
-	delete(name: string): boolean {
-		return this.cache.delete(name);
 	}
 
 	clear(): void {
