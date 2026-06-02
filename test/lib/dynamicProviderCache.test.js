@@ -202,25 +202,6 @@ describe('DynamicProviderCache', () => {
 		});
 	});
 
-	describe('delete', () => {
-		it('evicts a single entry and reports whether it was present', () => {
-			const cache = new DynamicProviderCache(60);
-			const entry = mockEntry('okta');
-			cache.set('okta-org1', entry);
-			cache.set('azure-org2', mockEntry('azure'));
-
-			assert.strictEqual(cache.delete('okta-org1'), true);
-			assert.strictEqual(cache.get('okta-org1'), undefined);
-			// Other entries are untouched
-			assert.strictEqual(cache.size, 1);
-		});
-
-		it('returns false when the key is not present', () => {
-			const cache = new DynamicProviderCache(60);
-			assert.strictEqual(cache.delete('nonexistent'), false);
-		});
-	});
-
 	describe('clear', () => {
 		it('removes all entries', () => {
 			const cache = new DynamicProviderCache(60);

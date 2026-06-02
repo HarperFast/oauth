@@ -142,16 +142,19 @@ async function resolveOAuthProvider(providerName, logger) {
 
 **Caching Behavior:**
 
-By default, the plugin caches the resolved provider config in memory permanently after the first `onResolveProvider` call. This is efficient but means config changes (domain, credentials, etc.) won't take effect until server restart.
+The plugin caches each resolved provider config in memory so the hook (a database lookup, decryption, etc.) doesn't run on every request. The cache is **in-memory and per-worker-thread**, and freshness is controlled **solely by a TTL** — an entry is re-resolved once it expires, so a config change (disabled provider, rotated credentials, etc.) takes effect within one TTL window. There is no manual invalidation API: a per-thread evict would clear only one worker's copy, so the uniform TTL is the single, predictable mechanism.
 
 Control caching with `cacheDynamicProviders` in your plugin config:
 
 ```yaml
 '@harperfast/oauth':
-  cacheDynamicProviders: true   # Cache forever (default)
-  cacheDynamicProviders: 60     # Cache for 60 seconds (recommended for multi-tenant)
+  cacheDynamicProviders: 300    # Cache for 300 seconds (default)
+  cacheDynamicProviders: 30     # Lower TTL = fresher config (recommended for multi-tenant)
   cacheDynamicProviders: false  # Never cache — hook called on every request
+  cacheDynamicProviders: true   # Cache forever (only if the config never changes at runtime)
 ```
+
+If your `onResolveProvider` already caches at the lookup layer (e.g. it memoizes its own DB reads and decryption), set `cacheDynamicProviders: false` and let that layer own caching — the plugin will simply call the hook each time.
 
 **Security Requirements:**
 
