@@ -227,6 +227,55 @@ registerHooks({
 
 ---
 
+### invalidateDynamicProvider()
+
+Evict a single dynamically-resolved provider (one resolved via the `onResolveProvider` hook) from the in-memory cache, so the next request re-resolves it via the hook. Call this after the backing config for `providerConfigId` changes — disabled, deleted, or credentials rotated — to make the change take effect without waiting out the cache TTL.
+
+**Import:**
+
+```javascript
+import { invalidateDynamicProvider } from '@harperfast/oauth';
+```
+
+**Signature:**
+
+```typescript
+function invalidateDynamicProvider(providerConfigId: string): boolean;
+```
+
+Returns `true` if a cached entry was present and removed in this worker thread.
+
+**Example:**
+
+```javascript
+// After updating an org's OAuth config in your datastore:
+invalidateDynamicProvider(configId);
+```
+
+**Note:** The cache is per-worker-thread, so this evicts only in the thread that runs the call. Other worker threads converge within the configured `cacheDynamicProviders` TTL (default 300s). For immediate cluster-wide effect, pair invalidation with a short TTL.
+
+---
+
+### clearDynamicProviderCache()
+
+Clear **all** dynamically-resolved providers from the in-memory cache (in the calling worker thread). Useful when many configs change at once.
+
+**Import:**
+
+```javascript
+import { clearDynamicProviderCache } from '@harperfast/oauth';
+```
+
+**Signature:**
+
+```typescript
+function clearDynamicProviderCache(): void;
+```
+
+**Note:** Same per-worker-thread caveat as `invalidateDynamicProvider()`.
+
+---
+
 ## Session Structure
 
 The OAuth plugin stores the following data in `request.session`:

@@ -1,14 +1,16 @@
 /**
  * Tests for the module-level dynamic-provider cache invalidation wiring in
  * src/index.ts: invalidateDynamicProvider(), clearDynamicProviderCache(), and
- * the scope-close ownership guard. The DynamicProviderCache class itself is
- * covered in test/lib/dynamicProviderCache.test.js — this exercises the
- * handleApplication wiring around it.
+ * the set of active caches (added on handleApplication, removed on scope close).
+ * The DynamicProviderCache class itself is covered in
+ * test/lib/dynamicProviderCache.test.js — this exercises the handleApplication
+ * wiring around it, including the multi-instance behavior that motivated tracking
+ * a Set of caches rather than a single reference.
  *
- * Everything runs in one test because the exported functions read module-level
- * state (the active cache + active hookManager) that is shared across the file;
- * node --test isolates each file in its own subprocess, so a single sequence
- * keeps the state deterministic without cross-test contamination.
+ * The exported functions read module-level state (the active-cache set + active
+ * hookManager) shared across the file; node --test isolates each file in its own
+ * subprocess, and each test tears down the scopes it creates so the set is empty
+ * between tests.
  */
 
 import { describe, it } from 'node:test';
@@ -119,9 +121,66 @@ describe('dynamic provider cache invalidation wiring', () => {
 		await middleware({ session: oacSession('oac-1') }, next);
 		assert.strictEqual(resolveCalls, 3, 'request after clear re-resolves');
 
-		// Scope close releases the active-cache reference → invalidate becomes a no-op.
+		// Scope close removes this cache from the active set → invalidate becomes a no-op.
 		assert.strictEqual(closeListeners.length, 1, 'a close listener is registered');
 		closeListeners[0]();
 		assert.strictEqual(invalidateDynamicProvider('oac-1'), false, 'invalidate is a no-op after close');
+	});
+
+	it('invalidation reaches every plugin instance in the thread; closing one does not orphan the others', async () => {
+		let resolveCalls = 0;
+		const resolver = {
+			async onResolveProvider(name) {
+				if (!name.startsWith('oac-')) return null;
+				resolveCalls++;
+				return {
+					provider: 'generic',
+					clientId: 'oac-client',
+					clientSecret: 'oac-secret',
+					authorizationUrl: 'https://idp.test/authorize',
+					tokenUrl: 'https://idp.test/token',
+					userInfoUrl: 'https://idp.test/userinfo',
+					scope: 'openid',
+				};
+			},
+		};
+		const next = (req) => req;
+		const req = () => ({ session: oacSession('oac-x') });
+
+		// Two plugin instances loaded in the same thread/module. Register the hook
+		// after each handleApplication so it binds to that instance's hookManager.
+		const a = makeScope();
+		await handleApplication(a.scope);
+		registerHooks(resolver);
+		const midA = a.getMiddleware();
+		await midA(req(), next); // A resolves + caches oac-x (resolveCalls: 1)
+
+		const b = makeScope();
+		await handleApplication(b.scope);
+		registerHooks(resolver);
+		const midB = b.getMiddleware();
+		await midB(req(), next); // B resolves + caches oac-x (resolveCalls: 2)
+		assert.strictEqual(resolveCalls, 2, 'each instance resolved and cached once');
+
+		// invalidate must reach BOTH instances. (The old single-reference design
+		// tracked only the last-loaded instance, so A's cache was never reachable.)
+		assert.strictEqual(invalidateDynamicProvider('oac-x'), true);
+		await midA(req(), next); // A re-resolves → proves A was cleared (3)
+		await midB(req(), next); // B re-resolves → proves B was cleared (4)
+		assert.strictEqual(resolveCalls, 4, 'invalidate reached both instances, not just the last-loaded one');
+
+		// Close B — the LAST-loaded instance. With the old `=== ` single-ref guard
+		// this nulled the shared reference and broke invalidation for every still-
+		// active instance. With the Set, A stays invalidatable.
+		b.closeListeners[0]();
+		assert.strictEqual(
+			invalidateDynamicProvider('oac-x'),
+			true,
+			'closing the last-loaded instance must not orphan invalidation for the still-active one'
+		);
+
+		// Tear down A too; with no active caches, invalidate is a no-op.
+		a.closeListeners[0]();
+		assert.strictEqual(invalidateDynamicProvider('oac-x'), false, 'no active caches after all instances close');
 	});
 });

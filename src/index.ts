@@ -39,34 +39,44 @@ export { getProvider } from './lib/providers/index.ts';
 let pendingHooks: OAuthHooks | null = null;
 let activeHookManager: HookManager | null = null;
 
-// Active dynamic-provider cache for the loaded plugin instance, so consumers
-// can invalidate entries when their backing config changes. Per-worker-thread:
-// this references the cache in the thread that ran handleApplication.
-let activeDynamicProviderCache: DynamicProviderCache | null = null;
+// Active dynamic-provider caches for every plugin instance loaded in this worker
+// thread, so consumers can invalidate entries when their backing config changes.
+// A Set (not a single reference) so multiple plugin instances in one thread each
+// stay invalidatable and closing one doesn't orphan the others' caches.
+// Per-worker-thread: these are the caches in the thread that ran handleApplication;
+// other threads converge via the cache TTL.
+const activeDynamicProviderCaches = new Set<DynamicProviderCache>();
 
 /**
- * Invalidate a single dynamically-resolved provider in the in-memory cache.
- * Call this from application code after the backing config for `providerConfigId`
- * changes (disabled, deleted, or credentials rotated) so the next request
- * re-resolves it via the `onResolveProvider` hook instead of serving stale data.
+ * Invalidate a single dynamically-resolved provider across every plugin instance
+ * loaded in this worker thread. Call this from application code after the backing
+ * config for `providerConfigId` changes (disabled, deleted, or credentials
+ * rotated) so the next request re-resolves it via the `onResolveProvider` hook
+ * instead of serving stale data.
  *
- * NOTE: the cache is per-worker-thread, so this evicts only in the thread that
+ * NOTE: the caches are per-worker-thread, so this evicts only in the thread that
  * runs the call. Other threads converge within the configured TTL
  * (`cacheDynamicProviders`, default {@link DEFAULT_DYNAMIC_PROVIDER_CACHE_TTL_SECONDS}s).
  * For immediate cluster-wide effect, pair invalidation with a short TTL.
  *
- * @returns true if an entry was present and removed in this thread.
+ * @returns true if an entry was present and removed in any instance in this thread.
  */
 export function invalidateDynamicProvider(providerConfigId: string): boolean {
-	return activeDynamicProviderCache?.delete(providerConfigId) ?? false;
+	let deleted = false;
+	for (const cache of activeDynamicProviderCaches) {
+		if (cache.delete(providerConfigId)) deleted = true;
+	}
+	return deleted;
 }
 
 /**
- * Clear every dynamically-resolved provider from the in-memory cache (this
- * worker thread only — see {@link invalidateDynamicProvider} for cross-thread notes).
+ * Clear every dynamically-resolved provider from every plugin instance's cache in
+ * this worker thread (see {@link invalidateDynamicProvider} for cross-thread notes).
  */
 export function clearDynamicProviderCache(): void {
-	activeDynamicProviderCache?.clear();
+	for (const cache of activeDynamicProviderCaches) {
+		cache.clear();
+	}
 }
 
 /**
@@ -113,9 +123,6 @@ export async function handleApplication(scope: Scope): Promise<void> {
 	let isInitialized = false;
 	let pluginDefaults: any = {}; // Store plugin defaults for dynamic provider resolution
 	const dynamicProviderCache = new DynamicProviderCache(); // TTL cache for dynamically-resolved providers
-
-	// Expose this thread's cache for consumer-driven invalidation
-	activeDynamicProviderCache = dynamicProviderCache;
 
 	// Create hookManager instance scoped to this application
 	const hookManager = new HookManager(logger);
@@ -313,10 +320,14 @@ export async function handleApplication(scope: Scope): Promise<void> {
 	});
 
 	// Clean up on scope close
+	// Expose this thread's cache for consumer-driven invalidation, paired with its
+	// removal on close. Registered here (after the initial config load above, which
+	// propagates errors to the plugin loader) so a failed init never leaves an
+	// orphaned cache in the set. The request middleware uses the closure reference
+	// directly, so it doesn't depend on set membership.
+	activeDynamicProviderCaches.add(dynamicProviderCache);
 	scope.on('close', () => {
 		logger?.info?.('OAuth plugin shutting down');
-		if (activeDynamicProviderCache === dynamicProviderCache) {
-			activeDynamicProviderCache = null;
-		}
+		activeDynamicProviderCaches.delete(dynamicProviderCache);
 	});
 }

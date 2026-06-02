@@ -142,14 +142,15 @@ async function resolveOAuthProvider(providerName, logger) {
 
 **Caching Behavior:**
 
-By default, the plugin caches the resolved provider config in memory permanently after the first `onResolveProvider` call. This is efficient but means config changes (domain, credentials, etc.) won't take effect until server restart.
+By default, the plugin caches the resolved provider config in memory for **300 seconds** after each `onResolveProvider` call. This avoids a hook/database lookup on every request while bounding how long a stale config (changed domain, credentials, or a disabled provider) is served — at most one TTL window, rather than until a server restart. For immediate effect, call `invalidateDynamicProvider()` from your app when the backing config changes (see the API reference).
 
 Control caching with `cacheDynamicProviders` in your plugin config:
 
 ```yaml
 '@harperfast/oauth':
-  cacheDynamicProviders: true   # Cache forever (default)
+  cacheDynamicProviders: 300    # Cache for 300 seconds (default)
   cacheDynamicProviders: 60     # Cache for 60 seconds (recommended for multi-tenant)
+  cacheDynamicProviders: true   # Cache forever — only safe if you call invalidateDynamicProvider() on change
   cacheDynamicProviders: false  # Never cache — hook called on every request
 ```
 
