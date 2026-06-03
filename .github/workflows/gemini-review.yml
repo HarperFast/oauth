@@ -34,7 +34,7 @@ concurrency:
 
 jobs:
   review:
-    uses: HarperFast/ai-review-prompts/.github/workflows/_gemini-review.yml@2be0f702b114e39b90eed90962922ef64df58482 # main 2026-05-21 (post #42 — continuity preamble now mandatory when prior findings exist so Gemini updates narrate the round, plus log-script count-line fix)
+    uses: HarperFast/ai-review-prompts/.github/workflows/_gemini-review.yml@2be0f702b114e39b90eed90962922ef64df58482 # main 2026-06-03 (post #52 — calibration: Harper-aware wiring for the Gemini leg, skills-ref v1.7.0, surface-findings rule, access-control blocker guidance, public-skill dedup)
     # Caller-side permissions, scoped at the calling-job level (NOT
     # workflow-level — that placement caps the reusable's per-job
     # grants below what they need and breaks the workflow at startup;

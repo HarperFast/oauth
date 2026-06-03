@@ -26,7 +26,7 @@ concurrency:
 
 jobs:
   review:
-    uses: HarperFast/ai-review-prompts/.github/workflows/_claude-review.yml@2be0f702b114e39b90eed90962922ef64df58482 # main 2026-05-21 (post #42 — log-script counts from "N blockers found" line + tolerates markdown wrapping, fixing Claude-recap titles undercounting; _claude-review.yml itself unchanged)
+    uses: HarperFast/ai-review-prompts/.github/workflows/_claude-review.yml@2be0f702b114e39b90eed90962922ef64df58482 # main 2026-06-03 (post #52 — week-of-05-25 calibration: Harper-aware best-practices wiring, skills-ref v1.7.0, surface-findings rule, access-control blocker guidance, public-skill dedup)
     # Caller-side permissions, scoped at the calling-job level (NOT
     # workflow-level — that placement caps the reusable's per-job
     # grants below what they need and breaks the workflow at startup;
