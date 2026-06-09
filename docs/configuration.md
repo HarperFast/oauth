@@ -57,16 +57,18 @@ Each provider requires:
 
 ### MCP OAuth (work in progress)
 
-Opt-in support for the Model Context Protocol authorization flow ([issue #86](https://github.com/HarperFast/oauth/issues/86)). The first two stages add Dynamic Client Registration at `POST /oauth/mcp/register` (RFC 7591) and the discovery documents under `/.well-known/*` (RFCs 8414, 9728) so MCP clients (Claude Desktop, Cursor, `mcp-remote`) can find and register themselves. `/authorize`, `/token`, and the `withMCPAuth` wrapper land in subsequent releases.
+Opt-in support for the Model Context Protocol authorization flow ([issue #86](https://github.com/HarperFast/oauth/issues/86)). Implemented so far: Dynamic Client Registration at `POST /oauth/mcp/register` (RFC 7591), the discovery documents under `/.well-known/*` (RFCs 8414, 9728) so MCP clients (Claude Desktop, Cursor, `mcp-remote`) can find and register themselves, and the authorization endpoint `GET /oauth/mcp/authorize` (OAuth 2.1 + PKCE-S256). The `/token` exchange and the `withMCPAuth` wrapper land in subsequent releases.
 
 ```yaml
 '@harperfast/oauth':
   mcp:
     enabled: true
-    # Pin the authorization-server identity. STRONGLY recommended in
-    # production — without this we derive issuer from the request's Host
-    # header, which a client controls. When tokens are signed (a later
-    # release), trusting Host would let an attacker influence `iss` claims.
+    # Required when enabled: pin the authorization-server identity. The plugin
+    # refuses to start if `issuer` is unset — otherwise `iss` (and the `aud`,
+    # which defaults to `<issuer>/mcp`) is derived from the client-controlled
+    # Host header, letting a client influence the advertised identity and the
+    # audience bound into the authorization code (audience confusion once tokens
+    # are signed). Pinning `resource` alone is NOT enough — `iss` still floats.
     issuer: https://my-app.example.com
     # Canonical resource URI advertised in PRM and used as the `aud` claim
     # on issued tokens (RFC 8707). Defaults to `<issuer>/mcp` when unset.
@@ -80,14 +82,15 @@ Opt-in support for the Model Context Protocol authorization flow ([issue #86](ht
         - app.example.com
 ```
 
-| Option                                                  | Type     | Default                | Description                                                                                                  |
-| ------------------------------------------------------- | -------- | ---------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `mcp.enabled`                                           | boolean  | `false`                | Master switch for the MCP OAuth endpoints                                                                    |
-| `mcp.issuer`                                            | string   | (derived from request) | Authorization-server URI advertised in AS metadata. Pin in production to prevent Host-header-driven identity |
-| `mcp.resource`                                          | string   | `<issuer>/mcp`         | Canonical resource URI advertised in PRM (RFC 9728) and validated as `aud` on issued tokens (RFC 8707)       |
-| `mcp.dynamicClientRegistration.enabled`                 | boolean  | `true`                 | Enable the `/register` endpoint when `mcp.enabled` is true                                                   |
-| `mcp.dynamicClientRegistration.initialAccessToken`      | string   | (none)                 | If set, registration requires `Authorization: Bearer <token>`. Otherwise open per RFC 7591                   |
-| `mcp.dynamicClientRegistration.allowedRedirectUriHosts` | string[] | (none)                 | Allowlist for redirect_uri hosts. Localhost always allowed per RFC 8252                                      |
+| Option                                                  | Type     | Default         | Description                                                                                                                                                                                                                       |
+| ------------------------------------------------------- | -------- | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `mcp.enabled`                                           | boolean  | `false`         | Master switch for the MCP OAuth endpoints                                                                                                                                                                                         |
+| `mcp.issuer`                                            | string   | (none)          | Authorization-server URI advertised in AS metadata. **Required when `mcp.enabled`** — startup fails otherwise, to prevent a Host-header-driven `iss`/`aud`                                                                        |
+| `mcp.resource`                                          | string   | `<issuer>/mcp`  | Canonical resource URI advertised in PRM (RFC 9728) and validated as `aud` on issued tokens (RFC 8707). Optional override; defaults safely from the pinned `issuer`                                                               |
+| `mcp.providers`                                         | string[] | (all providers) | Subset of upstream providers eligible for the MCP auth flow. **v1 requires exactly one** resolved provider — set this when more than one provider is configured globally, otherwise `/oauth/mcp/authorize` returns `server_error` |
+| `mcp.dynamicClientRegistration.enabled`                 | boolean  | `true`          | Enable the `/register` endpoint when `mcp.enabled` is true                                                                                                                                                                        |
+| `mcp.dynamicClientRegistration.initialAccessToken`      | string   | (none)          | If set, registration requires `Authorization: Bearer <token>`. Otherwise open per RFC 7591                                                                                                                                        |
+| `mcp.dynamicClientRegistration.allowedRedirectUriHosts` | string[] | (none)          | Allowlist for redirect_uri hosts. Localhost always allowed per RFC 8252                                                                                                                                                           |
 
 Sensitive leaves inside `mcp` support `${ENV_VAR}` expansion (e.g., `initialAccessToken: ${OAUTH_MCP_REGISTRATION_TOKEN}`), the same way provider credentials do.
 
