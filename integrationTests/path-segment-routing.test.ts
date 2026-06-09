@@ -72,4 +72,34 @@ suite('OAuth Resource routes by URL path segment (not literal "oauth")', (ctx: C
 			`client_id was ${url.searchParams.get('client_id')} — expected tenant's (${TENANT_CLIENT_ID}), decoy's is ${DECOY_CLIENT_ID}`
 		);
 	});
+
+	// Regression guard: a provider whose configured name is literally "oauth"
+	// must still be reachable at /oauth/oauth/login. Harper strips the mount
+	// segment, so parseRoute sees target.id = "oauth/login" → providerName
+	// "oauth". Any "detect and omit a leading oauth path segment" change would
+	// instead resolve providerName "login" (unknown) and make this provider
+	// unreachable. The sibling oac-oauth-tenant test does not exercise this case
+	// because its first path segment isn't "oauth", so this assertion is the one
+	// that fails under such a change.
+	test('/oauth/oauth/login dispatches to the provider literally named "oauth"', async () => {
+		const response = await fetch(`${ctx.harper.httpURL}/oauth/oauth/login`, {
+			redirect: 'manual',
+		});
+
+		strictEqual(response.status, 302, `expected 302 redirect, got ${response.status}`);
+		const location = response.headers.get('location');
+		strictEqual(typeof location, 'string', 'Location header missing');
+		const url = new URL(location!);
+
+		// The "oauth"-named provider's authorizationUrl is http://decoy.test/authorize
+		// with the decoy client_id. A parseRoute that strips a leading "oauth"
+		// segment would resolve providerName "login" → never reach this provider.
+		strictEqual(url.origin, 'http://decoy.test');
+		strictEqual(url.pathname, '/authorize');
+		strictEqual(
+			url.searchParams.get('client_id'),
+			DECOY_CLIENT_ID,
+			`client_id was ${url.searchParams.get('client_id')} — expected the "oauth"-named provider's (${DECOY_CLIENT_ID})`
+		);
+	});
 });
