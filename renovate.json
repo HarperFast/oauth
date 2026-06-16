@@ -1,0 +1,29 @@
+{
+	"$schema": "https://docs.renovatebot.com/renovate-schema.json",
+	"extends": ["config:recommended"],
+	"timezone": "America/New_York",
+	"schedule": ["before 9am on Monday"],
+	"semanticCommits": "enabled",
+	"prConcurrentLimit": 2,
+	"minimumReleaseAge": "14 days",
+	"internalChecksFilter": "strict",
+	"reviewersFromCodeOwners": true,
+	"osvVulnerabilityAlerts": true,
+	"lockFileMaintenance": { "enabled": false },
+	"vulnerabilityAlerts": {
+		"minimumReleaseAge": "0 days",
+		"labels": ["security"]
+	},
+	"packageRules": [
+		{
+			"description": "Auth module: never auto-merge. Every dependency update — including patches and dev deps — gets human review before it reaches main (supply-chain guard).",
+			"matchPackageNames": ["*"],
+			"automerge": false
+		},
+		{
+			"description": "Pin GitHub Action refs to immutable commit SHAs. Still reviewed, not auto-merged.",
+			"matchDepTypes": ["action"],
+			"pinDigests": true
+		}
+	]
+}
