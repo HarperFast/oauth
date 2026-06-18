@@ -83,6 +83,28 @@ describe('OAuth Plugin Options Watcher', () => {
 		assert.equal(closeListeners.length, 1, 'Should register one close listener');
 	});
 
+	it('should fail to start when mcp.enabled but issuer is not pinned', async () => {
+		scope.options._config.mcp = { enabled: true };
+		await assert.rejects(handleApplication(scope), /mcp\.issuer is not set/);
+	});
+
+	it('should fail to start when only mcp.resource is pinned (issuer still Host-derived)', async () => {
+		scope.options._config.mcp = { enabled: true, resource: 'https://app.example.com/mcp' };
+		await assert.rejects(handleApplication(scope), /mcp\.issuer is not set/);
+	});
+
+	it('should start when mcp.enabled and mcp.issuer is pinned', async () => {
+		scope.options._config.mcp = { enabled: true, issuer: 'https://app.example.com' };
+		await handleApplication(scope);
+		assert.ok(resources.oauth, 'OAuth resource should be registered');
+	});
+
+	it('should start when mcp is disabled regardless of issuer/resource', async () => {
+		scope.options._config.mcp = { enabled: false };
+		await handleApplication(scope);
+		assert.ok(resources.oauth, 'OAuth resource should be registered');
+	});
+
 	it('should update configuration when options change', async () => {
 		await handleApplication(scope);
 

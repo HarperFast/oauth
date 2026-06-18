@@ -138,6 +138,26 @@ export async function handleApplication(scope: Scope): Promise<void> {
 			isInitialized = true;
 		}
 
+		// Build the MCP config block up front so we can fail fast on an unsafe
+		// combination before mutating any provider state. expandEnvVarsDeep so
+		// sensitive leaves (mcp.dynamicClientRegistration.initialAccessToken) and
+		// a pinned issuer/resource support ${ENV_VAR}.
+		const mcpConfig = options.mcp ? expandEnvVarsDeep(options.mcp) : undefined;
+		if (mcpConfig?.enabled && !mcpConfig.issuer) {
+			// Without a pinned issuer, resolveIssuer() (wellKnown.ts) derives it from
+			// the client-controlled Host header — and resolveResource() defaults to
+			// `<issuer>/mcp`, so the `aud` bound into the minted code floats with it.
+			// That lets a client influence the advertised `iss` and the audience —
+			// audience confusion once Stage 4 issues tokens. A pinned issuer anchors
+			// both; `resource` may still be overridden explicitly. A pinned `resource`
+			// alone is NOT sufficient — it leaves `iss` Host-derived. See docs/configuration.md.
+			throw new Error(
+				'OAuth MCP is enabled but mcp.issuer is not set. ' +
+					'Pin it explicitly (e.g. mcp.issuer: "https://your-host") so the issuer and ' +
+					'token audience are not derived from the client-controlled Host header.'
+			);
+		}
+
 		// Re-initialize providers from new configuration
 		// Clear existing providers and repopulate (don't reassign to preserve closure reference)
 		const newProviders = initializeProviders(options, logger);
@@ -179,9 +199,7 @@ export async function handleApplication(scope: Scope): Promise<void> {
 			});
 		} else {
 			// Configure the OAuth resource with providers and settings.
-			// expandEnvVarsDeep on the mcp block so sensitive leaves like
-			// mcp.dynamicClientRegistration.initialAccessToken support ${ENV_VAR}.
-			const mcpConfig = options.mcp ? expandEnvVarsDeep(options.mcp) : undefined;
+			// mcpConfig was built and validated above.
 			OAuthResource.configure(
 				providers,
 				debugMode,

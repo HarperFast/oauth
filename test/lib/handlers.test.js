@@ -683,6 +683,165 @@ describe('OAuth Handlers', () => {
 		});
 	});
 
+	describe('handleCallback — MCP branch', () => {
+		let originalDatabases;
+		let storedAuthCodes;
+		// Import lazily so the dist symbol load doesn't happen at file parse.
+		let resetMCPAuthCodesTableCache;
+
+		const MCP_STATE = {
+			clientId: 'mcp-client-1',
+			resource: 'https://app.example.com/mcp',
+			codeChallenge: 'fake-challenge-32-chars-or-longer',
+			codeChallengeMethod: 'S256',
+			redirectUri: 'https://mcp-client.example.com/cb',
+			scope: 'mcp:read',
+			clientState: 'mcp-state-xyz',
+		};
+
+		beforeEach(async () => {
+			({ resetMCPAuthCodesTableCache } = await import('../../dist/lib/mcp/authCodeStore.js'));
+			resetMCPAuthCodesTableCache();
+			originalDatabases = global.databases;
+			storedAuthCodes = new Map();
+			global.databases = {
+				oauth: {
+					mcp_auth_codes: {
+						get: async (id) => storedAuthCodes.get(id) ?? null,
+						put: async (record) => {
+							storedAuthCodes.set(record.code, record);
+						},
+						delete: async (id) => storedAuthCodes.delete(id),
+					},
+				},
+			};
+			// Replace verifyCSRFToken to return MCP state by default for this block.
+			mockProvider.verifyCSRFToken = createMockFn(async () => ({
+				timestamp: Date.now(),
+				providerName: 'test-provider',
+				mcp: { ...MCP_STATE },
+			}));
+		});
+
+		// Restore after each test block via the outer afterEach (no-op if global.databases survives — we use a fresh object each time).
+
+		it('on success, mints auth code and redirects to MCP client redirect_uri', async () => {
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				mockLogger
+			);
+			assert.equal(result.status, 302);
+			const url = new URL(result.headers.Location);
+			assert.equal(url.origin + url.pathname, MCP_STATE.redirectUri);
+			assert.ok(url.searchParams.get('code'));
+			assert.equal(url.searchParams.get('state'), MCP_STATE.clientState);
+			assert.equal(storedAuthCodes.size, 1);
+			global.databases = originalDatabases;
+		});
+
+		it('binds the auth code to onLogin-mapped user (hookData.user wins over OAuth username)', async () => {
+			mockHookManager.callOnLogin = createMockFn(async () => ({ user: 'internal-user-id-42' }));
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				mockLogger
+			);
+			assert.equal(result.status, 302);
+			const [record] = storedAuthCodes.values();
+			assert.equal(record.user, 'internal-user-id-42');
+			global.databases = originalDatabases;
+		});
+
+		it('routes upstream IdP error to MCP client redirect_uri (not Harper postLoginRedirect)', async () => {
+			mockTarget.get = createMockFn((key) => {
+				const params = {
+					state: 'csrf-token-123',
+					error: 'access_denied',
+					error_description: 'User denied authorization',
+				};
+				return params[key];
+			});
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				mockLogger
+			);
+			assert.equal(result.status, 302);
+			const url = new URL(result.headers.Location);
+			assert.equal(url.origin + url.pathname, MCP_STATE.redirectUri);
+			assert.equal(url.searchParams.get('error'), 'access_denied');
+			assert.equal(url.searchParams.get('state'), MCP_STATE.clientState);
+			global.databases = originalDatabases;
+		});
+
+		it('routes cross-provider state mismatch to MCP redirect_uri', async () => {
+			mockProvider.verifyCSRFToken = createMockFn(async () => ({
+				timestamp: Date.now(),
+				providerName: 'other-provider', // mismatch
+				mcp: { ...MCP_STATE },
+			}));
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				mockLogger
+			);
+			assert.equal(result.status, 302);
+			const url = new URL(result.headers.Location);
+			assert.equal(url.origin + url.pathname, MCP_STATE.redirectUri);
+			assert.equal(url.searchParams.get('error'), 'invalid_request');
+			global.databases = originalDatabases;
+		});
+
+		it('does NOT include upstream IdP token in MCP redirect URL', async () => {
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				mockLogger
+			);
+			const location = result.headers.Location;
+			for (const banned of ['access_token', 'refresh_token', 'id_token', 'token_type', 'access-token-123']) {
+				assert.ok(!location.includes(banned), `${banned} must not appear in MCP redirect URL`);
+			}
+			global.databases = originalDatabases;
+		});
+
+		it('does NOT create a Harper session on the MCP branch (independent lifecycle)', async () => {
+			await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				mockLogger
+			);
+			// session.update must not have been called for the MCP branch
+			assert.equal(mockRequest.session.update.mock.calls.length, 0);
+			global.databases = originalDatabases;
+		});
+	});
+
 	describe('handleLogout', () => {
 		it('should clear session data', async () => {
 			// Add delete method mock to session

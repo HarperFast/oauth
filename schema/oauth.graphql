@@ -34,6 +34,23 @@ type harper_oauth_mcp_clients @table(database: "oauth") {
 	client_secret_expires_at: Float # 0 = never expires
 }
 
+## MCP Authorization Codes (OAuth 2.1 + RFC 7636 PKCE + RFC 8707 audience)
+## Short-lived codes minted by /oauth/mcp/authorize on successful upstream auth.
+## Single-use: /oauth/mcp/token (Stage 4) reads-then-deletes. TTL via Harper.
+## Auto-expires after 5 minutes — codes are exchanged immediately after the
+## upstream redirect, so a longer window only widens the replay attack surface.
+type mcp_auth_codes @table(database: "oauth", expiration: 300) {
+	code: ID @primaryKey
+	client_id: String
+	user: String # Harper user identifier
+	resource: String # RFC 8707 audience the issued token will be bound to
+	code_challenge: String # RFC 7636 PKCE; verified at /token
+	code_challenge_method: String # Always "S256"
+	redirect_uri: String # Bound at issuance; /token must match
+	scope: String # Space-separated; may be empty
+	created_at: Float
+}
+
 ## OAuth User Session table (optional, for future use)
 ## Could store OAuth-specific user data
 # type oauth_sessions @table(database: "oauth") {

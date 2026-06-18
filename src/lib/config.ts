@@ -170,6 +170,16 @@ export function initializeProviders(options: OAuthPluginConfig, logger?: Logger)
 
 	// Initialize each provider
 	for (const [providerName, providerConfig] of Object.entries(options.providers)) {
+		// `mcp` is a reserved path segment for the MCP OAuth endpoints
+		// (/oauth/mcp/*). A provider keyed `mcp` is shadowed by the MCP dispatcher
+		// (resource.ts) and would silently 404 at request time, so reject the
+		// collision loudly at config load instead.
+		if (providerName === 'mcp') {
+			throw new Error(
+				"OAuth provider name 'mcp' is reserved for the MCP OAuth endpoints (/oauth/mcp/*). Rename this provider."
+			);
+		}
+
 		const config = buildProviderConfig(providerConfig, providerName, pluginDefaults);
 
 		// Check if this provider is properly configured

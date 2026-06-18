@@ -488,6 +488,22 @@ describe('OAuth Configuration', () => {
 			assert.equal(providers.google.config.clientId, 'google-client');
 		});
 
+		it("should reject a provider named 'mcp' (reserved for MCP endpoints)", () => {
+			const options = {
+				providers: {
+					mcp: {
+						clientId: 'x',
+						clientSecret: 'y',
+						authorizationUrl: 'https://auth.com/authorize',
+						tokenUrl: 'https://auth.com/token',
+						userInfoUrl: 'https://auth.com/user',
+					},
+				},
+			};
+
+			assert.throws(() => initializeProviders(options, mockLogger), /reserved for the MCP OAuth endpoints/);
+		});
+
 		it('should skip providers with missing required fields', () => {
 			const options = {
 				providers: {

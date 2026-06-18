@@ -8,7 +8,8 @@ import { readFile } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { RequestTarget } from 'harper';
-import type { Request, Logger, IOAuthProvider, OAuthProviderConfig } from '../types.ts';
+import type { Request, Logger, IOAuthProvider, MCPAuthorizeState, OAuthProviderConfig } from '../types.ts';
+import { handleMCPCallback } from './mcp/index.ts';
 import type { HookManager } from './hookManager.ts';
 
 /**
@@ -131,61 +132,92 @@ export async function handleCallback(
 	const error = target.get?.('error');
 	const errorDescription = target.get?.('error_description');
 
-	// Handle OAuth errors from provider
-	if (error) {
-		logger?.error?.(`OAuth error: ${error} - ${errorDescription}`);
-		const errorUrl = buildErrorRedirect(config.postLoginRedirect || '/', { error: 'oauth_failed', reason: error });
-		return {
-			status: 302,
-			headers: {
-				Location: errorUrl,
-			},
-		};
-	}
+	// Helper: build an MCP-aware error redirect to the MCP client's redirect_uri.
+	// Only used in MCP branches — the human path keeps its existing
+	// buildErrorRedirect shape (error code only, optionally with reason) to
+	// avoid changing observable behavior on the human OAuth flow.
+	const mcpErrorRedirect = (mcp: MCPAuthorizeState, errorCode: string, description: string) => {
+		const url = new URL(mcp.redirectUri);
+		url.searchParams.set('error', errorCode);
+		url.searchParams.set('error_description', description);
+		if (mcp.clientState) url.searchParams.set('state', mcp.clientState);
+		return { status: 302, headers: { Location: url.toString() } };
+	};
 
-	// Validate parameters
-	if (!code || !state) {
-		logger?.warn?.('Missing required OAuth callback parameters');
+	// Validate state presence — we use it both to route errors (via mcp
+	// payload, when present) AND to defend against CSRF.
+	if (!state) {
+		// Without state, we can't be in an MCP flow (MCP always sets state).
+		// Preserve the legacy human-OAuth error UX: if the IdP sent an error,
+		// echo it to postLoginRedirect with the original reason. Otherwise,
+		// generic invalid_request.
+		if (error) {
+			logger?.error?.(`OAuth error (no state): ${error} - ${errorDescription}`);
+			const errorUrl = buildErrorRedirect(config.postLoginRedirect || '/', {
+				error: 'oauth_failed',
+				reason: error,
+			});
+			return { status: 302, headers: { Location: errorUrl } };
+		}
+		logger?.warn?.('Missing state parameter in OAuth callback');
 		const errorUrl = buildErrorRedirect(config.postLoginRedirect || '/', { error: 'invalid_request' });
-		return {
-			status: 302,
-			headers: {
-				Location: errorUrl,
-			},
-		};
+		return { status: 302, headers: { Location: errorUrl } };
 	}
 
-	// Verify CSRF token
+	// Verify CSRF token FIRST — before checking the upstream error param.
+	// This is what lets MCP-initiated errors route back to the MCP client's
+	// redirect_uri instead of the Harper app's default path. The token is
+	// single-use; consuming it on error is fine because OAuth callbacks
+	// aren't retried with the same state.
 	const tokenData = await provider.verifyCSRFToken(state);
 	if (!tokenData) {
 		logger?.warn?.('Invalid or expired CSRF token');
-		// Redirect back to login with error parameter
+		// We can't know if this was an MCP flow (state didn't decode), so
+		// fall back to a generic redirect — same behavior as pre-fix.
 		const loginUrl = `/oauth/${providerName}/login?error=session_expired`;
-		return {
-			status: 302,
-			headers: {
-				Location: loginUrl,
-			},
-		};
+		return { status: 302, headers: { Location: loginUrl } };
 	}
 
-	// Verify state token was issued for THIS provider (prevents cross-provider attacks)
+	const mcpState = tokenData.mcp as MCPAuthorizeState | undefined;
+
+	// Verify state token was issued for THIS provider (prevents cross-provider attacks).
 	if (tokenData.providerName !== providerName) {
 		logger?.warn?.(
 			`State token provider mismatch: token issued for '${tokenData.providerName}', callback for '${providerName}'`
 		);
-		// This could be an attack - redirect back to original URL with error
-		// Do NOT redirect to login endpoint as that would restart OAuth flow
+		if (mcpState) {
+			return mcpErrorRedirect(mcpState, 'invalid_request', 'cross-provider state mismatch');
+		}
 		const errorUrl = buildErrorRedirect(tokenData.originalUrl || config.postLoginRedirect || '/', {
 			error: 'auth_failed',
 			reason: 'csrf',
 		});
-		return {
-			status: 302,
-			headers: {
-				Location: errorUrl,
-			},
-		};
+		return { status: 302, headers: { Location: errorUrl } };
+	}
+
+	// Now that we know the flow context, handle upstream IdP errors.
+	if (error) {
+		logger?.error?.(`OAuth error: ${error} - ${errorDescription}`);
+		if (mcpState) {
+			return mcpErrorRedirect(mcpState, error, errorDescription || error);
+		}
+		const errorUrl = buildErrorRedirect(tokenData.originalUrl || config.postLoginRedirect || '/', {
+			error: 'oauth_failed',
+			reason: error,
+		});
+		return { status: 302, headers: { Location: errorUrl } };
+	}
+
+	// Validate code presence — needed regardless of flow.
+	if (!code) {
+		logger?.warn?.('Missing authorization code in OAuth callback');
+		if (mcpState) {
+			return mcpErrorRedirect(mcpState, 'invalid_request', 'Missing authorization code');
+		}
+		const errorUrl = buildErrorRedirect(tokenData.originalUrl || config.postLoginRedirect || '/', {
+			error: 'invalid_request',
+		});
+		return { status: 302, headers: { Location: errorUrl } };
 	}
 
 	try {
@@ -214,6 +246,17 @@ export async function handleCallback(
 		// This allows user provisioning plugins to create/update user records
 		// Pass providerName (registry key) not config.provider (provider type) for multi-tenant support
 		const hookData = await hookManager.callOnLogin(user, tokenResponse, request.session, request, providerName);
+
+		// MCP branch: if the CSRF state was minted by /oauth/mcp/authorize, the
+		// upstream callback's job is to mint an MCP authorization code, NOT to
+		// create a Harper session. Independent lifecycle per #86 resolved
+		// decision. The upstream IdP token never reaches the MCP client.
+		// Pass the onLogin-mapped username so the issued auth code (and the
+		// JWT exchanged for it in Stage 4) is bound to the correct identity.
+		if (mcpState) {
+			const userIdentifier = hookData?.user ?? user.username;
+			return handleMCPCallback(request, mcpState, userIdentifier, logger);
+		}
 
 		// Store in session if available
 		if (request.session) {
@@ -288,16 +331,14 @@ export async function handleCallback(
 		else if (message.includes('claim')) reason = 'user_mapping';
 		else if (message.includes('user info') || message.includes('userinfo')) reason = 'user_info';
 		else if (message.includes('hook') || message.includes('onLogin')) reason = 'login_hook';
+		if (mcpState) {
+			return mcpErrorRedirect(mcpState, 'server_error', reason);
+		}
 		const errorUrl = buildErrorRedirect(tokenData.originalUrl || config.postLoginRedirect || '/', {
 			error: 'auth_failed',
 			reason,
 		});
-		return {
-			status: 302,
-			headers: {
-				Location: errorUrl,
-			},
-		};
+		return { status: 302, headers: { Location: errorUrl } };
 	}
 }
 

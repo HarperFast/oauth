@@ -3,12 +3,17 @@
  *
  * Routes /oauth/mcp/* sub-paths to the appropriate handlers. Kept as a thin
  * dispatcher so OAuthResource doesn't grow MCP-specific logic; Stage 4 will
- * add /token, Stage 3 will add /authorize.
+ * add /token.
  */
 
-import type { Logger, MCPConfig, Request } from '../../types.ts';
+import type { RequestTarget } from 'harper';
+import type { Logger, MCPConfig, ProviderRegistry, Request } from '../../types.ts';
+import { handleAuthorize } from './authorize.ts';
 import { handleRegister } from './dcr.ts';
 
+export { MCPAuthCodeStore, resetMCPAuthCodesTableCache } from './authCodeStore.ts';
+export { handleAuthorize, selectMCPProvider } from './authorize.ts';
+export { handleMCPCallback } from './callback.ts';
 export { MCPClientStore, resetMCPClientsTableCache } from './clientStore.ts';
 export { handleRegister } from './dcr.ts';
 
@@ -31,6 +36,30 @@ export async function handleMCPPost(
 
 	if (action === 'register') {
 		return handleRegister(request, body, mcpConfig, logger);
+	}
+
+	return { status: 404, body: { error: 'Not found' } };
+}
+
+/**
+ * Dispatch GET /oauth/mcp/<action>.
+ *
+ * Returns 404 when MCP is disabled.
+ */
+export async function handleMCPGet(
+	action: string,
+	request: Request,
+	target: RequestTarget,
+	mcpConfig: MCPConfig | undefined,
+	providers: ProviderRegistry,
+	logger?: Logger
+): Promise<any> {
+	if (!mcpConfig?.enabled) {
+		return { status: 404, body: { error: 'Not found' } };
+	}
+
+	if (action === 'authorize') {
+		return handleAuthorize(request, target, mcpConfig, providers, logger);
 	}
 
 	return { status: 404, body: { error: 'Not found' } };
