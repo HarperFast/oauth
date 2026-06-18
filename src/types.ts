@@ -69,6 +69,23 @@ export interface MCPConfig {
 	providers?: string[];
 	/** Dynamic Client Registration settings (RFC 7591) */
 	dynamicClientRegistration?: MCPDynamicClientRegistrationConfig;
+	/**
+	 * JWT signing algorithm for issued access tokens. Only "RS256" is supported
+	 * in v1 — jsonwebtoken cannot emit EdDSA. Reserved for a future EdDSA option.
+	 * Default: "RS256".
+	 */
+	signingAlgorithm?: 'RS256';
+	/**
+	 * PEM-encoded RS256 private key (PKCS#8) to sign access tokens with. When
+	 * set, it is persisted to the keys table on first use instead of generating
+	 * one — operators provide the same key on every node for deterministic,
+	 * race-free key material. When unset, a keypair is generated on first boot.
+	 */
+	signingKeyPem?: string;
+	/** Access-token lifetime in seconds. Default: 3600 (1h). */
+	accessTokenTtl?: number;
+	/** Refresh-token (family) lifetime in seconds. Default: 2592000 (30d). */
+	refreshTokenTtl?: number;
 }
 
 /**
@@ -174,6 +191,41 @@ export interface MCPAuthCodeRecord {
 	redirect_uri: string;
 	scope?: string;
 	created_at: number;
+}
+
+/**
+ * MCP JWT signing key record (table `harper_oauth_mcp_keys`).
+ *
+ * The private half never leaves the server; only the public half is published
+ * at /.well-known/jwks.json. `kid` is surfaced in the JWT header so verifiers
+ * can select the right key.
+ */
+export interface MCPSigningKeyRecord {
+	kid: string;
+	alg: string;
+	public_key_pem: string;
+	private_key_pem: string;
+	created_at: number;
+}
+
+/**
+ * MCP refresh-token family record (table `mcp_refresh_families`).
+ *
+ * The opaque token issued to the client is `<family_id>.<secret>`; only the
+ * SHA-256 hash of the full value is persisted (`current_token_hash`). Rotation
+ * overwrites the hash; replay of a superseded token (hash mismatch) sets
+ * `revoked`, which invalidates the whole family.
+ */
+export interface MCPRefreshFamilyRecord {
+	family_id: string;
+	current_token_hash: string;
+	revoked: boolean;
+	client_id: string;
+	user: string;
+	resource: string;
+	scope?: string;
+	created_at: number;
+	expires_at: number;
 }
 
 /**

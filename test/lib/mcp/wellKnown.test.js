@@ -107,9 +107,9 @@ describe('MCP well-known: AS metadata document (RFC 8414)', () => {
 		assert.ok(methods.includes('client_secret_post'));
 	});
 
-	it('advertises both RS256 and EdDSA signing algorithms', () => {
+	it('advertises RS256 as the only signing algorithm (EdDSA deferred)', () => {
 		const doc = buildAuthorizationServerMetadata(makeRequest(), { enabled: true });
-		assert.deepEqual(doc.id_token_signing_alg_values_supported, ['RS256', 'EdDSA']);
+		assert.deepEqual(doc.id_token_signing_alg_values_supported, ['RS256']);
 	});
 
 	it('signals RFC 8707 resource-parameter support', () => {
@@ -119,8 +119,8 @@ describe('MCP well-known: AS metadata document (RFC 8414)', () => {
 });
 
 describe('MCP well-known: JWKS document', () => {
-	it('returns an empty key set (placeholder until Stage 4)', () => {
-		const doc = buildJWKS({ enabled: true });
+	it('returns an empty key set when no signing key has been minted yet', async () => {
+		const doc = await buildJWKS({ enabled: true });
 		assert.deepEqual(doc, { keys: [] });
 	});
 });
@@ -171,7 +171,7 @@ describe('MCP well-known: handler registration', () => {
 			return reg.handler;
 		}
 
-		it('falls through to next when MCP is disabled', () => {
+		it('falls through to next when MCP is disabled', async () => {
 			currentConfig = { enabled: false };
 			const handler = findHandler('/.well-known/oauth-protected-resource');
 			let nextCalled = false;
@@ -179,7 +179,7 @@ describe('MCP well-known: handler registration', () => {
 				nextCalled = true;
 				return 'fallthrough';
 			};
-			const result = handler(makeRequest(), next);
+			const result = await handler(makeRequest(), next);
 			assert.equal(nextCalled, true);
 			assert.equal(result, 'fallthrough');
 		});
@@ -208,10 +208,10 @@ describe('MCP well-known: handler registration', () => {
 			assert.equal(nextCalled, true, 'sub-paths should fall through, not be served');
 		});
 
-		it('serves PRM as JSON with Content-Type when enabled and path matches', () => {
+		it('serves PRM as JSON with Content-Type when enabled and path matches', async () => {
 			currentConfig = { enabled: true };
 			const handler = findHandler('/.well-known/oauth-protected-resource');
-			const response = handler(makeRequest(), () => null);
+			const response = await handler(makeRequest(), () => null);
 			assert.equal(response.status, 200);
 			assert.equal(response.headers['Content-Type'], 'application/json');
 			const body = JSON.parse(response.body);
@@ -219,28 +219,28 @@ describe('MCP well-known: handler registration', () => {
 			assert.deepEqual(body.authorization_servers, ['https://app.example.com']);
 		});
 
-		it('serves PRM with CORS headers so browser MCP clients can fetch cross-origin', () => {
+		it('serves PRM with CORS headers so browser MCP clients can fetch cross-origin', async () => {
 			currentConfig = { enabled: true };
 			const handler = findHandler('/.well-known/oauth-protected-resource');
-			const response = handler(makeRequest(), () => null);
+			const response = await handler(makeRequest(), () => null);
 			assert.equal(response.headers['Access-Control-Allow-Origin'], '*');
 			assert.equal(response.headers['Access-Control-Allow-Methods'], 'GET, OPTIONS');
 		});
 
-		it('serves AS metadata and JWKS with the same CORS headers', () => {
+		it('serves AS metadata and JWKS with the same CORS headers', async () => {
 			currentConfig = { enabled: true };
 			for (const path of ['/.well-known/oauth-authorization-server', '/.well-known/jwks.json']) {
 				const handler = findHandler(path);
-				const response = handler(makeRequest({ pathname: path }), () => null);
+				const response = await handler(makeRequest({ pathname: path }), () => null);
 				assert.equal(response.headers['Access-Control-Allow-Origin'], '*', `${path} should set CORS`);
 				assert.equal(response.headers['Access-Control-Allow-Methods'], 'GET, OPTIONS');
 			}
 		});
 
-		it('serves AS metadata as JSON with Content-Type when path matches', () => {
+		it('serves AS metadata as JSON with Content-Type when path matches', async () => {
 			currentConfig = { enabled: true };
 			const handler = findHandler('/.well-known/oauth-authorization-server');
-			const response = handler(makeRequest({ pathname: '/.well-known/oauth-authorization-server' }), () => null);
+			const response = await handler(makeRequest({ pathname: '/.well-known/oauth-authorization-server' }), () => null);
 			assert.equal(response.status, 200);
 			assert.equal(response.headers['Content-Type'], 'application/json');
 			const body = JSON.parse(response.body);
@@ -248,19 +248,19 @@ describe('MCP well-known: handler registration', () => {
 			assert.deepEqual(body.code_challenge_methods_supported, ['S256']);
 		});
 
-		it('serves JWKS as JSON with empty keys', () => {
+		it('serves JWKS as JSON with empty keys', async () => {
 			currentConfig = { enabled: true };
 			const handler = findHandler('/.well-known/jwks.json');
-			const response = handler(makeRequest({ pathname: '/.well-known/jwks.json' }), () => null);
+			const response = await handler(makeRequest({ pathname: '/.well-known/jwks.json' }), () => null);
 			assert.equal(response.status, 200);
 			assert.equal(response.headers['Content-Type'], 'application/json');
 			assert.deepEqual(JSON.parse(response.body), { keys: [] });
 		});
 
-		it('falls back to localhost when the request omits scheme/host', () => {
+		it('falls back to localhost when the request omits scheme/host', async () => {
 			currentConfig = { enabled: true };
 			const handler = findHandler('/.well-known/oauth-protected-resource');
-			const response = handler({ pathname: '/.well-known/oauth-protected-resource' }, () => null);
+			const response = await handler({ pathname: '/.well-known/oauth-protected-resource' }, () => null);
 			assert.equal(response.status, 200);
 			const body = JSON.parse(response.body);
 			assert.equal(body.resource, 'https://localhost/mcp');
