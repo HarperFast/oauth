@@ -142,6 +142,9 @@ function buildClientErrorRedirect(
 	return { status: 302, headers: { Location: url.toString() } };
 }
 
+// RFC 7636 §4.2: code_challenge = 43*128unreserved; unreserved = ALPHA / DIGIT / "-" / "." / "_" / "~".
+const CODE_CHALLENGE_PATTERN = /^[A-Za-z0-9._~-]{43,128}$/;
+
 interface AuthorizeQuery {
 	client_id?: string;
 	redirect_uri?: string;
@@ -233,6 +236,15 @@ export async function handleAuthorize(
 	}
 	if (query.code_challenge_method !== 'S256') {
 		return redirect('invalid_request', 'code_challenge_method must be "S256" (OAuth 2.1 forbids the plain method)');
+	}
+	// RFC 7636 §4.2: code_challenge is 43-128 chars from the unreserved set.
+	// Reject malformed values here so they fail fast, before we burn a full
+	// upstream IdP login on a challenge Stage 4 could never verify.
+	if (!CODE_CHALLENGE_PATTERN.test(query.code_challenge)) {
+		return redirect(
+			'invalid_request',
+			'code_challenge must be 43-128 characters from the unreserved set [A-Za-z0-9-._~] (RFC 7636)'
+		);
 	}
 
 	if (!query.resource) {

@@ -77,7 +77,7 @@ const BASE_QUERY = {
 	client_id: VALID_CLIENT.client_id,
 	redirect_uri: VALID_CLIENT.redirect_uris[0],
 	response_type: 'code',
-	code_challenge: 'fake-challenge-value-32-chars-min',
+	code_challenge: 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM', // RFC 7636 Appendix B (43 chars, S256)
 	code_challenge_method: 'S256',
 	resource: 'https://app.example.com/mcp',
 	state: 'mcp-client-state',
@@ -270,6 +270,34 @@ describe('handleAuthorize', () => {
 			const { params } = parseRedirect(response);
 			assert.equal(params.error, 'invalid_request');
 			assert.match(params.error_description, /S256/);
+		});
+
+		it('redirects with invalid_request when code_challenge is too short (RFC 7636 minimum is 43)', async () => {
+			const { entries } = newRegistry();
+			const target = makeTarget({ ...BASE_QUERY, code_challenge: 'x' });
+			const response = await handleAuthorize(makeRequest(), target, validConfig, entries);
+			const { params } = parseRedirect(response);
+			assert.equal(params.error, 'invalid_request');
+			assert.match(params.error_description, /code_challenge/);
+		});
+
+		it('redirects with invalid_request when code_challenge is too long (RFC 7636 maximum is 128)', async () => {
+			const { entries } = newRegistry();
+			const target = makeTarget({ ...BASE_QUERY, code_challenge: 'a'.repeat(129) });
+			const response = await handleAuthorize(makeRequest(), target, validConfig, entries);
+			const { params } = parseRedirect(response);
+			assert.equal(params.error, 'invalid_request');
+			assert.match(params.error_description, /code_challenge/);
+		});
+
+		it('redirects with invalid_request when code_challenge contains chars outside the unreserved set', async () => {
+			const { entries } = newRegistry();
+			// 43 chars but includes '+' and '/' (base64, not base64url) — RFC 7636 forbids both.
+			const target = makeTarget({ ...BASE_QUERY, code_challenge: 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuG+/Sstwcm' });
+			const response = await handleAuthorize(makeRequest(), target, validConfig, entries);
+			const { params } = parseRedirect(response);
+			assert.equal(params.error, 'invalid_request');
+			assert.match(params.error_description, /code_challenge/);
 		});
 
 		it('redirects with invalid_target when resource is missing', async () => {
