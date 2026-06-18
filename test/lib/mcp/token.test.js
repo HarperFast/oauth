@@ -437,6 +437,55 @@ describe('handleToken', () => {
 		assert.equal(res.body.error, 'invalid_request');
 	});
 
+	it('authenticates a confidential client via client_secret_post (secret in body)', async () => {
+		clients.set('post-1', {
+			client_id: 'post-1',
+			client_secret: CONF_SECRET,
+			token_endpoint_auth_method: 'client_secret_post',
+			redirect_uris: JSON.stringify([REDIRECT]),
+			client_id_issued_at: 1700000000,
+		});
+		seedCode('code-1', { client_id: 'post-1' });
+		const res = await handleToken(
+			{ headers: {} },
+			{
+				grant_type: 'authorization_code',
+				code: 'code-1',
+				code_verifier: CODE_VERIFIER,
+				redirect_uri: REDIRECT,
+				client_id: 'post-1',
+				client_secret: CONF_SECRET,
+			},
+			mcpConfig
+		);
+		assert.equal(res.status, 200);
+		assert.ok(res.body.access_token);
+	});
+
+	it('rejects a client_secret_post client that omits its secret', async () => {
+		clients.set('post-1', {
+			client_id: 'post-1',
+			client_secret: CONF_SECRET,
+			token_endpoint_auth_method: 'client_secret_post',
+			redirect_uris: JSON.stringify([REDIRECT]),
+			client_id_issued_at: 1700000000,
+		});
+		seedCode('code-1', { client_id: 'post-1' });
+		const res = await handleToken(
+			{ headers: {} },
+			{
+				grant_type: 'authorization_code',
+				code: 'code-1',
+				code_verifier: CODE_VERIFIER,
+				redirect_uri: REDIRECT,
+				client_id: 'post-1',
+			},
+			mcpConfig
+		);
+		assert.equal(res.status, 401);
+		assert.equal(res.body.error, 'invalid_client');
+	});
+
 	// ---- refresh_token rotation ----
 
 	function seedFamily(familyId, overrides = {}) {
@@ -552,6 +601,22 @@ describe('handleToken', () => {
 			mcpConfig
 		);
 		assert.equal(res.body.error, 'unauthorized_client');
+	});
+
+	it('does not rotate the family when token signing fails (old token survives for retry)', async () => {
+		const token = seedFamily('fam-1');
+		const before = families.get('fam-1').current_token_hash;
+		// Corrupt the signing key so signAccessToken throws — this happens before
+		// the rotation is persisted, so the family must be left intact.
+		keys.set(SIGNING_KEY_ID, { ...keys.get(SIGNING_KEY_ID), private_key_pem: 'not-a-valid-pem' });
+		await assert.rejects(() =>
+			handleToken(
+				{ headers: {} },
+				{ grant_type: 'refresh_token', refresh_token: token, client_id: 'public-1' },
+				mcpConfig
+			)
+		);
+		assert.equal(families.get('fam-1').current_token_hash, before, 'family not rotated when signing fails');
 	});
 
 	it('rejects a malformed refresh token', async () => {

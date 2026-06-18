@@ -43,7 +43,11 @@ type TokenResponse = {
 const NO_STORE_HEADERS = { 'Cache-Control': 'no-store', 'Pragma': 'no-cache' };
 
 function errorResponse(status: number, error: string, description?: string): TokenResponse {
-	return { status, body: description ? { error, error_description: description } : { error } };
+	return {
+		status,
+		body: description ? { error, error_description: description } : { error },
+		headers: NO_STORE_HEADERS,
+	};
 }
 
 function nowSeconds(): number {
@@ -306,13 +310,12 @@ async function handleRefreshTokenGrant(
 		return errorResponse(400, 'invalid_grant', 'Refresh token has been superseded; family revoked');
 	}
 
-	// Rotate: overwrite the family's current token, keep the original expiry.
+	// Sign the access token BEFORE committing the rotation. If key fetch or
+	// signing throws, the family is left untouched so the client's current
+	// refresh token still works on retry — otherwise a transient failure would
+	// orphan their token and trip replay-revocation on the next attempt.
 	const issuer = resolveIssuer(request as any, mcpConfig);
 	const accessTtl = coerceTtl(mcpConfig.accessTokenTtl, DEFAULT_ACCESS_TOKEN_TTL);
-	const { token: newRefreshToken, hash: newHash } = makeRefreshToken(family.family_id);
-	family.current_token_hash = newHash;
-	await familyStore.set(family);
-
 	const key = await new MCPKeyStore(logger).getSigningKey(mcpConfig);
 	const accessToken = signAccessToken(
 		{
@@ -325,6 +328,11 @@ async function handleRefreshTokenGrant(
 		},
 		key
 	);
+
+	// Rotate only once the new access token is in hand (keep the original expiry).
+	const { token: newRefreshToken, hash: newHash } = makeRefreshToken(family.family_id);
+	family.current_token_hash = newHash;
+	await familyStore.set(family);
 
 	const responseBody: Record<string, unknown> = {
 		access_token: accessToken,

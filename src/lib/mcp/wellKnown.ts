@@ -72,7 +72,11 @@ function jsonResponse(body: unknown, status = 200): HttpResponse {
  * explicitly regardless. Documented in docs/configuration.md.
  */
 export function resolveIssuer(request: HarperRequest, mcpConfig: MCPConfig): string {
-	if (mcpConfig.issuer) return mcpConfig.issuer;
+	if (mcpConfig.issuer) {
+		// Strip trailing slashes so the `iss` claim and `${issuer}/oauth/...`
+		// endpoint URLs don't end up with a doubled slash.
+		return mcpConfig.issuer.replace(/\/+$/, '');
+	}
 	const host = request.host ?? request.headers?.host ?? 'localhost';
 	const scheme = request.protocol ?? 'https';
 	return `${scheme}://${host}`;
