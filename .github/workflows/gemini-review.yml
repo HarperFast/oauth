@@ -45,7 +45,7 @@ jobs:
     # Note: the `gemini-review` label name is matched there too —
     # `_gemini-review.yml`'s authorize `if:`, not in this caller.
     if: ${{ vars.GEMINI_ALWAYS_ON == 'true' || github.event.action == 'labeled' }}
-    uses: HarperFast/ai-review-prompts/.github/workflows/_gemini-review.yml@441d5441e348ab6a2ab97c60f645e7053999b619 # main 2026-06-18 (post #65 — inline resolvable severity-badged review comments + non-blocking Suggestions tier; also #56 SHA-pin fix, #29 run-notes split, #63 test coverage)
+    uses: HarperFast/ai-review-prompts/.github/workflows/_gemini-review.yml@48e539aaa50cf45bd99494427a3ce4c9f1c46f26 # main 2026-06-18 (post #66 — Suggestions must propose a change, never affirm; incl. #65 inline resolvable severity-badged comments + Suggestions tier)
     # Caller-side permissions, scoped at the calling-job level (NOT
     # workflow-level — that placement caps the reusable's per-job
     # grants below what they need and breaks the workflow at startup;
@@ -67,7 +67,7 @@ jobs:
       # in this repo for why the duplication is unavoidable
       # (reusable workflows can't introspect their own ref in
       # workflow_call context).
-      ai-review-prompts-ref: 441d5441e348ab6a2ab97c60f645e7053999b619
+      ai-review-prompts-ref: 48e539aaa50cf45bd99494427a3ce4c9f1c46f26
       review-layers: |
         universal
         harper/common
