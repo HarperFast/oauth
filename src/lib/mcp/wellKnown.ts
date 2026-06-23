@@ -23,6 +23,8 @@
  */
 
 import type { Logger, MCPConfig } from '../../types.ts';
+import { MCPKeyStore } from './keyStore.ts';
+import { publicKeyToJwk } from './tokenIssuer.ts';
 
 interface HarperRequest {
 	pathname?: string;
@@ -70,7 +72,11 @@ function jsonResponse(body: unknown, status = 200): HttpResponse {
  * explicitly regardless. Documented in docs/configuration.md.
  */
 export function resolveIssuer(request: HarperRequest, mcpConfig: MCPConfig): string {
-	if (mcpConfig.issuer) return mcpConfig.issuer;
+	if (mcpConfig.issuer) {
+		// Strip trailing slashes so the `iss` claim and `${issuer}/oauth/...`
+		// endpoint URLs don't end up with a doubled slash.
+		return mcpConfig.issuer.replace(/\/+$/, '');
+	}
 	const host = request.host ?? request.headers?.host ?? 'localhost';
 	const scheme = request.protocol ?? 'https';
 	return `${scheme}://${host}`;
@@ -117,10 +123,9 @@ export function buildAuthorizationServerMetadata(
 		grant_types_supported: ['authorization_code', 'refresh_token'],
 		code_challenge_methods_supported: ['S256'],
 		token_endpoint_auth_methods_supported: ['none', 'client_secret_basic', 'client_secret_post'],
-		// Advertise both signing algorithms; the concrete key is selected at
-		// token-mint time (Stage 4). Empty until that lands; clients see this
-		// advertisement and the empty JWKS together for now.
-		id_token_signing_alg_values_supported: ['RS256', 'EdDSA'],
+		// RS256 only in v1 — jsonwebtoken cannot emit EdDSA. Matches the key
+		// served at the JWKS endpoint; EdDSA is deferred (would need a JOSE lib).
+		id_token_signing_alg_values_supported: ['RS256'],
 		// RFC 8707 §2: server understands the `resource` parameter.
 		resource_parameter_supported: true,
 		// CORS-friendly metadata is the spec norm; we serve cross-origin reads.
@@ -129,16 +134,19 @@ export function buildAuthorizationServerMetadata(
 }
 
 /**
- * JWKS document. Placeholder until Stage 4 generates and persists signing keys
- * in the `harper_oauth_mcp_keys` table.
+ * JWKS document — the public half of the signing key(s) in
+ * `harper_oauth_mcp_keys`, serialized to JWK. Read-only: it never triggers key
+ * generation (an unauthenticated fetch must not mint key material), so the set
+ * is empty until the first access token is issued.
  */
-export function buildJWKS(_mcpConfig: MCPConfig): Record<string, unknown> {
-	return { keys: [] };
+export async function buildJWKS(_mcpConfig: MCPConfig): Promise<Record<string, unknown>> {
+	const keys = await new MCPKeyStore().getAllPublicKeys();
+	return { keys: keys.map((k) => publicKeyToJwk(k.public_key_pem, k.kid, k.alg)) };
 }
 
 type WellKnownMatch = {
 	exactPath: string;
-	build: (request: HarperRequest, mcpConfig: MCPConfig) => Record<string, unknown>;
+	build: (request: HarperRequest, mcpConfig: MCPConfig) => Record<string, unknown> | Promise<Record<string, unknown>>;
 };
 
 const HANDLERS: WellKnownMatch[] = [
@@ -161,12 +169,12 @@ function makeHandler(
 	getConfig: () => MCPConfig | undefined,
 	logger?: Logger
 ): (req: HarperRequest, next: (r: HarperRequest) => any) => any {
-	return (req, next) => {
+	return async (req, next) => {
 		const cfg = getConfig();
 		if (!cfg?.enabled) return next(req);
 		if (req.pathname !== match.exactPath) return next(req);
 		try {
-			return jsonResponse(match.build(req, cfg));
+			return jsonResponse(await match.build(req, cfg));
 		} catch (error) {
 			logger?.error?.(`MCP well-known handler ${match.exactPath} failed:`, (error as Error).message);
 			return jsonResponse({ error: 'server_error' }, 500);

@@ -10,12 +10,17 @@ import type { RequestTarget } from 'harper';
 import type { Logger, MCPConfig, ProviderRegistry, Request } from '../../types.ts';
 import { handleAuthorize } from './authorize.ts';
 import { handleRegister } from './dcr.ts';
+import { handleToken } from './token.ts';
 
 export { MCPAuthCodeStore, resetMCPAuthCodesTableCache } from './authCodeStore.ts';
 export { handleAuthorize, selectMCPProvider } from './authorize.ts';
 export { handleMCPCallback } from './callback.ts';
 export { MCPClientStore, resetMCPClientsTableCache } from './clientStore.ts';
 export { handleRegister } from './dcr.ts';
+export { MCPKeyStore, resetMCPKeysTableCache, SIGNING_KEY_ID } from './keyStore.ts';
+export { MCPRefreshFamilyStore, resetMCPRefreshFamiliesTableCache } from './refreshTokenStore.ts';
+export { handleToken } from './token.ts';
+export { publicKeyToJwk, signAccessToken, verifyAccessToken } from './tokenIssuer.ts';
 
 /**
  * Dispatch POST /oauth/mcp/<action>.
@@ -36,6 +41,10 @@ export async function handleMCPPost(
 
 	if (action === 'register') {
 		return handleRegister(request, body, mcpConfig, logger);
+	}
+
+	if (action === 'token') {
+		return handleToken(request, body, mcpConfig, logger);
 	}
 
 	return { status: 404, body: { error: 'Not found' } };

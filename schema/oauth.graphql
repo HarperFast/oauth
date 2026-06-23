@@ -51,6 +51,39 @@ type mcp_auth_codes @table(database: "oauth", expiration: 300) {
 	created_at: Float
 }
 
+## MCP JWT signing keys (Stage 4)
+## Persisted here (not on disk) so all replicated Harper nodes share one key
+## set — file storage would diverge across nodes. No expiration: keys are
+## retained for verification until explicitly rotated. RS256 only in v1
+## (jsonwebtoken cannot emit EdDSA); the public half is published at
+## /.well-known/jwks.json, the private half never leaves the server.
+type harper_oauth_mcp_keys @table(database: "oauth") {
+	kid: ID @primaryKey
+	alg: String # "RS256"
+	public_key_pem: String
+	private_key_pem: String
+	created_at: Float # Unix seconds
+}
+
+## MCP refresh-token families (Stage 4, OAuth 2.1 single-use rotation)
+## One row per refresh-token family. The token handed to the client is
+## "<family_id>.<secret>"; only the SHA-256 hash of the whole value is stored
+## (current_token_hash). A presented token whose hash != current_token_hash is
+## a replay of an already-rotated token → the family is revoked. Real TTL is
+## enforced at runtime via expires_at; the table expiration is a generous GC
+## backstop (30d) so abandoned families are eventually evicted.
+type mcp_refresh_families @table(database: "oauth", expiration: 2592000) {
+	family_id: ID @primaryKey
+	current_token_hash: String
+	revoked: Boolean
+	client_id: String
+	user: String
+	resource: String
+	scope: String
+	created_at: Float # Unix seconds
+	expires_at: Float # Unix seconds; refresh rejected once exceeded
+}
+
 ## OAuth User Session table (optional, for future use)
 ## Could store OAuth-specific user data
 # type oauth_sessions @table(database: "oauth") {

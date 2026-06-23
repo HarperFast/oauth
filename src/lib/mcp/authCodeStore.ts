@@ -109,4 +109,17 @@ export class MCPAuthCodeStore {
 			this.logger?.warn?.('Failed to delete MCP auth code:', error);
 		}
 	}
+
+	/**
+	 * Strict single-use consume for the /token exchange. Unlike `delete`, a
+	 * failure is NOT swallowed — the caller must refuse to issue a token if the
+	 * code could still be replayed. (A residual race remains: with a
+	 * get/put/delete-only table there is no atomic compare-and-delete, so two
+	 * concurrent exchanges of the same code could both pass before either
+	 * delete lands. Accepted given PKCE binding, the 5-minute TTL, and Harper's
+	 * single-trust-domain model.)
+	 */
+	async consume(code: string): Promise<void> {
+		await getAuthCodesTable().delete(code);
+	}
 }

@@ -14,6 +14,24 @@ import { DynamicProviderCache, DEFAULT_DYNAMIC_PROVIDER_CACHE_TTL_SECONDS } from
 import { registerWellKnownHandlers } from './lib/mcp/wellKnown.ts';
 import type { Scope, OAuthPluginConfig, ProviderRegistry, OAuthHooks } from './types.ts';
 
+// Config can carry literal secrets (provider clientSecret, mcp.signingKeyPem,
+// mcp.dynamicClientRegistration.initialAccessToken). Redact them before logging
+// the options blob — logs are frequently shipped/retained outside the trust
+// boundary. Deny-list by key-name substring; over-redaction in a log is safe.
+const SENSITIVE_KEY_PATTERN = /secret|signingkeypem|initialaccesstoken|privatekey|password/i;
+
+function redactSecrets(value: unknown): unknown {
+	if (Array.isArray(value)) return value.map(redactSecrets);
+	if (value && typeof value === 'object') {
+		const out: Record<string, unknown> = {};
+		for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
+			out[key] = SENSITIVE_KEY_PATTERN.test(key) ? '[REDACTED]' : redactSecrets(val);
+		}
+		return out;
+	}
+	return value;
+}
+
 // Export HookManager class, OAuthResource class, and types
 export { HookManager } from './lib/hookManager.ts';
 export { OAuthResource } from './lib/resource.ts';
@@ -134,7 +152,7 @@ export async function handleApplication(scope: Scope): Promise<void> {
 		if (isInitialized) {
 			logger?.info?.('OAuth configuration changed, updating providers...');
 		} else {
-			logger?.info?.('OAuth plugin loading with options:', JSON.stringify(options, null, 2));
+			logger?.info?.('OAuth plugin loading with options:', JSON.stringify(redactSecrets(options), null, 2));
 			isInitialized = true;
 		}
 
