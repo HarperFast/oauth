@@ -27,7 +27,7 @@ jobs:
       # Trusted publishing (OIDC) requires npm >= 11.5.1; the Node 22 runner
       # ships npm 10.x, so upgrade before publishing.
       - name: Upgrade npm for trusted publishing
-        run: npm install -g npm@latest
+        run: npm install -g npm@^11.5.1
 
       - name: Install dependencies
         run: npm ci
@@ -45,8 +45,10 @@ jobs:
       # don't move `latest`; full releases go to `latest`.
       - name: Determine npm dist-tag
         id: disttag
+        env:
+          TAG_NAME: ${{ github.event.release.tag_name }}
         run: |
-          if [[ "${{ github.event.release.tag_name }}" == *-* ]]; then
+          if [[ "$TAG_NAME" == *-* ]]; then
             echo "tag=next" >> "$GITHUB_OUTPUT"
           else
             echo "tag=latest" >> "$GITHUB_OUTPUT"
