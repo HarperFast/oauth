@@ -13,6 +13,8 @@ OAuth 2.0 and OpenID Connect authentication for Harper applications. Supports Gi
 
 ## Installation
 
+**Requires Harper v5** (`harper >=5.0.0`). For Harper v4 (the legacy `harperdb` package), use the [`1.x`](https://github.com/HarperFast/oauth/tree/v1.x) line.
+
 ```bash
 npm install @harperfast/oauth
 ```
@@ -187,6 +189,12 @@ type CSRFToken @table {
 Tokens automatically expire after 10 minutes.
 
 When MCP OAuth is enabled (see [issue #86](https://github.com/HarperFast/oauth/issues/86)), the plugin also creates a `harper_oauth_mcp_clients` table for RFC 7591 Dynamic Client Registration. Registrations persist indefinitely so `client_id`s cached by MCP clients (Claude Desktop, Cursor, `mcp-remote`) survive Harper restarts.
+
+## MCP OAuth (experimental)
+
+The plugin can also act as an OAuth authorization server for **Model Context Protocol** clients (Claude Desktop, Cursor, `mcp-remote`), letting them authenticate against the same upstream providers. Enable it with `mcp.enabled: true` (see [`docs/configuration.md`](./docs/configuration.md)).
+
+**Status: experimental, opt-in.** Available now: RFC 7591 Dynamic Client Registration, discovery metadata (`/.well-known/*`), the authorization endpoint, and audience-bound JWT token issuance. Token _verification_ for app-owned MCP routes (`withMCPAuth`) and the remaining pieces land in 2.0.x — see [issue #86](https://github.com/HarperFast/oauth/issues/86).
 
 ## Security Considerations
 
