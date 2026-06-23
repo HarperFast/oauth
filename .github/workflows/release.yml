@@ -24,6 +24,11 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
           cache: 'npm'
 
+      # Trusted publishing (OIDC) requires npm >= 11.5.1; the Node 22 runner
+      # ships npm 10.x, so upgrade before publishing.
+      - name: Upgrade npm for trusted publishing
+        run: npm install -g npm@^11.5.1
+
       - name: Install dependencies
         run: npm ci
 
@@ -36,7 +41,21 @@ jobs:
       - name: Run tests
         run: npm test
 
-      - name: Publish to npm
-        run: npm publish --provenance --access public
+      # Prereleases (tags like v2.1.0-beta.1) go to the `next` dist-tag so they
+      # don't move `latest`; full releases go to `latest`.
+      - name: Determine npm dist-tag
+        id: disttag
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_ACCESS_KEY }}
+          TAG_NAME: ${{ github.event.release.tag_name }}
+        run: |
+          if [[ "$TAG_NAME" == *-* ]]; then
+            echo "tag=next" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=latest" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Auth is via npm trusted publishing (OIDC) using the id-token below — no
+      # NODE_AUTH_TOKEN/secret. Configured at npmjs.com: Trusted Publisher ->
+      # HarperFast/oauth, release.yml, Release environment.
+      - name: Publish to npm
+        run: npm publish --provenance --access public --tag "${{ steps.disttag.outputs.tag }}"
