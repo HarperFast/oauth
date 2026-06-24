@@ -1,0 +1,37 @@
+# Integration-test fixture for withMCPAuth (Stage 5).
+#
+# Loads the OAuth plugin with MCP enabled and a pinned issuer/resource, plus an
+# app JS file (mcp-app.js) that registers an MCP route guarded by withMCPAuth in
+# BOTH supported registration models:
+#   - /mcp     via urlPath subroute (Harper's routed dispatch isolates it from
+#              the default-group core-auth middleware)
+#   - /mcp-dg  via a default-group middleware ordered `before: authentication`
+#
+# The test asserts both routes answer an unauthenticated (or non-Harper-bearer)
+# request with the spec `401 + WWW-Authenticate: Bearer resource_metadata="..."`
+# — proving core auth never clobbers it with its `WWW-Authenticate: Basic`.
+#
+# A provider is configured so OAuthResource.configure() runs and the pinned
+# mcp.issuer reaches OAuthResource.mcpConfig (withMCPAuth's default config
+# source); without any provider the plugin registers an error resource and never
+# calls configure(), leaving mcpConfig undefined.
+
+rest: true
+
+'@harperfast/oauth':
+  package: '@harperfast/oauth'
+  providers:
+    test:
+      provider: generic
+      clientId: test-client
+      clientSecret: test-secret
+      authorizationUrl: 'http://idp.test/authorize'
+      tokenUrl: 'http://idp.test/token'
+      userInfoUrl: 'http://idp.test/userinfo'
+  mcp:
+    enabled: true
+    issuer: 'https://mcp.test'
+    resource: 'https://mcp.test/mcp'
+
+jsResource:
+  files: 'mcp-app.js'

@@ -57,7 +57,7 @@ Each provider requires:
 
 ### MCP OAuth (work in progress)
 
-Opt-in support for the Model Context Protocol authorization flow ([issue #86](https://github.com/HarperFast/oauth/issues/86)). Implemented so far: Dynamic Client Registration at `POST /oauth/mcp/register` (RFC 7591), the discovery documents under `/.well-known/*` (RFCs 8414, 9728) so MCP clients (Claude Desktop, Cursor, `mcp-remote`) can find and register themselves, and the authorization endpoint `GET /oauth/mcp/authorize` (OAuth 2.1 + PKCE-S256). The `/token` exchange and the `withMCPAuth` wrapper land in subsequent releases.
+Opt-in support for the Model Context Protocol authorization flow ([issue #86](https://github.com/HarperFast/oauth/issues/86)). Implemented so far: Dynamic Client Registration at `POST /oauth/mcp/register` (RFC 7591), the discovery documents under `/.well-known/*` (RFCs 8414, 9728) so MCP clients (Claude Desktop, Cursor, `mcp-remote`) can find and register themselves, the authorization endpoint `GET /oauth/mcp/authorize` (OAuth 2.1 + PKCE-S256), the `POST /oauth/mcp/token` exchange (audience-bound RS256 JWTs), and the `withMCPAuth` route guard (below) that verifies those tokens on your MCP endpoint.
 
 ```yaml
 '@harperfast/oauth':
@@ -103,6 +103,47 @@ Sensitive leaves inside `mcp` support `${ENV_VAR}` expansion (e.g., `initialAcce
 | `/.well-known/jwks.json`                  | —        | Public keys for verifying issued JWTs (returns an empty key set until signing lands) |
 
 All three documents include `Access-Control-Allow-Origin: *` so browser-based MCP clients and discovery tools can fetch them cross-origin.
+
+#### Protecting your MCP route — `withMCPAuth`
+
+The plugin issues and verifies tokens, but your app owns the MCP endpoint. Wrap your handler with `withMCPAuth` to enforce the spec contract on it:
+
+```ts
+import { server } from 'harper';
+import { withMCPAuth } from '@harperfast/oauth';
+
+const mcpHandler = (request) => {
+	// On success, the verified claims are attached: { sub, client_id, aud, scope }
+	return { status: 200, body: JSON.stringify({ user: request.mcp.sub }) };
+};
+
+// Recommended registration — a urlPath subroute (see "Registration", below):
+server.http(withMCPAuth(mcpHandler), { urlPath: '/mcp' });
+```
+
+What it enforces on every request, failing closed with `401 + WWW-Authenticate: Bearer resource_metadata="<issuer>/.well-known/oauth-protected-resource"`:
+
+- Bearer token present in the `Authorization` header (header-only; query-string tokens are ignored, RFC 6750).
+- Valid RS256 signature against the published JWKS, selecting the key by the token's `kid`.
+- `exp`/`nbf` within bounds, and `aud` equal to `mcp.resource` (audience binding, RFC 8707).
+- MCP enabled and a signing key published — while either is missing, all requests are rejected.
+
+On success it sets `request.mcp = { sub, client_id, aud, scope }` and calls your handler, returning its response unchanged.
+
+**Registration.** Harper's core auth is a default-group middleware that consumes `Authorization: Bearer` and rejects any non-Harper token with `WWW-Authenticate: Basic` — which would break MCP discovery. Register `withMCPAuth` so it owns the response for its route:
+
+- **urlPath subroute (recommended):** `server.http(withMCPAuth(handler), { urlPath: '/mcp' })`. Harper's routed dispatch runs only this chain, so core auth never runs for the route — the same isolation the `/.well-known/*` endpoints rely on. No extra options needed.
+- **Default-group fallback:** `server.http(withMCPAuth(handler, { path: '/mcp' }), { before: 'authentication' })`. When the route shares the default chain with auth, pass `path` (the guard then scopes to that path and calls `next()` for everything else) and register `before: 'authentication'` so it runs ahead of core auth. In this mode the wrapped handler must terminate the request rather than call `next`, or core auth runs afterward and re-rejects the token.
+
+**Options** — `withMCPAuth(handler, options?)`:
+
+| Option        | Type                           | Default                | Description                                                                                        |
+| ------------- | ------------------------------ | ---------------------- | -------------------------------------------------------------------------------------------------- |
+| `path`        | string                         | (none)                 | Default-group scoping only — the path this guard owns. Omit for the urlPath-subroute registration. |
+| `onAuthError` | `(request, reason) => any`     | (none)                 | Custom denial response. A falsy return still falls back to the default `401` (fail closed).        |
+| `getConfig`   | `() => MCPConfig \| undefined` | live plugin MCP config | Override the MCP config source (read per request).                                                 |
+| `logger`      | Logger                         | plugin logger          | Override the logger.                                                                               |
+| `keyStore`    | `{ getAllPublicKeys() }`       | plugin `MCPKeyStore`   | Override the signing-key source (used by tests).                                                   |
 
 ## Environment Variables
 

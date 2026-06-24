@@ -58,6 +58,11 @@ export { getProvider } from './lib/providers/index.ts';
 export { withOAuthValidation, getOAuthProviders } from './lib/withOAuthValidation.ts';
 export type { OAuthValidationOptions } from './lib/withOAuthValidation.ts';
 
+// Export MCP bearer-token guard (Stage 5) for app-owned MCP routes
+export { withMCPAuth } from './lib/mcp/withMCPAuth.ts';
+export type { WithMCPAuthOptions } from './lib/mcp/withMCPAuth.ts';
+export type { MCPRequestClaims } from './types.ts';
+
 // Store hooks registered at module load time and active hookManager
 let pendingHooks: OAuthHooks | null = null;
 let activeHookManager: HookManager | null = null;

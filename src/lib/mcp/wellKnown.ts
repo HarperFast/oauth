@@ -40,7 +40,10 @@ type HttpResponse = {
 	body: string;
 };
 
-const PRM_PATH = '/.well-known/oauth-protected-resource';
+// Exported so withMCPAuth (Stage 5) builds its `WWW-Authenticate: Bearer
+// resource_metadata="<issuer>${PRM_PATH}"` challenge from the same constant the
+// PRM document is served at — the discovery loop stays in sync by construction.
+export const PRM_PATH = '/.well-known/oauth-protected-resource';
 const AS_METADATA_PATH = '/.well-known/oauth-authorization-server';
 const JWKS_PATH = '/.well-known/jwks.json';
 
