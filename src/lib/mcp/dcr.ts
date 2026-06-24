@@ -242,28 +242,26 @@ export async function handleRegister(
 
 	// Observability: log every registration attempt. Rejections were previously
 	// silent, making DCR failures from MCP clients (e.g. Claude) undebuggable.
-	logger?.info?.('MCP DCR request received', {
-		redirect_uris: Array.isArray(body?.redirect_uris) ? body.redirect_uris : typeof body?.redirect_uris,
-		grant_types: body?.grant_types,
-		response_types: body?.response_types,
-		token_endpoint_auth_method: body?.token_endpoint_auth_method,
-		has_auth_header: !!request?.headers?.authorization,
-	});
+	// Single-string messages (matching this file's other logs) so they land in
+	// the structured app log rather than stdout.
+	const redirectUrisStr = JSON.stringify(body?.redirect_uris);
+	logger?.info?.(
+		`MCP DCR request received: redirect_uris=${redirectUrisStr} grant_types=${JSON.stringify(body?.grant_types)} response_types=${JSON.stringify(body?.response_types)} token_endpoint_auth_method=${JSON.stringify(body?.token_endpoint_auth_method)} auth_header=${!!request?.headers?.authorization}`
+	);
 
 	const authHeader = request?.headers?.authorization;
 	const authError = checkInitialAccessToken(authHeader, dcrConfig?.initialAccessToken);
 	if (authError) {
-		logger?.warn?.('MCP DCR rejected (initial access token required/invalid)');
+		logger?.warn?.('MCP DCR rejected: initial access token required or invalid');
 		return authError;
 	}
 
 	const built = buildClientFromRequest(body, dcrConfig?.allowedRedirectUriHosts);
 	if ('status' in built) {
-		logger?.warn?.('MCP DCR rejected', {
-			error: (built as { body?: { error?: string } }).body?.error,
-			error_description: (built as { body?: { error_description?: string } }).body?.error_description,
-			redirect_uris: Array.isArray(body?.redirect_uris) ? body.redirect_uris : typeof body?.redirect_uris,
-		});
+		const errBody = (built as { body?: { error?: string; error_description?: string } }).body;
+		logger?.warn?.(
+			`MCP DCR rejected: ${errBody?.error} — ${errBody?.error_description} (redirect_uris=${redirectUrisStr})`
+		);
 		return built;
 	}
 
