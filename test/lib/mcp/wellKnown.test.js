@@ -208,6 +208,35 @@ describe('MCP well-known: handler registration', () => {
 			assert.equal(nextCalled, true, 'sub-paths should fall through, not be served');
 		});
 
+		// Harper's server.http({ urlPath }) mounts the handler at urlPath and
+		// passes the path RELATIVE to it: '/' for an exact match, '/sub' for a
+		// sub-path. The exact-path check must accept the relative '/' form.
+		it('serves on the relative "/" path (Harper passes path relative to urlPath)', async () => {
+			currentConfig = { enabled: true };
+			const handler = findHandler('/.well-known/oauth-authorization-server');
+			const response = await handler(makeRequest({ pathname: '/' }), () => null);
+			assert.equal(response.status, 200, 'relative "/" exact match should be served');
+		});
+
+		it('falls through on a relative sub-path ("/extra")', () => {
+			currentConfig = { enabled: true };
+			const handler = findHandler('/.well-known/oauth-protected-resource');
+			let nextCalled = false;
+			const next = () => {
+				nextCalled = true;
+				return null;
+			};
+			handler(makeRequest({ pathname: '/extra' }), next);
+			assert.equal(nextCalled, true, 'relative sub-paths should fall through, not be served');
+		});
+
+		it('falls back to req.url when pathname is absent', async () => {
+			currentConfig = { enabled: true };
+			const handler = findHandler('/.well-known/jwks.json');
+			const response = await handler(makeRequest({ pathname: undefined, url: '/' }), () => null);
+			assert.equal(response.status, 200, 'should resolve the path from req.url when pathname is missing');
+		});
+
 		it('serves PRM as JSON with Content-Type when enabled and path matches', async () => {
 			currentConfig = { enabled: true };
 			const handler = findHandler('/.well-known/oauth-protected-resource');

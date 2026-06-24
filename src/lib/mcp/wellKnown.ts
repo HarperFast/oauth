@@ -28,6 +28,7 @@ import { publicKeyToJwk } from './tokenIssuer.ts';
 
 interface HarperRequest {
 	pathname?: string;
+	url?: string;
 	protocol?: string;
 	host?: string;
 	headers?: Record<string, any> & { host?: string };
@@ -172,7 +173,13 @@ function makeHandler(
 	return async (req, next) => {
 		const cfg = getConfig();
 		if (!cfg?.enabled) return next(req);
-		if (req.pathname !== match.exactPath) return next(req);
+		// `server.http({ urlPath })` is prefix-based, so sub-paths reach this
+		// handler and must be rejected. Harper passes the path RELATIVE to the
+		// mounted `urlPath` — `/` for an exact match, `/sub` for a sub-path —
+		// whereas older builds passed the absolute pathname. Accept both: the
+		// relative `/` form (current Harper) and the absolute `exactPath` form.
+		const reqPath = req.pathname ?? req.url;
+		if (reqPath !== '/' && reqPath !== match.exactPath) return next(req);
 		try {
 			return jsonResponse(await match.build(req, cfg));
 		} catch (error) {
