@@ -240,14 +240,30 @@ export async function handleRegister(
 		return { status: 404, body: { error: 'Not found' } };
 	}
 
+	// Observability: log every registration attempt. Rejections were previously
+	// silent, making DCR failures from MCP clients (e.g. Claude) undebuggable.
+	logger?.info?.('MCP DCR request received', {
+		redirect_uris: Array.isArray(body?.redirect_uris) ? body.redirect_uris : typeof body?.redirect_uris,
+		grant_types: body?.grant_types,
+		response_types: body?.response_types,
+		token_endpoint_auth_method: body?.token_endpoint_auth_method,
+		has_auth_header: !!request?.headers?.authorization,
+	});
+
 	const authHeader = request?.headers?.authorization;
 	const authError = checkInitialAccessToken(authHeader, dcrConfig?.initialAccessToken);
 	if (authError) {
+		logger?.warn?.('MCP DCR rejected (initial access token required/invalid)');
 		return authError;
 	}
 
 	const built = buildClientFromRequest(body, dcrConfig?.allowedRedirectUriHosts);
 	if ('status' in built) {
+		logger?.warn?.('MCP DCR rejected', {
+			error: (built as { body?: { error?: string } }).body?.error,
+			error_description: (built as { body?: { error_description?: string } }).body?.error_description,
+			redirect_uris: Array.isArray(body?.redirect_uris) ? body.redirect_uris : typeof body?.redirect_uris,
+		});
 		return built;
 	}
 
