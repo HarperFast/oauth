@@ -11,7 +11,7 @@ global.Resource = class {
 	static loadAsInstance = false;
 };
 
-import { OAuthResource } from '../../dist/lib/resource.js';
+import { OAuthResource, toHttpResponse } from '../../dist/lib/resource.js';
 
 describe('OAuthResource - Response Builders', () => {
 	afterEach(() => {
@@ -302,6 +302,49 @@ describe('OAuthResource - Response Builders', () => {
 			const response = OAuthResource.buildTokenStatusResponse(request);
 			assert.equal(response.status, 200);
 			// Should not throw when provider, expiresAt, etc. are undefined
+		});
+	});
+
+	describe('toHttpResponse() — Harper HTTP response normalization', () => {
+		it('wraps a { status, body } envelope so Harper honors the status', () => {
+			const out = toHttpResponse({ status: 201, body: { client_id: 'abc' } });
+			assert.equal(out.status, 201);
+			assert.ok(out.headers, 'must carry headers so Harper treats it as a Response');
+			assert.equal(out.headers['Content-Type'], 'application/json');
+			// body is serialized JSON, not the raw envelope object
+			assert.equal(typeof out.body, 'string');
+			assert.deepEqual(JSON.parse(out.body), { client_id: 'abc' });
+		});
+
+		it('preserves a non-200 error status (e.g. 400/404)', () => {
+			const out = toHttpResponse({ status: 400, body: { error: 'invalid_redirect_uri' } });
+			assert.equal(out.status, 400);
+			assert.deepEqual(JSON.parse(out.body), { error: 'invalid_redirect_uri' });
+		});
+
+		it('merges caller-provided headers over the default Content-Type', () => {
+			const out = toHttpResponse({
+				status: 200,
+				headers: { 'WWW-Authenticate': 'Bearer' },
+				body: { ok: true },
+			});
+			assert.equal(out.headers['WWW-Authenticate'], 'Bearer');
+			assert.equal(out.headers['Content-Type'], 'application/json');
+		});
+
+		it('passes through a plain body with no status (Harper serializes it as 200)', () => {
+			const plain = { message: 'OAuth providers', providers: [] };
+			assert.equal(toHttpResponse(plain), plain, 'should be returned unchanged');
+		});
+
+		it('passes through a header-bearing redirect with no body unchanged', () => {
+			const redirect = { status: 302, headers: { Location: 'https://idp.example/authorize' } };
+			assert.equal(toHttpResponse(redirect), redirect, 'redirects already work — leave them be');
+		});
+
+		it('leaves non-object values untouched', () => {
+			assert.equal(toHttpResponse(undefined), undefined);
+			assert.equal(toHttpResponse('raw'), 'raw');
 		});
 	});
 });

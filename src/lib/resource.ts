@@ -22,6 +22,37 @@ export interface ParsedRoute {
 }
 
 /**
+ * Adapt the plugin's internal `{ status, body }` response envelope to a shape
+ * Harper's REST layer recognizes as an explicit HTTP response.
+ *
+ * Harper only honors `status`/`headers` when the returned object carries a
+ * `headers` field; a bare `{ status, body }` (no headers) is otherwise
+ * serialized *whole* as the response body with a default 200 — so the status is
+ * lost and the `{ status, body }` envelope leaks into the payload (this broke
+ * DCR registration, token errors, 403/404 responses, etc.). Normalize those
+ * envelopes to a Harper response with a `headers` field and a pre-serialized
+ * JSON `body` (mirroring this plugin's well-known `jsonResponse` helper, which
+ * works for the same reason). Serializing explicitly — rather than handing
+ * Harper a `data` object to content-negotiate — guarantees JSON for these
+ * OAuth/DCR API responses regardless of the client's `Accept` header.
+ *
+ * Already-valid responses are passed through untouched:
+ *   - plain bodies with no `status` (Harper serializes them with a 200), and
+ *   - header-bearing responses with no `body` (e.g. 3xx redirects with Location).
+ */
+export function toHttpResponse(result: any): any {
+	if (!result || typeof result !== 'object' || Array.isArray(result)) return result;
+	if (!('status' in result)) return result;
+	if (result.headers && result.body === undefined) return result;
+	const { status, body, headers } = result;
+	return {
+		status,
+		headers: { 'Content-Type': 'application/json', ...(headers ?? {}) },
+		body: typeof body === 'string' ? body : JSON.stringify(body),
+	};
+}
+
+/**
  * OAuth Resource - proper Harper Resource class for handling OAuth endpoints
  * Follows Resource API v2 pattern (loadAsInstance = false)
  */
@@ -258,8 +289,16 @@ export class OAuthResource extends Resource {
 	/**
 	 * Handle GET requests to OAuth endpoints
 	 * Resource API v2 signature: get(target)
+	 *
+	 * Thin wrapper: routes to the implementation, then normalizes the internal
+	 * `{ status, body }` envelope into a Harper-recognized HTTP response (see
+	 * `toHttpResponse`).
 	 */
 	async get(target: RequestTarget): Promise<any> {
+		return toHttpResponse(await this.handleGet(target));
+	}
+
+	async handleGet(target: RequestTarget): Promise<any> {
 		const providers = OAuthResource.providers;
 		const debugMode = OAuthResource.debugMode;
 		const logger = OAuthResource.logger;
@@ -384,8 +423,16 @@ export class OAuthResource extends Resource {
 	/**
 	 * Handle POST requests to OAuth endpoints
 	 * Resource API v2 signature: post(target, data)
+	 *
+	 * Thin wrapper: routes to the implementation, then normalizes the internal
+	 * `{ status, body }` envelope into a Harper-recognized HTTP response (see
+	 * `toHttpResponse`).
 	 */
 	async post(target: RequestTarget, data: any): Promise<any> {
+		return toHttpResponse(await this.handlePost(target, data));
+	}
+
+	async handlePost(target: RequestTarget, data: any): Promise<any> {
 		const logger = OAuthResource.logger;
 		const hookManager = OAuthResource.hookManager!;
 
