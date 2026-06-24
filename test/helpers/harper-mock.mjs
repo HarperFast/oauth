@@ -27,6 +27,9 @@ export class Resource {
 	setContext(c) { this._context = c; }
 }
 export class RequestTarget {}
+export const logger = {
+	trace() {}, debug() {}, info() {}, warn() {}, error() {}, fatal() {}, notify() {},
+};
 `;
 
 const HARPER_MOCK_URL = 'harper-mock:harper';
