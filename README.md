@@ -218,7 +218,9 @@ server.http(withMCPAuth(mcpHandler), { urlPath: '/mcp' });
 - **urlPath subroute (recommended):** `server.http(withMCPAuth(handler), { urlPath: '/mcp' })`. Harper routes the request to this chain alone, so core auth never runs for it — the same isolation the `/.well-known/*` endpoints use. No extra options needed.
 - **Default-group fallback:** `server.http(withMCPAuth(handler, { path: '/mcp' }), { before: 'authentication' })`. When the route shares the default middleware chain with auth, pass `path` (so the guard scopes to your route and lets other paths fall through) and register `before: 'authentication'` so it runs ahead of core auth.
 
-`withMCPAuth(handler, options?)` options: `path` (default-group scoping, above), `onAuthError(request, reason)` (custom denial response — a falsy return still fails closed to the default `401`), plus `getConfig` / `logger` / `keyStore` overrides (default to the plugin's live MCP config, logger, and key store). The guard fails closed: while MCP is disabled or no signing key has been published, every request is rejected. Query-string tokens are ignored (header-only, RFC 6750). See [`docs/configuration.md`](./docs/configuration.md).
+`withMCPAuth(handler, options?)` options: `path` (default-group scoping, above), `onAuthError(request, reason)` (custom denial response — a falsy return still fails closed to the default `401`), plus `getConfig` / `logger` / `keyStore` overrides (default to the plugin's live MCP config, logger, and key store). The guard fails closed: while MCP is disabled or no signing key has been published, every request is rejected. Query-string tokens are ignored (header-only, RFC 6750).
+
+If your MCP route lives in a **different component** than the one declaring `@harperfast/oauth`, inject `getConfig` (the consumer's copy of `OAuthResource.mcpConfig` is unpopulated) — signing keys still resolve from the shared `oauth` database. See [`docs/configuration.md`](./docs/configuration.md).
 
 ## Security Considerations
 

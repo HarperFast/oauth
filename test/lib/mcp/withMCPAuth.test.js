@@ -20,7 +20,9 @@ import { SIGNING_KEY_ID } from '../../../dist/lib/mcp/keyStore.js';
 
 const ISSUER = 'https://as.example.com';
 const RESOURCE = 'https://app.example.com/mcp';
-const PRM_URL = `${ISSUER}/.well-known/oauth-protected-resource`;
+// RFC 9728 §3.1: the PRM URL is derived from the RESOURCE (origin + well-known +
+// the resource's path), not the issuer — so it's the app origin with /mcp appended.
+const PRM_URL = 'https://app.example.com/.well-known/oauth-protected-resource/mcp';
 const EXPECTED_CHALLENGE = `Bearer resource_metadata="${PRM_URL}"`;
 
 function makeKey(modulusKid = SIGNING_KEY_ID) {
@@ -173,10 +175,11 @@ describe('withMCPAuth — rejections (all return 401 + Bearer PRM challenge)', (
 	it('fails closed when config is entirely absent (challenge still well-formed)', async () => {
 		const res = await withMCPAuth(spyHandler().handler, opts({ getConfig: () => undefined }))(req(undefined), NEXT);
 		assert.equal(res.status, 401);
-		// No configured issuer → derived from the request host.
+		// No config → resource derives as <request-origin>/mcp, so the PRM URL is
+		// the request host with the /mcp path appended.
 		assert.equal(
 			res.headers['WWW-Authenticate'],
-			'Bearer resource_metadata="https://app.example.com/.well-known/oauth-protected-resource"'
+			'Bearer resource_metadata="https://app.example.com/.well-known/oauth-protected-resource/mcp"'
 		);
 	});
 
@@ -184,6 +187,19 @@ describe('withMCPAuth — rejections (all return 401 + Bearer PRM challenge)', (
 		const token = mint();
 		const res = await withMCPAuth(spyHandler().handler, opts({ keys: [] }))(req(`Bearer ${token}`), NEXT);
 		assert.equal(res.status, 401);
+	});
+
+	it('emits the BARE PRM challenge when the resource is at the origin root (no path)', async () => {
+		const res = await withMCPAuth(
+			spyHandler().handler,
+			opts({ getConfig: () => ({ enabled: true, issuer: ISSUER, resource: 'https://app.example.com' }) })
+		)(req(undefined), NEXT);
+		assert.equal(res.status, 401);
+		assert.equal(
+			res.headers['WWW-Authenticate'],
+			'Bearer resource_metadata="https://app.example.com/.well-known/oauth-protected-resource"',
+			'a root resource has no path to append'
+		);
 	});
 });
 

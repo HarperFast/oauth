@@ -28,7 +28,9 @@ function getHarperBinPath(): string {
 }
 
 const fixturePath = join(import.meta.dirname, 'fixtures', 'mcp-auth-app');
-const PRM_URL = 'https://mcp.test/.well-known/oauth-protected-resource';
+// RFC 9728 §3.1 path-appended form (resource is https://mcp.test/mcp), which #133
+// now serves and withMCPAuth points the challenge at.
+const PRM_URL = 'https://mcp.test/.well-known/oauth-protected-resource/mcp';
 
 suite('withMCPAuth: 401 + WWW-Authenticate: Bearer survives core auth', (ctx: ContextWithHarper) => {
 	before(async () => {

@@ -96,6 +96,28 @@ export function resolveResource(request: HarperRequest, mcpConfig: MCPConfig): s
 }
 
 /**
+ * Canonical RFC 9728 §3.1 Protected Resource Metadata URL for the configured
+ * resource: `<resource-origin>/.well-known/oauth-protected-resource[/<resource-path>]`.
+ *
+ * This is exactly the URL the PRM handler serves — bare for a resource at the
+ * origin root, path-appended when the resource carries a path (e.g. `.../mcp`);
+ * see {@link wellKnownPathMatches}. withMCPAuth's `WWW-Authenticate: Bearer
+ * resource_metadata="..."` challenge points here, so a client that uses the
+ * challenge value verbatim fetches a document this server actually answers.
+ * Falls back to the request-derived issuer origin (bare path) if the resource
+ * URI can't be parsed, so the deny path never throws.
+ */
+export function protectedResourceMetadataUrl(request: HarperRequest, mcpConfig: MCPConfig): string {
+	try {
+		const { origin, pathname } = new URL(resolveResource(request, mcpConfig));
+		const path = pathname && pathname !== '/' ? pathname.replace(/\/+$/, '') : '';
+		return `${origin}${PRM_PATH}${path}`;
+	} catch {
+		return `${resolveIssuer(request, mcpConfig)}${PRM_PATH}`;
+	}
+}
+
+/**
  * RFC 9728 Protected Resource Metadata document.
  */
 export function buildProtectedResourceMetadata(request: HarperRequest, mcpConfig: MCPConfig): Record<string, unknown> {

@@ -44,7 +44,7 @@ import type { Logger, MCPConfig, MCPRequestClaims, MCPSigningKeyRecord, Request 
 import { OAuthResource } from '../resource.ts';
 import { MCPKeyStore } from './keyStore.ts';
 import { verifyAccessTokenWithKeySet } from './tokenIssuer.ts';
-import { PRM_PATH, resolveIssuer, resolveResource } from './wellKnown.ts';
+import { protectedResourceMetadataUrl, resolveIssuer, resolveResource } from './wellKnown.ts';
 
 /** Minimal surface withMCPAuth needs from a key source (lets tests inject one). */
 interface KeySource {
@@ -154,15 +154,18 @@ export function withMCPAuth(handler: HttpListener, options: WithMCPAuthOptions =
 			return next(request);
 		}
 
-		// Build the spec 401 once we know the issuer. resolveIssuer dereferences
-		// mcpConfig.issuer, so guard a missing config with an empty object — a
-		// denial must never throw (it would surface as a 500, not a 401).
+		// Build the spec 401. protectedResourceMetadataUrl derefs mcpConfig
+		// (via resolveResource), so guard a missing config with an empty object —
+		// a denial must never throw (it would surface as a 500, not a 401). The
+		// challenge points at the SAME path-aware PRM URL the well-known handler
+		// serves (RFC 9728 §3.1: path-appended when the resource carries a path),
+		// so a client using the challenge value verbatim hits a real document.
 		const deny = async (reason: string): Promise<any> => {
-			const issuer = resolveIssuer(request as any, getConfig() ?? ({} as MCPConfig));
+			const metadataUrl = protectedResourceMetadataUrl(request as any, getConfig() ?? ({} as MCPConfig));
 			const defaultResponse = {
 				status: 401,
 				headers: {
-					'WWW-Authenticate': `Bearer resource_metadata="${issuer}${PRM_PATH}"`,
+					'WWW-Authenticate': `Bearer resource_metadata="${metadataUrl}"`,
 					'Content-Type': 'application/json',
 				},
 				body: JSON.stringify({ error: 'invalid_token', error_description: reason }),

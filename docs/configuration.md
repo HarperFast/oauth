@@ -121,7 +121,7 @@ const mcpHandler = (request) => {
 server.http(withMCPAuth(mcpHandler), { urlPath: '/mcp' });
 ```
 
-What it enforces on every request, failing closed with `401 + WWW-Authenticate: Bearer resource_metadata="<issuer>/.well-known/oauth-protected-resource"`:
+What it enforces on every request, failing closed with `401 + WWW-Authenticate: Bearer resource_metadata="<PRM URL>"`. The PRM URL is the RFC 9728 §3.1 location for the configured `mcp.resource` — `<resource-origin>/.well-known/oauth-protected-resource` with the resource's path appended when it has one (e.g. `https://app.example.com/.well-known/oauth-protected-resource/mcp` for resource `https://app.example.com/mcp`), matching exactly what the well-known handler serves:
 
 - Bearer token present in the `Authorization` header (header-only; query-string tokens are ignored, RFC 6750).
 - Valid RS256 signature against the published JWKS, selecting the key by the token's `kid`.
@@ -144,6 +144,29 @@ On success it sets `request.mcp = { sub, client_id, aud, scope }` and calls your
 | `getConfig`   | `() => MCPConfig \| undefined` | live plugin MCP config | Override the MCP config source (read per request).                                                 |
 | `logger`      | Logger                         | plugin logger          | Override the logger.                                                                               |
 | `keyStore`    | `{ getAllPublicKeys() }`       | plugin `MCPKeyStore`   | Override the signing-key source (used by tests).                                                   |
+
+##### Using `withMCPAuth` from a different component than the plugin
+
+By default `withMCPAuth` reads the live MCP config from the OAuth plugin via `OAuthResource.mcpConfig`. That works when the component that **declares** `@harperfast/oauth` is the same one that exposes the MCP route. If your MCP tools live in a **separate** component (it imports `withMCPAuth` as a function but doesn't declare the plugin in its own `config.yaml`), that consumer resolves its **own** `node_modules` copy of the package, where `OAuthResource.mcpConfig` is a module-local static that is never populated — so it reads as `undefined` and the guard fails closed.
+
+In that setup, **inject `getConfig`** so the wrapper sees the config:
+
+```ts
+server.http(
+	withMCPAuth(mcpHandler, {
+		// Pin issuer/resource to the values the plugin component issues tokens with,
+		// so the iss/aud checks match the minted tokens.
+		getConfig: () => ({
+			enabled: true,
+			issuer: 'https://my-app.example.com',
+			resource: 'https://my-app.example.com/mcp',
+		}),
+	}),
+	{ urlPath: '/mcp' }
+);
+```
+
+Signing keys need no extra wiring: the default `MCPKeyStore` reads `databases.oauth.harper_oauth_mcp_keys`, which is cluster-global, so the consumer verifies against the same JWKS the plugin component mints with. Importing `withMCPAuth` as a function does **not** spin up a second plugin instance.
 
 ## Environment Variables
 
