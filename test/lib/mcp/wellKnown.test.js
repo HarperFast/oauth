@@ -230,6 +230,69 @@ describe('MCP well-known: handler registration', () => {
 			assert.equal(nextCalled, true, 'relative sub-paths should fall through, not be served');
 		});
 
+		// RFC 9728 §3.1: for a resource with a path (here <issuer>/mcp), the PRM is
+		// ALSO served at /.well-known/oauth-protected-resource/<resource-path>.
+		// MCP clients (Claude.ai) construct that path-appended URL and fetch it
+		// rather than the bare host-root form. Harper passes the path relative to
+		// the mount, so the appended form arrives as the resource path ("/mcp").
+		it('serves the path-appended PRM on the relative resource path ("/mcp")', async () => {
+			currentConfig = { enabled: true };
+			const handler = findHandler('/.well-known/oauth-protected-resource');
+			const response = await handler(makeRequest({ pathname: '/mcp' }), () => null);
+			assert.equal(response.status, 200, 'path-appended PRM should be served');
+			const body = JSON.parse(response.body);
+			assert.equal(body.resource, 'https://app.example.com/mcp');
+		});
+
+		it('serves the path-appended PRM on the absolute form (older builds)', async () => {
+			currentConfig = { enabled: true };
+			const handler = findHandler('/.well-known/oauth-protected-resource');
+			const response = await handler(
+				makeRequest({ pathname: '/.well-known/oauth-protected-resource/mcp' }),
+				() => null
+			);
+			assert.equal(response.status, 200);
+		});
+
+		it('honors a configured resource path for the appended PRM', async () => {
+			currentConfig = { enabled: true, resource: 'https://app.example.com/mcp-v2' };
+			const handler = findHandler('/.well-known/oauth-protected-resource');
+			const served = await handler(makeRequest({ pathname: '/mcp-v2' }), () => null);
+			assert.equal(served.status, 200, 'configured resource path is served');
+			// A different sub-path (the default "/mcp") must NOT match when resource is /mcp-v2.
+			let nextCalled = false;
+			await handler(makeRequest({ pathname: '/mcp' }), () => {
+				nextCalled = true;
+				return null;
+			});
+			assert.equal(nextCalled, true, 'non-resource sub-path still falls through');
+		});
+
+		// A trailing slash on the configured resource (e.g. https://host/mcp/) must
+		// still serve the path-appended PRM: an RFC 9728 §3.1 client inserts the
+		// full path component and fetches `/mcp/`. The request-path trailing slash
+		// is normalized so it matches the (already-stripped) resource path.
+		it('serves the appended PRM when the configured resource has a trailing slash', async () => {
+			currentConfig = { enabled: true, resource: 'https://app.example.com/mcp/' };
+			const handler = findHandler('/.well-known/oauth-protected-resource');
+			const served = await handler(makeRequest({ pathname: '/mcp/' }), () => null);
+			assert.equal(served.status, 200, 'trailing-slash resource path is served');
+			// The slash-less form must match too (clients may send either).
+			const alsoServed = await handler(makeRequest({ pathname: '/mcp' }), () => null);
+			assert.equal(alsoServed.status, 200, 'slash-less form of the same resource is served');
+		});
+
+		it('only the PRM is resource-path-aware (AS metadata sub-path 404s)', () => {
+			currentConfig = { enabled: true };
+			const handler = findHandler('/.well-known/oauth-authorization-server');
+			let nextCalled = false;
+			handler(makeRequest({ pathname: '/mcp' }), () => {
+				nextCalled = true;
+				return null;
+			});
+			assert.equal(nextCalled, true, 'AS-metadata is not resource-path-aware');
+		});
+
 		it('falls back to req.url when pathname is absent', async () => {
 			currentConfig = { enabled: true };
 			const handler = findHandler('/.well-known/jwks.json');
