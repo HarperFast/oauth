@@ -27,5 +27,14 @@ mock.module('harper', () => {
 				this._context = context;
 			}
 		},
+		logger: {
+			trace() {},
+			debug() {},
+			info() {},
+			warn() {},
+			error() {},
+			fatal() {},
+			notify() {},
+		},
 	};
 });

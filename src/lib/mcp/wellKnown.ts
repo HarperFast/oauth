@@ -28,6 +28,7 @@ import { publicKeyToJwk } from './tokenIssuer.ts';
 
 interface HarperRequest {
 	pathname?: string;
+	url?: string;
 	protocol?: string;
 	host?: string;
 	headers?: Record<string, any> & { host?: string };
@@ -147,13 +148,66 @@ export async function buildJWKS(_mcpConfig: MCPConfig): Promise<Record<string, u
 type WellKnownMatch = {
 	exactPath: string;
 	build: (request: HarperRequest, mcpConfig: MCPConfig) => Record<string, unknown> | Promise<Record<string, unknown>>;
+	/**
+	 * When true, also serve the RFC 9728 §3.1 path-appended form of this
+	 * document for a resource that carries a path. Only the PRM is
+	 * resource-scoped this way (the AS-metadata issuer is the origin root here);
+	 * see {@link wellKnownPathMatches}.
+	 */
+	resourcePathAware?: boolean;
 };
 
 const HANDLERS: WellKnownMatch[] = [
-	{ exactPath: PRM_PATH, build: buildProtectedResourceMetadata },
+	{ exactPath: PRM_PATH, build: buildProtectedResourceMetadata, resourcePathAware: true },
 	{ exactPath: AS_METADATA_PATH, build: buildAuthorizationServerMetadata },
 	{ exactPath: JWKS_PATH, build: (_req, cfg) => buildJWKS(cfg) },
 ];
+
+/**
+ * The protected resource's path component (e.g. `/mcp` for resource
+ * `<issuer>/mcp`), or `''` when the resource is at the origin root. Used to
+ * serve the RFC 9728 §3.1 path-appended PRM.
+ */
+function resourcePathOf(req: HarperRequest, cfg: MCPConfig): string {
+	try {
+		const { pathname } = new URL(resolveResource(req, cfg));
+		return pathname && pathname !== '/' ? pathname.replace(/\/+$/, '') : '';
+	} catch {
+		return '';
+	}
+}
+
+/**
+ * Does an incoming well-known request match this handler? Harper's
+ * `server.http({ urlPath })` is prefix-based and passes the path RELATIVE to
+ * the mount, so sub-paths reach the handler and must be screened here.
+ *
+ * Accepts the exact mount — relative `/` (current Harper) or the absolute
+ * `exactPath` (older builds) — and, for the resource-path-aware PRM, the
+ * RFC 9728 §3.1 path-appended form: relative `<resource-path>` (e.g. `/mcp`) or
+ * absolute `exactPath + <resource-path>`. MCP clients (e.g. Claude.ai)
+ * construct the PRM URL by path-insertion and fetch the appended form rather
+ * than the bare host-root one, so without this the discovery loop 404s. Any
+ * other sub-path falls through to 404.
+ */
+function wellKnownPathMatches(
+	reqPath: string | undefined,
+	match: WellKnownMatch,
+	req: HarperRequest,
+	cfg: MCPConfig
+): boolean {
+	if (reqPath === '/' || reqPath === match.exactPath) return true;
+	if (!match.resourcePathAware || !reqPath) return false;
+	const resourcePath = resourcePathOf(req, cfg);
+	if (!resourcePath) return false;
+	// Normalize a single trailing slash on the request path so a resource
+	// configured with OR without one both match (resourcePath is already
+	// stripped). Exact-after-normalize — NOT prefix matching, which would let
+	// `/mcp-evil` match `/mcp`. The bare-mount `/` case is handled above, and an
+	// empty resourcePath short-circuits, so this can never broaden to serve `/`.
+	const normalized = reqPath.length > 1 && reqPath.endsWith('/') ? reqPath.slice(0, -1) : reqPath;
+	return normalized === resourcePath || normalized === match.exactPath + resourcePath;
+}
 
 /**
  * Make a Harper http() middleware bound to one well-known path.
@@ -172,7 +226,10 @@ function makeHandler(
 	return async (req, next) => {
 		const cfg = getConfig();
 		if (!cfg?.enabled) return next(req);
-		if (req.pathname !== match.exactPath) return next(req);
+		// Screen the (prefix-matched) request against the mount and, for the PRM,
+		// the RFC 9728 path-appended form; other sub-paths fall through to 404.
+		const reqPath = req.pathname ?? req.url;
+		if (!wellKnownPathMatches(reqPath, match, req, cfg)) return next(req);
 		try {
 			return jsonResponse(await match.build(req, cfg));
 		} catch (error) {

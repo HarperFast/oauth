@@ -11,6 +11,7 @@
  */
 
 import { randomUUID, randomBytes, timingSafeEqual } from 'node:crypto';
+import { logger as harperLogger } from 'harper';
 import type { Logger, MCPClientMetadata, MCPClientRecord, MCPConfig } from '../../types.ts';
 import { MCPClientStore } from './clientStore.ts';
 
@@ -240,14 +241,36 @@ export async function handleRegister(
 		return { status: 404, body: { error: 'Not found' } };
 	}
 
+	// Observability: log every registration attempt. Rejections were previously
+	// silent, making DCR failures from MCP clients (e.g. Claude) undebuggable.
+	// Single-string messages (matching this file's other logs) so they land in
+	// the structured app log rather than stdout.
+	// Use Harper's global logger (not the passed scope logger, which routes to
+	// system.log) so DCR observability lands in the structured app log (hdb.log)
+	// alongside the rest of the runtime's logging.
+	// Keep ALL formatting inside the logger calls. Harper's `logger` omits a
+	// level method (leaves it `undefined`) when it's below the configured level,
+	// and an optional call `?.()` short-circuits WITHOUT evaluating its arguments
+	// — so these JSON.stringify calls run only when the message is actually
+	// emitted. Don't hoist a shared `JSON.stringify(...)` out to a const: that
+	// reintroduces eager work on every request even when the log is suppressed.
+	harperLogger?.info?.(
+		`MCP DCR request received: redirect_uris=${JSON.stringify(body?.redirect_uris)} grant_types=${JSON.stringify(body?.grant_types)} response_types=${JSON.stringify(body?.response_types)} token_endpoint_auth_method=${JSON.stringify(body?.token_endpoint_auth_method)} auth_header=${!!request?.headers?.authorization}`
+	);
+
 	const authHeader = request?.headers?.authorization;
 	const authError = checkInitialAccessToken(authHeader, dcrConfig?.initialAccessToken);
 	if (authError) {
+		harperLogger?.warn?.('MCP DCR rejected: initial access token required or invalid');
 		return authError;
 	}
 
 	const built = buildClientFromRequest(body, dcrConfig?.allowedRedirectUriHosts);
 	if ('status' in built) {
+		const errBody = (built as { body?: { error?: string; error_description?: string } }).body;
+		harperLogger?.warn?.(
+			`MCP DCR rejected: ${errBody?.error} — ${errBody?.error_description} (redirect_uris=${JSON.stringify(body?.redirect_uris)})`
+		);
 		return built;
 	}
 
