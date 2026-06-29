@@ -248,9 +248,14 @@ export async function handleRegister(
 	// Use Harper's global logger (not the passed scope logger, which routes to
 	// system.log) so DCR observability lands in the structured app log (hdb.log)
 	// alongside the rest of the runtime's logging.
-	const redirectUrisStr = JSON.stringify(body?.redirect_uris);
+	// Keep ALL formatting inside the logger calls. Harper's `logger` omits a
+	// level method (leaves it `undefined`) when it's below the configured level,
+	// and an optional call `?.()` short-circuits WITHOUT evaluating its arguments
+	// — so these JSON.stringify calls run only when the message is actually
+	// emitted. Don't hoist a shared `JSON.stringify(...)` out to a const: that
+	// reintroduces eager work on every request even when the log is suppressed.
 	harperLogger?.info?.(
-		`MCP DCR request received: redirect_uris=${redirectUrisStr} grant_types=${JSON.stringify(body?.grant_types)} response_types=${JSON.stringify(body?.response_types)} token_endpoint_auth_method=${JSON.stringify(body?.token_endpoint_auth_method)} auth_header=${!!request?.headers?.authorization}`
+		`MCP DCR request received: redirect_uris=${JSON.stringify(body?.redirect_uris)} grant_types=${JSON.stringify(body?.grant_types)} response_types=${JSON.stringify(body?.response_types)} token_endpoint_auth_method=${JSON.stringify(body?.token_endpoint_auth_method)} auth_header=${!!request?.headers?.authorization}`
 	);
 
 	const authHeader = request?.headers?.authorization;
@@ -264,7 +269,7 @@ export async function handleRegister(
 	if ('status' in built) {
 		const errBody = (built as { body?: { error?: string; error_description?: string } }).body;
 		harperLogger?.warn?.(
-			`MCP DCR rejected: ${errBody?.error} — ${errBody?.error_description} (redirect_uris=${redirectUrisStr})`
+			`MCP DCR rejected: ${errBody?.error} — ${errBody?.error_description} (redirect_uris=${JSON.stringify(body?.redirect_uris)})`
 		);
 		return built;
 	}
