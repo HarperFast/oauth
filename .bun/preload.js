@@ -28,7 +28,13 @@ mock.module('harper', () => {
 			}
 		},
 		logger: {
-			trace() {}, debug() {}, info() {}, warn() {}, error() {}, fatal() {}, notify() {},
+			trace() {},
+			debug() {},
+			info() {},
+			warn() {},
+			error() {},
+			fatal() {},
+			notify() {},
 		},
 	};
 });
