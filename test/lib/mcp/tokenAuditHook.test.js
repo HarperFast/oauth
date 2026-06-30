@@ -78,6 +78,12 @@ describe('handleToken — audit events and onMCPTokenIssued hook', () => {
 	after(() => {
 		global.databases = originalDatabases;
 		harperMockLogger.info = originalHarperInfo;
+		// Clear the cached table refs so this file (which mints a signing key)
+		// doesn't leak state into other files under Bun's shared-process runner.
+		resetMCPClientsTableCache();
+		resetMCPAuthCodesTableCache();
+		resetMCPRefreshFamiliesTableCache();
+		resetMCPKeysTableCache();
 	});
 
 	beforeEach(() => {

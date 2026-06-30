@@ -12,6 +12,14 @@ import {
 	resolveIssuer,
 	resolveResource,
 } from '../../../dist/lib/mcp/wellKnown.js';
+import { resetMCPKeysTableCache } from '../../../dist/lib/mcp/keyStore.js';
+
+// Bun runs every test file in ONE shared process (Node isolates per file). The
+// JWKS tests below assert an EMPTY key set, which relies on the MCPKeyStore
+// module-level table cache being clear — a prior file that minted a signing key
+// would otherwise leak its cached table here and these tests would see that
+// key. Reset the cache before every test so they're order-independent.
+beforeEach(() => resetMCPKeysTableCache());
 
 function makeRequest(overrides = {}) {
 	return {
