@@ -86,7 +86,11 @@ export class HookManager {
 			this.logger?.debug?.(`Calling onMCPTokenIssued hook for client: ${event.client_id} type: ${event.type}`);
 			await this.hooks.onMCPTokenIssued(event, request);
 		} catch (error) {
-			this.logger?.error?.('onMCPTokenIssued hook failed:', (error as Error).message);
+			// `instanceof Error` (not `as Error`): a hook may throw a non-Error
+			// (string, null, undefined). `(null).message` would itself throw —
+			// inside the catch — and escape, breaking the fire-and-forget contract
+			// (a throwing hook must NEVER block token issuance).
+			this.logger?.error?.('onMCPTokenIssued hook failed:', error instanceof Error ? error.message : String(error));
 			// Don't throw - hooks should not block token issuance
 		}
 	}

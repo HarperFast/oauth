@@ -260,5 +260,18 @@ describe('HookManager', () => {
 
 			assert.equal(hookMock.mock.calls[0].arguments[0].type, 'refresh');
 		});
+
+		it('swallows a hook that throws a NON-Error value (null) without the catch itself throwing', async () => {
+			// `(null).message` in the catch would itself throw and escape, breaking
+			// the fire-and-forget contract — guards the `instanceof Error` handling.
+			hookManager.register({
+				onMCPTokenIssued: async () => {
+					throw null; // eslint-disable-line no-throw-literal
+				},
+			});
+
+			await assert.doesNotReject(() => hookManager.callOnMCPTokenIssued(SAMPLE_EVENT, SAMPLE_REQUEST));
+			assert.equal(mockLogger.error.mock.calls.length, 1, 'error is still logged');
+		});
 	});
 });
