@@ -20,7 +20,10 @@ export { handleRegister } from './dcr.ts';
 export { MCPKeyStore, resetMCPKeysTableCache, SIGNING_KEY_ID } from './keyStore.ts';
 export { MCPRefreshFamilyStore, resetMCPRefreshFamiliesTableCache } from './refreshTokenStore.ts';
 export { handleToken } from './token.ts';
-export { publicKeyToJwk, signAccessToken, verifyAccessToken } from './tokenIssuer.ts';
+export { publicKeyToJwk, signAccessToken, verifyAccessToken, verifyAccessTokenWithKeySet } from './tokenIssuer.ts';
+export type { VerifyWithKeySetOptions } from './tokenIssuer.ts';
+export { withMCPAuth } from './withMCPAuth.ts';
+export type { WithMCPAuthOptions } from './withMCPAuth.ts';
 
 /**
  * Dispatch POST /oauth/mcp/<action>.
