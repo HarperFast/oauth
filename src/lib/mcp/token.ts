@@ -412,18 +412,31 @@ export async function handleToken(
 	hookManager?: HookManager,
 	logger?: Logger
 ): Promise<TokenResponse> {
-	const grantType = typeof body?.grant_type === 'string' ? body.grant_type : undefined;
-	if (grantType !== 'authorization_code' && grantType !== 'refresh_token') {
-		return errorResponse(400, 'unsupported_grant_type', 'grant_type must be authorization_code or refresh_token');
-	}
+	// Top-level guard: any unexpected throw (a signing failure, a store
+	// timeout, etc.) must become a structured OAuth error (RFC 6749 §5.2), not
+	// propagate to the framework's default 500 handler — which could surface a
+	// stack trace or raw error message. The per-grant handlers already return
+	// their own 4xx errors; this only catches the unexpected.
+	try {
+		const grantType = typeof body?.grant_type === 'string' ? body.grant_type : undefined;
+		if (grantType !== 'authorization_code' && grantType !== 'refresh_token') {
+			return errorResponse(400, 'unsupported_grant_type', 'grant_type must be authorization_code or refresh_token');
+		}
 
-	const auth = await authenticateClient(request, body, logger);
-	if ('error' in auth) {
-		return auth.error;
-	}
+		const auth = await authenticateClient(request, body, logger);
+		if ('error' in auth) {
+			return auth.error;
+		}
 
-	if (grantType === 'authorization_code') {
-		return handleAuthorizationCodeGrant(request, body, auth.client, mcpConfig, hookManager, logger);
+		if (grantType === 'authorization_code') {
+			return await handleAuthorizationCodeGrant(request, body, auth.client, mcpConfig, hookManager, logger);
+		}
+		return await handleRefreshTokenGrant(request, body, auth.client, mcpConfig, hookManager, logger);
+	} catch (error) {
+		logger?.error?.(
+			'MCP token: unexpected error during token issuance:',
+			error instanceof Error ? error.message : String(error)
+		);
+		return errorResponse(500, 'server_error', 'An unexpected error occurred during token issuance');
 	}
-	return handleRefreshTokenGrant(request, body, auth.client, mcpConfig, hookManager, logger);
 }

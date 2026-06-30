@@ -433,23 +433,25 @@ describe('handleToken — audit events and onMCPTokenIssued hook', () => {
 		const hookManager = new HookManager(createMockLogger());
 		hookManager.register({ onMCPTokenIssued: hookMock });
 
-		await assert.rejects(
-			handleToken(
-				{ headers: {} },
-				{
-					grant_type: 'authorization_code',
-					code: 'code-1',
-					code_verifier: CODE_VERIFIER,
-					redirect_uri: REDIRECT,
-					client_id: 'public-1',
-				},
-				mcpConfig,
-				hookManager
-			),
-			/simulated persistence failure/
+		const res = await handleToken(
+			{ headers: {} },
+			{
+				grant_type: 'authorization_code',
+				code: 'code-1',
+				code_verifier: CODE_VERIFIER,
+				redirect_uri: REDIRECT,
+				client_id: 'public-1',
+			},
+			mcpConfig,
+			hookManager
 		);
 		restoreLogger();
 
+		// handleToken's top-level guard turns the persistence throw into a clean
+		// server_error — NOT a propagated exception — and the side effects (which
+		// run only after persistence) never fire.
+		assert.equal(res.status, 500, 'persistence failure → structured server_error');
+		assert.equal(res.body.error, 'server_error');
 		const issued = infoCalls.find((args) => args[0]?.includes('oauth.mcp.token.issued'));
 		assert.equal(issued, undefined, 'no phantom issued audit event when persistence fails');
 		assert.equal(hookMock.mock.calls.length, 0, 'hook must not fire when persistence fails');

@@ -607,15 +607,17 @@ describe('handleToken', () => {
 		const token = seedFamily('fam-1');
 		const before = families.get('fam-1').current_token_hash;
 		// Corrupt the signing key so signAccessToken throws — this happens before
-		// the rotation is persisted, so the family must be left intact.
+		// the rotation is persisted, so the family must be left intact. The throw
+		// is caught by handleToken's top-level guard and surfaced as a structured
+		// server_error (RFC 6749 §5.2), not propagated to the framework.
 		keys.set(SIGNING_KEY_ID, { ...keys.get(SIGNING_KEY_ID), private_key_pem: 'not-a-valid-pem' });
-		await assert.rejects(() =>
-			handleToken(
-				{ headers: {} },
-				{ grant_type: 'refresh_token', refresh_token: token, client_id: 'public-1' },
-				mcpConfig
-			)
+		const res = await handleToken(
+			{ headers: {} },
+			{ grant_type: 'refresh_token', refresh_token: token, client_id: 'public-1' },
+			mcpConfig
 		);
+		assert.equal(res.status, 500, 'signing failure → structured server_error, not a propagated throw');
+		assert.equal(res.body.error, 'server_error');
 		assert.equal(families.get('fam-1').current_token_hash, before, 'family not rotated when signing fails');
 	});
 
