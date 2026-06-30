@@ -273,7 +273,10 @@ async function handleAuthorizationCodeGrant(
 	try {
 		await codeStore.consume(code);
 	} catch (error) {
-		logger?.error?.('MCP token: failed to consume authorization code:', (error as Error).message);
+		logger?.error?.(
+			'MCP token: failed to consume authorization code:',
+			error instanceof Error ? error.message : String(error)
+		);
 		return errorResponse(500, 'server_error', 'Failed to consume authorization code');
 	}
 
@@ -331,7 +334,7 @@ async function handleRefreshTokenGrant(
 		} catch (error) {
 			logger?.error?.(
 				`MCP token: failed to persist revocation for family ${family.family_id}:`,
-				(error as Error).message
+				error instanceof Error ? error.message : String(error)
 			);
 		}
 		logger?.warn?.(`MCP token: refresh replay detected; revoked family ${family.family_id}`);

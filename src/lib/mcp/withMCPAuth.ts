@@ -246,7 +246,10 @@ export function withMCPAuth(handler: HttpListener, options: WithMCPAuthOptions =
 			const keyStore: KeySource = options.keyStore ?? new MCPKeyStore(logger);
 			keys = await keyStore.getAllPublicKeys();
 		} catch (error) {
-			logger?.error?.('withMCPAuth: failed to load MCP signing keys:', (error as Error).message);
+			logger?.error?.(
+				'withMCPAuth: failed to load MCP signing keys:',
+				error instanceof Error ? error.message : String(error)
+			);
 			keys = [];
 		}
 		if (keys.length === 0) {
@@ -263,7 +266,10 @@ export function withMCPAuth(handler: HttpListener, options: WithMCPAuthOptions =
 		try {
 			payload = verifyAccessTokenWithKeySet(token, keys, { audience: resource, issuer });
 		} catch (error) {
-			logger?.debug?.('withMCPAuth: token verification failed:', (error as Error).message);
+			logger?.debug?.(
+				'withMCPAuth: token verification failed:',
+				error instanceof Error ? error.message : String(error)
+			);
 			return deny('access token is invalid, expired, or not issued for this resource');
 		}
 
