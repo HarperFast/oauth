@@ -438,7 +438,7 @@ suite('MCP OAuth Stage 7: full round-trip e2e', (ctx: ContextWithHarper) => {
 		ok(loc.startsWith(redirectUri), `expected redirect to redirect_uri; got: ${loc}`);
 		const params = parseQuery(loc);
 		const error = params.get('error');
-		ok(error && error !== '', `expected error param in redirect; got: ${loc}`);
+		strictEqual(error, 'invalid_request', `plain PKCE must be rejected with error=invalid_request; got: ${loc}`);
 	});
 
 	test('negative: missing resource at /authorize → rejected', async () => {
@@ -471,7 +471,11 @@ suite('MCP OAuth Stage 7: full round-trip e2e', (ctx: ContextWithHarper) => {
 		ok(loc.startsWith(redirectUri), `expected redirect to redirect_uri; got: ${loc}`);
 		const params = parseQuery(loc);
 		const error = params.get('error');
-		ok(error && error !== '', `expected error param in redirect for missing resource; got: ${loc}`);
+		strictEqual(
+			error,
+			'invalid_target',
+			`missing resource must be rejected with error=invalid_target (RFC 8707); got: ${loc}`
+		);
 	});
 
 	test('negative: garbage bearer token at /mcp → 401', async () => {
