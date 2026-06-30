@@ -52,7 +52,7 @@ function mint(overrides = {}, signingKey = key) {
 		ttlSeconds: 3600,
 		...overrides,
 	};
-	return signAccessToken(params, signingKey);
+	return signAccessToken(params, signingKey).token;
 }
 
 const config = { enabled: true, issuer: ISSUER, resource: RESOURCE };

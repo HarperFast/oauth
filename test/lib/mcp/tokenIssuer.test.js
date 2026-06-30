@@ -109,7 +109,7 @@ function makeRsaKey(kid) {
 
 describe('verifyAccessTokenWithKeySet', () => {
 	it('selects the key by kid and verifies aud + iss', () => {
-		const token = signAccessToken(baseParams, key);
+		const { token } = signAccessToken(baseParams, key);
 		const claims = verifyAccessTokenWithKeySet(token, [makeRsaKey('unrelated'), key], {
 			audience: baseParams.audience,
 			issuer: baseParams.issuer,
@@ -119,7 +119,7 @@ describe('verifyAccessTokenWithKeySet', () => {
 	});
 
 	it('throws on an empty key set', () => {
-		const token = signAccessToken(baseParams, key);
+		const { token } = signAccessToken(baseParams, key);
 		assert.throws(
 			() => verifyAccessTokenWithKeySet(token, [], { audience: baseParams.audience, issuer: baseParams.issuer }),
 			/no signing keys/
@@ -128,7 +128,7 @@ describe('verifyAccessTokenWithKeySet', () => {
 
 	it('throws on an unknown kid rather than falling back to another key', () => {
 		// Signed with `key` (kid SIGNING_KEY_ID) but that kid is absent from the set.
-		const token = signAccessToken(baseParams, key);
+		const { token } = signAccessToken(baseParams, key);
 		assert.throws(
 			() =>
 				verifyAccessTokenWithKeySet(token, [makeRsaKey('different-kid')], {
