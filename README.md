@@ -198,6 +198,7 @@ The plugin can also act as an OAuth 2.1 authorization server for **Model Context
 ```yaml
 # config.yaml
 '@harperfast/oauth':
+  package: '@harperfast/oauth'
   providers:
     github:
       clientId: ${OAUTH_GITHUB_CLIENT_ID}
