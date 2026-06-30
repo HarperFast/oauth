@@ -318,9 +318,11 @@ registerHooks({
 });
 ```
 
-It fires **after** the token is durably issued, **before** the response returns.
-It is fire-and-forget: a throwing hook is caught and logged, never blocking token
-issuance.
+It fires **after** the token is durably issued and runs **detached** — it is not
+awaited, so it never delays or blocks the token response (a slow hook can't add
+latency to issuance). It is fire-and-forget: a throwing hook is caught and logged,
+never surfaced. Because it isn't awaited, its side effects may complete after the
+client already has the token — don't rely on it finishing before the response.
 
 > **Security:** `event` is sanitized — it carries only the `jti` (a token
 > identifier, safe to log), never the access/refresh token strings. The `request`

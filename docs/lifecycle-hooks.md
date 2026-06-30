@@ -352,7 +352,7 @@ async function onMCPTokenIssued(
 - `event` - Identifies the token issued: `type` (`access` for the authorization-code grant, `refresh` for a rotation), `client_id`, `sub`, `aud`, `scope` (optional), and `jti` (the token id)
 - `request` - The HTTP request that triggered issuance
 
-**Returns:** void. Fire-and-forget — a throwing hook is caught and logged, never blocking token issuance.
+**Returns:** void. Fire-and-forget — the hook is **not awaited** (it runs detached, so it never delays or blocks token issuance); a throwing hook is caught and logged, never surfaced.
 
 > **Security:** `event` is sanitized — it carries only the `jti` (a token identifier, safe to log), never the access/refresh token strings. The `request` is **not** sanitized: on the refresh path its body carries the `refresh_token` the client presented, so do not log `request` wholesale.
 
