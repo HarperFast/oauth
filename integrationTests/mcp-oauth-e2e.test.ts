@@ -143,6 +143,10 @@ function startStubIdp(getHarperBaseUrl: () => string): Promise<{
 				close: () =>
 					new Promise<void>((res, rej) => {
 						server.close((err) => (err ? rej(err) : res()));
+						// Node's global fetch (undici) pools/keep-alives connections, so
+						// server.close() would otherwise wait for the keep-alive timeout.
+						// Force-close sockets so teardown doesn't hang.
+						server.closeAllConnections();
 					}),
 			});
 		});
@@ -155,7 +159,7 @@ function startStubIdp(getHarperBaseUrl: () => string): Promise<{
 
 suite('MCP OAuth Stage 7: full round-trip e2e', (ctx: ContextWithHarper) => {
 	let idpPort: number;
-	let closeIdp: () => Promise<void>;
+	let closeIdp: (() => Promise<void>) | undefined;
 
 	before(async () => {
 		// Start the stub IdP first so we can read its ephemeral port, then pass
@@ -182,7 +186,9 @@ suite('MCP OAuth Stage 7: full round-trip e2e', (ctx: ContextWithHarper) => {
 
 	after(async () => {
 		await teardownHarper(ctx);
-		await closeIdp();
+		// Guard: if startStubIdp rejected in before(), closeIdp is undefined —
+		// calling it would throw a TypeError that masks the real setup failure.
+		await closeIdp?.();
 	});
 
 	// ── Step 1: unauthenticated GET /mcp → 401 + Bearer challenge ────────────
