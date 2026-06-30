@@ -1,6 +1,7 @@
 import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { handleApplication } from '../dist/index.js';
+import { OAuthResource } from '../dist/lib/resource.js';
 
 describe('OAuth Plugin Options Watcher', () => {
 	let scope;
@@ -173,6 +174,33 @@ describe('OAuth Plugin Options Watcher', () => {
 		const response = await resources.oauth.get();
 		assert.equal(response.status, 503, 'Should return 503 when no providers configured');
 		assert.ok(response.body.error.includes('No valid OAuth providers'), 'Should have appropriate error message');
+	});
+
+	it('should clear MCP config when a live reload drops all providers (fail closed)', async () => {
+		// Start enabled with a valid provider so OAuthResource.mcpConfig is live.
+		scope.options._config = {
+			debug: false,
+			providers: {
+				github: { provider: 'github', clientId: 'test-client-id', clientSecret: 'test-client-secret' },
+			},
+			mcp: { enabled: true, issuer: 'https://app.example.com' },
+		};
+		await handleApplication(scope);
+		assert.equal(OAuthResource.mcpConfig?.enabled, true, 'MCP config should be live while a provider is configured');
+
+		// Reload to zero providers — the plugin is no longer validly configured.
+		scope.options._config = { debug: false, providers: {} };
+		configChangeListeners[0]();
+		await new Promise((resolve) => setTimeout(resolve, 10));
+
+		// Fail closed: the stale enabled MCP config must not survive, or withMCPAuth's
+		// default getter (and the well-known handlers) would keep verifying tokens /
+		// serving discovery against config the plugin no longer holds.
+		assert.equal(
+			OAuthResource.mcpConfig,
+			undefined,
+			'MCP config must be cleared on the zero-provider branch so the MCP surface fails closed'
+		);
 	});
 
 	it('should handle adding new provider', async () => {
