@@ -150,7 +150,7 @@ export function withMCPAuth(handler: HttpListener, options: WithMCPAuthOptions =
 
 		// Default-group registration: only guard our own path; let everything
 		// else continue down the chain (to core auth and other middleware).
-		if (path && !pathOwned((request as any).pathname, path)) {
+		if (path && !pathOwned(request.pathname, path)) {
 			return next(request);
 		}
 
@@ -232,7 +232,7 @@ export function withMCPAuth(handler: HttpListener, options: WithMCPAuthOptions =
 			aud: payload.aud,
 			scope: payload.scope,
 		};
-		(request as any).mcp = claims;
+		request.mcp = claims;
 
 		// Token is valid — hand off to the app's handler. Its response is returned
 		// verbatim (no double-wrapping). `next` is forwarded so the handler may
