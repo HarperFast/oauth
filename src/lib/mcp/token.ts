@@ -225,7 +225,7 @@ async function mintTokenPair(
 		timestamp: new Date().toISOString(),
 	});
 	if (hookManager) {
-		await hookManager.callOnMCPTokenIssued(
+		hookManager.callOnMCPTokenIssued(
 			{ type: 'access', client_id: grant.clientId, sub: grant.user, aud: grant.resource, scope: grant.scope, jti },
 			request
 		);
@@ -374,7 +374,7 @@ async function handleRefreshTokenGrant(
 		timestamp: new Date().toISOString(),
 	});
 	if (hookManager) {
-		await hookManager.callOnMCPTokenIssued(
+		hookManager.callOnMCPTokenIssued(
 			{
 				type: 'refresh',
 				client_id: client.client_id,

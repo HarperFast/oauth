@@ -48,7 +48,7 @@ export class HookManager {
 			const result = await this.hooks.onLogin(oauthUser, tokenResponse, session, request, provider);
 			return result;
 		} catch (error) {
-			this.logger?.error?.('onLogin hook failed:', (error as Error).message);
+			this.logger?.error?.('onLogin hook failed:', error instanceof Error ? error.message : String(error));
 			// Don't throw - hooks should not break the OAuth flow
 			return;
 		}
@@ -64,35 +64,39 @@ export class HookManager {
 			this.logger?.debug?.('Calling onLogout hook');
 			await this.hooks.onLogout(session, request);
 		} catch (error) {
-			this.logger?.error?.('onLogout hook failed:', (error as Error).message);
+			this.logger?.error?.('onLogout hook failed:', error instanceof Error ? error.message : String(error));
 			// Don't throw - hooks should not break logout
 		}
 	}
 
 	/**
-	 * Call onMCPTokenIssued hook.
+	 * Call onMCPTokenIssued hook (fire-and-forget).
 	 *
-	 * Failure is swallowed — a throwing hook must NOT block token issuance.
-	 * The hook is fire-and-forget: we await it (so the log lands before the
-	 * response) but reject from app code is caught and logged, never re-thrown.
+	 * NOT awaited: the hook runs detached after the token is durably issued, so it
+	 * can never add latency to — or block — token issuance (per @kriszyp's review
+	 * on #141; this also removes the need for a hook-execution timeout, #143). A
+	 * rejection, or a synchronous throw, from app code is caught and logged here,
+	 * never surfaced to the caller.
 	 */
-	async callOnMCPTokenIssued(
+	callOnMCPTokenIssued(
 		event: { type: 'access' | 'refresh'; client_id: string; sub: string; aud: string; scope?: string; jti: string },
 		request: any
-	): Promise<void> {
-		if (!this.hooks.onMCPTokenIssued) return;
+	): void {
+		const hook = this.hooks.onMCPTokenIssued;
+		if (!hook) return;
 
-		try {
-			this.logger?.debug?.(`Calling onMCPTokenIssued hook for client: ${event.client_id} type: ${event.type}`);
-			await this.hooks.onMCPTokenIssued(event, request);
-		} catch (error) {
-			// `instanceof Error` (not `as Error`): a hook may throw a non-Error
-			// (string, null, undefined). `(null).message` would itself throw —
-			// inside the catch — and escape, breaking the fire-and-forget contract
-			// (a throwing hook must NEVER block token issuance).
-			this.logger?.error?.('onMCPTokenIssued hook failed:', error instanceof Error ? error.message : String(error));
-			// Don't throw - hooks should not block token issuance
-		}
+		this.logger?.debug?.(`Calling onMCPTokenIssued hook for client: ${event.client_id} type: ${event.type}`);
+		// Detach with Promise.resolve().then so a SYNCHRONOUS throw in the hook is
+		// funneled into the same catch as a rejected promise (and never escapes as
+		// an uncaught exception on the issuance path). `void` marks the floating
+		// promise intentional. `instanceof Error` (not `as Error`): a hook may throw
+		// a non-Error (string, null, undefined) and `(null).message` would itself
+		// throw inside the catch.
+		void Promise.resolve()
+			.then(() => hook(event, request))
+			.catch((error) =>
+				this.logger?.error?.('onMCPTokenIssued hook failed:', error instanceof Error ? error.message : String(error))
+			);
 	}
 
 	/**
@@ -105,7 +109,7 @@ export class HookManager {
 			this.logger?.debug?.(`Calling onTokenRefresh hook (refreshed: ${refreshed})`);
 			await this.hooks.onTokenRefresh(session, refreshed, request);
 		} catch (error) {
-			this.logger?.error?.('onTokenRefresh hook failed:', (error as Error).message);
+			this.logger?.error?.('onTokenRefresh hook failed:', error instanceof Error ? error.message : String(error));
 			// Don't throw - hooks should not break token refresh
 		}
 	}
@@ -147,7 +151,7 @@ export class HookManager {
 			}
 			return config;
 		} catch (error) {
-			this.logger?.error?.('onResolveProvider hook failed:', (error as Error).message);
+			this.logger?.error?.('onResolveProvider hook failed:', error instanceof Error ? error.message : String(error));
 			throw error; // Re-throw for resource to handle (returns 500)
 		}
 	}

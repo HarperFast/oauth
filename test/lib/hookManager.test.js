@@ -214,11 +214,16 @@ describe('HookManager', () => {
 		};
 		const SAMPLE_REQUEST = { headers: {} };
 
+		// The hook is fire-and-forget (NOT awaited), so it runs detached on the
+		// microtask queue. Drain it with a macrotask tick before asserting.
+		const flushMicrotasks = () => new Promise((resolve) => setImmediate(resolve));
+
 		it('should call onMCPTokenIssued hook with the correct event and request', async () => {
 			const hookMock = createMockFn(async () => {});
 			hookManager.register({ onMCPTokenIssued: hookMock });
 
-			await hookManager.callOnMCPTokenIssued(SAMPLE_EVENT, SAMPLE_REQUEST);
+			hookManager.callOnMCPTokenIssued(SAMPLE_EVENT, SAMPLE_REQUEST);
+			await flushMicrotasks();
 
 			assert.equal(hookMock.mock.calls.length, 1);
 			const [eventArg, requestArg] = hookMock.mock.calls[0].arguments;
@@ -231,9 +236,34 @@ describe('HookManager', () => {
 			assert.equal(requestArg, SAMPLE_REQUEST);
 		});
 
-		it('should not throw when no onMCPTokenIssued hook is registered', async () => {
-			// No hook registered — must complete without error.
-			await hookManager.callOnMCPTokenIssued(SAMPLE_EVENT, SAMPLE_REQUEST);
+		it('does not await the hook — a slow hook never blocks token issuance', async () => {
+			let release;
+			const gate = new Promise((resolve) => {
+				release = resolve;
+			});
+			let hookCompleted = false;
+			hookManager.register({
+				onMCPTokenIssued: async () => {
+					await gate;
+					hookCompleted = true;
+				},
+			});
+
+			// Returns synchronously (void) without waiting on the hook.
+			const ret = hookManager.callOnMCPTokenIssued(SAMPLE_EVENT, SAMPLE_REQUEST);
+			assert.equal(ret, undefined, 'returns void synchronously');
+			assert.equal(hookCompleted, false, 'issuance does not wait for the hook to finish');
+
+			// Once unblocked, the detached hook still runs to completion.
+			release();
+			await flushMicrotasks();
+			assert.equal(hookCompleted, true);
+		});
+
+		it('is a no-op when no onMCPTokenIssued hook is registered', async () => {
+			// No hook registered — returns without scheduling anything or throwing.
+			hookManager.callOnMCPTokenIssued(SAMPLE_EVENT, SAMPLE_REQUEST);
+			await flushMicrotasks();
 		});
 
 		it('swallows a throwing hook and logs the error (fire-and-forget contract)', async () => {
@@ -242,8 +272,9 @@ describe('HookManager', () => {
 			});
 			hookManager.register({ onMCPTokenIssued: throwingHook });
 
-			// Must not reject — failure-tolerant by design.
-			await assert.doesNotReject(() => hookManager.callOnMCPTokenIssued(SAMPLE_EVENT, SAMPLE_REQUEST));
+			hookManager.callOnMCPTokenIssued(SAMPLE_EVENT, SAMPLE_REQUEST);
+			await flushMicrotasks();
+
 			assert.equal(mockLogger.error.mock.calls.length, 1, 'error is logged');
 			assert.ok(
 				mockLogger.error.mock.calls[0].arguments[0].includes('onMCPTokenIssued hook failed'),
@@ -256,7 +287,8 @@ describe('HookManager', () => {
 			hookManager.register({ onMCPTokenIssued: hookMock });
 
 			const refreshEvent = { ...SAMPLE_EVENT, type: /** @type {const} */ ('refresh') };
-			await hookManager.callOnMCPTokenIssued(refreshEvent, SAMPLE_REQUEST);
+			hookManager.callOnMCPTokenIssued(refreshEvent, SAMPLE_REQUEST);
+			await flushMicrotasks();
 
 			assert.equal(hookMock.mock.calls[0].arguments[0].type, 'refresh');
 		});
@@ -266,11 +298,12 @@ describe('HookManager', () => {
 			// the fire-and-forget contract — guards the `instanceof Error` handling.
 			hookManager.register({
 				onMCPTokenIssued: async () => {
-					throw null; // eslint-disable-line no-throw-literal
+					throw null;
 				},
 			});
 
-			await assert.doesNotReject(() => hookManager.callOnMCPTokenIssued(SAMPLE_EVENT, SAMPLE_REQUEST));
+			hookManager.callOnMCPTokenIssued(SAMPLE_EVENT, SAMPLE_REQUEST);
+			await flushMicrotasks();
 			assert.equal(mockLogger.error.mock.calls.length, 1, 'error is still logged');
 		});
 	});
