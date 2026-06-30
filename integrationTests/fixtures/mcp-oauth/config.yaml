@@ -1,0 +1,30 @@
+# Integration-test fixture for MCP OAuth Stage 7 end-to-end flow.
+#
+# Loads the OAuth plugin with MCP enabled and a pinned issuer/resource.
+# The upstream IdP URLs are injected via environment variables so the test
+# can start the stub IdP server on an ephemeral port before launching Harper.
+#
+# The stub IdP server is owned by the test file; it handles:
+#   GET  ${STUB_IDP_AUTHORIZE_URL} — immediate 302 to the plugin's callback
+#   POST ${STUB_IDP_TOKEN_URL}     — fake upstream access token response
+#   GET  ${STUB_IDP_USERINFO_URL}  — stub user object (sub/email/name)
+
+rest: true
+
+'@harperfast/oauth':
+  package: '@harperfast/oauth'
+  providers:
+    stub:
+      provider: generic
+      clientId: stub-client-id
+      clientSecret: stub-client-secret
+      authorizationUrl: ${STUB_IDP_AUTHORIZE_URL}
+      tokenUrl: ${STUB_IDP_TOKEN_URL}
+      userInfoUrl: ${STUB_IDP_USERINFO_URL}
+  mcp:
+    enabled: true
+    issuer: 'https://mcp.test'
+    resource: 'https://mcp.test/mcp'
+
+jsResource:
+  files: 'mcp-app.js'
