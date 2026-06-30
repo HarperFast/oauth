@@ -167,6 +167,11 @@ export function withMCPAuth(handler: HttpListener, options: WithMCPAuthOptions =
 				headers: {
 					'WWW-Authenticate': `Bearer resource_metadata="${metadataUrl}"`,
 					'Content-Type': 'application/json',
+					// CORS parity with the well-known discovery docs: lets browser-based
+					// MCP clients read the challenge (and the WWW-Authenticate header)
+					// on a cross-origin 401 so the RFC 9728 discovery loop can proceed.
+					'Access-Control-Allow-Origin': '*',
+					'Access-Control-Expose-Headers': 'WWW-Authenticate',
 				},
 				body: JSON.stringify({ error: 'invalid_token', error_description: reason }),
 			};
@@ -177,6 +182,14 @@ export function withMCPAuth(handler: HttpListener, options: WithMCPAuthOptions =
 			// turn a denial into a pass or a malformed response — fail closed.
 			return handled || defaultResponse;
 		};
+
+		// Repo invariant (CLAUDE.md; OAuthResource.parseRoute caps paths at 2048
+		// for DoS mitigation): withMCPAuth can be registered outermost and doesn't
+		// go through parseRoute, so enforce the limit independently — fail closed
+		// before any token work.
+		if ((request.pathname ?? request.url ?? '').length > 2048) {
+			return deny('request path exceeds the maximum allowed length');
+		}
 
 		const cfg = getConfig();
 		// Fail closed: a route guarded by withMCPAuth never serves while MCP is

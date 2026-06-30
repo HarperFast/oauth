@@ -325,3 +325,33 @@ describe('withMCPAuth — onAuthError', () => {
 		}
 	});
 });
+
+describe('withMCPAuth — hardening', () => {
+	it('rejects an over-length request path (>2048) before any token work (repo invariant)', async () => {
+		const token = mint();
+		const { handler, calls } = spyHandler();
+		const longPath = '/mcp/' + 'a'.repeat(2100);
+		const res = await withMCPAuth(handler, opts())(req(`Bearer ${token}`, { pathname: longPath }), NEXT);
+		assert.equal(res.status, 401, 'over-length path is rejected');
+		assert.equal(calls.length, 0, 'handler must not run');
+	});
+
+	it('keeps the WWW-Authenticate challenge header-safe against a quote-injecting Host', async () => {
+		// No config → issuer derives from the request Host (RFC 9728 fallback). A
+		// Host carrying a `"` must NOT break out of resource_metadata="...".
+		const request = req(undefined, { pathname: '/mcp' });
+		request.headers.host = 'evil.com" injected_param="x';
+		const res = await withMCPAuth(spyHandler().handler, opts({ getConfig: () => undefined }))(request, NEXT);
+		assert.equal(res.status, 401);
+		const wa = res.headers['WWW-Authenticate'];
+		assert.equal((wa.match(/"/g) || []).length, 2, `exactly one quoted param; got: ${wa}`);
+		assert.ok(!wa.includes('injected_param'), `no injected header param; got: ${wa}`);
+	});
+
+	it('sets CORS headers on the deny response so browser clients can read the challenge', async () => {
+		const res = await withMCPAuth(spyHandler().handler, opts())(req(undefined), NEXT);
+		assert.equal(res.status, 401);
+		assert.equal(res.headers['Access-Control-Allow-Origin'], '*');
+		assert.equal(res.headers['Access-Control-Expose-Headers'], 'WWW-Authenticate');
+	});
+});

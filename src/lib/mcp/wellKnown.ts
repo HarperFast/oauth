@@ -81,7 +81,8 @@ export function resolveIssuer(request: HarperRequest, mcpConfig: MCPConfig): str
 		// endpoint URLs don't end up with a doubled slash.
 		return mcpConfig.issuer.replace(/\/+$/, '');
 	}
-	const host = request.host ?? request.headers?.host ?? 'localhost';
+	const rawHost = request.host ?? request.headers?.host;
+	const host = (Array.isArray(rawHost) ? rawHost[0] : rawHost) ?? 'localhost';
 	const scheme = request.protocol ?? 'https';
 	return `${scheme}://${host}`;
 }
@@ -106,6 +107,13 @@ export function resolveResource(request: HarperRequest, mcpConfig: MCPConfig): s
  * challenge value verbatim fetches a document this server actually answers.
  * Falls back to the request-derived issuer origin (bare path) if the resource
  * URI can't be parsed, so the deny path never throws.
+ *
+ * The result is interpolated into a quoted `resource_metadata="..."` header
+ * param, so it MUST be header-safe: a client-controlled Host (when the issuer
+ * is unpinned) must never inject a `"` or control char that breaks the quoting.
+ * Every branch normalizes through `new URL().origin`, which rejects/encodes
+ * such input; if even the issuer can't be parsed, fall back to the host-less
+ * relative path, which is always safe.
  */
 export function protectedResourceMetadataUrl(request: HarperRequest, mcpConfig: MCPConfig): string {
 	try {
@@ -113,7 +121,11 @@ export function protectedResourceMetadataUrl(request: HarperRequest, mcpConfig: 
 		const path = pathname && pathname !== '/' ? pathname.replace(/\/+$/, '') : '';
 		return `${origin}${PRM_PATH}${path}`;
 	} catch {
-		return `${resolveIssuer(request, mcpConfig)}${PRM_PATH}`;
+		try {
+			return `${new URL(resolveIssuer(request, mcpConfig)).origin}${PRM_PATH}`;
+		} catch {
+			return PRM_PATH;
+		}
 	}
 }
 
