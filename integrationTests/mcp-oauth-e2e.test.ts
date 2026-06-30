@@ -260,9 +260,13 @@ suite('MCP OAuth Stage 7: full round-trip e2e', (ctx: ContextWithHarper) => {
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({ redirect_uris: [redirectUri] }),
 		});
-		strictEqual(dcrRes.status, 201, `DCR must return 201; got ${dcrRes.status}: ${await dcrRes.text()}`);
+		// Read the body ONCE: a fetch Response body can only be consumed once, and
+		// the assertion message is evaluated eagerly (even when the assertion passes),
+		// so `${await dcrRes.text()}` inline here would consume it before json() below.
+		const dcrText = await dcrRes.text();
+		strictEqual(dcrRes.status, 201, `DCR must return 201; got ${dcrRes.status}: ${dcrText}`);
 
-		const dcrBody = (await dcrRes.json()) as any;
+		const dcrBody = JSON.parse(dcrText) as any;
 		const clientId = dcrBody.client_id as string;
 		ok(clientId, 'DCR must issue a client_id');
 
