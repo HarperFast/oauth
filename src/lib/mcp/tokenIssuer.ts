@@ -67,13 +67,70 @@ export interface VerifyOptions {
 
 /**
  * Verify an access token against a public key. Primarily for tests; Stage 5
- * performs production verification against the published JWKS.
+ * performs production verification against the published JWKS via
+ * {@link verifyAccessTokenWithKeySet}.
  */
 export function verifyAccessToken(token: string, publicKeyPem: string, options?: VerifyOptions): jwt.JwtPayload {
 	return jwt.verify(token, publicKeyPem, {
 		algorithms: ['RS256'],
 		audience: options?.audience,
 		issuer: options?.issuer,
+	}) as jwt.JwtPayload;
+}
+
+export interface VerifyWithKeySetOptions {
+	/** Required `aud` claim — the canonical MCP resource URI (RFC 8707). */
+	audience: string;
+	/** Required `iss` claim — the authorization-server issuer. */
+	issuer: string;
+}
+
+/**
+ * Verify an access token against a set of published signing keys (the JWKS),
+ * selecting the key by the token header's `kid`:
+ *
+ * - `kid` present → the matching key MUST exist; an unknown `kid` throws (never
+ *   silently falls back to another key — that would let a token reference a
+ *   retired/foreign key and still verify against a current one).
+ * - `kid` absent → the sole key is used. Ambiguous (the set has >1 key) or an
+ *   empty set throws.
+ *
+ * Signature is verified RS256-only (pinning `algorithms` blocks `alg: none`
+ * and RS/HS confusion), and `audience` + `issuer` are enforced. Throws on any
+ * failure so callers (withMCPAuth) can fail closed. This is the production
+ * counterpart to {@link verifyAccessToken} and keeps all `jsonwebtoken` usage
+ * inside this module.
+ */
+export function verifyAccessTokenWithKeySet(
+	token: string,
+	keys: MCPSigningKeyRecord[],
+	options: VerifyWithKeySetOptions
+): jwt.JwtPayload {
+	if (!keys || keys.length === 0) {
+		throw new Error('no signing keys available');
+	}
+
+	// Decode (without verifying) only to read the header's `kid` for key
+	// selection. The signature is still verified below against the selected key.
+	const decoded = jwt.decode(token, { complete: true });
+	if (!decoded || typeof decoded === 'string') {
+		throw new Error('malformed token');
+	}
+
+	const kid = decoded.header?.kid;
+	let key: MCPSigningKeyRecord | undefined;
+	if (kid) {
+		key = keys.find((k) => k.kid === kid);
+		if (!key) throw new Error('unknown key id');
+	} else {
+		if (keys.length !== 1) throw new Error('key id required to select among multiple keys');
+		key = keys[0];
+	}
+
+	return jwt.verify(token, key.public_key_pem, {
+		algorithms: ['RS256'],
+		audience: options.audience,
+		issuer: options.issuer,
 	}) as jwt.JwtPayload;
 }
 

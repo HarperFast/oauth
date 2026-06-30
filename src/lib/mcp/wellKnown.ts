@@ -40,7 +40,10 @@ type HttpResponse = {
 	body: string;
 };
 
-const PRM_PATH = '/.well-known/oauth-protected-resource';
+// Exported so withMCPAuth (Stage 5) builds its `WWW-Authenticate: Bearer
+// resource_metadata="<issuer>${PRM_PATH}"` challenge from the same constant the
+// PRM document is served at — the discovery loop stays in sync by construction.
+export const PRM_PATH = '/.well-known/oauth-protected-resource';
 const AS_METADATA_PATH = '/.well-known/oauth-authorization-server';
 const JWKS_PATH = '/.well-known/jwks.json';
 
@@ -78,7 +81,8 @@ export function resolveIssuer(request: HarperRequest, mcpConfig: MCPConfig): str
 		// endpoint URLs don't end up with a doubled slash.
 		return mcpConfig.issuer.replace(/\/+$/, '');
 	}
-	const host = request.host ?? request.headers?.host ?? 'localhost';
+	const rawHost = request.host ?? request.headers?.host;
+	const host = (Array.isArray(rawHost) ? rawHost[0] : rawHost) ?? 'localhost';
 	const scheme = request.protocol ?? 'https';
 	return `${scheme}://${host}`;
 }
@@ -90,6 +94,39 @@ export function resolveIssuer(request: HarperRequest, mcpConfig: MCPConfig): str
 export function resolveResource(request: HarperRequest, mcpConfig: MCPConfig): string {
 	if (mcpConfig.resource) return mcpConfig.resource;
 	return `${resolveIssuer(request, mcpConfig)}/mcp`;
+}
+
+/**
+ * Canonical RFC 9728 §3.1 Protected Resource Metadata URL for the configured
+ * resource: `<resource-origin>/.well-known/oauth-protected-resource[/<resource-path>]`.
+ *
+ * This is exactly the URL the PRM handler serves — bare for a resource at the
+ * origin root, path-appended when the resource carries a path (e.g. `.../mcp`);
+ * see {@link wellKnownPathMatches}. withMCPAuth's `WWW-Authenticate: Bearer
+ * resource_metadata="..."` challenge points here, so a client that uses the
+ * challenge value verbatim fetches a document this server actually answers.
+ * Falls back to the request-derived issuer origin (bare path) if the resource
+ * URI can't be parsed, so the deny path never throws.
+ *
+ * The result is interpolated into a quoted `resource_metadata="..."` header
+ * param, so it MUST be header-safe: a client-controlled Host (when the issuer
+ * is unpinned) must never inject a `"` or control char that breaks the quoting.
+ * Every branch normalizes through `new URL().origin`, which rejects/encodes
+ * such input; if even the issuer can't be parsed, fall back to the host-less
+ * relative path, which is always safe.
+ */
+export function protectedResourceMetadataUrl(request: HarperRequest, mcpConfig: MCPConfig): string {
+	try {
+		const { origin, pathname } = new URL(resolveResource(request, mcpConfig));
+		const path = pathname && pathname !== '/' ? pathname.replace(/\/+$/, '') : '';
+		return `${origin}${PRM_PATH}${path}`;
+	} catch {
+		try {
+			return `${new URL(resolveIssuer(request, mcpConfig)).origin}${PRM_PATH}`;
+		} catch {
+			return PRM_PATH;
+		}
+	}
 }
 
 /**

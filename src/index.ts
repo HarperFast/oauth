@@ -58,6 +58,11 @@ export { getProvider } from './lib/providers/index.ts';
 export { withOAuthValidation, getOAuthProviders } from './lib/withOAuthValidation.ts';
 export type { OAuthValidationOptions } from './lib/withOAuthValidation.ts';
 
+// Export MCP bearer-token guard (Stage 5) for app-owned MCP routes
+export { withMCPAuth } from './lib/mcp/withMCPAuth.ts';
+export type { WithMCPAuthOptions } from './lib/mcp/withMCPAuth.ts';
+export type { MCPRequestClaims } from './types.ts';
+
 // Store hooks registered at module load time and active hookManager
 let pendingHooks: OAuthHooks | null = null;
 let activeHookManager: HookManager | null = null;
@@ -192,7 +197,14 @@ export async function handleApplication(scope: Scope): Promise<void> {
 
 		// Update the resource with new providers
 		if (Object.keys(providers).length === 0) {
-			// No valid providers configured - register a simple error resource
+			// No valid providers configured - register a simple error resource.
+			// Fail closed: clear the MCP config static too. OAuthResource.configure()
+			// (the only other writer) runs only in the else branch, so without this a
+			// live reload that drops all providers would leave the PREVIOUS mcpConfig in
+			// place — and withMCPAuth's default getter (and the well-known handlers) read
+			// that static, so they'd keep verifying tokens / serving discovery against
+			// stale config after the plugin is no longer validly configured.
+			OAuthResource.mcpConfig = undefined;
 			resources.set('oauth', {
 				async get() {
 					return {

@@ -5,7 +5,13 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync } from 'node:crypto';
-import { signAccessToken, verifyAccessToken, publicKeyToJwk } from '../../../dist/lib/mcp/tokenIssuer.js';
+import jwt from 'jsonwebtoken';
+import {
+	signAccessToken,
+	verifyAccessToken,
+	verifyAccessTokenWithKeySet,
+	publicKeyToJwk,
+} from '../../../dist/lib/mcp/tokenIssuer.js';
 import { SIGNING_KEY_ID } from '../../../dist/lib/mcp/keyStore.js';
 
 const { publicKey, privateKey } = generateKeyPairSync('rsa', {
@@ -89,5 +95,87 @@ describe('tokenIssuer', () => {
 		assert.equal(jwk.alg, 'RS256');
 		assert.equal(jwk.kid, SIGNING_KEY_ID);
 		assert.equal(jwk.d, undefined, 'private exponent must NOT be present');
+	});
+});
+
+function makeRsaKey(kid) {
+	const { publicKey, privateKey } = generateKeyPairSync('rsa', {
+		modulusLength: 2048,
+		publicKeyEncoding: { type: 'spki', format: 'pem' },
+		privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+	});
+	return { kid, alg: 'RS256', public_key_pem: publicKey, private_key_pem: privateKey, created_at: 1700000000 };
+}
+
+describe('verifyAccessTokenWithKeySet', () => {
+	it('selects the key by kid and verifies aud + iss', () => {
+		const token = signAccessToken(baseParams, key);
+		const claims = verifyAccessTokenWithKeySet(token, [makeRsaKey('unrelated'), key], {
+			audience: baseParams.audience,
+			issuer: baseParams.issuer,
+		});
+		assert.equal(claims.sub, baseParams.subject);
+		assert.equal(claims.client_id, baseParams.clientId);
+	});
+
+	it('throws on an empty key set', () => {
+		const token = signAccessToken(baseParams, key);
+		assert.throws(
+			() => verifyAccessTokenWithKeySet(token, [], { audience: baseParams.audience, issuer: baseParams.issuer }),
+			/no signing keys/
+		);
+	});
+
+	it('throws on an unknown kid rather than falling back to another key', () => {
+		// Signed with `key` (kid SIGNING_KEY_ID) but that kid is absent from the set.
+		const token = signAccessToken(baseParams, key);
+		assert.throws(
+			() =>
+				verifyAccessTokenWithKeySet(token, [makeRsaKey('different-kid')], {
+					audience: baseParams.audience,
+					issuer: baseParams.issuer,
+				}),
+			/unknown key id/
+		);
+	});
+
+	it('uses the sole key when the token carries no kid', () => {
+		// signAccessToken always sets a kid, so craft a no-kid token directly.
+		const token = jwt.sign({ client_id: 'c' }, key.private_key_pem, {
+			algorithm: 'RS256',
+			issuer: baseParams.issuer,
+			audience: baseParams.audience,
+			subject: baseParams.subject,
+		});
+		const claims = verifyAccessTokenWithKeySet(token, [key], {
+			audience: baseParams.audience,
+			issuer: baseParams.issuer,
+		});
+		assert.equal(claims.sub, baseParams.subject);
+	});
+
+	it('throws when no kid and the set is ambiguous (>1 key)', () => {
+		const token = jwt.sign({ client_id: 'c' }, key.private_key_pem, {
+			algorithm: 'RS256',
+			issuer: baseParams.issuer,
+			audience: baseParams.audience,
+			subject: baseParams.subject,
+		});
+		assert.throws(
+			() =>
+				verifyAccessTokenWithKeySet(token, [key, makeRsaKey('second')], {
+					audience: baseParams.audience,
+					issuer: baseParams.issuer,
+				}),
+			/key id required/
+		);
+	});
+
+	it('throws on a malformed token', () => {
+		assert.throws(
+			() =>
+				verifyAccessTokenWithKeySet('not-a-jwt', [key], { audience: baseParams.audience, issuer: baseParams.issuer }),
+			/malformed token/
+		);
 	});
 });

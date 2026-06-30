@@ -533,6 +533,28 @@ export interface Request extends IncomingMessage {
 	 * from `IncomingMessage`.)
 	 */
 	pathname?: string;
+	/**
+	 * Verified MCP access-token claims, populated by `withMCPAuth` after a
+	 * successful Bearer validation. Absent when the request was not guarded by
+	 * `withMCPAuth` or did not pass validation (those requests are rejected
+	 * before the wrapped handler runs).
+	 */
+	mcp?: MCPRequestClaims;
+}
+
+/**
+ * Verified MCP access-token claims attached to the request by `withMCPAuth`.
+ * The app's MCP handler reads these to authorize per user/client.
+ */
+export interface MCPRequestClaims {
+	/** Token subject — the end-user identifier (`sub`). */
+	sub: string;
+	/** OAuth client that obtained the token — the DCR `client_id`. */
+	client_id: string;
+	/** Audience (`aud`) — the canonical MCP resource URI the token was minted for. */
+	aud: string;
+	/** Space-separated granted scopes (`scope`), if any. */
+	scope?: string;
 }
 
 /**

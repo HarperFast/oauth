@@ -43,6 +43,11 @@ describe('MCP well-known: URI resolution', () => {
 		assert.equal(resolveIssuer(req, {}), 'https://auto.example.com');
 	});
 
+	it('resolveIssuer takes the first value when the Host header is an array', () => {
+		const req = makeRequest({ protocol: 'https', host: undefined, headers: { host: ['first.example.com', 'second'] } });
+		assert.equal(resolveIssuer(req, {}), 'https://first.example.com');
+	});
+
 	it('resolveResource uses configured value when set', () => {
 		const req = makeRequest();
 		const resource = resolveResource(req, { resource: 'https://canonical.example.com/mcp-v2' });
