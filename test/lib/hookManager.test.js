@@ -306,5 +306,29 @@ describe('HookManager', () => {
 			await flushMicrotasks();
 			assert.equal(mockLogger.error.mock.calls.length, 1, 'error is still logged');
 		});
+
+		it('shields the catch body — a throwing logger does not escape the detached chain', async () => {
+			// The hook throws AND logger.error throws. Without the try/catch shield in
+			// the catch body, the throw would become an unhandled rejection on the
+			// detached (void) chain — which the test runner attributes as a failure
+			// (and crashes Node >=15 in production). Surviving the flush is the proof.
+			const throwingLogger = {
+				debug() {},
+				error() {
+					throw new Error('logging subsystem down');
+				},
+			};
+			const hm = new HookManager(throwingLogger);
+			hm.register({
+				onMCPTokenIssued: async () => {
+					throw new Error('hook boom');
+				},
+			});
+
+			hm.callOnMCPTokenIssued(SAMPLE_EVENT, SAMPLE_REQUEST);
+			await flushMicrotasks();
+			await flushMicrotasks();
+			assert.ok(true, 'no unhandled rejection escaped the detached chain');
+		});
 	});
 });

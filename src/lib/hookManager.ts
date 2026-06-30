@@ -94,9 +94,18 @@ export class HookManager {
 		// throw inside the catch.
 		void Promise.resolve()
 			.then(() => hook(event, request))
-			.catch((error) =>
-				this.logger?.error?.('onMCPTokenIssued hook failed:', error instanceof Error ? error.message : String(error))
-			);
+			.catch((error) => {
+				// Shield the catch body itself: a throwing logger (logging-subsystem
+				// I/O error) or a malicious `error.toString()` must NOT throw here —
+				// this chain is detached (`void`), so an escaping error would be an
+				// unhandled rejection (process crash on Node ≥15). Best-effort, same
+				// posture as emitMCPAuditEvent.
+				try {
+					this.logger?.error?.('onMCPTokenIssued hook failed:', error instanceof Error ? error.message : String(error));
+				} catch {
+					// Intentionally ignored — logging is best-effort.
+				}
+			});
 	}
 
 	/**
