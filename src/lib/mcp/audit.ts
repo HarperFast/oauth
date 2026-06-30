@@ -20,21 +20,29 @@
  *     auth audit trail, not to system.log.
  *
  * Keep ALL string formatting inside the logger call so the optional-call
- * short-circuit (`?.`) avoids JSON.stringify work when info is suppressed
- * (same lazy-logging pattern as dcr.ts).
+ * short-circuit (`?.`) avoids JSON.stringify work when info is undefined
+ * (same lazy-logging pattern as dcr.ts). Note: `?.` only short-circuits when
+ * `info` is absent, not when it's a level-suppressed no-op — fully lazy logging
+ * would need a logger-level check Harper doesn't expose to plugins here.
  *
- * The `rejected` event (oauth.mcp.token.rejected) is NOT implemented here yet
- * — it belongs in withMCPAuth (Stage 5, PR #134, not on main). The helper is
- * written to accept any event type so adding it later is a one-liner.
+ * Three event types: `issued` / `refreshed` (success path, from the token
+ * endpoint — carry the verified claims) and `rejected` (from the withMCPAuth
+ * guard when a presented bearer token fails validation). A rejected token has
+ * NO verified claims, so its payload is a distinct shape (reason + resource).
  */
 
 import { logger as harperLogger } from 'harper';
 
 export type MCPAuditEventType = 'oauth.mcp.token.issued' | 'oauth.mcp.token.refreshed' | 'oauth.mcp.token.rejected';
 
-export interface MCPAuditPayload {
-	/** Discriminator for the audit event type. */
-	event: MCPAuditEventType;
+/**
+ * Audit record for a successfully issued or refreshed token. Carries the
+ * verified claims (the token validated, so these are trustworthy) — but never
+ * the token strings themselves; only the `jti` identifier.
+ */
+export interface MCPTokenIssuedAuditPayload {
+	/** Discriminator: success-path token events. */
+	event: 'oauth.mcp.token.issued' | 'oauth.mcp.token.refreshed';
 	/** Registered MCP client identifier. */
 	client_id: string;
 	/** Subject claim — the Harper user the token was issued to. */
@@ -48,6 +56,26 @@ export interface MCPAuditPayload {
 	/** ISO-8601 UTC timestamp of the event. */
 	timestamp: string;
 }
+
+/**
+ * Audit record for a bearer token rejected at the withMCPAuth guard. The token
+ * FAILED validation (bad signature / expired / wrong audience / malformed
+ * claims), so it has no trustworthy claims: we log only the denial reason and
+ * the resource it was presented to — never an unverified `client_id`/`sub`/`jti`,
+ * which would be attacker-controlled, spoofable input.
+ */
+export interface MCPTokenRejectedAuditPayload {
+	/** Discriminator: a presented token was rejected. */
+	event: 'oauth.mcp.token.rejected';
+	/** Human-readable denial reason (the same text returned in the 401 body). */
+	reason: string;
+	/** Resource URI the token was presented to (best-effort, from MCP config). */
+	aud: string;
+	/** ISO-8601 UTC timestamp of the event. */
+	timestamp: string;
+}
+
+export type MCPAuditPayload = MCPTokenIssuedAuditPayload | MCPTokenRejectedAuditPayload;
 
 /**
  * Emit a structured MCP audit event via Harper's global logger.

@@ -114,4 +114,24 @@ describe('emitMCPAuditEvent', () => {
 		const parsed = JSON.parse(infoCalls[0][0].replace(/^MCP audit: /, ''));
 		assert.equal(parsed.scope, undefined);
 	});
+
+	it('emits oauth.mcp.token.rejected with reason + aud and NO unverified claims', () => {
+		emitMCPAuditEvent({
+			event: /** @type {const} */ ('oauth.mcp.token.rejected'),
+			reason: 'access token is invalid, expired, or not issued for this resource',
+			aud: 'https://app.example.com/mcp',
+			timestamp: '2024-01-01T00:00:00.000Z',
+		});
+		harperMockLogger.info = originalInfo;
+
+		assert.equal(infoCalls.length, 1);
+		const parsed = JSON.parse(infoCalls[0][0].replace(/^MCP audit: /, ''));
+		assert.equal(parsed.event, 'oauth.mcp.token.rejected');
+		assert.equal(parsed.reason, 'access token is invalid, expired, or not issued for this resource');
+		assert.equal(parsed.aud, 'https://app.example.com/mcp');
+		// A rejected token has no trustworthy claims — none must be logged.
+		assert.equal(parsed.client_id, undefined, 'no client_id on a rejected event');
+		assert.equal(parsed.sub, undefined, 'no sub on a rejected event');
+		assert.equal(parsed.jti, undefined, 'no jti on a rejected event');
+	});
 });
