@@ -180,14 +180,22 @@ export function withMCPAuth(handler: HttpListener, options: WithMCPAuthOptions =
 			if (tokenPresented) {
 				// Best-effort, secret-free: the reason + the resource the token was
 				// presented to. NEVER unverified claims — the token failed validation,
-				// so any client_id/sub/jti it carries is attacker-controlled. The audit
-				// helper swallows its own errors, so this can't break the 401 path.
-				emitAudit({
-					event: 'oauth.mcp.token.rejected',
-					reason,
-					aud: resolveResource(request as any, getConfig() ?? ({} as MCPConfig)),
-					timestamp: new Date().toISOString(),
-				});
+				// so any client_id/sub/jti it carries is attacker-controlled. Shielded
+				// in try/catch: emitAudit is part of the exported options surface, so a
+				// custom sink that throws must NOT turn this denial into a 500 — deny()
+				// must always produce the 401 (fail closed). The default
+				// emitMCPAuditEvent already swallows its own errors; this guards a
+				// caller-supplied sink too.
+				try {
+					emitAudit({
+						event: 'oauth.mcp.token.rejected',
+						reason,
+						aud: resolveResource(request as any, getConfig() ?? ({} as MCPConfig)),
+						timestamp: new Date().toISOString(),
+					});
+				} catch {
+					// Audit is best-effort; never let it break the fail-closed 401.
+				}
 			}
 			const metadataUrl = protectedResourceMetadataUrl(request as any, getConfig() ?? ({} as MCPConfig));
 			const defaultResponse = {

@@ -153,6 +153,20 @@ describe('withMCPAuth — rejected-token audit (oauth.mcp.token.rejected)', () =
 		assert.equal(res.status, 401);
 		assert.equal(events.length, 0, 'no audit event for an oversized path');
 	});
+
+	it('a throwing emitAudit sink never breaks the fail-closed 401 (no 500)', async () => {
+		// emitAudit is part of the exported options surface; a custom sink that throws
+		// must not turn the denial into a rejected promise / framework 500.
+		const token = mint({}, makeKey(SIGNING_KEY_ID)); // valid kid, wrong key → bad signature
+		const o = opts({
+			emitAudit: () => {
+				throw new Error('audit sink down');
+			},
+		});
+		const res = await withMCPAuth(spyHandler().handler, o)(req(`Bearer ${token}`), NEXT);
+		assert.equal(res.status, 401, 'a throwing audit sink must not break the 401');
+		assert.equal(res.headers['WWW-Authenticate'], EXPECTED_CHALLENGE);
+	});
 });
 
 describe('withMCPAuth — rejections (all return 401 + Bearer PRM challenge)', () => {
