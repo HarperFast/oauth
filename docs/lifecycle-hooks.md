@@ -332,6 +332,39 @@ async function handleTokenRefresh(session, refreshed, request) {
 }
 ```
 
+### onMCPTokenIssued
+
+Called after an MCP access or refresh token is minted, before the response returns. Only fires when [MCP OAuth](./mcp-oauth.md) is enabled. This is the MCP-client analog of [`onLogin`](#onlogin) — react in your own application when an MCP client gains access.
+
+**Purpose:** Associate an MCP `client_id` with a user (`sub`) in your own data model, monitoring and security alerting on which clients obtain tokens, per-client rate-limiting
+
+**Signature:**
+
+```typescript
+async function onMCPTokenIssued(
+	event: { type: 'access' | 'refresh'; client_id: string; sub: string; aud: string; scope?: string; jti: string },
+	request: Request
+): Promise<void>;
+```
+
+**Parameters:**
+
+- `event` - Identifies the token issued: `type` (`access` for the authorization-code grant, `refresh` for a rotation), `client_id`, `sub`, `aud`, `scope` (optional), and `jti` (the token id)
+- `request` - The HTTP request that triggered issuance
+
+**Returns:** void. Fire-and-forget — a throwing hook is caught and logged, never blocking token issuance.
+
+> **Security:** `event` is sanitized — it carries only the `jti` (a token identifier, safe to log), never the access/refresh token strings. The `request` is **not** sanitized: on the refresh path its body carries the `refresh_token` the client presented, so do not log `request` wholesale.
+
+**Example:**
+
+```javascript
+async function handleMCPTokenIssued(event, request) {
+	// Record which MCP client is acting for which user.
+	await tables.McpClient.put({ id: event.client_id, user: event.sub, lastSeen: Date.now() });
+}
+```
+
 ## Hook Registration
 
 Hooks are **lazy-referenced** - they are looked up when OAuth events occur (login, logout, token refresh), not when registered. This means you can call `registerHooks()` at any time, and there's no specific initialization window. The hooks are simply stored and referenced later when needed.
