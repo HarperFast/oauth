@@ -51,8 +51,9 @@ route handler with `withMCPAuth`.
 import { withMCPAuth } from '@harperfast/oauth';
 
 // Your MCP endpoint. request.mcp is populated only after a valid bearer token.
-function mcpHandler(request, next) {
+function mcpHandler(request) {
 	const { sub, client_id, scope } = request.mcp; // verified token claims
+	// MCP messages are JSON-RPC 2.0 — your handler returns a JSON-RPC response.
 	return { jsonrpc: '2.0', result: { hello: sub } };
 }
 

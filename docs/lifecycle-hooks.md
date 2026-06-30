@@ -334,7 +334,7 @@ async function handleTokenRefresh(session, refreshed, request) {
 
 ### onMCPTokenIssued
 
-Called after an MCP access or refresh token is minted, before the response returns. Only fires when [MCP OAuth](./mcp-oauth.md) is enabled. This is the MCP-client analog of [`onLogin`](#onlogin) — react in your own application when an MCP client gains access.
+Called after an MCP access or refresh token is minted. Because it runs detached and is not awaited (fire-and-forget), it never delays the token response — its side effects may complete after the client has already received the token. Only fires when [MCP OAuth](./mcp-oauth.md) is enabled. This is the MCP-client analog of [`onLogin`](#onlogin) — react in your own application when an MCP client gains access.
 
 **Purpose:** Associate an MCP `client_id` with a user (`sub`) in your own data model, monitoring and security alerting on which clients obtain tokens, per-client rate-limiting
 
