@@ -7,6 +7,7 @@
  */
 
 import type { RequestTarget } from 'harper';
+import type { HookManager } from '../hookManager.ts';
 import type { Logger, MCPConfig, ProviderRegistry, Request } from '../../types.ts';
 import { handleAuthorize } from './authorize.ts';
 import { handleRegister } from './dcr.ts';
@@ -27,12 +28,16 @@ export { publicKeyToJwk, signAccessToken, verifyAccessToken } from './tokenIssue
  *
  * Returns 404 when MCP is disabled (existence-hiding — clients shouldn't
  * be able to probe whether MCP support is configured).
+ *
+ * `hookManager` is forwarded to `handleToken` so `onMCPTokenIssued` fires
+ * on successful token issuance.
  */
 export async function handleMCPPost(
 	action: string,
 	request: Request,
 	body: any,
 	mcpConfig: MCPConfig | undefined,
+	hookManager?: HookManager,
 	logger?: Logger
 ): Promise<any> {
 	if (!mcpConfig?.enabled) {
@@ -44,7 +49,7 @@ export async function handleMCPPost(
 	}
 
 	if (action === 'token') {
-		return handleToken(request, body, mcpConfig, logger);
+		return handleToken(request, body, mcpConfig, hookManager, logger);
 	}
 
 	return { status: 404, body: { error: 'Not found' } };

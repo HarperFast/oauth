@@ -202,4 +202,63 @@ describe('HookManager', () => {
 			);
 		});
 	});
+
+	describe('callOnMCPTokenIssued', () => {
+		const SAMPLE_EVENT = {
+			type: /** @type {const} */ ('access'),
+			client_id: 'client-abc',
+			sub: 'alice@example.com',
+			aud: 'https://app.example.com/mcp',
+			scope: 'mcp:read',
+			jti: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+		};
+		const SAMPLE_REQUEST = { headers: {} };
+
+		it('should call onMCPTokenIssued hook with the correct event and request', async () => {
+			const hookMock = createMockFn(async () => {});
+			hookManager.register({ onMCPTokenIssued: hookMock });
+
+			await hookManager.callOnMCPTokenIssued(SAMPLE_EVENT, SAMPLE_REQUEST);
+
+			assert.equal(hookMock.mock.calls.length, 1);
+			const [eventArg, requestArg] = hookMock.mock.calls[0].arguments;
+			assert.equal(eventArg.type, 'access');
+			assert.equal(eventArg.client_id, SAMPLE_EVENT.client_id);
+			assert.equal(eventArg.sub, SAMPLE_EVENT.sub);
+			assert.equal(eventArg.aud, SAMPLE_EVENT.aud);
+			assert.equal(eventArg.scope, SAMPLE_EVENT.scope);
+			assert.equal(eventArg.jti, SAMPLE_EVENT.jti);
+			assert.equal(requestArg, SAMPLE_REQUEST);
+		});
+
+		it('should not throw when no onMCPTokenIssued hook is registered', async () => {
+			// No hook registered — must complete without error.
+			await hookManager.callOnMCPTokenIssued(SAMPLE_EVENT, SAMPLE_REQUEST);
+		});
+
+		it('swallows a throwing hook and logs the error (fire-and-forget contract)', async () => {
+			const throwingHook = createMockFn(async () => {
+				throw new Error('billing service unavailable');
+			});
+			hookManager.register({ onMCPTokenIssued: throwingHook });
+
+			// Must not reject — failure-tolerant by design.
+			await assert.doesNotReject(() => hookManager.callOnMCPTokenIssued(SAMPLE_EVENT, SAMPLE_REQUEST));
+			assert.equal(mockLogger.error.mock.calls.length, 1, 'error is logged');
+			assert.ok(
+				mockLogger.error.mock.calls[0].arguments[0].includes('onMCPTokenIssued hook failed'),
+				'error message mentions the hook name'
+			);
+		});
+
+		it('handles the refresh type correctly', async () => {
+			const hookMock = createMockFn(async () => {});
+			hookManager.register({ onMCPTokenIssued: hookMock });
+
+			const refreshEvent = { ...SAMPLE_EVENT, type: /** @type {const} */ ('refresh') };
+			await hookManager.callOnMCPTokenIssued(refreshEvent, SAMPLE_REQUEST);
+
+			assert.equal(hookMock.mock.calls[0].arguments[0].type, 'refresh');
+		});
+	});
 });

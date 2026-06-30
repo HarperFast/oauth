@@ -70,6 +70,28 @@ export class HookManager {
 	}
 
 	/**
+	 * Call onMCPTokenIssued hook.
+	 *
+	 * Failure is swallowed — a throwing hook must NOT block token issuance.
+	 * The hook is fire-and-forget: we await it (so the log lands before the
+	 * response) but reject from app code is caught and logged, never re-thrown.
+	 */
+	async callOnMCPTokenIssued(
+		event: { type: 'access' | 'refresh'; client_id: string; sub: string; aud: string; scope?: string; jti: string },
+		request: any
+	): Promise<void> {
+		if (!this.hooks.onMCPTokenIssued) return;
+
+		try {
+			this.logger?.debug?.(`Calling onMCPTokenIssued hook for client: ${event.client_id} type: ${event.type}`);
+			await this.hooks.onMCPTokenIssued(event, request);
+		} catch (error) {
+			this.logger?.error?.('onMCPTokenIssued hook failed:', (error as Error).message);
+			// Don't throw - hooks should not block token issuance
+		}
+	}
+
+	/**
 	 * Call onTokenRefresh hook
 	 */
 	async callOnTokenRefresh(session: any, refreshed: boolean, request?: any): Promise<void> {

@@ -311,6 +311,28 @@ export interface OAuthHooks {
 	 * @param request - The HTTP request object (may be undefined for background refresh)
 	 */
 	onTokenRefresh?: (session: any, refreshed: boolean, request?: any) => Promise<void>;
+
+	/**
+	 * Called after an MCP access or refresh token is minted, before the response
+	 * is returned. Use for rate-limiting by client_id, usage attribution,
+	 * pushing to a queue, etc.
+	 *
+	 * Failure is caught and logged — a throwing hook NEVER blocks token issuance
+	 * (fire-and-forget contract).
+	 *
+	 * SECURITY: the `event` is sanitized — it carries only the `jti` (token
+	 * identifier, safe to log), never the access/refresh token strings. The
+	 * `request` is NOT sanitized: on the refresh path its body carries the
+	 * refresh_token the client presented, so do not log `request` wholesale.
+	 *
+	 * @param event - Identifies the token issued: type, client_id, sub, aud, scope, jti
+	 * @param request - The HTTP request that triggered issuance (typed as any for
+	 *   Harper version independence). NOT sanitized — see SECURITY above.
+	 */
+	onMCPTokenIssued?: (
+		event: { type: 'access' | 'refresh'; client_id: string; sub: string; aud: string; scope?: string; jti: string },
+		request: any
+	) => Promise<void>;
 }
 
 /**

@@ -11,7 +11,9 @@
  */
 
 import { createHash, timingSafeEqual } from 'node:crypto';
+import type { HookManager } from '../hookManager.ts';
 import type { Logger, MCPClientRecord, MCPConfig, Request } from '../../types.ts';
+import { emitMCPAuditEvent } from './audit.ts';
 import { MCPAuthCodeStore } from './authCodeStore.ts';
 import { MCPClientStore } from './clientStore.ts';
 import { MCPKeyStore } from './keyStore.ts';
@@ -161,6 +163,7 @@ async function mintTokenPair(
 	request: Request | undefined,
 	mcpConfig: MCPConfig,
 	grant: { user: string; resource: string; scope?: string; clientId: string; issueRefresh: boolean },
+	hookManager?: HookManager,
 	logger?: Logger
 ): Promise<TokenResponse> {
 	const issuer = resolveIssuer(request as any, mcpConfig);
@@ -168,7 +171,7 @@ async function mintTokenPair(
 	const refreshTtl = coerceTtl(mcpConfig.refreshTokenTtl, DEFAULT_REFRESH_TOKEN_TTL);
 
 	const key = await new MCPKeyStore(logger).getSigningKey(mcpConfig);
-	const accessToken = signAccessToken(
+	const { token: accessToken, jti } = signAccessToken(
 		{
 			issuer,
 			subject: grant.user,
@@ -206,6 +209,28 @@ async function mintTokenPair(
 		responseBody.refresh_token = refreshToken;
 	}
 
+	// Emit the audit event + fire the hook only AFTER all token state is durably
+	// persisted (the refresh family above) — otherwise a persistence failure
+	// would report a phantom successful issuance to audit/billing/rate-limit
+	// consumers for an exchange the client never actually received. Both are
+	// fire-and-forget (emitMCPAuditEvent and callOnMCPTokenIssued each swallow
+	// their own errors), so neither can block the token from reaching the client.
+	emitMCPAuditEvent({
+		event: 'oauth.mcp.token.issued',
+		client_id: grant.clientId,
+		sub: grant.user,
+		aud: grant.resource,
+		scope: grant.scope,
+		jti,
+		timestamp: new Date().toISOString(),
+	});
+	if (hookManager) {
+		await hookManager.callOnMCPTokenIssued(
+			{ type: 'access', client_id: grant.clientId, sub: grant.user, aud: grant.resource, scope: grant.scope, jti },
+			request
+		);
+	}
+
 	return { status: 200, body: responseBody, headers: NO_STORE_HEADERS };
 }
 
@@ -214,6 +239,7 @@ async function handleAuthorizationCodeGrant(
 	body: any,
 	client: MCPClientRecord,
 	mcpConfig: MCPConfig,
+	hookManager?: HookManager,
 	logger?: Logger
 ): Promise<TokenResponse> {
 	const code = typeof body?.code === 'string' ? body.code : undefined;
@@ -261,6 +287,7 @@ async function handleAuthorizationCodeGrant(
 			clientId: client.client_id,
 			issueRefresh: allowsRefresh(client),
 		},
+		hookManager,
 		logger
 	);
 }
@@ -270,6 +297,7 @@ async function handleRefreshTokenGrant(
 	body: any,
 	client: MCPClientRecord,
 	mcpConfig: MCPConfig,
+	hookManager?: HookManager,
 	logger?: Logger
 ): Promise<TokenResponse> {
 	if (!allowsRefresh(client)) {
@@ -317,7 +345,7 @@ async function handleRefreshTokenGrant(
 	const issuer = resolveIssuer(request as any, mcpConfig);
 	const accessTtl = coerceTtl(mcpConfig.accessTokenTtl, DEFAULT_ACCESS_TOKEN_TTL);
 	const key = await new MCPKeyStore(logger).getSigningKey(mcpConfig);
-	const accessToken = signAccessToken(
+	const { token: accessToken, jti } = signAccessToken(
 		{
 			issuer,
 			subject: family.user,
@@ -334,6 +362,31 @@ async function handleRefreshTokenGrant(
 	family.current_token_hash = newHash;
 	await familyStore.set(family);
 
+	// Emit audit event + fire hook after the token is signed and rotation is
+	// committed. Failures are fire-and-forget: must not block the response.
+	emitMCPAuditEvent({
+		event: 'oauth.mcp.token.refreshed',
+		client_id: client.client_id,
+		sub: family.user,
+		aud: family.resource,
+		scope: family.scope,
+		jti,
+		timestamp: new Date().toISOString(),
+	});
+	if (hookManager) {
+		await hookManager.callOnMCPTokenIssued(
+			{
+				type: 'refresh',
+				client_id: client.client_id,
+				sub: family.user,
+				aud: family.resource,
+				scope: family.scope,
+				jti,
+			},
+			request
+		);
+	}
+
 	const responseBody: Record<string, unknown> = {
 		access_token: accessToken,
 		token_type: 'Bearer',
@@ -347,11 +400,16 @@ async function handleRefreshTokenGrant(
 /**
  * Handle POST /oauth/mcp/token. Returns `{ status, body }`; the `enabled` gate
  * is applied upstream in handleMCPPost.
+ *
+ * `hookManager` is optional so callers that don't have access to it (e.g.
+ * unit tests that go directly to this function) can omit it without error.
+ * When present, `onMCPTokenIssued` is fired after every successful mint.
  */
 export async function handleToken(
 	request: Request | undefined,
 	body: any,
 	mcpConfig: MCPConfig,
+	hookManager?: HookManager,
 	logger?: Logger
 ): Promise<TokenResponse> {
 	const grantType = typeof body?.grant_type === 'string' ? body.grant_type : undefined;
@@ -365,7 +423,7 @@ export async function handleToken(
 	}
 
 	if (grantType === 'authorization_code') {
-		return handleAuthorizationCodeGrant(request, body, auth.client, mcpConfig, logger);
+		return handleAuthorizationCodeGrant(request, body, auth.client, mcpConfig, hookManager, logger);
 	}
-	return handleRefreshTokenGrant(request, body, auth.client, mcpConfig, logger);
+	return handleRefreshTokenGrant(request, body, auth.client, mcpConfig, hookManager, logger);
 }

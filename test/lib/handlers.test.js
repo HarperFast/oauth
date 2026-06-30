@@ -840,6 +840,35 @@ describe('OAuth Handlers', () => {
 			assert.equal(mockRequest.session.update.mock.calls.length, 0);
 			global.databases = originalDatabases;
 		});
+
+		it('onLogin fires for MCP-initiated auth (bridged authorize/callback flow)', async () => {
+			// Regression guard: the onLogin hook must fire on the MCP branch exactly
+			// as it does on the human-session branch — it runs before the branch
+			// decision so user-provisioning hooks work for MCP users too.
+			const onLoginMock = createMockFn(async () => ({}));
+			const trackingHookManager = {
+				...mockHookManager,
+				callOnLogin: onLoginMock,
+			};
+
+			await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				trackingHookManager,
+				'test-provider',
+				mockLogger
+			);
+
+			assert.equal(onLoginMock.mock.calls.length, 1, 'callOnLogin fired exactly once on the MCP path');
+			// The hook receives the mapped Harper user, the upstream token response, the session, the request, and the provider name.
+			const [oauthUser, tokenResponse, , , providerName] = onLoginMock.mock.calls[0].arguments;
+			assert.ok(oauthUser.username, 'user object forwarded to onLogin');
+			assert.ok(tokenResponse, 'token response forwarded to onLogin');
+			assert.equal(providerName, 'test-provider');
+			global.databases = originalDatabases;
+		});
 	});
 
 	describe('handleLogout', () => {

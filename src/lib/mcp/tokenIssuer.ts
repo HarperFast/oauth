@@ -24,25 +24,40 @@ export interface MintAccessTokenParams {
 	scope?: string;
 	/** Access-token lifetime in seconds. */
 	ttlSeconds: number;
+	/**
+	 * JWT ID (`jti` claim). Callers SHOULD generate this with `randomUUID()`
+	 * before calling so they can capture it for audit/hook events without
+	 * decoding the signed token. When omitted a fresh UUID is generated here.
+	 */
+	jti?: string;
 }
 
 /**
- * Sign an access token. `iat`/`exp` are set from `ttlSeconds`, `jti` is a fresh
- * UUID, and registered claims are populated via jsonwebtoken's options so the
- * payload carries only `client_id` + `scope`.
+ * Sign an access token. `iat`/`exp` are set from `ttlSeconds`; `jti` is taken
+ * from `params.jti` (or generated fresh when omitted). Registered claims are
+ * populated via jsonwebtoken's options so the payload carries only
+ * `client_id` + `scope`.
+ *
+ * Returns an object containing both the signed token string and the `jti`
+ * so callers can use the id for audit records without re-parsing the JWT.
  */
-export function signAccessToken(params: MintAccessTokenParams, key: MCPSigningKeyRecord): string {
+export function signAccessToken(
+	params: MintAccessTokenParams,
+	key: MCPSigningKeyRecord
+): { token: string; jti: string } {
+	const jti = params.jti ?? randomUUID();
 	const payload: Record<string, unknown> = { client_id: params.clientId };
 	if (params.scope) payload.scope = params.scope;
-	return jwt.sign(payload, key.private_key_pem, {
+	const token = jwt.sign(payload, key.private_key_pem, {
 		algorithm: 'RS256',
 		keyid: key.kid,
 		issuer: params.issuer,
 		audience: params.audience,
 		subject: params.subject,
-		jwtid: randomUUID(),
+		jwtid: jti,
 		expiresIn: params.ttlSeconds,
 	});
+	return { token, jti };
 }
 
 export interface VerifyOptions {
