@@ -504,6 +504,13 @@ export interface Request extends IncomingMessage {
 	headers: IncomingMessage['headers'];
 	/** Client IP address */
 	ip?: string;
+	/**
+	 * Request path (no query string). Harper populates this on the runtime
+	 * request; it's declared here so middleware can read `request.pathname`
+	 * without an `(request as any)` cast. (`url` — path + query — is inherited
+	 * from `IncomingMessage`.)
+	 */
+	pathname?: string;
 }
 
 /**
