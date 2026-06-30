@@ -45,6 +45,7 @@ import { OAuthResource } from '../resource.ts';
 import { MCPKeyStore } from './keyStore.ts';
 import { verifyAccessTokenWithKeySet } from './tokenIssuer.ts';
 import { protectedResourceMetadataUrl, resolveIssuer, resolveResource } from './wellKnown.ts';
+import { emitMCPAuditEvent, type MCPTokenRejectedAuditPayload } from './audit.ts';
 
 /** Minimal surface withMCPAuth needs from a key source (lets tests inject one). */
 interface KeySource {
@@ -81,6 +82,12 @@ export interface WithMCPAuthOptions {
 	 * turn a denial into a pass (fail closed by construction).
 	 */
 	onAuthError?: (request: Request, error: string) => any;
+	/**
+	 * Audit sink for `oauth.mcp.token.rejected` events, invoked when a *presented*
+	 * bearer token is rejected (not for missing-token probes or the pre-token
+	 * guards). Defaults to the plugin's `emitMCPAuditEvent`. Injectable for tests.
+	 */
+	emitAudit?: (payload: MCPTokenRejectedAuditPayload) => void;
 }
 
 type HttpListener = (request: Request, next: (req: Request) => any) => any;
@@ -160,7 +167,36 @@ export function withMCPAuth(handler: HttpListener, options: WithMCPAuthOptions =
 		// challenge points at the SAME path-aware PRM URL the well-known handler
 		// serves (RFC 9728 §3.1: path-appended when the resource carries a path),
 		// so a client using the challenge value verbatim hits a real document.
+		const emitAudit = options.emitAudit ?? emitMCPAuditEvent;
+		// Flipped true once a bearer token has actually been presented; from that
+		// point on, every denial is an audited `oauth.mcp.token.rejected` event.
+		// Denials BEFORE it (path-length guard, MCP disabled, no token presented)
+		// are NOT audited — those are unauthenticated probes / the normal discovery
+		// 401, not rejected tokens, and auditing them would flood the log on probes
+		// and DoS floods.
+		let tokenPresented = false;
+
 		const deny = async (reason: string): Promise<any> => {
+			if (tokenPresented) {
+				// Best-effort, secret-free: the reason + the resource the token was
+				// presented to. NEVER unverified claims — the token failed validation,
+				// so any client_id/sub/jti it carries is attacker-controlled. Shielded
+				// in try/catch: emitAudit is part of the exported options surface, so a
+				// custom sink that throws must NOT turn this denial into a 500 — deny()
+				// must always produce the 401 (fail closed). The default
+				// emitMCPAuditEvent already swallows its own errors; this guards a
+				// caller-supplied sink too.
+				try {
+					emitAudit({
+						event: 'oauth.mcp.token.rejected',
+						reason,
+						aud: resolveResource(request as any, getConfig() ?? ({} as MCPConfig)),
+						timestamp: new Date().toISOString(),
+					});
+				} catch {
+					// Audit is best-effort; never let it break the fail-closed 401.
+				}
+			}
 			const metadataUrl = protectedResourceMetadataUrl(request as any, getConfig() ?? ({} as MCPConfig));
 			const defaultResponse = {
 				status: 401,
@@ -202,13 +238,18 @@ export function withMCPAuth(handler: HttpListener, options: WithMCPAuthOptions =
 		if (!token) {
 			return deny('missing or malformed Authorization: Bearer header');
 		}
+		// A bearer token was presented — any denial below is a rejected token (audited).
+		tokenPresented = true;
 
 		let keys: MCPSigningKeyRecord[];
 		try {
 			const keyStore: KeySource = options.keyStore ?? new MCPKeyStore(logger);
 			keys = await keyStore.getAllPublicKeys();
 		} catch (error) {
-			logger?.error?.('withMCPAuth: failed to load MCP signing keys:', (error as Error).message);
+			logger?.error?.(
+				'withMCPAuth: failed to load MCP signing keys:',
+				error instanceof Error ? error.message : String(error)
+			);
 			keys = [];
 		}
 		if (keys.length === 0) {
@@ -225,7 +266,10 @@ export function withMCPAuth(handler: HttpListener, options: WithMCPAuthOptions =
 		try {
 			payload = verifyAccessTokenWithKeySet(token, keys, { audience: resource, issuer });
 		} catch (error) {
-			logger?.debug?.('withMCPAuth: token verification failed:', (error as Error).message);
+			logger?.debug?.(
+				'withMCPAuth: token verification failed:',
+				error instanceof Error ? error.message : String(error)
+			);
 			return deny('access token is invalid, expired, or not issued for this resource');
 		}
 

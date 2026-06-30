@@ -11,7 +11,9 @@
  */
 
 import { createHash, timingSafeEqual } from 'node:crypto';
+import type { HookManager } from '../hookManager.ts';
 import type { Logger, MCPClientRecord, MCPConfig, Request } from '../../types.ts';
+import { emitMCPAuditEvent } from './audit.ts';
 import { MCPAuthCodeStore } from './authCodeStore.ts';
 import { MCPClientStore } from './clientStore.ts';
 import { MCPKeyStore } from './keyStore.ts';
@@ -161,6 +163,7 @@ async function mintTokenPair(
 	request: Request | undefined,
 	mcpConfig: MCPConfig,
 	grant: { user: string; resource: string; scope?: string; clientId: string; issueRefresh: boolean },
+	hookManager?: HookManager,
 	logger?: Logger
 ): Promise<TokenResponse> {
 	const issuer = resolveIssuer(request as any, mcpConfig);
@@ -168,7 +171,7 @@ async function mintTokenPair(
 	const refreshTtl = coerceTtl(mcpConfig.refreshTokenTtl, DEFAULT_REFRESH_TOKEN_TTL);
 
 	const key = await new MCPKeyStore(logger).getSigningKey(mcpConfig);
-	const accessToken = signAccessToken(
+	const { token: accessToken, jti } = signAccessToken(
 		{
 			issuer,
 			subject: grant.user,
@@ -206,6 +209,28 @@ async function mintTokenPair(
 		responseBody.refresh_token = refreshToken;
 	}
 
+	// Emit the audit event + fire the hook only AFTER all token state is durably
+	// persisted (the refresh family above) — otherwise a persistence failure
+	// would report a phantom successful issuance to audit/billing/rate-limit
+	// consumers for an exchange the client never actually received. Both are
+	// fire-and-forget (emitMCPAuditEvent and callOnMCPTokenIssued each swallow
+	// their own errors), so neither can block the token from reaching the client.
+	emitMCPAuditEvent({
+		event: 'oauth.mcp.token.issued',
+		client_id: grant.clientId,
+		sub: grant.user,
+		aud: grant.resource,
+		scope: grant.scope,
+		jti,
+		timestamp: new Date().toISOString(),
+	});
+	if (hookManager) {
+		hookManager.callOnMCPTokenIssued(
+			{ type: 'access', client_id: grant.clientId, sub: grant.user, aud: grant.resource, scope: grant.scope, jti },
+			request
+		);
+	}
+
 	return { status: 200, body: responseBody, headers: NO_STORE_HEADERS };
 }
 
@@ -214,6 +239,7 @@ async function handleAuthorizationCodeGrant(
 	body: any,
 	client: MCPClientRecord,
 	mcpConfig: MCPConfig,
+	hookManager?: HookManager,
 	logger?: Logger
 ): Promise<TokenResponse> {
 	const code = typeof body?.code === 'string' ? body.code : undefined;
@@ -247,7 +273,10 @@ async function handleAuthorizationCodeGrant(
 	try {
 		await codeStore.consume(code);
 	} catch (error) {
-		logger?.error?.('MCP token: failed to consume authorization code:', (error as Error).message);
+		logger?.error?.(
+			'MCP token: failed to consume authorization code:',
+			error instanceof Error ? error.message : String(error)
+		);
 		return errorResponse(500, 'server_error', 'Failed to consume authorization code');
 	}
 
@@ -261,6 +290,7 @@ async function handleAuthorizationCodeGrant(
 			clientId: client.client_id,
 			issueRefresh: allowsRefresh(client),
 		},
+		hookManager,
 		logger
 	);
 }
@@ -270,6 +300,7 @@ async function handleRefreshTokenGrant(
 	body: any,
 	client: MCPClientRecord,
 	mcpConfig: MCPConfig,
+	hookManager?: HookManager,
 	logger?: Logger
 ): Promise<TokenResponse> {
 	if (!allowsRefresh(client)) {
@@ -303,7 +334,7 @@ async function handleRefreshTokenGrant(
 		} catch (error) {
 			logger?.error?.(
 				`MCP token: failed to persist revocation for family ${family.family_id}:`,
-				(error as Error).message
+				error instanceof Error ? error.message : String(error)
 			);
 		}
 		logger?.warn?.(`MCP token: refresh replay detected; revoked family ${family.family_id}`);
@@ -317,7 +348,7 @@ async function handleRefreshTokenGrant(
 	const issuer = resolveIssuer(request as any, mcpConfig);
 	const accessTtl = coerceTtl(mcpConfig.accessTokenTtl, DEFAULT_ACCESS_TOKEN_TTL);
 	const key = await new MCPKeyStore(logger).getSigningKey(mcpConfig);
-	const accessToken = signAccessToken(
+	const { token: accessToken, jti } = signAccessToken(
 		{
 			issuer,
 			subject: family.user,
@@ -334,6 +365,31 @@ async function handleRefreshTokenGrant(
 	family.current_token_hash = newHash;
 	await familyStore.set(family);
 
+	// Emit audit event + fire hook after the token is signed and rotation is
+	// committed. Failures are fire-and-forget: must not block the response.
+	emitMCPAuditEvent({
+		event: 'oauth.mcp.token.refreshed',
+		client_id: client.client_id,
+		sub: family.user,
+		aud: family.resource,
+		scope: family.scope,
+		jti,
+		timestamp: new Date().toISOString(),
+	});
+	if (hookManager) {
+		hookManager.callOnMCPTokenIssued(
+			{
+				type: 'refresh',
+				client_id: client.client_id,
+				sub: family.user,
+				aud: family.resource,
+				scope: family.scope,
+				jti,
+			},
+			request
+		);
+	}
+
 	const responseBody: Record<string, unknown> = {
 		access_token: accessToken,
 		token_type: 'Bearer',
@@ -347,25 +403,43 @@ async function handleRefreshTokenGrant(
 /**
  * Handle POST /oauth/mcp/token. Returns `{ status, body }`; the `enabled` gate
  * is applied upstream in handleMCPPost.
+ *
+ * `hookManager` is optional so callers that don't have access to it (e.g.
+ * unit tests that go directly to this function) can omit it without error.
+ * When present, `onMCPTokenIssued` is fired after every successful mint.
  */
 export async function handleToken(
 	request: Request | undefined,
 	body: any,
 	mcpConfig: MCPConfig,
+	hookManager?: HookManager,
 	logger?: Logger
 ): Promise<TokenResponse> {
-	const grantType = typeof body?.grant_type === 'string' ? body.grant_type : undefined;
-	if (grantType !== 'authorization_code' && grantType !== 'refresh_token') {
-		return errorResponse(400, 'unsupported_grant_type', 'grant_type must be authorization_code or refresh_token');
-	}
+	// Top-level guard: any unexpected throw (a signing failure, a store
+	// timeout, etc.) must become a structured OAuth error (RFC 6749 §5.2), not
+	// propagate to the framework's default 500 handler — which could surface a
+	// stack trace or raw error message. The per-grant handlers already return
+	// their own 4xx errors; this only catches the unexpected.
+	try {
+		const grantType = typeof body?.grant_type === 'string' ? body.grant_type : undefined;
+		if (grantType !== 'authorization_code' && grantType !== 'refresh_token') {
+			return errorResponse(400, 'unsupported_grant_type', 'grant_type must be authorization_code or refresh_token');
+		}
 
-	const auth = await authenticateClient(request, body, logger);
-	if ('error' in auth) {
-		return auth.error;
-	}
+		const auth = await authenticateClient(request, body, logger);
+		if ('error' in auth) {
+			return auth.error;
+		}
 
-	if (grantType === 'authorization_code') {
-		return handleAuthorizationCodeGrant(request, body, auth.client, mcpConfig, logger);
+		if (grantType === 'authorization_code') {
+			return await handleAuthorizationCodeGrant(request, body, auth.client, mcpConfig, hookManager, logger);
+		}
+		return await handleRefreshTokenGrant(request, body, auth.client, mcpConfig, hookManager, logger);
+	} catch (error) {
+		logger?.error?.(
+			'MCP token: unexpected error during token issuance:',
+			error instanceof Error ? error.message : String(error)
+		);
+		return errorResponse(500, 'server_error', 'An unexpected error occurred during token issuance');
 	}
-	return handleRefreshTokenGrant(request, body, auth.client, mcpConfig, logger);
 }

@@ -202,4 +202,133 @@ describe('HookManager', () => {
 			);
 		});
 	});
+
+	describe('callOnMCPTokenIssued', () => {
+		const SAMPLE_EVENT = {
+			type: /** @type {const} */ ('access'),
+			client_id: 'client-abc',
+			sub: 'alice@example.com',
+			aud: 'https://app.example.com/mcp',
+			scope: 'mcp:read',
+			jti: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+		};
+		const SAMPLE_REQUEST = { headers: {} };
+
+		// The hook is fire-and-forget (NOT awaited), so it runs detached on the
+		// microtask queue. Drain it with a macrotask tick before asserting.
+		const flushMicrotasks = () => new Promise((resolve) => setImmediate(resolve));
+
+		it('should call onMCPTokenIssued hook with the correct event and request', async () => {
+			const hookMock = createMockFn(async () => {});
+			hookManager.register({ onMCPTokenIssued: hookMock });
+
+			hookManager.callOnMCPTokenIssued(SAMPLE_EVENT, SAMPLE_REQUEST);
+			await flushMicrotasks();
+
+			assert.equal(hookMock.mock.calls.length, 1);
+			const [eventArg, requestArg] = hookMock.mock.calls[0].arguments;
+			assert.equal(eventArg.type, 'access');
+			assert.equal(eventArg.client_id, SAMPLE_EVENT.client_id);
+			assert.equal(eventArg.sub, SAMPLE_EVENT.sub);
+			assert.equal(eventArg.aud, SAMPLE_EVENT.aud);
+			assert.equal(eventArg.scope, SAMPLE_EVENT.scope);
+			assert.equal(eventArg.jti, SAMPLE_EVENT.jti);
+			assert.equal(requestArg, SAMPLE_REQUEST);
+		});
+
+		it('does not await the hook — a slow hook never blocks token issuance', async () => {
+			let release;
+			const gate = new Promise((resolve) => {
+				release = resolve;
+			});
+			let hookCompleted = false;
+			hookManager.register({
+				onMCPTokenIssued: async () => {
+					await gate;
+					hookCompleted = true;
+				},
+			});
+
+			// Returns synchronously (void) without waiting on the hook.
+			const ret = hookManager.callOnMCPTokenIssued(SAMPLE_EVENT, SAMPLE_REQUEST);
+			assert.equal(ret, undefined, 'returns void synchronously');
+			assert.equal(hookCompleted, false, 'issuance does not wait for the hook to finish');
+
+			// Once unblocked, the detached hook still runs to completion.
+			release();
+			await flushMicrotasks();
+			assert.equal(hookCompleted, true);
+		});
+
+		it('is a no-op when no onMCPTokenIssued hook is registered', async () => {
+			// No hook registered — returns without scheduling anything or throwing.
+			hookManager.callOnMCPTokenIssued(SAMPLE_EVENT, SAMPLE_REQUEST);
+			await flushMicrotasks();
+		});
+
+		it('swallows a throwing hook and logs the error (fire-and-forget contract)', async () => {
+			const throwingHook = createMockFn(async () => {
+				throw new Error('billing service unavailable');
+			});
+			hookManager.register({ onMCPTokenIssued: throwingHook });
+
+			hookManager.callOnMCPTokenIssued(SAMPLE_EVENT, SAMPLE_REQUEST);
+			await flushMicrotasks();
+
+			assert.equal(mockLogger.error.mock.calls.length, 1, 'error is logged');
+			assert.ok(
+				mockLogger.error.mock.calls[0].arguments[0].includes('onMCPTokenIssued hook failed'),
+				'error message mentions the hook name'
+			);
+		});
+
+		it('handles the refresh type correctly', async () => {
+			const hookMock = createMockFn(async () => {});
+			hookManager.register({ onMCPTokenIssued: hookMock });
+
+			const refreshEvent = { ...SAMPLE_EVENT, type: /** @type {const} */ ('refresh') };
+			hookManager.callOnMCPTokenIssued(refreshEvent, SAMPLE_REQUEST);
+			await flushMicrotasks();
+
+			assert.equal(hookMock.mock.calls[0].arguments[0].type, 'refresh');
+		});
+
+		it('swallows a hook that throws a NON-Error value (null) without the catch itself throwing', async () => {
+			// `(null).message` in the catch would itself throw and escape, breaking
+			// the fire-and-forget contract — guards the `instanceof Error` handling.
+			hookManager.register({
+				onMCPTokenIssued: async () => {
+					throw null;
+				},
+			});
+
+			hookManager.callOnMCPTokenIssued(SAMPLE_EVENT, SAMPLE_REQUEST);
+			await flushMicrotasks();
+			assert.equal(mockLogger.error.mock.calls.length, 1, 'error is still logged');
+		});
+
+		it('shields the catch body — a throwing logger does not escape the detached chain', async () => {
+			// The hook throws AND logger.error throws. Without the try/catch shield in
+			// the catch body, the throw would become an unhandled rejection on the
+			// detached (void) chain — which the test runner attributes as a failure
+			// (and crashes Node >=15 in production). Surviving the flush is the proof.
+			const throwingLogger = {
+				debug() {},
+				error() {
+					throw new Error('logging subsystem down');
+				},
+			};
+			const hm = new HookManager(throwingLogger);
+			hm.register({
+				onMCPTokenIssued: async () => {
+					throw new Error('hook boom');
+				},
+			});
+
+			hm.callOnMCPTokenIssued(SAMPLE_EVENT, SAMPLE_REQUEST);
+			await flushMicrotasks();
+			await flushMicrotasks();
+			assert.ok(true, 'no unhandled rejection escaped the detached chain');
+		});
+	});
 });

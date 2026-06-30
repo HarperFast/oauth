@@ -458,7 +458,14 @@ export class OAuthResource extends Resource {
 
 		// Handle MCP endpoints (/oauth/mcp/<action>)
 		if (providerName === 'mcp') {
-			return handleMCPPost(action, request, data, OAuthResource.mcpConfig, logger);
+			return handleMCPPost(
+				action,
+				request,
+				data,
+				OAuthResource.mcpConfig,
+				OAuthResource.hookManager ?? undefined,
+				logger
+			);
 		}
 
 		// All other POST endpoints are not supported

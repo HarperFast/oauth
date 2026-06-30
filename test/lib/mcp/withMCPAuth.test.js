@@ -52,7 +52,7 @@ function mint(overrides = {}, signingKey = key) {
 		ttlSeconds: 3600,
 		...overrides,
 	};
-	return signAccessToken(params, signingKey);
+	return signAccessToken(params, signingKey).token;
 }
 
 const config = { enabled: true, issuer: ISSUER, resource: RESOURCE };
@@ -96,6 +96,76 @@ describe('withMCPAuth — construction', () => {
 	it('throws if handler is not a function', () => {
 		assert.throws(() => withMCPAuth(undefined), TypeError);
 		assert.throws(() => withMCPAuth({}), TypeError);
+	});
+});
+
+describe('withMCPAuth — rejected-token audit (oauth.mcp.token.rejected)', () => {
+	// Inject an emitAudit spy; returns the captured events + the options bag.
+	function auditOpts(extra = {}) {
+		const events = [];
+		return { events, opts: opts({ emitAudit: (p) => events.push(p), ...extra }) };
+	}
+
+	it('emits oauth.mcp.token.rejected when a presented token fails validation', async () => {
+		const token = mint({}, makeKey(SIGNING_KEY_ID)); // valid kid, wrong key → bad signature
+		const { events, opts: o } = auditOpts();
+		const res = await withMCPAuth(spyHandler().handler, o)(req(`Bearer ${token}`), NEXT);
+
+		assert.equal(res.status, 401);
+		assert.equal(events.length, 1, 'exactly one rejected audit event');
+		assert.equal(events[0].event, 'oauth.mcp.token.rejected');
+		assert.equal(events[0].aud, RESOURCE, 'aud is the configured resource, not the token claim');
+		assert.ok(events[0].reason, 'reason present');
+		assert.ok(events[0].timestamp, 'timestamp present');
+		// A rejected token has no trustworthy claims — none may leak into the record.
+		assert.equal(events[0].client_id, undefined);
+		assert.equal(events[0].sub, undefined);
+		assert.equal(events[0].jti, undefined);
+	});
+
+	it('audits a wrong-audience token (RFC 8707 rejection)', async () => {
+		const token = mint({ audience: 'https://evil.example.com/mcp' });
+		const { events, opts: o } = auditOpts();
+		const res = await withMCPAuth(spyHandler().handler, o)(req(`Bearer ${token}`), NEXT);
+		assert.equal(res.status, 401);
+		assert.equal(events.length, 1);
+		assert.equal(events[0].event, 'oauth.mcp.token.rejected');
+	});
+
+	it('does NOT audit a missing-token request (unauthenticated probe, not a rejected token)', async () => {
+		const { events, opts: o } = auditOpts();
+		const res = await withMCPAuth(spyHandler().handler, o)(req(undefined), NEXT);
+		assert.equal(res.status, 401);
+		assert.equal(events.length, 0, 'no audit event for a missing token');
+	});
+
+	it('does NOT audit when MCP is disabled (denial before any token work)', async () => {
+		const { events, opts: o } = auditOpts({ getConfig: () => ({ enabled: false }) });
+		const res = await withMCPAuth(spyHandler().handler, o)(req(`Bearer ${mint()}`), NEXT);
+		assert.equal(res.status, 401);
+		assert.equal(events.length, 0, 'no audit event when the guard short-circuits before token validation');
+	});
+
+	it('does NOT audit the path-length guard (pre-token DoS rejection)', async () => {
+		const { events, opts: o } = auditOpts();
+		const longPath = '/mcp/' + 'a'.repeat(2100);
+		const res = await withMCPAuth(spyHandler().handler, o)(req(`Bearer ${mint()}`, { pathname: longPath }), NEXT);
+		assert.equal(res.status, 401);
+		assert.equal(events.length, 0, 'no audit event for an oversized path');
+	});
+
+	it('a throwing emitAudit sink never breaks the fail-closed 401 (no 500)', async () => {
+		// emitAudit is part of the exported options surface; a custom sink that throws
+		// must not turn the denial into a rejected promise / framework 500.
+		const token = mint({}, makeKey(SIGNING_KEY_ID)); // valid kid, wrong key → bad signature
+		const o = opts({
+			emitAudit: () => {
+				throw new Error('audit sink down');
+			},
+		});
+		const res = await withMCPAuth(spyHandler().handler, o)(req(`Bearer ${token}`), NEXT);
+		assert.equal(res.status, 401, 'a throwing audit sink must not break the 401');
+		assert.equal(res.headers['WWW-Authenticate'], EXPECTED_CHALLENGE);
 	});
 });
 

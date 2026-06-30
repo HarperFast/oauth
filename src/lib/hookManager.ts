@@ -48,7 +48,7 @@ export class HookManager {
 			const result = await this.hooks.onLogin(oauthUser, tokenResponse, session, request, provider);
 			return result;
 		} catch (error) {
-			this.logger?.error?.('onLogin hook failed:', (error as Error).message);
+			this.logger?.error?.('onLogin hook failed:', error instanceof Error ? error.message : String(error));
 			// Don't throw - hooks should not break the OAuth flow
 			return;
 		}
@@ -64,9 +64,48 @@ export class HookManager {
 			this.logger?.debug?.('Calling onLogout hook');
 			await this.hooks.onLogout(session, request);
 		} catch (error) {
-			this.logger?.error?.('onLogout hook failed:', (error as Error).message);
+			this.logger?.error?.('onLogout hook failed:', error instanceof Error ? error.message : String(error));
 			// Don't throw - hooks should not break logout
 		}
+	}
+
+	/**
+	 * Call onMCPTokenIssued hook (fire-and-forget).
+	 *
+	 * NOT awaited: the hook runs detached after the token is durably issued, so it
+	 * can never add latency to — or block — token issuance (per @kriszyp's review
+	 * on #141; this also removes the need for a hook-execution timeout, #143). A
+	 * rejection, or a synchronous throw, from app code is caught and logged here,
+	 * never surfaced to the caller.
+	 */
+	callOnMCPTokenIssued(
+		event: { type: 'access' | 'refresh'; client_id: string; sub: string; aud: string; scope?: string; jti: string },
+		request: any
+	): void {
+		const hook = this.hooks.onMCPTokenIssued;
+		if (!hook) return;
+
+		this.logger?.debug?.(`Calling onMCPTokenIssued hook for client: ${event.client_id} type: ${event.type}`);
+		// Detach with Promise.resolve().then so a SYNCHRONOUS throw in the hook is
+		// funneled into the same catch as a rejected promise (and never escapes as
+		// an uncaught exception on the issuance path). `void` marks the floating
+		// promise intentional. `instanceof Error` (not `as Error`): a hook may throw
+		// a non-Error (string, null, undefined) and `(null).message` would itself
+		// throw inside the catch.
+		void Promise.resolve()
+			.then(() => hook(event, request))
+			.catch((error) => {
+				// Shield the catch body itself: a throwing logger (logging-subsystem
+				// I/O error) or a malicious `error.toString()` must NOT throw here —
+				// this chain is detached (`void`), so an escaping error would be an
+				// unhandled rejection (process crash on Node ≥15). Best-effort, same
+				// posture as emitMCPAuditEvent.
+				try {
+					this.logger?.error?.('onMCPTokenIssued hook failed:', error instanceof Error ? error.message : String(error));
+				} catch {
+					// Intentionally ignored — logging is best-effort.
+				}
+			});
 	}
 
 	/**
@@ -79,7 +118,7 @@ export class HookManager {
 			this.logger?.debug?.(`Calling onTokenRefresh hook (refreshed: ${refreshed})`);
 			await this.hooks.onTokenRefresh(session, refreshed, request);
 		} catch (error) {
-			this.logger?.error?.('onTokenRefresh hook failed:', (error as Error).message);
+			this.logger?.error?.('onTokenRefresh hook failed:', error instanceof Error ? error.message : String(error));
 			// Don't throw - hooks should not break token refresh
 		}
 	}
@@ -121,7 +160,7 @@ export class HookManager {
 			}
 			return config;
 		} catch (error) {
-			this.logger?.error?.('onResolveProvider hook failed:', (error as Error).message);
+			this.logger?.error?.('onResolveProvider hook failed:', error instanceof Error ? error.message : String(error));
 			throw error; // Re-throw for resource to handle (returns 500)
 		}
 	}
