@@ -8,8 +8,9 @@ import { readFile } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { RequestTarget } from 'harper';
-import type { Request, Logger, IOAuthProvider, MCPAuthorizeState, OAuthProviderConfig } from '../types.ts';
+import type { Request, Logger, IOAuthProvider, MCPAuthorizeState, MCPConfig, OAuthProviderConfig } from '../types.ts';
 import { handleMCPCallback } from './mcp/index.ts';
+import { resolveIssuer } from './mcp/wellKnown.ts';
 import type { HookManager } from './hookManager.ts';
 
 /**
@@ -124,8 +125,9 @@ export async function handleCallback(
 	config: OAuthProviderConfig,
 	hookManager: HookManager,
 	providerName: string,
-	logger?: Logger
+	opts?: { mcpConfig?: MCPConfig; logger?: Logger }
 ): Promise<any> {
+	const { mcpConfig, logger } = opts ?? {};
 	// Get query parameters from target
 	const code = target.get?.('code');
 	const state = target.get?.('state');
@@ -136,11 +138,13 @@ export async function handleCallback(
 	// Only used in MCP branches — the human path keeps its existing
 	// buildErrorRedirect shape (error code only, optionally with reason) to
 	// avoid changing observable behavior on the human OAuth flow.
+	// RFC 9207: include `iss` on all authorization responses, including errors.
 	const mcpErrorRedirect = (mcp: MCPAuthorizeState, errorCode: string, description: string) => {
 		const url = new URL(mcp.redirectUri);
 		url.searchParams.set('error', errorCode);
 		url.searchParams.set('error_description', description);
 		if (mcp.clientState) url.searchParams.set('state', mcp.clientState);
+		url.searchParams.set('iss', resolveIssuer(request as any, mcpConfig ?? {}));
 		return { status: 302, headers: { Location: url.toString() } };
 	};
 
@@ -255,7 +259,7 @@ export async function handleCallback(
 		// JWT exchanged for it in Stage 4) is bound to the correct identity.
 		if (mcpState) {
 			const userIdentifier = hookData?.user ?? user.username;
-			return handleMCPCallback(request, mcpState, userIdentifier, logger);
+			return handleMCPCallback(request, mcpState, userIdentifier, mcpConfig ?? {}, logger);
 		}
 
 		// Store in session if available

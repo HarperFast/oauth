@@ -2,7 +2,7 @@
  * Tests for OAuth Handlers
  */
 
-import { describe, it, beforeEach } from 'node:test';
+import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { handleLogin, handleCallback, handleLogout, handleUserInfo, handleTestPage } from '../../dist/lib/handlers.js';
 import { createMockFn, createMockLogger } from '../helpers/mockFn.js';
@@ -162,7 +162,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
-				mockLogger
+				{ logger: mockLogger }
 			);
 
 			assert.equal(result.status, 302);
@@ -174,16 +174,9 @@ describe('OAuth Handlers', () => {
 		});
 
 		it('should update session with user data', async () => {
-			await handleCallback(
-				mockRequest,
-				mockTarget,
-				mockProvider,
-				mockConfig,
-				mockHookManager,
-				'test-provider',
-				'test-provider',
-				mockLogger
-			);
+			await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockHookManager, 'test-provider', {
+				logger: mockLogger,
+			});
 
 			const updateCall = mockRequest.session.update.mock.calls[0];
 			assert.equal(updateCall.arguments[0].user, 'user@example.com');
@@ -208,7 +201,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
-				mockLogger
+				{ logger: mockLogger }
 			);
 
 			assert.equal(result.status, 302);
@@ -225,7 +218,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
-				mockLogger
+				{ logger: mockLogger }
 			);
 
 			assert.equal(result.status, 302);
@@ -242,8 +235,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
-				'test-provider',
-				mockLogger
+				{ logger: mockLogger }
 			);
 
 			assert.equal(result.status, 302);
@@ -265,7 +257,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
-				mockLogger
+				{ logger: mockLogger }
 			);
 
 			assert.equal(result.status, 302);
@@ -283,7 +275,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
-				mockLogger
+				{ logger: mockLogger }
 			);
 
 			assert.equal(result.status, 302);
@@ -297,16 +289,9 @@ describe('OAuth Handlers', () => {
 				id_token: 'id-token-jwt',
 			}));
 
-			await handleCallback(
-				mockRequest,
-				mockTarget,
-				mockProvider,
-				mockConfig,
-				mockHookManager,
-				'test-provider',
-				'test-provider',
-				mockLogger
-			);
+			await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockHookManager, 'test-provider', {
+				logger: mockLogger,
+			});
 
 			assert.equal(mockProvider.verifyIdToken.mock.calls.length, 1);
 			assert.equal(mockProvider.verifyIdToken.mock.calls[0].arguments[0], 'id-token-jwt');
@@ -328,7 +313,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
-				mockLogger
+				{ logger: mockLogger }
 			);
 
 			// Should still succeed, falling back to userinfo endpoint
@@ -348,7 +333,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
-				mockLogger
+				{ logger: mockLogger }
 			);
 
 			assert.equal(result.status, 302);
@@ -371,7 +356,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
-				mockLogger
+				{ logger: mockLogger }
 			);
 
 			assert.equal(result.status, 302);
@@ -391,7 +376,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
-				mockLogger
+				{ logger: mockLogger }
 			);
 
 			assert.equal(result.status, 302);
@@ -410,7 +395,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
-				mockLogger
+				{ logger: mockLogger }
 			);
 
 			assert.equal(result.status, 302);
@@ -436,7 +421,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
-				mockLogger
+				{ logger: mockLogger }
 			);
 
 			assert.equal(result.status, 302);
@@ -466,7 +451,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
-				mockLogger
+				{ logger: mockLogger }
 			);
 
 			assert.equal(result.status, 302);
@@ -491,7 +476,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
-				mockLogger
+				{ logger: mockLogger }
 			);
 
 			assert.equal(result.status, 302);
@@ -512,7 +497,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
-				mockLogger
+				{ logger: mockLogger }
 			);
 
 			assert.equal(result.status, 302);
@@ -542,7 +527,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
-				mockLogger
+				{ logger: mockLogger }
 			);
 
 			assert.equal(result.status, 302);
@@ -563,7 +548,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
-				mockLogger
+				{ logger: mockLogger }
 			);
 
 			assert.equal(result.status, 302);
@@ -587,7 +572,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'target-company', // But callback is for this provider
-				mockLogger
+				{ logger: mockLogger }
 			);
 
 			// Should reject with error - redirects to original URL with error params
@@ -616,8 +601,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'acme-corp', // Same provider
-				'test-provider',
-				mockLogger
+				{ logger: mockLogger }
 			);
 
 			// Should succeed
@@ -647,8 +631,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'target-company',
-				'test-provider',
-				mockLogger
+				{ logger: mockLogger }
 			);
 
 			// Attack should be blocked - redirects to original URL with error params
@@ -666,16 +649,9 @@ describe('OAuth Handlers', () => {
 				providerName: 'acme-corp',
 			}));
 
-			await handleCallback(
-				mockRequest,
-				mockTarget,
-				mockProvider,
-				mockConfig,
-				mockHookManager,
-				'acme-corp',
-				'test-provider',
-				mockLogger
-			);
+			await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockHookManager, 'acme-corp', {
+				logger: mockLogger,
+			});
 
 			const updateCall = mockRequest.session.update.mock.calls[0];
 			// Provider should be the registry key (providerName), not the provider type
@@ -697,6 +673,11 @@ describe('OAuth Handlers', () => {
 			redirectUri: 'https://mcp-client.example.com/cb',
 			scope: 'mcp:read',
 			clientState: 'mcp-state-xyz',
+		};
+
+		const MCP_CONFIG = {
+			issuer: 'https://as.example.com',
+			enabled: true,
 		};
 
 		beforeEach(async () => {
@@ -723,7 +704,11 @@ describe('OAuth Handlers', () => {
 			}));
 		});
 
-		// Restore after each test block via the outer afterEach (no-op if global.databases survives — we use a fresh object each time).
+		// Restore global.databases in afterEach so a failing assertion mid-test
+		// doesn't pollute later tests in this describe block.
+		afterEach(() => {
+			global.databases = originalDatabases;
+		});
 
 		it('on success, mints auth code and redirects to MCP client redirect_uri', async () => {
 			const result = await handleCallback(
@@ -733,7 +718,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
-				mockLogger
+				{ mcpConfig: MCP_CONFIG, logger: mockLogger }
 			);
 			assert.equal(result.status, 302);
 			const url = new URL(result.headers.Location);
@@ -741,7 +726,42 @@ describe('OAuth Handlers', () => {
 			assert.ok(url.searchParams.get('code'));
 			assert.equal(url.searchParams.get('state'), MCP_STATE.clientState);
 			assert.equal(storedAuthCodes.size, 1);
-			global.databases = originalDatabases;
+		});
+
+		it('includes iss on success redirect (RFC 9207, handler-level)', async () => {
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				{ mcpConfig: MCP_CONFIG, logger: mockLogger }
+			);
+			const url = new URL(result.headers.Location);
+			assert.equal(url.searchParams.get('iss'), MCP_CONFIG.issuer, 'iss must equal the configured issuer on success');
+		});
+
+		it('includes iss on error redirect (RFC 9207, handler-level mcpErrorRedirect)', async () => {
+			mockTarget.get = createMockFn((key) => {
+				const params = {
+					state: 'csrf-token-123',
+					error: 'access_denied',
+					error_description: 'User denied authorization',
+				};
+				return params[key];
+			});
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				{ mcpConfig: MCP_CONFIG, logger: mockLogger }
+			);
+			const url = new URL(result.headers.Location);
+			assert.equal(url.searchParams.get('iss'), MCP_CONFIG.issuer, 'iss must appear on MCP error redirects');
 		});
 
 		it('binds the auth code to onLogin-mapped user (hookData.user wins over OAuth username)', async () => {
@@ -753,12 +773,11 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
-				mockLogger
+				{ mcpConfig: MCP_CONFIG, logger: mockLogger }
 			);
 			assert.equal(result.status, 302);
 			const [record] = storedAuthCodes.values();
 			assert.equal(record.user, 'internal-user-id-42');
-			global.databases = originalDatabases;
 		});
 
 		it('routes upstream IdP error to MCP client redirect_uri (not Harper postLoginRedirect)', async () => {
@@ -777,14 +796,13 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
-				mockLogger
+				{ mcpConfig: MCP_CONFIG, logger: mockLogger }
 			);
 			assert.equal(result.status, 302);
 			const url = new URL(result.headers.Location);
 			assert.equal(url.origin + url.pathname, MCP_STATE.redirectUri);
 			assert.equal(url.searchParams.get('error'), 'access_denied');
 			assert.equal(url.searchParams.get('state'), MCP_STATE.clientState);
-			global.databases = originalDatabases;
 		});
 
 		it('routes cross-provider state mismatch to MCP redirect_uri', async () => {
@@ -800,13 +818,12 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
-				mockLogger
+				{ mcpConfig: MCP_CONFIG, logger: mockLogger }
 			);
 			assert.equal(result.status, 302);
 			const url = new URL(result.headers.Location);
 			assert.equal(url.origin + url.pathname, MCP_STATE.redirectUri);
 			assert.equal(url.searchParams.get('error'), 'invalid_request');
-			global.databases = originalDatabases;
 		});
 
 		it('does NOT include upstream IdP token in MCP redirect URL', async () => {
@@ -817,28 +834,21 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
-				mockLogger
+				{ mcpConfig: MCP_CONFIG, logger: mockLogger }
 			);
 			const location = result.headers.Location;
 			for (const banned of ['access_token', 'refresh_token', 'id_token', 'token_type', 'access-token-123']) {
 				assert.ok(!location.includes(banned), `${banned} must not appear in MCP redirect URL`);
 			}
-			global.databases = originalDatabases;
 		});
 
 		it('does NOT create a Harper session on the MCP branch (independent lifecycle)', async () => {
-			await handleCallback(
-				mockRequest,
-				mockTarget,
-				mockProvider,
-				mockConfig,
-				mockHookManager,
-				'test-provider',
-				mockLogger
-			);
+			await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockHookManager, 'test-provider', {
+				mcpConfig: MCP_CONFIG,
+				logger: mockLogger,
+			});
 			// session.update must not have been called for the MCP branch
 			assert.equal(mockRequest.session.update.mock.calls.length, 0);
-			global.databases = originalDatabases;
 		});
 
 		it('onLogin fires for MCP-initiated auth (bridged authorize/callback flow)', async () => {
@@ -851,15 +861,10 @@ describe('OAuth Handlers', () => {
 				callOnLogin: onLoginMock,
 			};
 
-			await handleCallback(
-				mockRequest,
-				mockTarget,
-				mockProvider,
-				mockConfig,
-				trackingHookManager,
-				'test-provider',
-				mockLogger
-			);
+			await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, trackingHookManager, 'test-provider', {
+				mcpConfig: MCP_CONFIG,
+				logger: mockLogger,
+			});
 
 			assert.equal(onLoginMock.mock.calls.length, 1, 'callOnLogin fired exactly once on the MCP path');
 			// The hook receives the mapped Harper user, the upstream token response, the session, the request, and the provider name.
@@ -867,7 +872,6 @@ describe('OAuth Handlers', () => {
 			assert.ok(oauthUser.username, 'user object forwarded to onLogin');
 			assert.ok(tokenResponse, 'token response forwarded to onLogin');
 			assert.equal(providerName, 'test-provider');
-			global.databases = originalDatabases;
 		});
 	});
 

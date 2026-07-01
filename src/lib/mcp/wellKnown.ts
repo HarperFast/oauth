@@ -166,8 +166,8 @@ export function buildAuthorizationServerMetadata(
 		id_token_signing_alg_values_supported: ['RS256'],
 		// RFC 8707 §2: server understands the `resource` parameter.
 		resource_parameter_supported: true,
-		// CORS-friendly metadata is the spec norm; we serve cross-origin reads.
-		// (No spec-mandated field for this — included as a hint for proxy configs.)
+		// RFC 9207: server emits `iss` on every authorization response redirect.
+		authorization_response_iss_parameter_supported: true,
 	};
 }
 

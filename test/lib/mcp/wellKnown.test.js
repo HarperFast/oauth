@@ -129,6 +129,11 @@ describe('MCP well-known: AS metadata document (RFC 8414)', () => {
 		const doc = buildAuthorizationServerMetadata(makeRequest(), { enabled: true });
 		assert.equal(doc.resource_parameter_supported, true);
 	});
+
+	it('signals RFC 9207 authorization_response_iss_parameter_supported', () => {
+		const doc = buildAuthorizationServerMetadata(makeRequest(), { enabled: true });
+		assert.equal(doc.authorization_response_iss_parameter_supported, true);
+	});
 });
 
 describe('MCP well-known: JWKS document', () => {

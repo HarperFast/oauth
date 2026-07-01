@@ -18,18 +18,25 @@
  */
 
 import { randomBytes } from 'node:crypto';
-import type { Logger, MCPAuthCodeRecord, MCPAuthorizeState, Request } from '../../types.ts';
+import type { Logger, MCPAuthCodeRecord, MCPAuthorizeState, MCPConfig, Request } from '../../types.ts';
 import { MCPAuthCodeStore } from './authCodeStore.ts';
+import { resolveIssuer } from './wellKnown.ts';
 
 type Redirect = {
 	status: 302;
 	headers: { Location: string };
 };
 
-function buildSuccessRedirect(redirectUri: string, code: string, clientState: string | undefined): Redirect {
+function buildSuccessRedirect(
+	redirectUri: string,
+	code: string,
+	clientState: string | undefined,
+	issuer: string
+): Redirect {
 	const url = new URL(redirectUri);
 	url.searchParams.set('code', code);
 	if (clientState) url.searchParams.set('state', clientState);
+	url.searchParams.set('iss', issuer);
 	return { status: 302, headers: { Location: url.toString() } };
 }
 
@@ -37,12 +44,14 @@ function buildErrorRedirect(
 	redirectUri: string,
 	error: string,
 	description: string,
-	clientState: string | undefined
+	clientState: string | undefined,
+	issuer: string
 ): Redirect {
 	const url = new URL(redirectUri);
 	url.searchParams.set('error', error);
 	url.searchParams.set('error_description', description);
 	if (clientState) url.searchParams.set('state', clientState);
+	url.searchParams.set('iss', issuer);
 	return { status: 302, headers: { Location: url.toString() } };
 }
 
@@ -54,15 +63,16 @@ function buildErrorRedirect(
  * human-session branch would apply is also reflected on the auth code
  * (and downstream JWT in Stage 4).
  *
- * `request` is unused today but accepted for signature parity with the
- * human-session branch — Stage 6 audit hooks will read from it.
+ * `mcpConfig` is used to resolve the issuer (RFC 9207 `iss` on the redirect).
  */
 export async function handleMCPCallback(
-	_request: Request,
+	request: Request,
 	mcpState: MCPAuthorizeState,
 	userIdentifier: string,
+	mcpConfig: MCPConfig,
 	logger?: Logger
 ): Promise<Redirect> {
+	const issuer = resolveIssuer(request as any, mcpConfig);
 	const code = randomBytes(32).toString('base64url');
 	const record: MCPAuthCodeRecord = {
 		code,
@@ -85,10 +95,11 @@ export async function handleMCPCallback(
 			mcpState.redirectUri,
 			'server_error',
 			'Failed to persist authorization code',
-			mcpState.clientState
+			mcpState.clientState,
+			issuer
 		);
 	}
 
 	logger?.info?.(`MCP callback: minted auth code for client=${mcpState.clientId} user=${userIdentifier}`);
-	return buildSuccessRedirect(mcpState.redirectUri, code, mcpState.clientState);
+	return buildSuccessRedirect(mcpState.redirectUri, code, mcpState.clientState, issuer);
 }
