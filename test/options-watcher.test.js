@@ -94,14 +94,59 @@ describe('OAuth Plugin Options Watcher', () => {
 		await assert.rejects(handleApplication(scope), /mcp\.issuer is not set/);
 	});
 
-	it('should start when mcp.enabled and mcp.issuer is pinned', async () => {
+	it('should start when mcp.enabled and mcp.issuer is a valid https origin', async () => {
 		scope.options._config.mcp = { enabled: true, issuer: 'https://app.example.com' };
 		await handleApplication(scope);
 		assert.ok(resources.oauth, 'OAuth resource should be registered');
 	});
 
+	it('should start when mcp.issuer is an http origin (localhost)', async () => {
+		scope.options._config.mcp = { enabled: true, issuer: 'http://localhost:9926' };
+		await handleApplication(scope);
+		assert.ok(resources.oauth, 'OAuth resource should be registered');
+	});
+
+	it('should start when mcp.issuer has a trailing slash (tolerated)', async () => {
+		scope.options._config.mcp = { enabled: true, issuer: 'https://app.example.com/' };
+		await handleApplication(scope);
+		assert.ok(resources.oauth, 'OAuth resource should be registered');
+	});
+
+	it('should fail to start when mcp.issuer is schemeless', async () => {
+		scope.options._config.mcp = { enabled: true, issuer: 'as.example.com' };
+		await assert.rejects(handleApplication(scope), /mcp\.issuer must be an absolute http\(s\) origin/);
+	});
+
+	it('should fail to start when mcp.issuer includes a path', async () => {
+		scope.options._config.mcp = { enabled: true, issuer: 'https://app.example.com/base' };
+		await assert.rejects(handleApplication(scope), /mcp\.issuer must be an absolute http\(s\) origin/);
+	});
+
+	it('should fail to start when mcp.issuer includes a query string', async () => {
+		scope.options._config.mcp = { enabled: true, issuer: 'https://app.example.com?q=1' };
+		await assert.rejects(handleApplication(scope), /mcp\.issuer must be an absolute http\(s\) origin/);
+	});
+
+	it('should fail to start when mcp.issuer includes a fragment', async () => {
+		scope.options._config.mcp = { enabled: true, issuer: 'https://app.example.com#frag' };
+		await assert.rejects(handleApplication(scope), /mcp\.issuer must be an absolute http\(s\) origin/);
+	});
+
+	it('should fail to start when mcp.issuer embeds credentials', async () => {
+		scope.options._config.mcp = { enabled: true, issuer: 'https://user:pass@app.example.com' };
+		await assert.rejects(handleApplication(scope), /mcp\.issuer must be an absolute http\(s\) origin/);
+	});
+
 	it('should start when mcp is disabled regardless of issuer/resource', async () => {
 		scope.options._config.mcp = { enabled: false };
+		await handleApplication(scope);
+		assert.ok(resources.oauth, 'OAuth resource should be registered');
+	});
+
+	it('should start when mcp is disabled even with an invalid issuer (master switch off)', async () => {
+		// `enabled: false` must not run issuer-format validation — a stale/placeholder
+		// issuer left in config should not block startup when the feature is off.
+		scope.options._config.mcp = { enabled: false, issuer: 'as.example.com' };
 		await handleApplication(scope);
 		assert.ok(resources.oauth, 'OAuth resource should be registered');
 	});

@@ -180,6 +180,40 @@ export async function handleApplication(scope: Scope): Promise<void> {
 					'token audience are not derived from the client-controlled Host header.'
 			);
 		}
+		// Only validate the issuer when MCP is enabled — `enabled: false` is a master
+		// switch that disables the whole feature, so a stale/placeholder issuer left in
+		// config must not block startup (and the value is never used downstream when off).
+		if (mcpConfig?.enabled && mcpConfig.issuer) {
+			// Validate that the issuer is an absolute http(s) origin.
+			// resolveIssuer() strips trailing slashes and the value is used verbatim in
+			// JWT `iss` claims and as a prefix for every endpoint URL (e.g.
+			// `${issuer}/oauth/mcp/authorize`). A schemeless or path-bearing value
+			// produces malformed/unparseable URLs downstream — reject it at startup.
+			// Parse once and check every constraint together: a valid origin has an
+			// http(s) scheme and nothing beyond an optional trailing slash (no path,
+			// query, or fragment).
+			let validOrigin = false;
+			try {
+				const parsedIssuer = new URL(mcpConfig.issuer);
+				const pathWithoutTrailingSlash = parsedIssuer.pathname.replace(/\/+$/, '');
+				validOrigin =
+					(parsedIssuer.protocol === 'http:' || parsedIssuer.protocol === 'https:') &&
+					pathWithoutTrailingSlash === '' &&
+					parsedIssuer.search === '' &&
+					parsedIssuer.hash === '' &&
+					// Embedded credentials (user:pass@host) are not part of an origin and
+					// would leak into `iss` / endpoint URLs — reject them.
+					parsedIssuer.username === '' &&
+					parsedIssuer.password === '';
+			} catch {
+				// Unparseable URL — validOrigin stays false.
+			}
+			if (!validOrigin) {
+				throw new Error(
+					`mcp.issuer must be an absolute http(s) origin like "https://your-host" (got: "${mcpConfig.issuer}")`
+				);
+			}
+		}
 
 		// Re-initialize providers from new configuration
 		// Clear existing providers and repopulate (don't reassign to preserve closure reference)
