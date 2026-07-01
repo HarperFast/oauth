@@ -7,7 +7,7 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { redactSecrets, SENSITIVE_KEY_PATTERN } from '../dist/index.js';
+import { redactSecrets, SENSITIVE_KEY_PATTERN } from '../dist/lib/redact.js';
 
 describe('redactSecrets', () => {
 	describe('redacts camelCase secret keys', () => {
@@ -170,6 +170,31 @@ describe('redactSecrets', () => {
 
 		it('returns null unchanged', () => {
 			assert.equal(redactSecrets(null), null);
+		});
+	});
+
+	describe('non-plain-object guard — returns non-plain objects as-is', () => {
+		it('returns a Date unchanged (same reference)', () => {
+			const d = new Date('2024-01-01');
+			assert.strictEqual(redactSecrets(d), d);
+		});
+
+		it('returns a RegExp unchanged (same reference)', () => {
+			const r = /foo/i;
+			assert.strictEqual(redactSecrets(r), r);
+		});
+
+		it('returns a Map unchanged (same reference)', () => {
+			const m = new Map([['clientSecret', 'shh']]);
+			assert.strictEqual(redactSecrets(m), m);
+		});
+
+		it('still redacts secrets in plain objects alongside non-plain values', () => {
+			const d = new Date('2024-01-01');
+			const input = { clientSecret: 'shh', createdAt: d };
+			const result = redactSecrets(input);
+			assert.equal(result.clientSecret, '[REDACTED]');
+			assert.strictEqual(result.createdAt, d, 'Date value must not be converted to {}');
 		});
 	});
 });
