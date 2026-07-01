@@ -23,7 +23,7 @@
  */
 
 import { suite, test, before, after } from 'node:test';
-import { strictEqual, ok, match, doesNotMatch } from 'node:assert/strict';
+import { strictEqual, ok, match } from 'node:assert/strict';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createHash, randomBytes } from 'node:crypto';
 import { join, dirname } from 'node:path';
@@ -354,9 +354,8 @@ suite('MCP OAuth Stage 7: full round-trip e2e', (ctx: ContextWithHarper) => {
 
 		// The upstream IdP token must NOT appear in any client-visible response.
 		const tokenBodyStr = JSON.stringify(tokenBody);
-		doesNotMatch(
-			tokenBodyStr,
-			new RegExp(STUB_UPSTREAM_ACCESS_TOKEN),
+		ok(
+			!tokenBodyStr.includes(STUB_UPSTREAM_ACCESS_TOKEN),
 			'upstream IdP access token must not appear in token response body'
 		);
 
@@ -375,9 +374,8 @@ suite('MCP OAuth Stage 7: full round-trip e2e', (ctx: ContextWithHarper) => {
 
 		// Upstream IdP token must not appear in the /mcp response body.
 		const mcpBodyStr = JSON.stringify(mcpBody);
-		doesNotMatch(
-			mcpBodyStr,
-			new RegExp(STUB_UPSTREAM_ACCESS_TOKEN),
+		ok(
+			!mcpBodyStr.includes(STUB_UPSTREAM_ACCESS_TOKEN),
 			'upstream IdP access token must not appear in authenticated /mcp response'
 		);
 
