@@ -200,7 +200,11 @@ export async function handleApplication(scope: Scope): Promise<void> {
 					(parsedIssuer.protocol === 'http:' || parsedIssuer.protocol === 'https:') &&
 					pathWithoutTrailingSlash === '' &&
 					parsedIssuer.search === '' &&
-					parsedIssuer.hash === '';
+					parsedIssuer.hash === '' &&
+					// Embedded credentials (user:pass@host) are not part of an origin and
+					// would leak into `iss` / endpoint URLs — reject them.
+					parsedIssuer.username === '' &&
+					parsedIssuer.password === '';
 			} catch {
 				// Unparseable URL — validOrigin stays false.
 			}

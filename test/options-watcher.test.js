@@ -122,6 +122,21 @@ describe('OAuth Plugin Options Watcher', () => {
 		await assert.rejects(handleApplication(scope), /mcp\.issuer must be an absolute http\(s\) origin/);
 	});
 
+	it('should fail to start when mcp.issuer includes a query string', async () => {
+		scope.options._config.mcp = { enabled: true, issuer: 'https://app.example.com?q=1' };
+		await assert.rejects(handleApplication(scope), /mcp\.issuer must be an absolute http\(s\) origin/);
+	});
+
+	it('should fail to start when mcp.issuer includes a fragment', async () => {
+		scope.options._config.mcp = { enabled: true, issuer: 'https://app.example.com#frag' };
+		await assert.rejects(handleApplication(scope), /mcp\.issuer must be an absolute http\(s\) origin/);
+	});
+
+	it('should fail to start when mcp.issuer embeds credentials', async () => {
+		scope.options._config.mcp = { enabled: true, issuer: 'https://user:pass@app.example.com' };
+		await assert.rejects(handleApplication(scope), /mcp\.issuer must be an absolute http\(s\) origin/);
+	});
+
 	it('should start when mcp is disabled regardless of issuer/resource', async () => {
 		scope.options._config.mcp = { enabled: false };
 		await handleApplication(scope);
