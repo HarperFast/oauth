@@ -213,7 +213,7 @@ The plugin can also act as an OAuth 2.1 authorization server for **Model Context
 import { server } from 'harper';
 import { withMCPAuth } from '@harperfast/oauth';
 
-// request.mcp = { sub, client_id, aud, scope } once a valid bearer token is verified.
+// request.mcp (verified { sub, client_id, aud, scope }) is guaranteed present inside the guarded handler.
 server.http(
 	withMCPAuth((request) => ({ status: 200, body: JSON.stringify({ user: request.mcp.sub }) })),
 	{

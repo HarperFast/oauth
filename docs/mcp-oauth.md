@@ -51,7 +51,8 @@ route handler with `withMCPAuth`.
 import { server } from 'harper';
 import { withMCPAuth } from '@harperfast/oauth';
 
-// Your MCP endpoint. request.mcp is populated only after a valid bearer token.
+// Your MCP endpoint. request.mcp is guaranteed present here — the guard rejects
+// missing/invalid tokens before your handler runs, so no optional-chaining needed.
 function mcpHandler(request) {
 	const { sub, client_id, scope } = request.mcp; // verified token claims
 	// Harper HTTP listeners return { status, body, headers? }; MCP messages are
