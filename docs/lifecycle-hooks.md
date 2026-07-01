@@ -360,7 +360,9 @@ async function onMCPTokenIssued(
 
 ```javascript
 async function handleMCPTokenIssued(event, request) {
-	// Record which MCP client is acting for which user.
+	// Record which MCP client is acting for which user. `tables` is a Harper global
+	// (no import needed); `McpClient` is an example app-owned table — the plugin
+	// doesn't provide it, so define your own.
 	await tables.McpClient.put({ id: event.client_id, user: event.sub, lastSeen: Date.now() });
 }
 ```
