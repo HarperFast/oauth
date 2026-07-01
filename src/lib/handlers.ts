@@ -144,7 +144,7 @@ export async function handleCallback(
 		url.searchParams.set('error', errorCode);
 		url.searchParams.set('error_description', description);
 		if (mcp.clientState) url.searchParams.set('state', mcp.clientState);
-		if (mcpConfig) url.searchParams.set('iss', resolveIssuer(request as any, mcpConfig));
+		url.searchParams.set('iss', resolveIssuer(request as any, mcpConfig ?? {}));
 		return { status: 302, headers: { Location: url.toString() } };
 	};
 

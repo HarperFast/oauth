@@ -29,7 +29,7 @@ import type {
 	Request,
 } from '../../types.ts';
 import { MCPClientStore } from './clientStore.ts';
-import { resolveResource } from './wellKnown.ts';
+import { resolveIssuer, resolveResource } from './wellKnown.ts';
 
 type ErrorJSON = {
 	status: 400 | 500;
@@ -133,12 +133,14 @@ function buildClientErrorRedirect(
 	redirectUri: string,
 	error: string,
 	description: string,
-	clientState: string | undefined
+	clientState: string | undefined,
+	issuer: string
 ): Redirect {
 	const url = new URL(redirectUri);
 	url.searchParams.set('error', error);
 	url.searchParams.set('error_description', description);
 	if (clientState) url.searchParams.set('state', clientState);
+	url.searchParams.set('iss', issuer);
 	return { status: 302, headers: { Location: url.toString() } };
 }
 
@@ -223,9 +225,11 @@ export async function handleAuthorize(
 	}
 
 	const clientState = query.state;
+	const issuer = resolveIssuer(request as any, mcpConfig);
 	// Phase 2: everything else redirects to the verified client redirect_uri.
+	// RFC 9207: `iss` is included on all Phase-2 error redirects.
 	const redirect = (error: string, description: string) =>
-		buildClientErrorRedirect(query.redirect_uri as string, error, description, clientState);
+		buildClientErrorRedirect(query.redirect_uri as string, error, description, clientState, issuer);
 
 	if (query.response_type !== 'code') {
 		return redirect('unsupported_response_type', 'response_type must be "code"');

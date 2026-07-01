@@ -340,6 +340,53 @@ describe('handleAuthorize', () => {
 		});
 	});
 
+	describe('phase 2 — RFC 9207 iss on error redirects', () => {
+		it('includes iss matching the configured issuer on a Phase-2 error redirect', async () => {
+			const { entries } = newRegistry();
+			const configWithIssuer = { enabled: true, issuer: 'https://as.example.com' };
+			// Trigger a Phase-2 error (response_type mismatch → redirect, not 400)
+			const target = makeTarget({ ...BASE_QUERY, response_type: 'token' });
+			const response = await handleAuthorize(makeRequest(), target, configWithIssuer, entries);
+			assert.equal(response.status, 302);
+			const url = new URL(response.headers.Location);
+			assert.equal(url.searchParams.get('iss'), 'https://as.example.com', 'iss must equal the configured issuer');
+		});
+
+		it('derives iss from request when issuer is not configured', async () => {
+			const { entries } = newRegistry();
+			// Trigger a Phase-2 error without a configured issuer
+			const target = makeTarget({ ...BASE_QUERY, response_type: 'token' });
+			const response = await handleAuthorize(makeRequest(), target, { enabled: true }, entries);
+			assert.equal(response.status, 302);
+			const url = new URL(response.headers.Location);
+			assert.equal(url.searchParams.get('iss'), 'https://app.example.com', 'iss must derive from request scheme+host');
+		});
+
+		it('includes iss on all Phase-2 error types (resource mismatch, provider error)', async () => {
+			const configWithIssuer = { enabled: true, issuer: 'https://as.example.com' };
+			const { entries } = newRegistry();
+
+			// resource mismatch error
+			const resourceTarget = makeTarget({ ...BASE_QUERY, resource: 'https://other.example.com/mcp' });
+			const resourceResp = await handleAuthorize(makeRequest(), resourceTarget, configWithIssuer, entries);
+			assert.equal(new URL(resourceResp.headers.Location).searchParams.get('iss'), 'https://as.example.com');
+
+			// provider selection error
+			const noProviderTarget = makeTarget(BASE_QUERY);
+			const noProviderResp = await handleAuthorize(makeRequest(), noProviderTarget, configWithIssuer, {});
+			assert.equal(new URL(noProviderResp.headers.Location).searchParams.get('iss'), 'https://as.example.com');
+		});
+
+		it('does NOT include iss on Phase-1 errors (400 JSON responses)', async () => {
+			// Phase-1 errors are 400 JSON, not redirects — iss is only for redirects
+			const { entries } = newRegistry();
+			const target = makeTarget({ ...BASE_QUERY, client_id: 'unknown-client' });
+			const response = await handleAuthorize(makeRequest(), target, { enabled: true }, entries);
+			assert.equal(response.status, 400, 'Phase-1 errors are 400 JSON, not redirects');
+			assert.ok(!('headers' in response), 'no Location header on Phase-1 errors');
+		});
+	});
+
 	describe('happy path', () => {
 		it('redirects to upstream provider with CSRF token carrying MCP state', async () => {
 			const { entries, harnesses } = newRegistry();

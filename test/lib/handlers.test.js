@@ -2,7 +2,7 @@
  * Tests for OAuth Handlers
  */
 
-import { describe, it, beforeEach } from 'node:test';
+import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { handleLogin, handleCallback, handleLogout, handleUserInfo, handleTestPage } from '../../dist/lib/handlers.js';
 import { createMockFn, createMockLogger } from '../helpers/mockFn.js';
@@ -730,7 +730,11 @@ describe('OAuth Handlers', () => {
 			}));
 		});
 
-		// Restore after each test block via the outer afterEach (no-op if global.databases survives — we use a fresh object each time).
+		// Restore global.databases in afterEach so a failing assertion mid-test
+		// doesn't pollute later tests in this describe block.
+		afterEach(() => {
+			global.databases = originalDatabases;
+		});
 
 		it('on success, mints auth code and redirects to MCP client redirect_uri', async () => {
 			const result = await handleCallback(
@@ -749,7 +753,6 @@ describe('OAuth Handlers', () => {
 			assert.ok(url.searchParams.get('code'));
 			assert.equal(url.searchParams.get('state'), MCP_STATE.clientState);
 			assert.equal(storedAuthCodes.size, 1);
-			global.databases = originalDatabases;
 		});
 
 		it('includes iss on success redirect (RFC 9207, handler-level)', async () => {
@@ -765,7 +768,6 @@ describe('OAuth Handlers', () => {
 			);
 			const url = new URL(result.headers.Location);
 			assert.equal(url.searchParams.get('iss'), MCP_CONFIG.issuer, 'iss must equal the configured issuer on success');
-			global.databases = originalDatabases;
 		});
 
 		it('includes iss on error redirect (RFC 9207, handler-level mcpErrorRedirect)', async () => {
@@ -789,7 +791,6 @@ describe('OAuth Handlers', () => {
 			);
 			const url = new URL(result.headers.Location);
 			assert.equal(url.searchParams.get('iss'), MCP_CONFIG.issuer, 'iss must appear on MCP error redirects');
-			global.databases = originalDatabases;
 		});
 
 		it('binds the auth code to onLogin-mapped user (hookData.user wins over OAuth username)', async () => {
@@ -807,7 +808,6 @@ describe('OAuth Handlers', () => {
 			assert.equal(result.status, 302);
 			const [record] = storedAuthCodes.values();
 			assert.equal(record.user, 'internal-user-id-42');
-			global.databases = originalDatabases;
 		});
 
 		it('routes upstream IdP error to MCP client redirect_uri (not Harper postLoginRedirect)', async () => {
@@ -834,7 +834,6 @@ describe('OAuth Handlers', () => {
 			assert.equal(url.origin + url.pathname, MCP_STATE.redirectUri);
 			assert.equal(url.searchParams.get('error'), 'access_denied');
 			assert.equal(url.searchParams.get('state'), MCP_STATE.clientState);
-			global.databases = originalDatabases;
 		});
 
 		it('routes cross-provider state mismatch to MCP redirect_uri', async () => {
@@ -857,7 +856,6 @@ describe('OAuth Handlers', () => {
 			const url = new URL(result.headers.Location);
 			assert.equal(url.origin + url.pathname, MCP_STATE.redirectUri);
 			assert.equal(url.searchParams.get('error'), 'invalid_request');
-			global.databases = originalDatabases;
 		});
 
 		it('does NOT include upstream IdP token in MCP redirect URL', async () => {
@@ -875,7 +873,6 @@ describe('OAuth Handlers', () => {
 			for (const banned of ['access_token', 'refresh_token', 'id_token', 'token_type', 'access-token-123']) {
 				assert.ok(!location.includes(banned), `${banned} must not appear in MCP redirect URL`);
 			}
-			global.databases = originalDatabases;
 		});
 
 		it('does NOT create a Harper session on the MCP branch (independent lifecycle)', async () => {
@@ -891,7 +888,6 @@ describe('OAuth Handlers', () => {
 			);
 			// session.update must not have been called for the MCP branch
 			assert.equal(mockRequest.session.update.mock.calls.length, 0);
-			global.databases = originalDatabases;
 		});
 
 		it('onLogin fires for MCP-initiated auth (bridged authorize/callback flow)', async () => {
@@ -921,7 +917,6 @@ describe('OAuth Handlers', () => {
 			assert.ok(oauthUser.username, 'user object forwarded to onLogin');
 			assert.ok(tokenResponse, 'token response forwarded to onLogin');
 			assert.equal(providerName, 'test-provider');
-			global.databases = originalDatabases;
 		});
 	});
 
