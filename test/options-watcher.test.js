@@ -128,6 +128,14 @@ describe('OAuth Plugin Options Watcher', () => {
 		assert.ok(resources.oauth, 'OAuth resource should be registered');
 	});
 
+	it('should start when mcp is disabled even with an invalid issuer (master switch off)', async () => {
+		// `enabled: false` must not run issuer-format validation — a stale/placeholder
+		// issuer left in config should not block startup when the feature is off.
+		scope.options._config.mcp = { enabled: false, issuer: 'as.example.com' };
+		await handleApplication(scope);
+		assert.ok(resources.oauth, 'OAuth resource should be registered');
+	});
+
 	it('should update configuration when options change', async () => {
 		await handleApplication(scope);
 

@@ -180,7 +180,10 @@ export async function handleApplication(scope: Scope): Promise<void> {
 					'token audience are not derived from the client-controlled Host header.'
 			);
 		}
-		if (mcpConfig?.issuer) {
+		// Only validate the issuer when MCP is enabled — `enabled: false` is a master
+		// switch that disables the whole feature, so a stale/placeholder issuer left in
+		// config must not block startup (and the value is never used downstream when off).
+		if (mcpConfig?.enabled && mcpConfig.issuer) {
 			// Validate that the issuer is an absolute http(s) origin.
 			// resolveIssuer() strips trailing slashes and the value is used verbatim in
 			// JWT `iss` claims and as a prefix for every endpoint URL (e.g.
