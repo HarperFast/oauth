@@ -162,6 +162,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
+				undefined,
 				mockLogger
 			);
 
@@ -181,7 +182,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
-				'test-provider',
+				undefined,
 				mockLogger
 			);
 
@@ -208,6 +209,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
+				undefined,
 				mockLogger
 			);
 
@@ -225,6 +227,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
+				undefined,
 				mockLogger
 			);
 
@@ -242,7 +245,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
-				'test-provider',
+				undefined,
 				mockLogger
 			);
 
@@ -265,6 +268,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
+				undefined,
 				mockLogger
 			);
 
@@ -283,6 +287,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
+				undefined,
 				mockLogger
 			);
 
@@ -304,7 +309,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
-				'test-provider',
+				undefined,
 				mockLogger
 			);
 
@@ -328,6 +333,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
+				undefined,
 				mockLogger
 			);
 
@@ -348,6 +354,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
+				undefined,
 				mockLogger
 			);
 
@@ -371,6 +378,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
+				undefined,
 				mockLogger
 			);
 
@@ -391,6 +399,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
+				undefined,
 				mockLogger
 			);
 
@@ -410,6 +419,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
+				undefined,
 				mockLogger
 			);
 
@@ -436,6 +446,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
+				undefined,
 				mockLogger
 			);
 
@@ -466,6 +477,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
+				undefined,
 				mockLogger
 			);
 
@@ -491,6 +503,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
+				undefined,
 				mockLogger
 			);
 
@@ -512,6 +525,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
+				undefined,
 				mockLogger
 			);
 
@@ -542,6 +556,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
+				undefined,
 				mockLogger
 			);
 
@@ -618,7 +633,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'acme-corp', // Same provider
-				'test-provider',
+				undefined,
 				mockLogger
 			);
 
@@ -649,7 +664,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'target-company',
-				'test-provider',
+				undefined,
 				mockLogger
 			);
 
@@ -675,7 +690,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'acme-corp',
-				'test-provider',
+				undefined,
 				mockLogger
 			);
 
