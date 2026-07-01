@@ -162,8 +162,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
-				undefined,
-				mockLogger
+				{ logger: mockLogger }
 			);
 
 			assert.equal(result.status, 302);
@@ -175,16 +174,9 @@ describe('OAuth Handlers', () => {
 		});
 
 		it('should update session with user data', async () => {
-			await handleCallback(
-				mockRequest,
-				mockTarget,
-				mockProvider,
-				mockConfig,
-				mockHookManager,
-				'test-provider',
-				undefined,
-				mockLogger
-			);
+			await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockHookManager, 'test-provider', {
+				logger: mockLogger,
+			});
 
 			const updateCall = mockRequest.session.update.mock.calls[0];
 			assert.equal(updateCall.arguments[0].user, 'user@example.com');
@@ -209,8 +201,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
-				undefined,
-				mockLogger
+				{ logger: mockLogger }
 			);
 
 			assert.equal(result.status, 302);
@@ -227,8 +218,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
-				undefined,
-				mockLogger
+				{ logger: mockLogger }
 			);
 
 			assert.equal(result.status, 302);
@@ -245,8 +235,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
-				undefined,
-				mockLogger
+				{ logger: mockLogger }
 			);
 
 			assert.equal(result.status, 302);
@@ -268,8 +257,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
-				undefined,
-				mockLogger
+				{ logger: mockLogger }
 			);
 
 			assert.equal(result.status, 302);
@@ -287,8 +275,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
-				undefined,
-				mockLogger
+				{ logger: mockLogger }
 			);
 
 			assert.equal(result.status, 302);
@@ -302,16 +289,9 @@ describe('OAuth Handlers', () => {
 				id_token: 'id-token-jwt',
 			}));
 
-			await handleCallback(
-				mockRequest,
-				mockTarget,
-				mockProvider,
-				mockConfig,
-				mockHookManager,
-				'test-provider',
-				undefined,
-				mockLogger
-			);
+			await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockHookManager, 'test-provider', {
+				logger: mockLogger,
+			});
 
 			assert.equal(mockProvider.verifyIdToken.mock.calls.length, 1);
 			assert.equal(mockProvider.verifyIdToken.mock.calls[0].arguments[0], 'id-token-jwt');
@@ -333,8 +313,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
-				undefined,
-				mockLogger
+				{ logger: mockLogger }
 			);
 
 			// Should still succeed, falling back to userinfo endpoint
@@ -354,8 +333,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
-				undefined,
-				mockLogger
+				{ logger: mockLogger }
 			);
 
 			assert.equal(result.status, 302);
@@ -378,8 +356,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
-				undefined,
-				mockLogger
+				{ logger: mockLogger }
 			);
 
 			assert.equal(result.status, 302);
@@ -399,8 +376,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
-				undefined,
-				mockLogger
+				{ logger: mockLogger }
 			);
 
 			assert.equal(result.status, 302);
@@ -419,8 +395,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
-				undefined,
-				mockLogger
+				{ logger: mockLogger }
 			);
 
 			assert.equal(result.status, 302);
@@ -446,8 +421,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
-				undefined,
-				mockLogger
+				{ logger: mockLogger }
 			);
 
 			assert.equal(result.status, 302);
@@ -477,8 +451,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
-				undefined,
-				mockLogger
+				{ logger: mockLogger }
 			);
 
 			assert.equal(result.status, 302);
@@ -503,8 +476,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
-				undefined,
-				mockLogger
+				{ logger: mockLogger }
 			);
 
 			assert.equal(result.status, 302);
@@ -525,8 +497,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
-				undefined,
-				mockLogger
+				{ logger: mockLogger }
 			);
 
 			assert.equal(result.status, 302);
@@ -556,8 +527,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
-				undefined,
-				mockLogger
+				{ logger: mockLogger }
 			);
 
 			assert.equal(result.status, 302);
@@ -578,8 +548,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
-				undefined,
-				mockLogger
+				{ logger: mockLogger }
 			);
 
 			assert.equal(result.status, 302);
@@ -603,8 +572,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'target-company', // But callback is for this provider
-				undefined,
-				mockLogger
+				{ logger: mockLogger }
 			);
 
 			// Should reject with error - redirects to original URL with error params
@@ -633,8 +601,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'acme-corp', // Same provider
-				undefined,
-				mockLogger
+				{ logger: mockLogger }
 			);
 
 			// Should succeed
@@ -664,8 +631,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'target-company',
-				undefined,
-				mockLogger
+				{ logger: mockLogger }
 			);
 
 			// Attack should be blocked - redirects to original URL with error params
@@ -683,16 +649,9 @@ describe('OAuth Handlers', () => {
 				providerName: 'acme-corp',
 			}));
 
-			await handleCallback(
-				mockRequest,
-				mockTarget,
-				mockProvider,
-				mockConfig,
-				mockHookManager,
-				'acme-corp',
-				undefined,
-				mockLogger
-			);
+			await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockHookManager, 'acme-corp', {
+				logger: mockLogger,
+			});
 
 			const updateCall = mockRequest.session.update.mock.calls[0];
 			// Provider should be the registry key (providerName), not the provider type
@@ -759,8 +718,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
-				MCP_CONFIG,
-				mockLogger
+				{ mcpConfig: MCP_CONFIG, logger: mockLogger }
 			);
 			assert.equal(result.status, 302);
 			const url = new URL(result.headers.Location);
@@ -778,8 +736,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
-				MCP_CONFIG,
-				mockLogger
+				{ mcpConfig: MCP_CONFIG, logger: mockLogger }
 			);
 			const url = new URL(result.headers.Location);
 			assert.equal(url.searchParams.get('iss'), MCP_CONFIG.issuer, 'iss must equal the configured issuer on success');
@@ -801,8 +758,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
-				MCP_CONFIG,
-				mockLogger
+				{ mcpConfig: MCP_CONFIG, logger: mockLogger }
 			);
 			const url = new URL(result.headers.Location);
 			assert.equal(url.searchParams.get('iss'), MCP_CONFIG.issuer, 'iss must appear on MCP error redirects');
@@ -817,8 +773,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
-				MCP_CONFIG,
-				mockLogger
+				{ mcpConfig: MCP_CONFIG, logger: mockLogger }
 			);
 			assert.equal(result.status, 302);
 			const [record] = storedAuthCodes.values();
@@ -841,8 +796,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
-				MCP_CONFIG,
-				mockLogger
+				{ mcpConfig: MCP_CONFIG, logger: mockLogger }
 			);
 			assert.equal(result.status, 302);
 			const url = new URL(result.headers.Location);
@@ -864,8 +818,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
-				MCP_CONFIG,
-				mockLogger
+				{ mcpConfig: MCP_CONFIG, logger: mockLogger }
 			);
 			assert.equal(result.status, 302);
 			const url = new URL(result.headers.Location);
@@ -881,8 +834,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
-				MCP_CONFIG,
-				mockLogger
+				{ mcpConfig: MCP_CONFIG, logger: mockLogger }
 			);
 			const location = result.headers.Location;
 			for (const banned of ['access_token', 'refresh_token', 'id_token', 'token_type', 'access-token-123']) {
@@ -891,16 +843,10 @@ describe('OAuth Handlers', () => {
 		});
 
 		it('does NOT create a Harper session on the MCP branch (independent lifecycle)', async () => {
-			await handleCallback(
-				mockRequest,
-				mockTarget,
-				mockProvider,
-				mockConfig,
-				mockHookManager,
-				'test-provider',
-				MCP_CONFIG,
-				mockLogger
-			);
+			await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockHookManager, 'test-provider', {
+				mcpConfig: MCP_CONFIG,
+				logger: mockLogger,
+			});
 			// session.update must not have been called for the MCP branch
 			assert.equal(mockRequest.session.update.mock.calls.length, 0);
 		});
@@ -915,16 +861,10 @@ describe('OAuth Handlers', () => {
 				callOnLogin: onLoginMock,
 			};
 
-			await handleCallback(
-				mockRequest,
-				mockTarget,
-				mockProvider,
-				mockConfig,
-				trackingHookManager,
-				'test-provider',
-				MCP_CONFIG,
-				mockLogger
-			);
+			await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, trackingHookManager, 'test-provider', {
+				mcpConfig: MCP_CONFIG,
+				logger: mockLogger,
+			});
 
 			assert.equal(onLoginMock.mock.calls.length, 1, 'callOnLogin fired exactly once on the MCP path');
 			// The hook receives the mapped Harper user, the upstream token response, the session, the request, and the provider name.

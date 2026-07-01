@@ -251,6 +251,12 @@ suite('MCP OAuth Stage 7: full round-trip e2e', (ctx: ContextWithHarper) => {
 			'must support S256 code challenge method'
 		);
 		strictEqual(meta.resource_parameter_supported, true, 'must advertise resource_parameter_supported: true');
+		// RFC 9207: server must declare that it emits iss on authorization responses.
+		strictEqual(
+			meta.authorization_response_iss_parameter_supported,
+			true,
+			'must advertise authorization_response_iss_parameter_supported: true (RFC 9207)'
+		);
 	});
 
 	// ── Steps 4-9: full round-trip ────────────────────────────────────────────
@@ -333,6 +339,8 @@ suite('MCP OAuth Stage 7: full round-trip e2e', (ctx: ContextWithHarper) => {
 		ok(mcpCode, 'final redirect must carry a code');
 		const returnedState = finalUrl.searchParams.get('state');
 		strictEqual(returnedState, clientState, 'state must round-trip unchanged');
+		// RFC 9207: iss must equal the configured issuer on the success authorization response.
+		strictEqual(finalUrl.searchParams.get('iss'), 'https://mcp.test', 'iss must equal the configured issuer');
 
 		// ── Step 7: Token exchange ──────────────────────────────────────────────
 		const tokenRes = await fetch(`${base}/oauth/mcp/token`, {
@@ -446,6 +454,8 @@ suite('MCP OAuth Stage 7: full round-trip e2e', (ctx: ContextWithHarper) => {
 		const params = parseQuery(loc);
 		const error = params.get('error');
 		strictEqual(error, 'invalid_request', `plain PKCE must be rejected with error=invalid_request; got: ${loc}`);
+		// RFC 9207: iss must appear on Phase-2 error redirects too.
+		strictEqual(params.get('iss'), 'https://mcp.test', `iss must be present on error redirect; got: ${loc}`);
 	});
 
 	test('negative: missing resource at /authorize → rejected', async () => {

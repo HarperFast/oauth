@@ -403,16 +403,10 @@ export class OAuthResource extends Resource {
 				return handleLogin(request, target, provider, config, providerName, logger);
 
 			case 'callback':
-				return handleCallback(
-					request,
-					target,
-					provider,
-					config,
-					hookManager,
-					providerName,
-					OAuthResource.mcpConfig,
-					logger
-				);
+				return handleCallback(request, target, provider, config, hookManager, providerName, {
+					mcpConfig: OAuthResource.mcpConfig,
+					logger,
+				});
 
 			case 'user':
 				return handleUserInfo(request, false);

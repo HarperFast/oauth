@@ -125,9 +125,9 @@ export async function handleCallback(
 	config: OAuthProviderConfig,
 	hookManager: HookManager,
 	providerName: string,
-	mcpConfig: MCPConfig | undefined,
-	logger?: Logger
+	opts?: { mcpConfig?: MCPConfig; logger?: Logger }
 ): Promise<any> {
+	const { mcpConfig, logger } = opts ?? {};
 	// Get query parameters from target
 	const code = target.get?.('code');
 	const state = target.get?.('state');
