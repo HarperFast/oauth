@@ -102,6 +102,29 @@ describe('HookManager', () => {
 
 			assert.ok(mockLogger.debug.mock.calls.some((call) => call.arguments[0].includes('Calling onLogin hook')));
 		});
+
+		it('should not throw and still logs when hook throws a non-Error string', async () => {
+			hookManager.register({
+				onLogin: async () => {
+					throw 'string-error'; // eslint-disable-line no-throw-literal
+				},
+			});
+			// Must resolve without throwing even though the hook threw a non-Error.
+			const result = await hookManager.callOnLogin({}, {}, {}, {}, 'github');
+			assert.equal(result, undefined);
+			assert.equal(mockLogger.error.mock.calls.length, 1, 'error still logged');
+		});
+
+		it('should not throw and still logs when hook throws null', async () => {
+			hookManager.register({
+				onLogin: async () => {
+					throw null; // eslint-disable-line no-throw-literal
+				},
+			});
+			const result = await hookManager.callOnLogin({}, {}, {}, {}, 'github');
+			assert.equal(result, undefined);
+			assert.equal(mockLogger.error.mock.calls.length, 1, 'error still logged');
+		});
 	});
 
 	describe('callOnLogout', () => {
@@ -134,6 +157,16 @@ describe('HookManager', () => {
 
 			assert.equal(mockLogger.error.mock.calls.length, 1);
 			assert.ok(mockLogger.error.mock.calls[0].arguments[0].includes('onLogout hook failed'));
+		});
+
+		it('should not throw when hook throws a non-Error value (null)', async () => {
+			hookManager.register({
+				onLogout: async () => {
+					throw null; // eslint-disable-line no-throw-literal
+				},
+			});
+			await hookManager.callOnLogout({}, {});
+			assert.equal(mockLogger.error.mock.calls.length, 1, 'error still logged');
 		});
 	});
 
@@ -187,6 +220,16 @@ describe('HookManager', () => {
 
 			assert.equal(mockLogger.error.mock.calls.length, 1);
 			assert.ok(mockLogger.error.mock.calls[0].arguments[0].includes('onTokenRefresh hook failed'));
+		});
+
+		it('should not throw when hook throws a non-Error value (string)', async () => {
+			hookManager.register({
+				onTokenRefresh: async () => {
+					throw 'non-error-string'; // eslint-disable-line no-throw-literal
+				},
+			});
+			await hookManager.callOnTokenRefresh({}, true);
+			assert.equal(mockLogger.error.mock.calls.length, 1, 'error still logged');
 		});
 
 		it('should log debug message with refreshed status', async () => {

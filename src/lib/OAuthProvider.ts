@@ -158,7 +158,10 @@ export class OAuthProvider implements IOAuthProvider {
 					const additionalInfo = await this.fetchUserInfo(accessToken);
 					return { ...idTokenClaims, ...additionalInfo };
 				} catch (error) {
-					this.logger?.warn?.('Failed to fetch additional user info:', (error as Error).message);
+					this.logger?.warn?.(
+						'Failed to fetch additional user info:',
+						error instanceof Error ? error.message : String(error)
+					);
 				}
 			}
 			return idTokenClaims;
@@ -222,8 +225,13 @@ export class OAuthProvider implements IOAuthProvider {
 				return verified;
 			} catch (error) {
 				// Signature verification failed - this is a security issue
-				this.logger?.error?.('ID token signature verification failed:', (error as Error).message);
-				throw new Error(`ID token verification failed: ${(error as Error).message}`);
+				this.logger?.error?.(
+					'ID token signature verification failed:',
+					error instanceof Error ? error.message : String(error)
+				);
+				throw new Error(`ID token verification failed: ${error instanceof Error ? error.message : String(error)}`, {
+					cause: error,
+				});
 			}
 		} else {
 			// No JWKS client - fall back to claims validation only

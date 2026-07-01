@@ -39,7 +39,7 @@ export const GitHubProvider: OAuthProviderConfig = {
 			}
 			return isValid;
 		} catch (error) {
-			logger?.warn?.('GitHub token validation error:', (error as Error).message);
+			logger?.warn?.('GitHub token validation error:', error instanceof Error ? error.message : String(error));
 			return false; // Assume invalid on error
 		}
 	},
@@ -73,7 +73,10 @@ export const GitHubProvider: OAuthProviderConfig = {
 				}
 			} catch (error) {
 				// Email fetch failed, continue without it
-				helpers.logger?.warn?.('Failed to fetch GitHub user emails:', (error as Error).message);
+				helpers.logger?.warn?.(
+					'Failed to fetch GitHub user emails:',
+					error instanceof Error ? error.message : String(error)
+				);
 			}
 		}
 

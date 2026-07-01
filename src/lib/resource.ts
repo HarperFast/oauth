@@ -378,7 +378,10 @@ export class OAuthResource extends Resource {
 					OAuthResource.dynamicProviderCache?.set(providerName, providerData);
 				}
 			} catch (error) {
-				logger?.error?.(`Error resolving provider ${providerName}:`, (error as Error).message);
+				logger?.error?.(
+					`Error resolving provider ${providerName}:`,
+					error instanceof Error ? error.message : String(error)
+				);
 				return {
 					status: 500,
 					body: { error: 'Failed to resolve OAuth provider' },

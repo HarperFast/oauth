@@ -200,7 +200,7 @@ export async function handleAuthorize(
 	try {
 		client = await clientStore.get(query.client_id);
 	} catch (error) {
-		logger?.error?.('MCP authorize: client lookup failed:', (error as Error).message);
+		logger?.error?.('MCP authorize: client lookup failed:', error instanceof Error ? error.message : String(error));
 		return {
 			status: 500,
 			body: { error: 'server_error', error_description: 'Client lookup failed' },
@@ -289,7 +289,10 @@ export async function handleAuthorize(
 			mcp: mcpState,
 		});
 	} catch (error) {
-		logger?.error?.('MCP authorize: failed to generate CSRF token:', (error as Error).message);
+		logger?.error?.(
+			'MCP authorize: failed to generate CSRF token:',
+			error instanceof Error ? error.message : String(error)
+		);
 		return redirect('server_error', 'Failed to initialize upstream OAuth flow');
 	}
 

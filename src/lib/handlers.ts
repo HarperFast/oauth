@@ -236,7 +236,10 @@ export async function handleCallback(
 				logger?.info?.('ID token verified successfully');
 			} catch (error) {
 				// Log verification failure but continue with userinfo endpoint
-				logger?.warn?.('ID token verification failed, falling back to userinfo endpoint:', (error as Error).message);
+				logger?.warn?.(
+					'ID token verification failed, falling back to userinfo endpoint:',
+					error instanceof Error ? error.message : String(error)
+				);
 			}
 		}
 
@@ -329,7 +332,7 @@ export async function handleCallback(
 	} catch (error) {
 		logger?.error?.('OAuth callback error:', error);
 		// Use a safe, generic reason code — details are in the server log
-		const message = (error as Error).message || '';
+		const message = error instanceof Error ? error.message : String(error);
 		let reason = 'unknown';
 		if (message.startsWith('Token exchange failed')) reason = 'token_exchange';
 		else if (message.includes('claim')) reason = 'user_mapping';

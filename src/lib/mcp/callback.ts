@@ -90,7 +90,10 @@ export async function handleMCPCallback(
 	try {
 		await store.set(record);
 	} catch (error) {
-		logger?.error?.('MCP callback: failed to persist auth code:', (error as Error).message);
+		logger?.error?.(
+			'MCP callback: failed to persist auth code:',
+			error instanceof Error ? error.message : String(error)
+		);
 		return buildErrorRedirect(
 			mcpState.redirectUri,
 			'server_error',

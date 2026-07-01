@@ -310,7 +310,10 @@ export async function handleApplication(scope: Scope): Promise<void> {
 					dynamicProviderCache.set(providerConfigId, providerData);
 				}
 			} catch (error) {
-				logger?.error?.(`Error resolving provider ${providerConfigId} for session:`, (error as Error).message);
+				logger?.error?.(
+					`Error resolving provider ${providerConfigId} for session:`,
+					error instanceof Error ? error.message : String(error)
+				);
 			}
 		}
 
