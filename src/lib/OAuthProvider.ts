@@ -229,7 +229,9 @@ export class OAuthProvider implements IOAuthProvider {
 					'ID token signature verification failed:',
 					error instanceof Error ? error.message : String(error)
 				);
-				throw new Error(`ID token verification failed: ${error instanceof Error ? error.message : String(error)}`);
+				throw new Error(`ID token verification failed: ${error instanceof Error ? error.message : String(error)}`, {
+					cause: error,
+				});
 			}
 		} else {
 			// No JWKS client - fall back to claims validation only
