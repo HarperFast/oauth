@@ -158,8 +158,9 @@ discovery handlers fall through).
 All three send `Access-Control-Allow-Origin: *` so browser-based clients and
 discovery tools can fetch them cross-origin. When `mcp.resource` carries a path
 (e.g. `https://host/mcp`), the Protected Resource Metadata document is **also**
-served at the RFC 9728 path-appended location `/mcp/.well-known/oauth-protected-resource`,
-which is the form the `WWW-Authenticate` challenge advertises.
+served at the RFC 9728 path-appended location `/.well-known/oauth-protected-resource/mcp`
+(the well-known segment sits between the origin and the resource path), which is the
+form the `WWW-Authenticate` challenge advertises.
 
 ### Authorization server
 
@@ -203,7 +204,7 @@ On any failure it **fails closed** with the spec 401:
 
 ```
 HTTP/1.1 401 Unauthorized
-WWW-Authenticate: Bearer resource_metadata="https://my-app.example.com/mcp/.well-known/oauth-protected-resource"
+WWW-Authenticate: Bearer resource_metadata="https://my-app.example.com/.well-known/oauth-protected-resource/mcp"
 Content-Type: application/json
 
 {"error":"invalid_token","error_description":"<reason>"}
