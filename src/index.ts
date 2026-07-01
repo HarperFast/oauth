@@ -186,22 +186,22 @@ export async function handleApplication(scope: Scope): Promise<void> {
 			// JWT `iss` claims and as a prefix for every endpoint URL (e.g.
 			// `${issuer}/oauth/mcp/authorize`). A schemeless or path-bearing value
 			// produces malformed/unparseable URLs downstream — reject it at startup.
-			let parsedIssuer: URL;
+			// Parse once and check every constraint together: a valid origin has an
+			// http(s) scheme and nothing beyond an optional trailing slash (no path,
+			// query, or fragment).
+			let validOrigin = false;
 			try {
-				parsedIssuer = new URL(mcpConfig.issuer);
+				const parsedIssuer = new URL(mcpConfig.issuer);
+				const pathWithoutTrailingSlash = parsedIssuer.pathname.replace(/\/+$/, '');
+				validOrigin =
+					(parsedIssuer.protocol === 'http:' || parsedIssuer.protocol === 'https:') &&
+					pathWithoutTrailingSlash === '' &&
+					parsedIssuer.search === '' &&
+					parsedIssuer.hash === '';
 			} catch {
-				throw new Error(
-					`mcp.issuer must be an absolute http(s) origin like "https://your-host" (got: "${mcpConfig.issuer}")`
-				);
+				// Unparseable URL — validOrigin stays false.
 			}
-			if (parsedIssuer.protocol !== 'http:' && parsedIssuer.protocol !== 'https:') {
-				throw new Error(
-					`mcp.issuer must be an absolute http(s) origin like "https://your-host" (got: "${mcpConfig.issuer}")`
-				);
-			}
-			// Reject anything beyond an optional trailing slash (path, query, fragment).
-			const withoutTrailingSlash = parsedIssuer.pathname.replace(/\/+$/, '');
-			if (withoutTrailingSlash !== '' || parsedIssuer.search !== '' || parsedIssuer.hash !== '') {
+			if (!validOrigin) {
 				throw new Error(
 					`mcp.issuer must be an absolute http(s) origin like "https://your-host" (got: "${mcpConfig.issuer}")`
 				);
