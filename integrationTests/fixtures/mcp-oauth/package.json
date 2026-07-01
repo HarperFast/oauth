@@ -1,0 +1,6 @@
+{
+	"name": "mcp-oauth-fixture",
+	"private": true,
+	"type": "module",
+	"description": "Integration-test fixture for Stage 7 MCP OAuth end-to-end flow. The @harperfast/oauth dep is installed at test setup time via scripts/install-fixtures.js (npm pack + install) so the plugin lives as real files under node_modules — Harper's default VM sandbox rejects symlinked file: deps. harper is resolved from the repo root."
+}
