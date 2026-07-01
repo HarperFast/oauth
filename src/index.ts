@@ -14,13 +14,18 @@ import { DynamicProviderCache, DEFAULT_DYNAMIC_PROVIDER_CACHE_TTL_SECONDS } from
 import { registerWellKnownHandlers } from './lib/mcp/wellKnown.ts';
 import type { Scope, OAuthPluginConfig, ProviderRegistry, OAuthHooks } from './types.ts';
 
-// Config can carry literal secrets (provider clientSecret, mcp.signingKeyPem,
-// mcp.dynamicClientRegistration.initialAccessToken). Redact them before logging
-// the options blob — logs are frequently shipped/retained outside the trust
-// boundary. Deny-list by key-name substring; over-redaction in a log is safe.
-const SENSITIVE_KEY_PATTERN = /secret|signingkeypem|initialaccesstoken|privatekey|password/i;
+// Config can carry literal secrets (provider clientSecret/client_secret,
+// mcp.signingKeyPem/signing_key_pem, mcp.dynamicClientRegistration.initialAccessToken/
+// initial_access_token, and generic private_key/api_key/passphrase/credential).
+// Redact them before logging the options blob — logs are frequently shipped/retained
+// outside the trust boundary. Deny-list by key-name substring; over-redaction in a
+// log is safe. Patterns use optional [_-]? separators to catch camelCase, snake_case,
+// and kebab-case variants in one pass. Bare `token` and `key` are intentionally
+// excluded — they would redact non-secret values like refreshTokenTtl or kid.
+export const SENSITIVE_KEY_PATTERN =
+	/secret|signing[_-]?key|private[_-]?key|api[_-]?key|initial[_-]?access[_-]?token|password|passphrase|credential/i;
 
-function redactSecrets(value: unknown): unknown {
+export function redactSecrets(value: unknown): unknown {
 	if (Array.isArray(value)) return value.map(redactSecrets);
 	if (value && typeof value === 'object') {
 		const out: Record<string, unknown> = {};
