@@ -180,6 +180,33 @@ export async function handleApplication(scope: Scope): Promise<void> {
 					'token audience are not derived from the client-controlled Host header.'
 			);
 		}
+		if (mcpConfig?.issuer) {
+			// Validate that the issuer is an absolute http(s) origin.
+			// resolveIssuer() strips trailing slashes and the value is used verbatim in
+			// JWT `iss` claims and as a prefix for every endpoint URL (e.g.
+			// `${issuer}/oauth/mcp/authorize`). A schemeless or path-bearing value
+			// produces malformed/unparseable URLs downstream — reject it at startup.
+			let parsedIssuer: URL;
+			try {
+				parsedIssuer = new URL(mcpConfig.issuer);
+			} catch {
+				throw new Error(
+					`mcp.issuer must be an absolute http(s) origin like "https://your-host" (got: "${mcpConfig.issuer}")`
+				);
+			}
+			if (parsedIssuer.protocol !== 'http:' && parsedIssuer.protocol !== 'https:') {
+				throw new Error(
+					`mcp.issuer must be an absolute http(s) origin like "https://your-host" (got: "${mcpConfig.issuer}")`
+				);
+			}
+			// Reject anything beyond an optional trailing slash (path, query, fragment).
+			const withoutTrailingSlash = parsedIssuer.pathname.replace(/\/+$/, '');
+			if (withoutTrailingSlash !== '' || parsedIssuer.search !== '' || parsedIssuer.hash !== '') {
+				throw new Error(
+					`mcp.issuer must be an absolute http(s) origin like "https://your-host" (got: "${mcpConfig.issuer}")`
+				);
+			}
+		}
 
 		// Re-initialize providers from new configuration
 		// Clear existing providers and repopulate (don't reassign to preserve closure reference)
