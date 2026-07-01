@@ -179,7 +179,9 @@ describe('handleToken — audit events and onMCPTokenIssued hook', () => {
 		);
 		restoreLogger();
 
-		const auditLog = infoCalls.find((args) => args[0] === 'MCP audit:' && args[1]?.event?.includes('oauth.mcp.token.issued'));
+		const auditLog = infoCalls.find(
+			(args) => args[0] === 'MCP audit:' && args[1]?.event?.includes('oauth.mcp.token.issued')
+		);
 		assert.ok(auditLog, 'audit log for oauth.mcp.token.issued was emitted');
 		const logged = auditLog[1];
 		assert.equal(logged.event, 'oauth.mcp.token.issued');
@@ -206,7 +208,9 @@ describe('handleToken — audit events and onMCPTokenIssued hook', () => {
 		);
 		restoreLogger();
 
-		const auditLog = infoCalls.find((args) => args[0] === 'MCP audit:' && args[1]?.event?.includes('oauth.mcp.token.issued'));
+		const auditLog = infoCalls.find(
+			(args) => args[0] === 'MCP audit:' && args[1]?.event?.includes('oauth.mcp.token.issued')
+		);
 		assert.ok(auditLog, 'audit log emitted');
 		const logged = auditLog[1];
 
@@ -234,7 +238,9 @@ describe('handleToken — audit events and onMCPTokenIssued hook', () => {
 		);
 		restoreLogger();
 
-		const auditLog = infoCalls.find((args) => args[0] === 'MCP audit:' && args[1]?.event?.includes('oauth.mcp.token.refreshed'));
+		const auditLog = infoCalls.find(
+			(args) => args[0] === 'MCP audit:' && args[1]?.event?.includes('oauth.mcp.token.refreshed')
+		);
 		assert.ok(auditLog, 'audit log for oauth.mcp.token.refreshed was emitted');
 		const logged = auditLog[1];
 		assert.equal(logged.event, 'oauth.mcp.token.refreshed');
@@ -255,7 +261,9 @@ describe('handleToken — audit events and onMCPTokenIssued hook', () => {
 		);
 		restoreLogger();
 
-		const auditLog = infoCalls.find((args) => args[0] === 'MCP audit:' && args[1]?.event?.includes('oauth.mcp.token.refreshed'));
+		const auditLog = infoCalls.find(
+			(args) => args[0] === 'MCP audit:' && args[1]?.event?.includes('oauth.mcp.token.refreshed')
+		);
 		assert.ok(auditLog, 'audit log emitted');
 		const logged = auditLog[1];
 
@@ -357,7 +365,9 @@ describe('handleToken — audit events and onMCPTokenIssued hook', () => {
 		);
 		restoreLogger();
 
-		const auditLog = infoCalls.find((args) => args[0] === 'MCP audit:' && args[1]?.event?.includes('oauth.mcp.token.issued'));
+		const auditLog = infoCalls.find(
+			(args) => args[0] === 'MCP audit:' && args[1]?.event?.includes('oauth.mcp.token.issued')
+		);
 		assert.ok(auditLog, 'audit log emitted');
 		const hookJti = hookMock.mock.calls[0].arguments[0].jti;
 		assert.equal(hookJti, auditLog[1].jti, 'hook jti matches the audit-log jti');
@@ -455,7 +465,9 @@ describe('handleToken — audit events and onMCPTokenIssued hook', () => {
 		// run only after persistence) never fire.
 		assert.equal(res.status, 500, 'persistence failure → structured server_error');
 		assert.equal(res.body.error, 'server_error');
-		const issued = infoCalls.find((args) => args[0] === 'MCP audit:' && args[1]?.event?.includes('oauth.mcp.token.issued'));
+		const issued = infoCalls.find(
+			(args) => args[0] === 'MCP audit:' && args[1]?.event?.includes('oauth.mcp.token.issued')
+		);
 		assert.equal(issued, undefined, 'no phantom issued audit event when persistence fails');
 		assert.equal(hookMock.mock.calls.length, 0, 'hook must not fire when persistence fails');
 	});
