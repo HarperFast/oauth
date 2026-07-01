@@ -19,11 +19,10 @@
  *     scoped plugin logger routes these to hdb.log alongside Harper's own
  *     auth audit trail, not to system.log.
  *
- * Keep ALL string formatting inside the logger call so the optional-call
- * short-circuit (`?.`) avoids JSON.stringify work when info is undefined
- * (same lazy-logging pattern as dcr.ts). Note: `?.` only short-circuits when
- * `info` is absent, not when it's a level-suppressed no-op — fully lazy logging
- * would need a logger-level check Harper doesn't expose to plugins here.
+ * The payload is passed as a second argument (`harperLogger?.info?.('MCP audit:', payload)`)
+ * so the structured object is never serialised unless the logger renders it.
+ * This matches how Harper core's auth-event logger is called. The `'MCP audit:'`
+ * prefix string stays greppable / filterable in hdb.log.
  *
  * Three event types: `issued` / `refreshed` (success path, from the token
  * endpoint — carry the verified claims) and `rejected` (from the withMCPAuth
@@ -93,9 +92,8 @@ export function emitMCPAuditEvent(payload: MCPAuditPayload): void {
 	// thrown logger error here would deny the client its new token and strand
 	// the family on a hash the client never received. Swallow everything.
 	try {
-		// Keep JSON.stringify inside the optional call so it is only evaluated
-		// when the info level is active (optional-call short-circuit).
-		harperLogger?.info?.(`MCP audit: ${JSON.stringify(payload)}`);
+		// Pass payload as a second arg so serialisation is deferred to the logger.
+		harperLogger?.info?.('MCP audit:', payload);
 	} catch {
 		// Intentionally ignored — audit logging is best-effort.
 	}

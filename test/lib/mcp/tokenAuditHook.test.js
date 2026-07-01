@@ -179,16 +179,16 @@ describe('handleToken — audit events and onMCPTokenIssued hook', () => {
 		);
 		restoreLogger();
 
-		const auditLog = infoCalls.find((args) => args[0]?.includes('oauth.mcp.token.issued'));
+		const auditLog = infoCalls.find((args) => args[0] === 'MCP audit:' && args[1]?.event?.includes('oauth.mcp.token.issued'));
 		assert.ok(auditLog, 'audit log for oauth.mcp.token.issued was emitted');
-		const parsed = JSON.parse(auditLog[0].replace(/^MCP audit: /, ''));
-		assert.equal(parsed.event, 'oauth.mcp.token.issued');
-		assert.equal(parsed.client_id, 'public-1');
-		assert.equal(parsed.sub, 'alice@example.com');
-		assert.equal(parsed.aud, RESOURCE);
-		assert.equal(parsed.scope, 'mcp:read');
-		assert.ok(parsed.jti, 'jti present');
-		assert.ok(parsed.timestamp, 'timestamp present');
+		const logged = auditLog[1];
+		assert.equal(logged.event, 'oauth.mcp.token.issued');
+		assert.equal(logged.client_id, 'public-1');
+		assert.equal(logged.sub, 'alice@example.com');
+		assert.equal(logged.aud, RESOURCE);
+		assert.equal(logged.scope, 'mcp:read');
+		assert.ok(logged.jti, 'jti present');
+		assert.ok(logged.timestamp, 'timestamp present');
 	});
 
 	it('audit event for issued token contains no token material', async () => {
@@ -206,18 +206,20 @@ describe('handleToken — audit events and onMCPTokenIssued hook', () => {
 		);
 		restoreLogger();
 
-		const auditLog = infoCalls.find((args) => args[0]?.includes('oauth.mcp.token.issued'));
+		const auditLog = infoCalls.find((args) => args[0] === 'MCP audit:' && args[1]?.event?.includes('oauth.mcp.token.issued'));
 		assert.ok(auditLog, 'audit log emitted');
-		const logged = auditLog[0];
+		const logged = auditLog[1];
 
 		// The actual token strings must not appear in the audit record.
-		const BANNED = [res.body.access_token, res.body.refresh_token].filter(Boolean);
-		for (const banned of BANNED) {
-			assert.ok(!logged.includes(banned), 'token string must not appear in audit log');
+		const BANNED_KEYS = ['access_token', 'refresh_token', 'client_secret'];
+		for (const key of BANNED_KEYS) {
+			assert.ok(!(key in logged), `"${key}" must not appear in audit log`);
 		}
-		// Verify no generic credential keys either.
-		for (const key of ['access_token', 'refresh_token', 'client_secret']) {
-			assert.ok(!logged.includes(`"${key}"`), `"${key}" must not appear in audit log`);
+		// Verify actual token values are not present either (check in JSON form as belt-and-suspenders).
+		const serialised = JSON.stringify(logged);
+		const BANNED_VALUES = [res.body.access_token, res.body.refresh_token].filter(Boolean);
+		for (const banned of BANNED_VALUES) {
+			assert.ok(!serialised.includes(banned), 'token string must not appear in audit log');
 		}
 	});
 
@@ -232,16 +234,16 @@ describe('handleToken — audit events and onMCPTokenIssued hook', () => {
 		);
 		restoreLogger();
 
-		const auditLog = infoCalls.find((args) => args[0]?.includes('oauth.mcp.token.refreshed'));
+		const auditLog = infoCalls.find((args) => args[0] === 'MCP audit:' && args[1]?.event?.includes('oauth.mcp.token.refreshed'));
 		assert.ok(auditLog, 'audit log for oauth.mcp.token.refreshed was emitted');
-		const parsed = JSON.parse(auditLog[0].replace(/^MCP audit: /, ''));
-		assert.equal(parsed.event, 'oauth.mcp.token.refreshed');
-		assert.equal(parsed.client_id, 'public-1');
-		assert.equal(parsed.sub, 'alice@example.com');
-		assert.equal(parsed.aud, RESOURCE);
-		assert.equal(parsed.scope, 'mcp:read');
-		assert.ok(parsed.jti, 'jti present');
-		assert.ok(parsed.timestamp, 'timestamp present');
+		const logged = auditLog[1];
+		assert.equal(logged.event, 'oauth.mcp.token.refreshed');
+		assert.equal(logged.client_id, 'public-1');
+		assert.equal(logged.sub, 'alice@example.com');
+		assert.equal(logged.aud, RESOURCE);
+		assert.equal(logged.scope, 'mcp:read');
+		assert.ok(logged.jti, 'jti present');
+		assert.ok(logged.timestamp, 'timestamp present');
 	});
 
 	it('audit event for refreshed token contains no token material', async () => {
@@ -253,13 +255,14 @@ describe('handleToken — audit events and onMCPTokenIssued hook', () => {
 		);
 		restoreLogger();
 
-		const auditLog = infoCalls.find((args) => args[0]?.includes('oauth.mcp.token.refreshed'));
+		const auditLog = infoCalls.find((args) => args[0] === 'MCP audit:' && args[1]?.event?.includes('oauth.mcp.token.refreshed'));
 		assert.ok(auditLog, 'audit log emitted');
-		const logged = auditLog[0];
+		const logged = auditLog[1];
 
+		const serialised = JSON.stringify(logged);
 		const BANNED = [res.body.access_token, res.body.refresh_token, token].filter(Boolean);
 		for (const banned of BANNED) {
-			assert.ok(!logged.includes(banned), 'token string must not appear in audit log');
+			assert.ok(!serialised.includes(banned), 'token string must not appear in audit log');
 		}
 	});
 
@@ -278,7 +281,7 @@ describe('handleToken — audit events and onMCPTokenIssued hook', () => {
 		);
 		restoreLogger();
 
-		const auditLog = infoCalls.find((args) => args[0]?.includes('oauth.mcp.token'));
+		const auditLog = infoCalls.find((args) => args[0] === 'MCP audit:');
 		assert.equal(auditLog, undefined, 'no audit log emitted on failure');
 	});
 
@@ -354,10 +357,10 @@ describe('handleToken — audit events and onMCPTokenIssued hook', () => {
 		);
 		restoreLogger();
 
-		const auditLog = infoCalls.find((args) => args[0]?.includes('oauth.mcp.token.issued'));
-		const parsed = JSON.parse(auditLog[0].replace(/^MCP audit: /, ''));
+		const auditLog = infoCalls.find((args) => args[0] === 'MCP audit:' && args[1]?.event?.includes('oauth.mcp.token.issued'));
+		assert.ok(auditLog, 'audit log emitted');
 		const hookJti = hookMock.mock.calls[0].arguments[0].jti;
-		assert.equal(hookJti, parsed.jti, 'hook jti matches the audit-log jti');
+		assert.equal(hookJti, auditLog[1].jti, 'hook jti matches the audit-log jti');
 	});
 
 	it('a throwing onMCPTokenIssued hook does NOT block the token response (fire-and-forget)', async () => {
@@ -452,7 +455,7 @@ describe('handleToken — audit events and onMCPTokenIssued hook', () => {
 		// run only after persistence) never fire.
 		assert.equal(res.status, 500, 'persistence failure → structured server_error');
 		assert.equal(res.body.error, 'server_error');
-		const issued = infoCalls.find((args) => args[0]?.includes('oauth.mcp.token.issued'));
+		const issued = infoCalls.find((args) => args[0] === 'MCP audit:' && args[1]?.event?.includes('oauth.mcp.token.issued'));
 		assert.equal(issued, undefined, 'no phantom issued audit event when persistence fails');
 		assert.equal(hookMock.mock.calls.length, 0, 'hook must not fire when persistence fails');
 	});

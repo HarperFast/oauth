@@ -343,7 +343,10 @@ See [Lifecycle Hooks](./lifecycle-hooks.md) for `registerHooks` and the other ho
 ## Audit events
 
 Token lifecycle events are written to Harper's structured log (`hdb.log`) at
-`info`, each line prefixed `MCP audit:` with a JSON payload:
+`info`. Each event is emitted as a two-argument logger call — a fixed `'MCP audit:'`
+marker string followed by the structured payload object — so the payload is never
+serialised unless the logger actually renders it. Log aggregators see output similar
+to:
 
 ```
 MCP audit: {"event":"oauth.mcp.token.issued","client_id":"…","sub":"…","aud":"https://my-app.example.com/mcp","scope":"…","jti":"…","timestamp":"2026-06-29T17:00:00.000Z"}

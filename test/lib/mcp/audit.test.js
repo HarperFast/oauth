@@ -49,16 +49,15 @@ describe('emitMCPAuditEvent', () => {
 		harperMockLogger.info = originalInfo;
 
 		assert.equal(infoCalls.length, 1, 'exactly one info log emitted');
-		const logged = infoCalls[0][0];
-		assert.ok(typeof logged === 'string', 'logged argument is a string');
-		const parsed = JSON.parse(logged.replace(/^MCP audit: /, ''));
-		assert.equal(parsed.event, 'oauth.mcp.token.issued');
-		assert.equal(parsed.client_id, BASE_PAYLOAD.client_id);
-		assert.equal(parsed.sub, BASE_PAYLOAD.sub);
-		assert.equal(parsed.aud, BASE_PAYLOAD.aud);
-		assert.equal(parsed.scope, BASE_PAYLOAD.scope);
-		assert.equal(parsed.jti, BASE_PAYLOAD.jti);
-		assert.ok(parsed.timestamp, 'timestamp present');
+		const [marker, payload] = infoCalls[0];
+		assert.equal(marker, 'MCP audit:', 'first arg is the marker string');
+		assert.equal(payload.event, 'oauth.mcp.token.issued');
+		assert.equal(payload.client_id, BASE_PAYLOAD.client_id);
+		assert.equal(payload.sub, BASE_PAYLOAD.sub);
+		assert.equal(payload.aud, BASE_PAYLOAD.aud);
+		assert.equal(payload.scope, BASE_PAYLOAD.scope);
+		assert.equal(payload.jti, BASE_PAYLOAD.jti);
+		assert.ok(payload.timestamp, 'timestamp present');
 	});
 
 	it('emits oauth.mcp.token.refreshed with the correct payload shape', () => {
@@ -67,12 +66,13 @@ describe('emitMCPAuditEvent', () => {
 		harperMockLogger.info = originalInfo;
 
 		assert.equal(infoCalls.length, 1);
-		const parsed = JSON.parse(infoCalls[0][0].replace(/^MCP audit: /, ''));
-		assert.equal(parsed.event, 'oauth.mcp.token.refreshed');
-		assert.equal(parsed.client_id, payload.client_id);
-		assert.equal(parsed.sub, payload.sub);
-		assert.equal(parsed.aud, payload.aud);
-		assert.equal(parsed.jti, payload.jti);
+		const [marker, logged] = infoCalls[0];
+		assert.equal(marker, 'MCP audit:');
+		assert.equal(logged.event, 'oauth.mcp.token.refreshed');
+		assert.equal(logged.client_id, payload.client_id);
+		assert.equal(logged.sub, payload.sub);
+		assert.equal(logged.aud, payload.aud);
+		assert.equal(logged.jti, payload.jti);
 	});
 
 	it('never includes token strings in the emitted payload', () => {
@@ -82,10 +82,10 @@ describe('emitMCPAuditEvent', () => {
 		emitMCPAuditEvent(BASE_PAYLOAD);
 		harperMockLogger.info = originalInfo;
 
-		const logged = infoCalls[0][0];
+		const logged = infoCalls[0][1];
 		const BANNED_KEYS = ['access_token', 'refresh_token', 'id_token', 'client_secret'];
 		for (const key of BANNED_KEYS) {
-			assert.ok(!logged.includes(`"${key}"`), `"${key}" must not appear in audit log`);
+			assert.ok(!(key in logged), `"${key}" must not appear in audit log`);
 		}
 	});
 
@@ -94,8 +94,8 @@ describe('emitMCPAuditEvent', () => {
 		emitMCPAuditEvent(payload);
 		harperMockLogger.info = originalInfo;
 
-		const parsed = JSON.parse(infoCalls[0][0].replace(/^MCP audit: /, ''));
-		assert.ok(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z$/.test(parsed.timestamp), 'timestamp is ISO-8601 UTC');
+		const logged = infoCalls[0][1];
+		assert.ok(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z$/.test(logged.timestamp), 'timestamp is ISO-8601 UTC');
 	});
 
 	it('does not throw when the logger is suppressed (info is undefined)', () => {
@@ -111,8 +111,8 @@ describe('emitMCPAuditEvent', () => {
 		emitMCPAuditEvent(noScope);
 		harperMockLogger.info = originalInfo;
 
-		const parsed = JSON.parse(infoCalls[0][0].replace(/^MCP audit: /, ''));
-		assert.equal(parsed.scope, undefined);
+		const logged = infoCalls[0][1];
+		assert.equal(logged.scope, undefined);
 	});
 
 	it('emits oauth.mcp.token.rejected with reason + aud and NO unverified claims', () => {
@@ -125,13 +125,14 @@ describe('emitMCPAuditEvent', () => {
 		harperMockLogger.info = originalInfo;
 
 		assert.equal(infoCalls.length, 1);
-		const parsed = JSON.parse(infoCalls[0][0].replace(/^MCP audit: /, ''));
-		assert.equal(parsed.event, 'oauth.mcp.token.rejected');
-		assert.equal(parsed.reason, 'access token is invalid, expired, or not issued for this resource');
-		assert.equal(parsed.aud, 'https://app.example.com/mcp');
+		const [marker, logged] = infoCalls[0];
+		assert.equal(marker, 'MCP audit:');
+		assert.equal(logged.event, 'oauth.mcp.token.rejected');
+		assert.equal(logged.reason, 'access token is invalid, expired, or not issued for this resource');
+		assert.equal(logged.aud, 'https://app.example.com/mcp');
 		// A rejected token has no trustworthy claims — none must be logged.
-		assert.equal(parsed.client_id, undefined, 'no client_id on a rejected event');
-		assert.equal(parsed.sub, undefined, 'no sub on a rejected event');
-		assert.equal(parsed.jti, undefined, 'no jti on a rejected event');
+		assert.equal(logged.client_id, undefined, 'no client_id on a rejected event');
+		assert.equal(logged.sub, undefined, 'no sub on a rejected event');
+		assert.equal(logged.jti, undefined, 'no jti on a rejected event');
 	});
 });
