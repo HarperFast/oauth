@@ -48,6 +48,7 @@ route handler with `withMCPAuth`.
 **2. Guard your MCP handler** (`resources.ts`):
 
 ```typescript
+import { server } from 'harper';
 import { withMCPAuth } from '@harperfast/oauth';
 
 // Your MCP endpoint. request.mcp is populated only after a valid bearer token.
