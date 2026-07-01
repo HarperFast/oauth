@@ -94,7 +94,7 @@ export async function validateAndRefreshSession(
 
 				logger?.debug?.('Token validation successful');
 			} catch (error) {
-				logger?.error?.('Token validation error:', (error as Error).message);
+				logger?.error?.('Token validation error:', error instanceof Error ? error.message : String(error));
 				// Don't logout on validation errors - could be network issue
 				// Token will be validated again on next request
 			}
@@ -178,12 +178,12 @@ export async function validateAndRefreshSession(
 
 		return { valid: true, refreshed: true };
 	} catch (error) {
-		logger?.error?.('OAuth token refresh failed:', (error as Error).message);
+		logger?.error?.('OAuth token refresh failed:', error instanceof Error ? error.message : String(error));
 
 		// If token was expired and refresh failed, log out
 		if (isExpired) {
 			await clearOAuthSession(session, logger);
-			return { valid: false, error: `Token refresh failed: ${(error as Error).message}` };
+			return { valid: false, error: `Token refresh failed: ${error instanceof Error ? error.message : String(error)}` };
 		}
 
 		// Token not yet expired, allow continued use

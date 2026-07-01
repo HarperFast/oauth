@@ -293,7 +293,7 @@ export async function handleRegister(
 	try {
 		await store.set(record);
 	} catch (error) {
-		logger?.error?.('MCP client registration storage failed:', (error as Error).message);
+		logger?.error?.('MCP client registration storage failed:', error instanceof Error ? error.message : String(error));
 		return {
 			status: 500,
 			body: { error: 'server_error', error_description: 'Failed to persist client registration' },

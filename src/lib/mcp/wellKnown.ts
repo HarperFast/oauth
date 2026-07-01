@@ -270,7 +270,10 @@ function makeHandler(
 		try {
 			return jsonResponse(await match.build(req, cfg));
 		} catch (error) {
-			logger?.error?.(`MCP well-known handler ${match.exactPath} failed:`, (error as Error).message);
+			logger?.error?.(
+				`MCP well-known handler ${match.exactPath} failed:`,
+				error instanceof Error ? error.message : String(error)
+			);
 			return jsonResponse({ error: 'server_error' }, 500);
 		}
 	};
