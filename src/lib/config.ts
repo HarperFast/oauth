@@ -6,6 +6,7 @@
 
 import { OAuthProvider } from './OAuthProvider.ts';
 import { getProvider } from './providers/index.ts';
+import { redactSecrets } from './redact.ts';
 import type { OAuthProviderConfig, OAuthPluginConfig, ProviderRegistry, Logger } from '../types.ts';
 
 /**
@@ -166,7 +167,7 @@ export function initializeProviders(options: OAuthPluginConfig, logger?: Logger)
 
 	// Extract plugin-level defaults
 	const pluginDefaults = extractPluginDefaults(options);
-	logger?.debug?.('Plugin defaults:', pluginDefaults);
+	logger?.debug?.('Plugin defaults:', redactSecrets(pluginDefaults));
 
 	// Initialize each provider
 	for (const [providerName, providerConfig] of Object.entries(options.providers)) {
