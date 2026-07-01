@@ -145,6 +145,7 @@ Complete documentation is available in the [docs](./docs) directory:
 - **[Lifecycle Hooks](./docs/lifecycle-hooks.md)** - User provisioning and custom logic
 - **[Multi-Tenant SSO](./docs/multi-tenant-sso.md)** - Per-organization OAuth providers for B2B SaaS
 - **[Token Refresh and Sessions](./docs/token-refresh-and-sessions.md)** - How OAuth tokens and Harper sessions interact
+- **[MCP OAuth](./docs/mcp-oauth.md)** - Authorization server for Model Context Protocol clients (experimental)
 - **[API Reference](./docs/api-reference.md)** - Endpoints and programmatic API
 
 ## Development
@@ -192,35 +193,38 @@ When MCP OAuth is enabled (see [issue #86](https://github.com/HarperFast/oauth/i
 
 ## MCP OAuth (experimental)
 
-The plugin can also act as an OAuth authorization server for **Model Context Protocol** clients (Claude Desktop, Cursor, `mcp-remote`), letting them authenticate against the same upstream providers. Enable it with `mcp.enabled: true` (see [`docs/configuration.md`](./docs/configuration.md)).
+The plugin can also act as an OAuth 2.1 authorization server for **Model Context Protocol** clients (Claude Desktop, Cursor, `mcp-remote`), letting them authenticate against the same upstream providers. Two steps: enable it in config, and guard your MCP route with `withMCPAuth`.
 
-**Status: experimental, opt-in.** Available now: RFC 7591 Dynamic Client Registration, discovery metadata (`/.well-known/*`), the authorization endpoint, audience-bound JWT token issuance, and token _verification_ for app-owned MCP routes (`withMCPAuth`, below). The remaining pieces land in 2.0.x — see [issue #86](https://github.com/HarperFast/oauth/issues/86).
+```yaml
+# config.yaml
+'@harperfast/oauth':
+  package: '@harperfast/oauth'
+  providers:
+    github:
+      clientId: ${OAUTH_GITHUB_CLIENT_ID}
+      clientSecret: ${OAUTH_GITHUB_CLIENT_SECRET}
+  mcp:
+    enabled: true
+    issuer: https://my-app.example.com # required; pin to your public origin
+```
 
-### Protecting an MCP route — `withMCPAuth`
-
-The plugin doesn't own the MCP endpoint — your app does. `withMCPAuth` wraps your handler so it enforces the spec contract once, centrally: it validates the `Authorization: Bearer` access token (signature against the published JWKS, `exp`/`nbf`, and audience binding to `mcp.resource` per RFC 8707), and on any failure returns `401` with `WWW-Authenticate: Bearer resource_metadata="…"` (RFC 9728) pointing MCP clients at discovery. On success it attaches the verified claims as `request.mcp = { sub, client_id, aud, scope }` and invokes your handler unchanged.
-
-```ts
+```typescript
+// resources.ts
 import { server } from 'harper';
 import { withMCPAuth } from '@harperfast/oauth';
 
-const mcpHandler = (request) => {
-	// request.mcp is guaranteed present here: { sub, client_id, aud, scope }
-	return { status: 200, body: JSON.stringify({ user: request.mcp.sub }) };
-};
-
-// Recommended: register on a urlPath subroute.
-server.http(withMCPAuth(mcpHandler), { urlPath: '/mcp' });
+// request.mcp (verified { sub, client_id, aud, scope }) is guaranteed present inside the guarded handler.
+server.http(
+	withMCPAuth((request) => ({ status: 200, body: JSON.stringify({ user: request.mcp.sub }) })),
+	{
+		urlPath: '/mcp',
+	}
+);
 ```
 
-**Registration matters — Harper's core auth will otherwise reject the token.** Core auth consumes `Authorization: Bearer` and rejects any non-Harper token with `WWW-Authenticate: Basic`, which breaks the MCP discovery loop. Register `withMCPAuth` so it owns the response for its route:
+The plugin serves discovery (`/.well-known/*`), Dynamic Client Registration, the authorize/token endpoints, and JWKS; `withMCPAuth` verifies the audience-bound JWT on every call and fails closed. There's an [`onMCPTokenIssued`](./docs/lifecycle-hooks.md#onmcptokenissued) hook to react when a client gains access (client→user mapping, monitoring, rate-limiting) and a built-in audit log.
 
-- **urlPath subroute (recommended):** `server.http(withMCPAuth(handler), { urlPath: '/mcp' })`. Harper routes the request to this chain alone, so core auth never runs for it — the same isolation the `/.well-known/*` endpoints use. No extra options needed.
-- **Default-group fallback:** `server.http(withMCPAuth(handler, { path: '/mcp' }), { before: 'authentication' })`. When the route shares the default middleware chain with auth, pass `path` (so the guard scopes to your route and lets other paths fall through) and register `before: 'authentication'` so it runs ahead of core auth.
-
-`withMCPAuth(handler, options?)` options: `path` (default-group scoping, above), `onAuthError(request, reason)` (custom denial response — a falsy return still fails closed to the default `401`), plus `getConfig` / `logger` / `keyStore` overrides (default to the plugin's live MCP config, logger, and key store). The guard fails closed: while MCP is disabled or no signing key has been published, every request is rejected. Query-string tokens are ignored (header-only, RFC 6750).
-
-If your MCP route lives in a **different component** than the one declaring `@harperfast/oauth`, inject `getConfig` (the consumer's copy of `OAuthResource.mcpConfig` is unpopulated) — signing keys still resolve from the shared `oauth` database. See [`docs/configuration.md`](./docs/configuration.md).
+**Status: experimental, opt-in.** See **[MCP OAuth](./docs/mcp-oauth.md)** for the full flow, the `withMCPAuth` registration models and options, the hook, configuration, the production checklist, and troubleshooting — and [issue #86](https://github.com/HarperFast/oauth/issues/86) for what's still v1.1.
 
 ## Security Considerations
 

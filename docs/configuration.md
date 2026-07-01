@@ -26,7 +26,7 @@ Complete configuration options for the `@harperfast/oauth` plugin.
 | `redirectUri`           | string            | (auto-gen) | OAuth callback URL where providers redirect back to                                                                                                                                                                                                        |
 | `postLoginRedirect`     | string            | `/`        | Default URL to redirect users after successful OAuth login                                                                                                                                                                                                 |
 | `cacheDynamicProviders` | boolean \| number | `300`      | TTL (seconds) for providers resolved via the `onResolveProvider` hook. Number = seconds; `false` = never cache (call the hook every request); `true` = cache forever. Default 300s; freshness is controlled by this TTL (there is no manual invalidation). |
-| `mcp`                   | object            | (off)      | MCP OAuth flow configuration. See [MCP OAuth](#mcp-oauth-work-in-progress) below                                                                                                                                                                           |
+| `mcp`                   | object            | (off)      | MCP OAuth flow configuration. See [MCP OAuth](#mcp-oauth) below                                                                                                                                                                                            |
 
 ### Provider Configuration
 
@@ -55,9 +55,11 @@ Each provider requires:
 - `userInfoUrl` - User info endpoint URL (required)
 - `jwksUrl` - JWKS endpoint URL (required for ID token verification)
 
-### MCP OAuth (work in progress)
+### MCP OAuth
 
-Opt-in support for the Model Context Protocol authorization flow ([issue #86](https://github.com/HarperFast/oauth/issues/86)). Implemented so far: Dynamic Client Registration at `POST /oauth/mcp/register` (RFC 7591), the discovery documents under `/.well-known/*` (RFCs 8414, 9728) so MCP clients (Claude Desktop, Cursor, `mcp-remote`) can find and register themselves, the authorization endpoint `GET /oauth/mcp/authorize` (OAuth 2.1 + PKCE-S256), the `POST /oauth/mcp/token` exchange (audience-bound RS256 JWTs), and the `withMCPAuth` route guard (below) that verifies those tokens on your MCP endpoint.
+Opt-in support for the Model Context Protocol authorization flow ([issue #86](https://github.com/HarperFast/oauth/issues/86)). The plugin serves Dynamic Client Registration at `POST /oauth/mcp/register` (RFC 7591), the discovery documents under `/.well-known/*` (RFCs 8414, 9728) so MCP clients (Claude Desktop, Cursor, `mcp-remote`) can find and register themselves, the authorization endpoint `GET /oauth/mcp/authorize` (OAuth 2.1 + PKCE-S256), the `POST /oauth/mcp/token` exchange (audience-bound RS256 JWTs), and the `withMCPAuth` route guard that verifies those tokens on your MCP endpoint.
+
+> This section is the configuration reference. For the end-to-end flow, the `withMCPAuth` wrapper (registration models + options), the `onMCPTokenIssued` hook, the production checklist, and troubleshooting, see **[MCP OAuth](./mcp-oauth.md)**. The feature is **experimental and opt-in** (`mcp.enabled`).
 
 ```yaml
 '@harperfast/oauth':
@@ -82,91 +84,37 @@ Opt-in support for the Model Context Protocol authorization flow ([issue #86](ht
         - app.example.com
 ```
 
-| Option                                                  | Type     | Default         | Description                                                                                                                                                                                                                       |
-| ------------------------------------------------------- | -------- | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `mcp.enabled`                                           | boolean  | `false`         | Master switch for the MCP OAuth endpoints                                                                                                                                                                                         |
-| `mcp.issuer`                                            | string   | (none)          | Authorization-server URI advertised in AS metadata. **Required when `mcp.enabled`** — startup fails otherwise, to prevent a Host-header-driven `iss`/`aud`                                                                        |
-| `mcp.resource`                                          | string   | `<issuer>/mcp`  | Canonical resource URI advertised in PRM (RFC 9728) and validated as `aud` on issued tokens (RFC 8707). Optional override; defaults safely from the pinned `issuer`                                                               |
-| `mcp.providers`                                         | string[] | (all providers) | Subset of upstream providers eligible for the MCP auth flow. **v1 requires exactly one** resolved provider — set this when more than one provider is configured globally, otherwise `/oauth/mcp/authorize` returns `server_error` |
-| `mcp.dynamicClientRegistration.enabled`                 | boolean  | `true`          | Enable the `/register` endpoint when `mcp.enabled` is true                                                                                                                                                                        |
-| `mcp.dynamicClientRegistration.initialAccessToken`      | string   | (none)          | If set, registration requires `Authorization: Bearer <token>`. Otherwise open per RFC 7591                                                                                                                                        |
-| `mcp.dynamicClientRegistration.allowedRedirectUriHosts` | string[] | (none)          | Allowlist for redirect_uri hosts. Localhost always allowed per RFC 8252                                                                                                                                                           |
+| Option                                                  | Type     | Default         | Description                                                                                                                                                                                                                             |
+| ------------------------------------------------------- | -------- | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `mcp.enabled`                                           | boolean  | `false`         | Master switch for the MCP OAuth endpoints                                                                                                                                                                                               |
+| `mcp.issuer`                                            | string   | (none)          | Authorization-server URI advertised in AS metadata. **Required when `mcp.enabled`** — startup fails otherwise, to prevent a Host-header-driven `iss`/`aud`                                                                              |
+| `mcp.resource`                                          | string   | `<issuer>/mcp`  | Canonical resource URI advertised in PRM (RFC 9728) and validated as `aud` on issued tokens (RFC 8707). Optional override; defaults safely from the pinned `issuer`                                                                     |
+| `mcp.providers`                                         | string[] | (all providers) | Subset of upstream providers eligible for the MCP auth flow. **v1 requires exactly one** resolved provider — set this when more than one provider is configured globally, otherwise `/oauth/mcp/authorize` returns `server_error`       |
+| `mcp.dynamicClientRegistration.enabled`                 | boolean  | `true`          | Enable the `/register` endpoint when `mcp.enabled` is true                                                                                                                                                                              |
+| `mcp.dynamicClientRegistration.initialAccessToken`      | string   | (none)          | If set, registration requires `Authorization: Bearer <token>`. Otherwise open per RFC 7591                                                                                                                                              |
+| `mcp.dynamicClientRegistration.allowedRedirectUriHosts` | string[] | (none)          | Allowlist for redirect_uri hosts. Localhost always allowed per RFC 8252                                                                                                                                                                 |
+| `mcp.signingKeyPem`                                     | string   | (generated)     | PEM-encoded RS256 private key (PKCS#8) used to sign access tokens. When unset, a keypair is generated on first boot. **Pin the same PEM on every node in a cluster** — otherwise nodes can sign with keys the JWKS hasn't published yet |
+| `mcp.signingAlgorithm`                                  | string   | `RS256`         | JWT signing algorithm. Only `RS256` is supported in v1 (reserved for a future EdDSA option)                                                                                                                                             |
+| `mcp.accessTokenTtl`                                    | number   | `3600`          | Access-token lifetime in seconds (default 1 hour)                                                                                                                                                                                       |
+| `mcp.refreshTokenTtl`                                   | number   | `2592000`       | Refresh-token (family) lifetime in seconds (default 30 days)                                                                                                                                                                            |
 
 Sensitive leaves inside `mcp` support `${ENV_VAR}` expansion (e.g., `initialAccessToken: ${OAUTH_MCP_REGISTRATION_TOKEN}`), the same way provider credentials do.
 
 **Discovery endpoints** (served when `mcp.enabled: true`):
 
-| Path                                      | Spec     | Purpose                                                                              |
-| ----------------------------------------- | -------- | ------------------------------------------------------------------------------------ |
-| `/.well-known/oauth-protected-resource`   | RFC 9728 | Tells MCP clients where to find the authorization server                             |
-| `/.well-known/oauth-authorization-server` | RFC 8414 | Advertises authorize / token / register / JWKS endpoints and supported methods       |
-| `/.well-known/jwks.json`                  | —        | Public keys for verifying issued JWTs (returns an empty key set until signing lands) |
+| Path                                      | Spec     | Purpose                                                                                          |
+| ----------------------------------------- | -------- | ------------------------------------------------------------------------------------------------ |
+| `/.well-known/oauth-protected-resource`   | RFC 9728 | Tells MCP clients where to find the authorization server                                         |
+| `/.well-known/oauth-authorization-server` | RFC 8414 | Advertises authorize / token / register / JWKS endpoints and supported methods                   |
+| `/.well-known/jwks.json`                  | —        | Public keys for verifying issued JWTs (returns an empty key set until the first token is minted) |
 
 All three documents include `Access-Control-Allow-Origin: *` so browser-based MCP clients and discovery tools can fetch them cross-origin.
 
 #### Protecting your MCP route — `withMCPAuth`
 
-The plugin issues and verifies tokens, but your app owns the MCP endpoint. Wrap your handler with `withMCPAuth` to enforce the spec contract on it:
+Your app owns the MCP endpoint; wrap your handler with `withMCPAuth` to verify the issued tokens on it — fail-closed bearer-token validation that emits the RFC 9728 `WWW-Authenticate` challenge on rejection and attaches `request.mcp = { sub, client_id, aud, scope }` on success. Registration matters (Harper's core auth otherwise consumes the bearer token), so see **[MCP OAuth → The `withMCPAuth` wrapper](./mcp-oauth.md#the-withmcpauth-wrapper)** for the registration models, the full options reference, and using the wrapper from a separate component.
 
-```ts
-import { server } from 'harper';
-import { withMCPAuth } from '@harperfast/oauth';
-
-const mcpHandler = (request) => {
-	// On success, the verified claims are attached: { sub, client_id, aud, scope }
-	return { status: 200, body: JSON.stringify({ user: request.mcp.sub }) };
-};
-
-// Recommended registration — a urlPath subroute (see "Registration", below):
-server.http(withMCPAuth(mcpHandler), { urlPath: '/mcp' });
-```
-
-What it enforces on every request, failing closed with `401 + WWW-Authenticate: Bearer resource_metadata="<PRM URL>"`. The PRM URL is the RFC 9728 §3.1 location for the configured `mcp.resource` — `<resource-origin>/.well-known/oauth-protected-resource` with the resource's path appended when it has one (e.g. `https://app.example.com/.well-known/oauth-protected-resource/mcp` for resource `https://app.example.com/mcp`), matching exactly what the well-known handler serves:
-
-- Bearer token present in the `Authorization` header (header-only; query-string tokens are ignored, RFC 6750).
-- Valid RS256 signature against the published JWKS, selecting the key by the token's `kid`.
-- `exp`/`nbf` within bounds, and `aud` equal to `mcp.resource` (audience binding, RFC 8707).
-- MCP enabled and a signing key published — while either is missing, all requests are rejected.
-
-On success it sets `request.mcp = { sub, client_id, aud, scope }` and calls your handler, returning its response unchanged.
-
-**Registration.** Harper's core auth is a default-group middleware that consumes `Authorization: Bearer` and rejects any non-Harper token with `WWW-Authenticate: Basic` — which would break MCP discovery. Register `withMCPAuth` so it owns the response for its route:
-
-- **urlPath subroute (recommended):** `server.http(withMCPAuth(handler), { urlPath: '/mcp' })`. Harper's routed dispatch runs only this chain, so core auth never runs for the route — the same isolation the `/.well-known/*` endpoints rely on. No extra options needed.
-- **Default-group fallback:** `server.http(withMCPAuth(handler, { path: '/mcp' }), { before: 'authentication' })`. When the route shares the default chain with auth, pass `path` (the guard then scopes to that path and calls `next()` for everything else) and register `before: 'authentication'` so it runs ahead of core auth. In this mode the wrapped handler must terminate the request rather than call `next`, or core auth runs afterward and re-rejects the token.
-
-**Options** — `withMCPAuth(handler, options?)`:
-
-| Option        | Type                           | Default                | Description                                                                                        |
-| ------------- | ------------------------------ | ---------------------- | -------------------------------------------------------------------------------------------------- |
-| `path`        | string                         | (none)                 | Default-group scoping only — the path this guard owns. Omit for the urlPath-subroute registration. |
-| `onAuthError` | `(request, reason) => any`     | (none)                 | Custom denial response. A falsy return still falls back to the default `401` (fail closed).        |
-| `getConfig`   | `() => MCPConfig \| undefined` | live plugin MCP config | Override the MCP config source (read per request).                                                 |
-| `logger`      | Logger                         | plugin logger          | Override the logger.                                                                               |
-| `keyStore`    | `{ getAllPublicKeys() }`       | plugin `MCPKeyStore`   | Override the signing-key source (used by tests).                                                   |
-
-##### Using `withMCPAuth` from a different component than the plugin
-
-By default `withMCPAuth` reads the live MCP config from the OAuth plugin via `OAuthResource.mcpConfig`. That works when the component that **declares** `@harperfast/oauth` is the same one that exposes the MCP route. If your MCP tools live in a **separate** component (it imports `withMCPAuth` as a function but doesn't declare the plugin in its own `config.yaml`), that consumer resolves its **own** `node_modules` copy of the package, where `OAuthResource.mcpConfig` is a module-local static that is never populated — so it reads as `undefined` and the guard fails closed.
-
-In that setup, **inject `getConfig`** so the wrapper sees the config:
-
-```ts
-server.http(
-	withMCPAuth(mcpHandler, {
-		// Pin issuer/resource to the values the plugin component issues tokens with,
-		// so the iss/aud checks match the minted tokens.
-		getConfig: () => ({
-			enabled: true,
-			issuer: 'https://my-app.example.com',
-			resource: 'https://my-app.example.com/mcp',
-		}),
-	}),
-	{ urlPath: '/mcp' }
-);
-```
-
-Signing keys need no extra wiring: the default `MCPKeyStore` reads `databases.oauth.harper_oauth_mcp_keys`, which is cluster-global, so the consumer verifies against the same JWKS the plugin component mints with. Importing `withMCPAuth` as a function does **not** spin up a second plugin instance.
+**Security:** before exposing MCP OAuth publicly, work through the [production-deployment checklist](./mcp-oauth.md#production-deployment) — pin `issuer`, gate Dynamic Client Registration, restrict redirect-URI hosts, serve over HTTPS, and (in clusters) pin `signingKeyPem`.
 
 ## Environment Variables
 
