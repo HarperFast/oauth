@@ -2,7 +2,7 @@
  * Tests for the MCP callback branch (handleMCPCallback).
  *
  * Verifies it mints an authorization code, persists the binding fields,
- * redirects to the client's redirect_uri with `code` + echoed `state`,
+ * redirects to the client's redirect_uri with `code` + echoed `state` + RFC 9207 `iss`,
  * and never leaks upstream-provider token material in the response.
  */
 
@@ -22,6 +22,16 @@ const SAMPLE_MCP_STATE = {
 };
 
 const SAMPLE_USER_ID = 'alice@example.com';
+
+const SAMPLE_MCP_CONFIG = {
+	issuer: 'https://as.example.com',
+	enabled: true,
+};
+
+// Minimal request stub — handleMCPCallback delegates issuer resolution to
+// resolveIssuer(request, mcpConfig); with a configured issuer the request
+// fields are not consulted.
+const SAMPLE_REQUEST = { protocol: 'https', host: 'app.example.com', headers: { host: 'app.example.com' } };
 
 describe('handleMCPCallback', () => {
 	let originalDatabases;
@@ -54,7 +64,7 @@ describe('handleMCPCallback', () => {
 	});
 
 	it('mints an auth code and persists the binding fields', async () => {
-		const response = await handleMCPCallback({}, SAMPLE_MCP_STATE, SAMPLE_USER_ID);
+		const response = await handleMCPCallback(SAMPLE_REQUEST, SAMPLE_MCP_STATE, SAMPLE_USER_ID, SAMPLE_MCP_CONFIG);
 		assert.equal(response.status, 302);
 		assert.equal(storedRecords.size, 1);
 		const [record] = storedRecords.values();
@@ -70,25 +80,45 @@ describe('handleMCPCallback', () => {
 	});
 
 	it('redirects to the client redirect_uri with code and echoed state', async () => {
-		const response = await handleMCPCallback({}, SAMPLE_MCP_STATE, SAMPLE_USER_ID);
+		const response = await handleMCPCallback(SAMPLE_REQUEST, SAMPLE_MCP_STATE, SAMPLE_USER_ID, SAMPLE_MCP_CONFIG);
 		const url = new URL(response.headers.Location);
 		assert.equal(url.origin + url.pathname, SAMPLE_MCP_STATE.redirectUri);
 		assert.ok(url.searchParams.get('code'));
 		assert.equal(url.searchParams.get('state'), SAMPLE_MCP_STATE.clientState);
 	});
 
+	it('includes iss on the success redirect (RFC 9207)', async () => {
+		const response = await handleMCPCallback(SAMPLE_REQUEST, SAMPLE_MCP_STATE, SAMPLE_USER_ID, SAMPLE_MCP_CONFIG);
+		const url = new URL(response.headers.Location);
+		assert.equal(url.searchParams.get('iss'), SAMPLE_MCP_CONFIG.issuer, 'iss must equal the configured issuer');
+	});
+
+	it('derives iss from the request when issuer is not configured', async () => {
+		const configWithoutIssuer = { enabled: true };
+		const response = await handleMCPCallback(SAMPLE_REQUEST, SAMPLE_MCP_STATE, SAMPLE_USER_ID, configWithoutIssuer);
+		const url = new URL(response.headers.Location);
+		assert.equal(url.searchParams.get('iss'), 'https://app.example.com', 'iss must derive from request scheme+host');
+	});
+
 	it('omits state when the MCP client did not send one', async () => {
 		const { clientState, ...stateWithoutClientState } = SAMPLE_MCP_STATE;
 		void clientState;
-		const response = await handleMCPCallback({}, stateWithoutClientState, SAMPLE_USER_ID);
+		const response = await handleMCPCallback(
+			SAMPLE_REQUEST,
+			stateWithoutClientState,
+			SAMPLE_USER_ID,
+			SAMPLE_MCP_CONFIG
+		);
 		const url = new URL(response.headers.Location);
 		assert.equal(url.searchParams.has('state'), false);
 		assert.ok(url.searchParams.get('code'));
+		// iss is always present regardless of state
+		assert.ok(url.searchParams.get('iss'));
 	});
 
 	it('generates a fresh code per invocation (no reuse across requests)', async () => {
-		const a = await handleMCPCallback({}, SAMPLE_MCP_STATE, SAMPLE_USER_ID);
-		const b = await handleMCPCallback({}, SAMPLE_MCP_STATE, SAMPLE_USER_ID);
+		const a = await handleMCPCallback(SAMPLE_REQUEST, SAMPLE_MCP_STATE, SAMPLE_USER_ID, SAMPLE_MCP_CONFIG);
+		const b = await handleMCPCallback(SAMPLE_REQUEST, SAMPLE_MCP_STATE, SAMPLE_USER_ID, SAMPLE_MCP_CONFIG);
 		const codeA = new URL(a.headers.Location).searchParams.get('code');
 		const codeB = new URL(b.headers.Location).searchParams.get('code');
 		assert.notEqual(codeA, codeB);
@@ -99,18 +129,20 @@ describe('handleMCPCallback', () => {
 		mockTable.put = async () => {
 			throw new Error('db write failure');
 		};
-		const response = await handleMCPCallback({}, SAMPLE_MCP_STATE, SAMPLE_USER_ID);
+		const response = await handleMCPCallback(SAMPLE_REQUEST, SAMPLE_MCP_STATE, SAMPLE_USER_ID, SAMPLE_MCP_CONFIG);
 		assert.equal(response.status, 302);
 		const url = new URL(response.headers.Location);
 		assert.equal(url.origin + url.pathname, SAMPLE_MCP_STATE.redirectUri);
 		assert.equal(url.searchParams.get('error'), 'server_error');
 		assert.equal(url.searchParams.get('state'), SAMPLE_MCP_STATE.clientState);
+		// RFC 9207: iss must appear on error redirects too
+		assert.equal(url.searchParams.get('iss'), SAMPLE_MCP_CONFIG.issuer);
 	});
 
 	it('never includes upstream provider token in the redirect URL', async () => {
 		// `handleMCPCallback` signature doesn't take a token — that's the guard.
 		// But assert no field on the response references known token-ish names.
-		const response = await handleMCPCallback({}, SAMPLE_MCP_STATE, SAMPLE_USER_ID);
+		const response = await handleMCPCallback(SAMPLE_REQUEST, SAMPLE_MCP_STATE, SAMPLE_USER_ID, SAMPLE_MCP_CONFIG);
 		const location = response.headers.Location;
 		for (const banned of ['access_token', 'refresh_token', 'id_token', 'token_type']) {
 			assert.ok(!location.includes(banned), `${banned} must not appear in MCP redirect URL`);

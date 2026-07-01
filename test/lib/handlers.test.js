@@ -563,6 +563,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
+				undefined,
 				mockLogger
 			);
 
@@ -587,6 +588,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'target-company', // But callback is for this provider
+				undefined,
 				mockLogger
 			);
 
@@ -699,6 +701,11 @@ describe('OAuth Handlers', () => {
 			clientState: 'mcp-state-xyz',
 		};
 
+		const MCP_CONFIG = {
+			issuer: 'https://as.example.com',
+			enabled: true,
+		};
+
 		beforeEach(async () => {
 			({ resetMCPAuthCodesTableCache } = await import('../../dist/lib/mcp/authCodeStore.js'));
 			resetMCPAuthCodesTableCache();
@@ -733,6 +740,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
+				MCP_CONFIG,
 				mockLogger
 			);
 			assert.equal(result.status, 302);
@@ -741,6 +749,46 @@ describe('OAuth Handlers', () => {
 			assert.ok(url.searchParams.get('code'));
 			assert.equal(url.searchParams.get('state'), MCP_STATE.clientState);
 			assert.equal(storedAuthCodes.size, 1);
+			global.databases = originalDatabases;
+		});
+
+		it('includes iss on success redirect (RFC 9207, handler-level)', async () => {
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				MCP_CONFIG,
+				mockLogger
+			);
+			const url = new URL(result.headers.Location);
+			assert.equal(url.searchParams.get('iss'), MCP_CONFIG.issuer, 'iss must equal the configured issuer on success');
+			global.databases = originalDatabases;
+		});
+
+		it('includes iss on error redirect (RFC 9207, handler-level mcpErrorRedirect)', async () => {
+			mockTarget.get = createMockFn((key) => {
+				const params = {
+					state: 'csrf-token-123',
+					error: 'access_denied',
+					error_description: 'User denied authorization',
+				};
+				return params[key];
+			});
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				MCP_CONFIG,
+				mockLogger
+			);
+			const url = new URL(result.headers.Location);
+			assert.equal(url.searchParams.get('iss'), MCP_CONFIG.issuer, 'iss must appear on MCP error redirects');
 			global.databases = originalDatabases;
 		});
 
@@ -753,6 +801,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
+				MCP_CONFIG,
 				mockLogger
 			);
 			assert.equal(result.status, 302);
@@ -777,6 +826,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
+				MCP_CONFIG,
 				mockLogger
 			);
 			assert.equal(result.status, 302);
@@ -800,6 +850,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
+				MCP_CONFIG,
 				mockLogger
 			);
 			assert.equal(result.status, 302);
@@ -817,6 +868,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
+				MCP_CONFIG,
 				mockLogger
 			);
 			const location = result.headers.Location;
@@ -834,6 +886,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				mockHookManager,
 				'test-provider',
+				MCP_CONFIG,
 				mockLogger
 			);
 			// session.update must not have been called for the MCP branch
@@ -858,6 +911,7 @@ describe('OAuth Handlers', () => {
 				mockConfig,
 				trackingHookManager,
 				'test-provider',
+				MCP_CONFIG,
 				mockLogger
 			);
 
