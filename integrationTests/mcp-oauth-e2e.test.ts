@@ -185,10 +185,13 @@ suite('MCP OAuth Stage 7: full round-trip e2e', (ctx: ContextWithHarper) => {
 	});
 
 	after(async () => {
-		await teardownHarper(ctx);
-		// Guard: if startStubIdp rejected in before(), closeIdp is undefined —
-		// calling it would throw a TypeError that masks the real setup failure.
-		await closeIdp?.();
+		try {
+			await teardownHarper(ctx);
+		} finally {
+			// Always close the stub IdP, even if teardownHarper throws — otherwise the
+			// server leaks. Guarded (?.) in case startStubIdp rejected in before().
+			await closeIdp?.();
+		}
 	});
 
 	// ── Step 1: unauthenticated GET /mcp → 401 + Bearer challenge ────────────
