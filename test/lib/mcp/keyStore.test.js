@@ -258,9 +258,10 @@ describe('MCPKeyStore', () => {
 		assert.equal(signer.private_key_pem, privateKey, 'pinned key is the signer');
 	});
 
-	it('pin wins over rotation: signingKeyPem prevents rotation even with keyRotationInterval set', async () => {
-		// Seed an aged key that would normally trigger rotation.
-		const veryOldKey = seedKey(stored, { kid: 'old-key', created_at: 1_000_000 });
+	it('pin wins over rotation: signingKeyPem persists the pinned key and skips rotation', async () => {
+		// Seed an aged key that would normally trigger rotation. Note: kid ≠ SIGNING_KEY_ID
+		// so SIGNING_KEY_ID is free for the pinned key.
+		seedKey(stored, { kid: 'old-key', created_at: 1_000_000 });
 
 		const { privateKey } = generateKeyPairSync('rsa', {
 			modulusLength: 2048,
@@ -268,16 +269,153 @@ describe('MCPKeyStore', () => {
 			privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
 		});
 
-		await store.getSigningKey({
+		const signer = await store.getSigningKey({
 			signingKeyPem: privateKey,
 			keyRotationInterval: 1, // would rotate if not pinned
 			accessTokenTtl: 3600,
 		});
 
-		// No rotation key should have been added — pin skips the rotation path.
-		assert.equal(stored.size, 1, 'no rotation key generated when pinned');
-		// The existing key is still the signer (pin doesn't overwrite existing keys).
-		assert.ok(stored.has(veryOldKey.kid), 'original key unchanged');
+		// Pinned key was persisted under rs256-default (free because old-key ≠ SIGNING_KEY_ID).
+		// No rotation key was generated.
+		assert.equal(stored.size, 2, 'pinned key added; old key retained for JWKS overlap');
+		assert.ok(stored.has('old-key'), 'old key untouched');
+		assert.ok(stored.has(SIGNING_KEY_ID), 'pinned key stored under rs256-default');
+		assert.equal(signer.private_key_pem, privateKey, 'pinned key signs');
+	});
+
+	it('pin wins after unpinned first boot: pinned PEM is persisted and becomes signer', async () => {
+		// An unpinned node already minted a UUID key.
+		const { privateKey: existingPrivKey, publicKey: existingPubKey } = generateKeyPairSync('rsa', {
+			modulusLength: 2048,
+			publicKeyEncoding: { type: 'spki', format: 'pem' },
+			privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+		});
+		const uuidKid = 'aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb';
+		stored.set(uuidKid, {
+			kid: uuidKid,
+			alg: 'RS256',
+			public_key_pem: existingPubKey,
+			private_key_pem: existingPrivKey,
+			created_at: Math.floor(Date.now() / 1000) - 60,
+		});
+
+		const { privateKey: pinnedPrivKey } = generateKeyPairSync('rsa', {
+			modulusLength: 2048,
+			publicKeyEncoding: { type: 'spki', format: 'pem' },
+			privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+		});
+
+		// Now configure the pin.
+		const signer = await store.getSigningKey({ signingKeyPem: pinnedPrivKey, accessTokenTtl: 3600 });
+
+		// Pinned key persisted under rs256-default (UUID key ≠ SIGNING_KEY_ID).
+		assert.equal(stored.size, 2, 'pinned key added; UUID key retained for JWKS overlap');
+		assert.ok(stored.has(uuidKid), 'UUID key still in table for JWKS overlap');
+		assert.ok(stored.has(SIGNING_KEY_ID), 'pinned key stored under rs256-default');
+		assert.equal(signer.private_key_pem, pinnedPrivKey, 'pinned key is the signer');
+
+		// A token signed by the UUID key MUST still verify (JWKS overlap window).
+		const oldKeyRecord = {
+			kid: uuidKid,
+			alg: 'RS256',
+			public_key_pem: existingPubKey,
+			private_key_pem: existingPrivKey,
+			created_at: Math.floor(Date.now() / 1000) - 60,
+		};
+		const { token } = signAccessToken(
+			{
+				issuer: 'https://as.example.com',
+				subject: 'alice',
+				audience: 'https://app.example.com/mcp',
+				clientId: 'client-1',
+				ttlSeconds: 3600,
+			},
+			oldKeyRecord
+		);
+		const allKeys = await store.getAllPublicKeys();
+		assert.doesNotThrow(() =>
+			verifyAccessTokenWithKeySet(token, allKeys, {
+				audience: 'https://app.example.com/mcp',
+				issuer: 'https://as.example.com',
+			})
+		);
+	});
+
+	it('pin recognized when legacy rs256-default already holds the MATCHING material', async () => {
+		// Table already has the pinned key under rs256-default (e.g. configured since first boot).
+		const { privateKey } = generateKeyPairSync('rsa', {
+			modulusLength: 2048,
+			publicKeyEncoding: { type: 'spki', format: 'pem' },
+			privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+		});
+		const pinnedPublicKey = createPublicKey(privateKey).export({ type: 'spki', format: 'pem' });
+		stored.set(SIGNING_KEY_ID, {
+			kid: SIGNING_KEY_ID,
+			alg: 'RS256',
+			public_key_pem: pinnedPublicKey,
+			private_key_pem: privateKey,
+			created_at: Math.floor(Date.now() / 1000) - 3600,
+		});
+
+		const signer = await store.getSigningKey({ signingKeyPem: privateKey, accessTokenTtl: 3600 });
+
+		// Found by material match — NO new row written.
+		assert.equal(stored.size, 1, 'no new row when matching material already exists');
+		assert.equal(signer.kid, SIGNING_KEY_ID, 'existing row is the signer');
+		assert.equal(signer.private_key_pem, privateKey, 'pinned key signs');
+	});
+
+	it('pin while rs256-default holds DIFFERENT material: fingerprint kid used, rs256-default untouched', async () => {
+		// rs256-default exists with different (legacy-generated) material.
+		const { privateKey: legacyPrivKey, publicKey: legacyPubKey } = generateKeyPairSync('rsa', {
+			modulusLength: 2048,
+			publicKeyEncoding: { type: 'spki', format: 'pem' },
+			privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+		});
+		stored.set(SIGNING_KEY_ID, {
+			kid: SIGNING_KEY_ID,
+			alg: 'RS256',
+			public_key_pem: legacyPubKey,
+			private_key_pem: legacyPrivKey,
+			created_at: Math.floor(Date.now() / 1000) - 3600,
+		});
+
+		const { privateKey: pinnedPrivKey } = generateKeyPairSync('rsa', {
+			modulusLength: 2048,
+			publicKeyEncoding: { type: 'spki', format: 'pem' },
+			privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+		});
+
+		const signer = await store.getSigningKey({ signingKeyPem: pinnedPrivKey, accessTokenTtl: 3600 });
+
+		// Pinned key gets a fingerprint kid; rs256-default is untouched.
+		assert.equal(stored.size, 2, 'fingerprint kid row added alongside rs256-default');
+		assert.ok(stored.has(SIGNING_KEY_ID), 'legacy rs256-default row preserved');
+		assert.notEqual(signer.kid, SIGNING_KEY_ID, 'signer is the fingerprint-kid row, not rs256-default');
+		assert.ok(signer.kid.startsWith('pinned-'), 'signer kid has the fingerprint prefix');
+		assert.equal(signer.private_key_pem, pinnedPrivKey, 'pinned key signs');
+
+		// Determinism: calling again with the same PEM yields the same kid.
+		resetMCPKeysTableCache();
+		const store2 = new MCPKeyStore();
+		const signer2 = await store2.getSigningKey({ signingKeyPem: pinnedPrivKey, accessTokenTtl: 3600 });
+		assert.equal(signer2.kid, signer.kid, 'deterministic kid: same PEM → same kid');
+		assert.equal(stored.size, 2, 'idempotent: no second fingerprint row written');
+	});
+
+	it('idempotent: calling getSigningKey twice with the same pin produces exactly one pinned row', async () => {
+		const { privateKey } = generateKeyPairSync('rsa', {
+			modulusLength: 2048,
+			publicKeyEncoding: { type: 'spki', format: 'pem' },
+			privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+		});
+
+		const cfg = { signingKeyPem: privateKey, accessTokenTtl: 3600 };
+		await store.getSigningKey(cfg);
+		resetMCPKeysTableCache();
+		await new MCPKeyStore().getSigningKey(cfg);
+
+		assert.equal(stored.size, 1, 'exactly one pinned row after two calls');
 	});
 
 	// ---- GC ----
