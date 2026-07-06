@@ -316,8 +316,13 @@ export class MCPKeyStore {
 		let afterWrite: MCPSigningKeyRecord[] = [];
 		try {
 			afterWrite = await this.enumerateKeys();
-		} catch {
-			// fall through to the local record
+		} catch (error) {
+			// Fall through to the local record — the write already succeeded; log so
+			// transient read failures are diagnosable in clustered environments.
+			this.logger?.debug?.(
+				'MCP keys: post-write re-enumeration failed; using local fallback:',
+				error instanceof Error ? error.message : String(error)
+			);
 		}
 		const allAfterWrite = afterWrite.length > 0 ? afterWrite : [...allKeys, record];
 
@@ -365,8 +370,13 @@ export class MCPKeyStore {
 		let afterWrite: MCPSigningKeyRecord[] = [];
 		try {
 			afterWrite = await this.enumerateKeys();
-		} catch {
-			// fall through to the local record
+		} catch (error) {
+			// Fall through to the local record — the write already succeeded; log so
+			// transient read failures are diagnosable in clustered environments.
+			this.logger?.debug?.(
+				'MCP keys: post-write re-enumeration failed; using local fallback:',
+				error instanceof Error ? error.message : String(error)
+			);
 		}
 		return afterWrite.length > 0 ? afterWrite : [record];
 	}
@@ -398,8 +408,13 @@ export class MCPKeyStore {
 		let afterRotate: MCPSigningKeyRecord[] = [];
 		try {
 			afterRotate = await this.enumerateKeys();
-		} catch {
-			// fall through
+		} catch (error) {
+			// Fall through to the local fallback — the write already succeeded; log so
+			// transient read failures are diagnosable in clustered environments.
+			this.logger?.debug?.(
+				'MCP keys: post-write re-enumeration failed; using local fallback:',
+				error instanceof Error ? error.message : String(error)
+			);
 		}
 		return afterRotate.length > 0 ? afterRotate : [...currentKeys, newKey];
 	}
