@@ -379,10 +379,14 @@ A checklist before you expose MCP OAuth publicly:
 - [ ] **Restrict redirect URI hosts** with
       `mcp.dynamicClientRegistration.allowedRedirectUriHosts`. Loopback is always
       allowed for native clients (RFC 8252).
-- [ ] **Set `mcp.signingKeyPem` in clusters.** The signing key is a single row at
-      a fixed key id. Without a configured PEM, two nodes can each generate a
-      different key on first mint and sign tokens the published JWKS doesn't list
-      until replication converges. Provide the **same** PEM on every node.
+- [ ] **Review cluster signing-key strategy.** The plugin publishes _all_ persisted
+      signing keys in the JWKS, so a token signed by any node's key is always
+      verifiable — the clustered first-boot race is no longer a hard blocker.
+      Two strategies: - _Recommended for production_: set `mcp.signingKeyPem` to the **same** PEM
+      on every node. One canonical key, no race, no rotation. - _Without a pinned key_: each node generates its own key on first mint, and
+      all of them are published in the JWKS. Tokens verify across nodes once
+      replication converges (within seconds). Enable `mcp.keyRotationInterval` to
+      roll keys automatically (see below).
 - [ ] **Resolve to exactly one provider.** v1 requires a single eligible upstream
       provider. If you configure more than one globally, set `mcp.providers` to the
       one that should serve the MCP flow, or `/oauth/mcp/authorize` returns
@@ -409,8 +413,10 @@ use the default-group fallback with `{ before: 'authentication' }`. See
 **Token verification fails right after enabling MCP.** `GET /.well-known/jwks.json`
 returns an empty key set until the first token is minted — the signing key is
 created lazily. Complete one authorization flow and the key (and JWKS entry)
-appear. In a cluster, an empty or mismatched JWKS after traffic usually means
-`mcp.signingKeyPem` isn't pinned (see [Production deployment](#production-deployment)).
+appear. In a cluster, an empty JWKS after traffic usually means no token has been minted
+yet (the key is generated lazily). A mismatched JWKS (token signed by a key not
+in the set) can happen in the brief window before replication converges; it
+resolves automatically once the key table replicates.
 
 **`/oauth/mcp/authorize` returns `server_error`.** More than one upstream provider
 resolved as eligible. Set `mcp.providers` to exactly one.
@@ -443,11 +449,47 @@ Point your MCP clients at the same route; they rediscover the endpoints via the
 
 ---
 
+## Signing-key rotation
+
+By default, the plugin generates one RS256 keypair per node on first mint and
+keeps it indefinitely. The JWKS endpoint publishes **all** persisted keys, so
+tokens signed by any node's key are always verifiable — the cluster first-boot
+race is resolved without any manual coordination.
+
+To roll signing keys automatically, set `mcp.keyRotationInterval` (seconds):
+
+```yaml
+mcp:
+  enabled: true
+  issuer: https://my-app.example.com
+  keyRotationInterval: 86400 # rotate once a day
+  accessTokenTtl: 3600
+```
+
+When the newest key's age exceeds `keyRotationInterval`, a new UUID-kid keypair
+is generated at the next token mint. The old key **remains in the JWKS** until
+every token it signed can no longer be valid (`2 × accessTokenTtl` after the
+newer key's creation time), then it is garbage-collected. During that overlap
+window, both old and new tokens verify correctly.
+
+**Pin vs rotation — mutually exclusive.** `mcp.signingKeyPem` and
+`mcp.keyRotationInterval` conflict: the pin prevents rotation (a pinned key is
+identical everywhere; rotating it would invalidate that identity). If both are
+set, a warning is logged at startup and rotation is silently skipped. Pick one:
+
+| Goal                                             | Config                    |
+| ------------------------------------------------ | ------------------------- |
+| Fixed key, identical everywhere (zero race risk) | `mcp.signingKeyPem`       |
+| Automatic rotation, lazy JWKS GC                 | `mcp.keyRotationInterval` |
+| No rotation, no pin (single node or low-traffic) | neither                   |
+
+---
+
 ## Not yet supported (v1.1+)
 
 These are **not** available and no config or code sample here implies them:
 
 - Per-tool / fine-grained scopes (the `scope` claim is passed through, not enforced per tool)
 - Transitive revocation (revoking the upstream IdP session does not invalidate already-issued MCP tokens)
-- Signing algorithms other than RS256, and multi-key JWKS / key rotation
+- Signing algorithms other than RS256
 - A native, composed MCP server (this plugin is the authorization server, not the MCP transport)

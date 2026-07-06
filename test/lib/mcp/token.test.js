@@ -37,6 +37,11 @@ function makeTable(map, pkField) {
 		delete: async (id) => {
 			map.delete(id);
 		},
+		search: async function* () {
+			for (const rec of map.values()) {
+				yield asTrackedObject(rec);
+			}
+		},
 	};
 }
 
