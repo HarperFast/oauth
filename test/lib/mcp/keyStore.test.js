@@ -95,9 +95,14 @@ describe('MCPKeyStore', () => {
 		assert.deepEqual(await store.getAllPublicKeys(), []);
 	});
 
-	it('generates and persists an RS256 keypair on first use', async () => {
+	it('generates and persists an RS256 keypair under a UNIQUE kid on first use', async () => {
 		const key = await store.getSigningKey();
-		assert.equal(key.kid, SIGNING_KEY_ID);
+		// Generated first-boot keys must NOT share the fixed legacy kid: two nodes
+		// racing first boot generate different keypairs, and a shared primary key
+		// would let one overwrite the other — stranding the loser's already-signed
+		// tokens with a kid whose JWKS entry is a different public key.
+		assert.notEqual(key.kid, SIGNING_KEY_ID, 'generated key gets a unique kid, not the legacy fixed kid');
+		assert.match(key.kid, /^[0-9a-f-]{36}$/, 'generated kid is a UUID');
 		assert.equal(key.alg, 'RS256');
 		assert.match(key.public_key_pem, /BEGIN PUBLIC KEY/);
 		assert.match(key.private_key_pem, /BEGIN PRIVATE KEY/);
@@ -125,10 +130,10 @@ describe('MCPKeyStore', () => {
 	});
 
 	it('publishes the public key in the JWKS set once a key exists', async () => {
-		await store.getSigningKey();
+		const signer = await store.getSigningKey();
 		const keys = await store.getAllPublicKeys();
 		assert.equal(keys.length, 1);
-		assert.equal(keys[0].kid, SIGNING_KEY_ID);
+		assert.equal(keys[0].kid, signer.kid);
 	});
 
 	// ---- Multi-key: two keys in table ----
@@ -336,6 +341,42 @@ describe('MCPKeyStore', () => {
 		// Should resolve to the current signer without throwing.
 		const signer = await store.getSigningKey({ accessTokenTtl: 3600 });
 		assert.equal(signer.kid, currentKey.kid, 'minting still works despite GC failure');
+	});
+
+	it("GC keys off each key's IMMEDIATE SUCCESSOR, not the current signer (no accumulation)", async () => {
+		// Regression for the accumulation bug: with a fresh signer, a signer-age
+		// rule never fires and retired keys pile up forever. The successor rule
+		// deletes oldest-key because ITS successor (middle-key) is old enough,
+		// even though the signer is brand new.
+		const nowSeconds = Math.floor(Date.now() / 1000);
+		seedKey(stored, { kid: 'oldest-key', created_at: nowSeconds - 20_000 });
+		seedKey(stored, { kid: 'middle-key', created_at: nowSeconds - 10_000 }); // > 2×3600 ago
+		seedKey(stored, { kid: 'signer-key', created_at: nowSeconds - 10 }); // fresh — signer-age rule would never fire
+
+		await store.getSigningKey({ accessTokenTtl: 3600 });
+		await new Promise((resolve) => setImmediate(resolve));
+
+		assert.ok(!stored.has('oldest-key'), 'oldest key GCd — its successor (middle-key) is past the window');
+		assert.ok(stored.has('middle-key'), 'middle key retained — its successor (signer) is too fresh');
+		assert.ok(stored.has('signer-key'), 'signer retained');
+	});
+
+	// ---- Enumeration errors ----
+
+	it('getSigningKey PROPAGATES enumeration errors instead of generating spurious keys', async () => {
+		global.databases.oauth.harper_oauth_mcp_keys.search = async function* () {
+			throw new Error('simulated table read failure');
+		};
+
+		await assert.rejects(store.getSigningKey({ accessTokenTtl: 3600 }), /simulated table read failure/);
+		assert.equal(stored.size, 0, 'no key generated on a transient read error');
+	});
+
+	it('getAllPublicKeys returns an empty set on enumeration error (JWKS must not 500)', async () => {
+		global.databases.oauth.harper_oauth_mcp_keys.search = async function* () {
+			throw new Error('simulated table read failure');
+		};
+		assert.deepEqual(await store.getAllPublicKeys(), []);
 	});
 
 	// ---- Legacy compat ----
