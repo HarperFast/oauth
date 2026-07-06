@@ -363,19 +363,23 @@ describe('MCPKeyStore', () => {
 
 	// ---- Enumeration errors ----
 
+	// A generator that throws before yielding anything — simulates a table read
+	// failure surfacing on the first iteration. (Plain throw keeps eslint's
+	// require-yield satisfied via the unreachable yield.)
+	async function* failingSearch() {
+		throw new Error('simulated table read failure');
+		yield undefined; // eslint-disable-line no-unreachable
+	}
+
 	it('getSigningKey PROPAGATES enumeration errors instead of generating spurious keys', async () => {
-		global.databases.oauth.harper_oauth_mcp_keys.search = async function* () {
-			throw new Error('simulated table read failure');
-		};
+		global.databases.oauth.harper_oauth_mcp_keys.search = failingSearch;
 
 		await assert.rejects(store.getSigningKey({ accessTokenTtl: 3600 }), /simulated table read failure/);
 		assert.equal(stored.size, 0, 'no key generated on a transient read error');
 	});
 
 	it('getAllPublicKeys returns an empty set on enumeration error (JWKS must not 500)', async () => {
-		global.databases.oauth.harper_oauth_mcp_keys.search = async function* () {
-			throw new Error('simulated table read failure');
-		};
+		global.databases.oauth.harper_oauth_mcp_keys.search = failingSearch;
 		assert.deepEqual(await store.getAllPublicKeys(), []);
 	});
 
