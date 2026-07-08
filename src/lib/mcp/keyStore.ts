@@ -194,10 +194,15 @@ function pinnedKidFromPem(publicKeyPem: string): string {
 /**
  * Partition keys into live and retired sets using the successor-age rule.
  *
- * Sorted newest-first: `sorted[0]` is always live (the current signer or
- * candidate). A key at position `i` is retired when its immediate successor
- * (`sorted[i-1]`) was created more than `2 × accessTtl` seconds ago — meaning
- * no token it signed can still be valid, with margin for replication lag.
+ * PRECONDITION: `keys` must already be sorted newest-first (created_at desc,
+ * kid-desc tie-break) — both call sites receive `enumerateKeys` output (or the
+ * sorted local fallbacks), which is pre-sorted at cache population, so no
+ * re-sort happens on the verification/JWKS hot path.
+ *
+ * `keys[0]` is always live (the current signer or candidate). A key at
+ * position `i` is retired when its immediate successor (`keys[i-1]`) was
+ * created more than `2 × accessTtl` seconds ago — meaning no token it signed
+ * can still be valid, with margin for replication lag.
  *
  * Used by both `getAllPublicKeys` (read-time trust expiry) and `garbageCollect`
  * (physical deletion on the mint path).
@@ -208,16 +213,15 @@ function partitionRetired(
 	nowSeconds: number
 ): { live: MCPSigningKeyRecord[]; retired: MCPSigningKeyRecord[] } {
 	if (keys.length <= 1) return { live: keys.slice(), retired: [] };
-	const sorted = sortByNewest(keys);
-	const live: MCPSigningKeyRecord[] = [sorted[0]];
+	const live: MCPSigningKeyRecord[] = [keys[0]];
 	const retired: MCPSigningKeyRecord[] = [];
 	const gcThreshold = 2 * accessTtl;
-	for (let i = 1; i < sorted.length; i++) {
-		const successor = sorted[i - 1];
+	for (let i = 1; i < keys.length; i++) {
+		const successor = keys[i - 1];
 		if (nowSeconds - successor.created_at > gcThreshold) {
-			retired.push(sorted[i]);
+			retired.push(keys[i]);
 		} else {
-			live.push(sorted[i]);
+			live.push(keys[i]);
 		}
 	}
 	return { live, retired };
