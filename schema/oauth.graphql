@@ -84,6 +84,17 @@ type mcp_refresh_families @table(database: "oauth", expiration: 2592000) {
 	expires_at: Float # Unix seconds; refresh rejected once exceeded
 }
 
+## MCP client-assertion replay guard (RFC 7523 jti; #159/#160)
+## One row per seen (client_id, jti); id = sha256(client_id, jti). Rows only
+## need to outlive the maximum assertion window (60s exp + clock tolerance),
+## so a 120s TTL evicts them. See assertionJtiStore.ts for the keying and
+## accepted-race notes (get-then-put, no atomic compare-and-set).
+type mcp_assertion_jtis @table(database: "oauth", expiration: 120) {
+	id: ID @primaryKey
+	client_id: String
+	created_at: Float
+}
+
 ## OAuth User Session table (optional, for future use)
 ## Could store OAuth-specific user data
 # type oauth_sessions @table(database: "oauth") {

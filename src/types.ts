@@ -229,6 +229,20 @@ export interface MCPRefreshFamilyRecord {
 }
 
 /**
+ * MCP client-assertion replay-guard record (table `mcp_assertion_jtis`,
+ * `expiration: 120`).
+ *
+ * `id` is sha256(client_id, jti) — see assertionJtiStore.ts for the keying
+ * and accepted-race notes. Rows only need to outlive the maximum assertion
+ * window; the table TTL evicts them.
+ */
+export interface MCPAssertionJtiRecord {
+	id: string;
+	client_id: string;
+	created_at: number;
+}
+
+/**
  * OAuth Lifecycle Hooks
  * Callbacks invoked at key points in the OAuth flow
  */
