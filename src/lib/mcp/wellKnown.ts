@@ -177,8 +177,8 @@ export function buildAuthorizationServerMetadata(
  * generation (an unauthenticated fetch must not mint key material), so the set
  * is empty until the first access token is issued.
  */
-export async function buildJWKS(_mcpConfig: MCPConfig): Promise<Record<string, unknown>> {
-	const keys = await new MCPKeyStore().getAllPublicKeys();
+export async function buildJWKS(mcpConfig: MCPConfig): Promise<Record<string, unknown>> {
+	const keys = await new MCPKeyStore().getAllPublicKeys(mcpConfig);
 	return { keys: keys.map((k) => publicKeyToJwk(k.public_key_pem, k.kid, k.alg)) };
 }
 

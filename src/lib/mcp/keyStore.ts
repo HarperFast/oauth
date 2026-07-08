@@ -10,22 +10,39 @@
  * Signer selection: the key with the newest `created_at` wins. Tie-break on
  * `kid` descending (lexicographic) for determinism.
  *
+ * Single-flight guard: an in-process `pendingWrite` promise serializes
+ * concurrent key writes (first-boot, rotation, pin-persist) so N concurrent
+ * mints don't each generate a redundant keypair. Cross-node races are handled
+ * by convergence — multi-key JWKS + double-checked locking inside the write
+ * lambda; the guard is per-process only.
+ *
  * Rotation (opt-in via `mcp.keyRotationInterval`): lazy check at token mint —
  * if the newest key is older than the interval a fresh UUID-kid keypair is
  * generated and persisted. Old keys are GC'd once no token they signed can
  * still be valid (2× accessTokenTtl after their immediate successor's
- * created_at). GC runs detached via setImmediate so it never holds the request's
- * transaction context.
+ * created_at). GC runs detached via setImmediate so it never holds the
+ * request's transaction context.
+ *
+ * Read-time retirement: `getAllPublicKeys` applies the same successor-age rule
+ * to EXCLUDE retired keys from the JWKS and from `withMCPAuth` verification —
+ * trust expires by time, not by traffic. Physical deletion (garbageCollect)
+ * still only runs on the mint path; the read path never writes.
+ *
+ * Enumeration cache: raw key records are cached for 5 s to avoid a full-table
+ * scan on every auth-hot-path JWKS or verification call. Any local `put` or
+ * `delete` through `MCPKeyStore` invalidates the cache immediately so a
+ * just-minted key verifies on this node without waiting for TTL expiry. The
+ * retirement filter runs per-call on the cached records (cheap CPU, accurate
+ * time).
  *
  * `mcp.signingKeyPem` (pin wins — ALWAYS): when a pinned key is configured,
  * getSigningKey looks for an existing record whose public_key_pem matches the
- * configured PEM. If found → that record signs (regardless of age/created_at).
- * If not found → the pinned key is persisted (under `rs256-default` when that
- * row is absent; under a deterministic fingerprint kid otherwise so concurrent
- * writes from clustered nodes are idempotent). This means the configured PEM
- * becomes the signer even if the table already has generated keys — not just on
- * first boot. Rotation is skipped while a pin is active; a startup warning is
- * logged if both are set.
+ * configured PEM. If found and already the newest key → sign directly. If
+ * found but NOT the newest → bump created_at (same kid, same material) so the
+ * pin leads the sorted order and the successor-based GC loop can clean up keys
+ * that post-dated the pin. If not found at all → persist under `rs256-default`
+ * (when free) or a deterministic fingerprint kid (when rs256-default holds
+ * different material). Rotation is skipped while a pin is active.
  *
  * Fingerprint kid: `pinned-<first 16 hex chars of sha256(publicKeyPem)>`.
  * Every node derives the same kid from the same PEM, so concurrent writes are
@@ -48,10 +65,34 @@ const generateKeyPairAsync = promisify(generateKeyPair);
 export const SIGNING_KEY_ID = 'rs256-default';
 
 const DEFAULT_ACCESS_TOKEN_TTL = 3600;
+const ENUM_CACHE_TTL_MS = 5_000;
 
 declare const databases: any;
 
 let keysTable: Table | undefined;
+
+// Enumeration cache: stores raw decoded records; retirement filter runs per-call.
+let enumCache: { records: MCPSigningKeyRecord[]; fetchedAt: number } | null = null;
+
+// In-process single-flight guard for key writes. Cross-node races are handled
+// by convergence (multi-key JWKS + double-checked locking inside write lambdas),
+// not by this guard — this is per-process only.
+let pendingWrite: Promise<MCPSigningKeyRecord[]> | null = null;
+
+// Single-entry memo: derive public key from PEM only when PEM changes.
+let pinnedPublicKeyMemo: { pem: string; publicPem: string } | null = null;
+
+// Cache timestamp function — overridable in tests via _setCacheNowMs.
+let _getCacheNowMs: () => number = () => Date.now();
+
+/**
+ * Override the cache clock for testing. Pass null to restore the default.
+ * Not part of the public API.
+ * @internal
+ */
+export function _setCacheNowMs(fn: (() => number) | null): void {
+	_getCacheNowMs = fn ?? (() => Date.now());
+}
 
 function getKeysTable(): Table {
 	if (!keysTable) {
@@ -67,11 +108,18 @@ function getKeysTable(): Table {
 }
 
 /**
- * Reset cached table reference (for testing only).
+ * Reset all module-level state (for testing only).
  * @internal
  */
 export function resetMCPKeysTableCache(): void {
 	keysTable = undefined;
+	enumCache = null;
+	pendingWrite = null;
+	pinnedPublicKeyMemo = null;
+}
+
+function invalidateEnumCache(): void {
+	enumCache = null;
 }
 
 function encodeRecord(record: MCPSigningKeyRecord): Record<string, any> {
@@ -112,6 +160,14 @@ function coerceInterval(value: unknown): number {
 	return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
+/** Sort keys newest-first: `created_at` desc, `kid` desc tie-break. */
+function sortByNewest(keys: MCPSigningKeyRecord[]): MCPSigningKeyRecord[] {
+	return [...keys].sort((a, b) => {
+		if (b.created_at !== a.created_at) return b.created_at - a.created_at;
+		return b.kid > a.kid ? 1 : -1;
+	});
+}
+
 /**
  * Select the active signing key from a non-empty set.
  * Newest `created_at` wins; tie-break on `kid` descending (lexicographic).
@@ -134,6 +190,38 @@ function pinnedKidFromPem(publicKeyPem: string): string {
 	return `pinned-${fingerprint}`;
 }
 
+/**
+ * Partition keys into live and retired sets using the successor-age rule.
+ *
+ * Sorted newest-first: `sorted[0]` is always live (the current signer or
+ * candidate). A key at position `i` is retired when its immediate successor
+ * (`sorted[i-1]`) was created more than `2 × accessTtl` seconds ago — meaning
+ * no token it signed can still be valid, with margin for replication lag.
+ *
+ * Used by both `getAllPublicKeys` (read-time trust expiry) and `garbageCollect`
+ * (physical deletion on the mint path).
+ */
+function partitionRetired(
+	keys: MCPSigningKeyRecord[],
+	accessTtl: number,
+	nowSeconds: number
+): { live: MCPSigningKeyRecord[]; retired: MCPSigningKeyRecord[] } {
+	if (keys.length <= 1) return { live: keys.slice(), retired: [] };
+	const sorted = sortByNewest(keys);
+	const live: MCPSigningKeyRecord[] = [sorted[0]];
+	const retired: MCPSigningKeyRecord[] = [];
+	const gcThreshold = 2 * accessTtl;
+	for (let i = 1; i < sorted.length; i++) {
+		const successor = sorted[i - 1];
+		if (nowSeconds - successor.created_at > gcThreshold) {
+			retired.push(sorted[i]);
+		} else {
+			live.push(sorted[i]);
+		}
+	}
+	return { live, retired };
+}
+
 export class MCPKeyStore {
 	private logger?: Logger;
 
@@ -143,10 +231,22 @@ export class MCPKeyStore {
 
 	/**
 	 * Enumerate all rows in the keys table.
+	 *
+	 * Results are cached for `ENUM_CACHE_TTL_MS` (5 s). Any local write
+	 * (put/delete) invalidates the cache immediately via `invalidateEnumCache()`.
+	 *
+	 * @param bypassCache - Skip the cache and read from the table (used inside
+	 *   write lambdas for double-checked locking). The fresh result still refills
+	 *   the cache for subsequent callers.
+	 *
 	 * PROPAGATES errors — callers on the mint path (getSigningKey) let them
 	 * surface; callers on the read path (getAllPublicKeys) catch and return [].
 	 */
-	private async enumerateKeys(): Promise<MCPSigningKeyRecord[]> {
+	private async enumerateKeys(bypassCache = false): Promise<MCPSigningKeyRecord[]> {
+		const nowMs = _getCacheNowMs();
+		if (!bypassCache && enumCache && nowMs - enumCache.fetchedAt < ENUM_CACHE_TTL_MS) {
+			return enumCache.records;
+		}
 		const table = getKeysTable();
 		const records: MCPSigningKeyRecord[] = [];
 		for await (const raw of table.search({})) {
@@ -154,7 +254,44 @@ export class MCPKeyStore {
 				records.push(decodeRecord(raw));
 			}
 		}
+		enumCache = { records, fetchedAt: nowMs };
 		return records;
+	}
+
+	/**
+	 * Run `fn` inside the in-process single-flight guard.
+	 *
+	 * If another write is in flight, await it and re-evaluate `condition` against
+	 * its result — the concurrent write likely satisfied our trigger (e.g. another
+	 * request already generated the first-boot key or rotated). If the condition
+	 * IS satisfied we return early without running `fn`. If NOT satisfied (e.g. a
+	 * concurrent rotation write finished but we need to persist a pinned key), we
+	 * proceed to our own write under a new `pendingWrite`.
+	 *
+	 * Double-checked locking inside `fn`: `fn` receives the result of a fresh
+	 * `enumerateKeys(true)` call and can short-circuit if the condition is now
+	 * satisfied (another process may have written between the outer check and now).
+	 */
+	private async runSingleFlight(
+		condition: (keys: MCPSigningKeyRecord[]) => boolean,
+		fn: (freshKeys: MCPSigningKeyRecord[]) => Promise<MCPSigningKeyRecord[]>
+	): Promise<MCPSigningKeyRecord[]> {
+		// If a write is in flight, await it and re-evaluate.
+		if (pendingWrite !== null) {
+			const concurrent = await pendingWrite;
+			if (condition(concurrent)) return concurrent;
+			// Condition not satisfied by the concurrent write — fall through to our own.
+		}
+
+		// Our write: re-check from the DB first (double-checked locking).
+		pendingWrite = (async () => {
+			const freshKeys = await this.enumerateKeys(true);
+			if (condition(freshKeys)) return freshKeys;
+			return fn(freshKeys);
+		})().finally(() => {
+			pendingWrite = null;
+		});
+		return pendingWrite;
 	}
 
 	/** Read the persisted signing key by its fixed legacy id, or null if absent. */
@@ -176,28 +313,27 @@ export class MCPKeyStore {
 	 * Resolve the active signing key:
 	 *
 	 * **When `mcpConfig.signingKeyPem` is set (pin wins — always):**
-	 * 1. Derive the pinned public key from the PEM.
+	 * 1. Derive the pinned public key from the PEM (memoized per PEM string).
 	 * 2. Search the key set for a record whose `public_key_pem` matches.
-	 *    - Found → that record is the signer (ignoring `created_at`).
-	 *    - Not found → persist the pinned key (under `rs256-default` when absent,
-	 *      otherwise under a deterministic fingerprint kid), re-enumerate, select
-	 *      by material match.
+	 *    - Found AND already the newest → sign directly, no write.
+	 *    - Found but NOT newest → bump `created_at` (single-flight write) so the
+	 *      successor-based GC loop starts from the pin. Without the bump the
+	 *      previously-newer generated key sits permanently at sorted[0] with no
+	 *      older successor, and garbageCollect never visits it.
+	 *    - Not found → persist (single-flight write) under `rs256-default` when
+	 *      absent, otherwise under the deterministic fingerprint kid.
 	 * 3. Rotation is skipped. Old keys remain for JWKS overlap; GC fires as usual.
 	 *
 	 * **Otherwise (rotation/generation path):**
 	 * 1. Enumerate all persisted keys.
-	 * 2. If empty → first-boot: generate under a UUID kid, persist, re-enumerate.
+	 * 2. If empty → first-boot: single-flight write under a UUID kid.
 	 * 3. Select newest by `created_at` (tie-break: `kid` desc).
 	 * 4. If `keyRotationInterval > 0` and newest key is older than the interval
-	 *    → generate a fresh UUID-kid keypair, persist, re-enumerate, re-select.
+	 *    → single-flight rotation write.
 	 * 5. GC fires detached (setImmediate) to clean up retired keys.
 	 *
 	 * Enumeration errors PROPAGATE on the mint path — a transient read failure
-	 * must not trigger spurious key generation. The JWKS read path stays
-	 * best-effort (getAllPublicKeys catches errors and returns []).
-	 *
-	 * Not cached in-process — always reads persisted state so clustered nodes
-	 * converge to the same key set without a coordinator.
+	 * must not trigger spurious key generation.
 	 */
 	async getSigningKey(mcpConfig?: MCPConfig): Promise<MCPSigningKeyRecord> {
 		const accessTtl = coerceInterval(mcpConfig?.accessTokenTtl) || DEFAULT_ACCESS_TOKEN_TTL;
@@ -208,12 +344,14 @@ export class MCPKeyStore {
 		}
 
 		const rotationInterval = coerceInterval(mcpConfig?.keyRotationInterval);
-
 		let allKeys = await this.enumerateKeys();
 
 		// First boot: no keys in the table yet.
 		if (allKeys.length === 0) {
-			allKeys = await this.generateAndPersistFirstKey();
+			allKeys = await this.runSingleFlight(
+				(keys) => keys.length > 0,
+				(_freshKeys) => this.generateAndPersistFirstKey()
+			);
 		}
 
 		let signerKey = selectNewestKey(allKeys);
@@ -222,7 +360,10 @@ export class MCPKeyStore {
 		if (rotationInterval > 0) {
 			const nowSeconds = Math.floor(Date.now() / 1000);
 			if (nowSeconds - signerKey.created_at > rotationInterval) {
-				allKeys = await this.rotateTo(allKeys);
+				allKeys = await this.runSingleFlight(
+					(keys) => nowSeconds - selectNewestKey(keys).created_at <= rotationInterval,
+					(freshKeys) => this.rotateTo(freshKeys)
+				);
 				signerKey = selectNewestKey(allKeys);
 			}
 		}
@@ -238,16 +379,25 @@ export class MCPKeyStore {
 	}
 
 	/**
-	 * Public keys to publish at the JWKS endpoint.
+	 * Public keys to publish at the JWKS endpoint and use for token verification.
 	 *
-	 * Returns all persisted keys (public halves only). Read-only — never triggers
-	 * generation (an unauthenticated JWKS fetch must not mint key material).
-	 * Returns an empty set when the table isn't ready yet (first boot, table not
-	 * created) rather than 500-ing the discovery endpoint.
+	 * Returns only the LIVE key set — retired keys (whose immediate successor was
+	 * created more than `2 × accessTokenTtl` seconds ago) are excluded so trust
+	 * expires by time even when no mint traffic triggers physical GC deletion.
+	 *
+	 * Results are served from the enumeration cache (5 s TTL); the retirement
+	 * filter is applied per-call on the cached records (cheap, time-accurate).
+	 *
+	 * Read-only: never triggers key generation. Returns [] on table errors so the
+	 * JWKS endpoint doesn't 500 before the first key is minted.
 	 */
-	async getAllPublicKeys(): Promise<MCPSigningKeyRecord[]> {
+	async getAllPublicKeys(mcpConfig?: MCPConfig): Promise<MCPSigningKeyRecord[]> {
 		try {
-			return await this.enumerateKeys();
+			const records = await this.enumerateKeys();
+			const accessTtl = coerceInterval(mcpConfig?.accessTokenTtl) || DEFAULT_ACCESS_TOKEN_TTL;
+			const nowSeconds = Math.floor(Date.now() / 1000);
+			const { live } = partitionRetired(records, accessTtl, nowSeconds);
+			return live;
 		} catch (error) {
 			this.logger?.error?.(
 				'Failed to read MCP signing keys for JWKS:',
@@ -260,29 +410,44 @@ export class MCPKeyStore {
 	// ---- private helpers ----
 
 	/**
-	 * Find or persist the key for a configured `signingKeyPem`. This is the
-	 * pin-wins path: the configured PEM always signs, regardless of whether other
-	 * keys exist in the table and regardless of their `created_at`.
+	 * Find or persist/bump the key for a configured `signingKeyPem`. Pin-wins
+	 * path: the configured PEM always signs, regardless of other keys in the table.
 	 *
-	 * - Match by `public_key_pem` string equality (both sides exported via the
-	 *   same Node.js canonical SPKI path, so the comparison is stable).
-	 * - Kid assignment when persisting:
-	 *   - `rs256-default` if that row is absent (legacy compat; every node derives
-	 *     the same record from the same PEM → idempotent concurrent writes).
-	 *   - `pinned-<sha256 fingerprint>` if `rs256-default` already holds different
-	 *     material — deterministic from the PEM, so concurrent writes are also
-	 *     idempotent.
-	 * - Old keys are NOT removed — they stay for JWKS overlap so tokens they
-	 *   signed keep verifying until they expire.
+	 * Match by `public_key_pem` string equality (both sides exported via the same
+	 * Node.js canonical SPKI path — stable).
+	 *
+	 * When the pin is found but is NOT the newest key: re-persist with
+	 * `created_at = now` (same kid, same material, nothing stranding). This makes
+	 * the pin `sorted[0]` in `garbageCollect`, giving the previously-newer key a
+	 * fresh successor timestamp so the existing successor-based GC loop cleans it
+	 * up on schedule. Without the bump, that key leaks permanently — `sorted[0]`
+	 * has no older successor entry, so `garbageCollect`'s `i=1` loop never reaches
+	 * it. The bump is idempotent across nodes (same kid, same condition).
+	 *
+	 * Kid assignment when persisting:
+	 * - `rs256-default` when absent (legacy compat; deterministic across nodes).
+	 * - `pinned-<sha256 fingerprint>` when `rs256-default` holds different
+	 *   material — also deterministic, so concurrent puts from clustered nodes are
+	 *   idempotent.
+	 *
+	 * Old keys are NOT removed — they stay for JWKS overlap so tokens they signed
+	 * keep verifying until the retirement window closes.
 	 */
 	private async getOrPersistPinnedKey(signingKeyPem: string, accessTtl: number): Promise<MCPSigningKeyRecord> {
-		const pinnedPublicKeyPem = createPublicKey(signingKeyPem).export({ type: 'spki', format: 'pem' }) as string;
+		// Memo: recompute public key derivation only when PEM changes.
+		if (!pinnedPublicKeyMemo || pinnedPublicKeyMemo.pem !== signingKeyPem) {
+			pinnedPublicKeyMemo = {
+				pem: signingKeyPem,
+				publicPem: createPublicKey(signingKeyPem).export({ type: 'spki', format: 'pem' }) as string,
+			};
+		}
+		const pinnedPublicKeyPem = pinnedPublicKeyMemo.publicPem;
 
 		let allKeys = await this.enumerateKeys();
-
-		// If the pinned key is already in the table, use it.
 		const existing = allKeys.find((k) => k.public_key_pem === pinnedPublicKeyPem);
-		if (existing) {
+
+		// Fast path: pin is already in the table AND is already the newest key.
+		if (existing && existing.kid === selectNewestKey(allKeys).kid) {
 			setImmediate(() => {
 				this.garbageCollect(allKeys, existing, accessTtl).catch((err) => {
 					this.logger?.error?.('MCP key GC failed (non-fatal):', err instanceof Error ? err.message : String(err));
@@ -291,46 +456,73 @@ export class MCPKeyStore {
 			return existing;
 		}
 
-		// Not in table — choose kid and persist.
-		const existingDefault = allKeys.find((k) => k.kid === SIGNING_KEY_ID);
-		const kid = existingDefault ? pinnedKidFromPem(pinnedPublicKeyPem) : SIGNING_KEY_ID;
-
-		const record: MCPSigningKeyRecord = {
-			kid,
-			alg: 'RS256',
-			public_key_pem: pinnedPublicKeyPem,
-			private_key_pem: signingKeyPem,
-			created_at: Math.floor(Date.now() / 1000),
+		// Write path — single-flight (handles both pin-persist and created_at bump).
+		const pinnedIsNewest = (keys: MCPSigningKeyRecord[]) => {
+			const ex = keys.find((k) => k.public_key_pem === pinnedPublicKeyPem);
+			return ex != null && ex.kid === selectNewestKey(keys).kid;
 		};
 
-		const table = getKeysTable();
-		try {
-			await table.put(encodeRecord(record));
-			this.logger?.info?.('MCP: persisted pinned RS256 signing key as signer, kid:', kid);
-		} catch (error) {
-			this.logger?.error?.('Failed to persist pinned MCP signing key:', error);
-			throw error;
-		}
+		allKeys = await this.runSingleFlight(pinnedIsNewest, async (freshKeys) => {
+			const freshExisting = freshKeys.find((k) => k.public_key_pem === pinnedPublicKeyPem);
 
-		// Re-enumerate to adopt the converged state.
-		let afterWrite: MCPSigningKeyRecord[] = [];
-		try {
-			afterWrite = await this.enumerateKeys();
-		} catch (error) {
-			// Fall through to the local record — the write already succeeded; log so
-			// transient read failures are diagnosable in clustered environments.
-			this.logger?.debug?.(
-				'MCP keys: post-write re-enumeration failed; using local fallback:',
-				error instanceof Error ? error.message : String(error)
-			);
-		}
-		const allAfterWrite = afterWrite.length > 0 ? afterWrite : [...allKeys, record];
+			if (freshExisting) {
+				// Pin is in the table but not the newest — bump created_at.
+				const bumped: MCPSigningKeyRecord = { ...freshExisting, created_at: Math.floor(Date.now() / 1000) };
+				const table = getKeysTable();
+				try {
+					await table.put(encodeRecord(bumped));
+					invalidateEnumCache();
+					this.logger?.info?.('MCP: bumped pinned key created_at so it leads GC order, kid:', bumped.kid);
+				} catch (error) {
+					this.logger?.error?.('Failed to bump pinned MCP signing key created_at:', error);
+					return freshKeys; // Non-fatal: return without bump.
+				}
+				let afterBump: MCPSigningKeyRecord[] = [];
+				try {
+					afterBump = await this.enumerateKeys(true);
+				} catch {
+					// Fall through to local fallback.
+				}
+				return afterBump.length > 0 ? afterBump : freshKeys.map((k) => (k.kid === bumped.kid ? bumped : k));
+			}
 
-		// Find the pinned key in the post-write set by material match.
-		const signerKey = allAfterWrite.find((k) => k.public_key_pem === pinnedPublicKeyPem) ?? record;
+			// Pin not in table — choose kid and persist.
+			const existingDefault = freshKeys.find((k) => k.kid === SIGNING_KEY_ID);
+			const kid = existingDefault ? pinnedKidFromPem(pinnedPublicKeyPem) : SIGNING_KEY_ID;
+			const record: MCPSigningKeyRecord = {
+				kid,
+				alg: 'RS256',
+				public_key_pem: pinnedPublicKeyPem,
+				private_key_pem: signingKeyPem,
+				created_at: Math.floor(Date.now() / 1000),
+			};
+			const table = getKeysTable();
+			try {
+				await table.put(encodeRecord(record));
+				invalidateEnumCache();
+				this.logger?.info?.('MCP: persisted pinned RS256 signing key as signer, kid:', kid);
+			} catch (error) {
+				this.logger?.error?.('Failed to persist pinned MCP signing key:', error);
+				throw error;
+			}
+			let afterWrite: MCPSigningKeyRecord[] = [];
+			try {
+				afterWrite = await this.enumerateKeys(true);
+			} catch {
+				// Fall through.
+				this.logger?.debug?.('MCP keys: post-write re-enumeration failed; using local fallback');
+			}
+			return afterWrite.length > 0 ? afterWrite : [...freshKeys, record];
+		});
+
+		const signerKey = allKeys.find((k) => k.public_key_pem === pinnedPublicKeyPem) ?? existing;
+		if (!signerKey) {
+			// Should not happen — the single-flight write either persisted or bumped.
+			throw new Error('MCP: pinned key not found after write; check table access');
+		}
 
 		setImmediate(() => {
-			this.garbageCollect(allAfterWrite, signerKey, accessTtl).catch((err) => {
+			this.garbageCollect(allKeys, signerKey, accessTtl).catch((err) => {
 				this.logger?.error?.('MCP key GC failed (non-fatal):', err instanceof Error ? err.message : String(err));
 			});
 		});
@@ -341,7 +533,7 @@ export class MCPKeyStore {
 	/**
 	 * Generate and persist the first signing key under a UUID kid (no-pin
 	 * first-boot path). Re-enumerates after persisting to adopt the converged
-	 * winner under concurrent first-boot races.
+	 * winner under concurrent first-boot races from other processes.
 	 */
 	private async generateAndPersistFirstKey(): Promise<MCPSigningKeyRecord[]> {
 		const { publicKeyPem, privateKeyPem } = await generateRsaKeyPair();
@@ -360,19 +552,18 @@ export class MCPKeyStore {
 		const table = getKeysTable();
 		try {
 			await table.put(encodeRecord(record));
+			invalidateEnumCache();
 		} catch (error) {
 			this.logger?.error?.('Failed to persist MCP signing key:', error);
 			throw error;
 		}
 		this.logger?.info?.('MCP: generated and persisted RS256 signing key, kid:', record.kid);
 
-		// Re-enumerate to adopt the persisted state (convergence).
+		// Re-enumerate to adopt the persisted state (convergence under cross-process races).
 		let afterWrite: MCPSigningKeyRecord[] = [];
 		try {
 			afterWrite = await this.enumerateKeys();
 		} catch (error) {
-			// Fall through to the local record — the write already succeeded; log so
-			// transient read failures are diagnosable in clustered environments.
 			this.logger?.debug?.(
 				'MCP keys: post-write re-enumeration failed; using local fallback:',
 				error instanceof Error ? error.message : String(error)
@@ -397,6 +588,7 @@ export class MCPKeyStore {
 		const table = getKeysTable();
 		try {
 			await table.put(encodeRecord(newKey));
+			invalidateEnumCache();
 			this.logger?.info?.('MCP: rotated signing key, new kid:', newKey.kid);
 		} catch (error) {
 			this.logger?.error?.(
@@ -409,10 +601,8 @@ export class MCPKeyStore {
 		try {
 			afterRotate = await this.enumerateKeys();
 		} catch (error) {
-			// Fall through to the local fallback — the write already succeeded; log so
-			// transient read failures are diagnosable in clustered environments.
 			this.logger?.debug?.(
-				'MCP keys: post-write re-enumeration failed; using local fallback:',
+				'MCP keys: post-rotation re-enumeration failed; using local fallback:',
 				error instanceof Error ? error.message : String(error)
 			);
 		}
@@ -420,49 +610,34 @@ export class MCPKeyStore {
 	}
 
 	/**
-	 * Delete retired signing keys that are safe to remove.
+	 * Delete retired signing keys (physical cleanup; mint-path only).
 	 *
-	 * A key stopped signing the moment its IMMEDIATE SUCCESSOR (the next-newer
-	 * key) was created, so the last token it signed expires at
-	 * `successor.created_at + accessTtl`. It is deletable once
-	 * `now - successor.created_at > 2 × accessTtl` — one full TTL of margin over
-	 * that bound, covering replication lag between clustered nodes.
-	 *
-	 * The current signer is never deleted (kid check). Errors are caught by the
-	 * caller's setImmediate .catch().
+	 * Delegates to `partitionRetired` for the same successor-age rule used by
+	 * `getAllPublicKeys`. The current signer is additionally protected by a
+	 * kid-check (defense-in-depth in case the pin path hands an unexpected signer).
+	 * Errors are caught by the caller's `setImmediate .catch()`.
 	 */
 	private async garbageCollect(
 		allKeys: MCPSigningKeyRecord[],
 		signerKey: MCPSigningKeyRecord,
 		accessTtl: number
 	): Promise<void> {
-		if (allKeys.length <= 1) return;
-
 		const nowSeconds = Math.floor(Date.now() / 1000);
-		const gcThreshold = 2 * accessTtl;
+		const { retired } = partitionRetired(allKeys, accessTtl, nowSeconds);
+		if (retired.length === 0) return;
 		const table = getKeysTable();
-
-		// Sort newest first (same ordering as signer selection).
-		const sorted = [...allKeys].sort((a, b) => {
-			if (b.created_at !== a.created_at) return b.created_at - a.created_at;
-			return b.kid > a.kid ? 1 : -1;
-		});
-
-		for (let i = 1; i < sorted.length; i++) {
-			const key = sorted[i];
-			if (key.kid === signerKey.kid) continue;
-			const successor = sorted[i - 1];
-			if (nowSeconds - successor.created_at > gcThreshold) {
-				try {
-					await table.delete(key.kid);
-					this.logger?.info?.('MCP: GC deleted retired signing key:', key.kid);
-				} catch (gcErr) {
-					this.logger?.warn?.(
-						'MCP: GC failed to delete key:',
-						key.kid,
-						gcErr instanceof Error ? gcErr.message : String(gcErr)
-					);
-				}
+		for (const key of retired) {
+			if (key.kid === signerKey.kid) continue; // Defense-in-depth.
+			try {
+				await table.delete(key.kid);
+				invalidateEnumCache();
+				this.logger?.info?.('MCP: GC deleted retired signing key:', key.kid);
+			} catch (gcErr) {
+				this.logger?.warn?.(
+					'MCP: GC failed to delete key:',
+					key.kid,
+					gcErr instanceof Error ? gcErr.message : String(gcErr)
+				);
 			}
 		}
 	}

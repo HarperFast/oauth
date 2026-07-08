@@ -6,7 +6,7 @@
 import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createPublicKey, generateKeyPairSync } from 'node:crypto';
-import { MCPKeyStore, resetMCPKeysTableCache, SIGNING_KEY_ID } from '../../../dist/lib/mcp/keyStore.js';
+import { MCPKeyStore, resetMCPKeysTableCache, SIGNING_KEY_ID, _setCacheNowMs } from '../../../dist/lib/mcp/keyStore.js';
 import { verifyAccessTokenWithKeySet, signAccessToken } from '../../../dist/lib/mcp/tokenIssuer.js';
 
 // ---- Helpers ----
@@ -138,11 +138,13 @@ describe('MCPKeyStore', () => {
 
 	// ---- Multi-key: two keys in table ----
 
-	it('getAllPublicKeys returns all persisted keys', async () => {
-		const oldKey = seedKey(stored, { kid: 'key-old', created_at: 1_000_000 });
-		const newKey = seedKey(stored, { kid: 'key-new', created_at: 2_000_000 });
+	it('getAllPublicKeys returns all persisted keys (within retirement window)', async () => {
+		// Both keys use recent timestamps so neither is retired (successor age < 2×TTL).
+		const nowSeconds = Math.floor(Date.now() / 1000);
+		const oldKey = seedKey(stored, { kid: 'key-old', created_at: nowSeconds - 100 });
+		const newKey = seedKey(stored, { kid: 'key-new', created_at: nowSeconds - 50 });
 		const keys = await store.getAllPublicKeys();
-		assert.equal(keys.length, 2, 'both keys published');
+		assert.equal(keys.length, 2, 'both keys published within the retirement window');
 		const kids = keys.map((k) => k.kid).sort();
 		assert.deepEqual(kids, [oldKey.kid, newKey.kid].sort());
 	});
@@ -540,5 +542,296 @@ describe('MCPKeyStore', () => {
 
 		const signer = await store.getSigningKey({ accessTokenTtl: 3600 });
 		assert.equal(signer.kid, newerKey.kid, 'UUID key supersedes legacy row');
+	});
+
+	// ---- Single-flight (item 1) ----
+
+	it('single-flight: 5 concurrent first-boot getSigningKey calls produce exactly one key', async () => {
+		// Slow put so all 5 calls race to the empty-table check.
+		global.databases.oauth.harper_oauth_mcp_keys.put = async (rec) => {
+			await new Promise((resolve) => setTimeout(resolve, 5));
+			stored.set(rec.kid, rec);
+		};
+
+		const results = await Promise.all([
+			store.getSigningKey({ accessTokenTtl: 3600 }),
+			store.getSigningKey({ accessTokenTtl: 3600 }),
+			store.getSigningKey({ accessTokenTtl: 3600 }),
+			store.getSigningKey({ accessTokenTtl: 3600 }),
+			store.getSigningKey({ accessTokenTtl: 3600 }),
+		]);
+
+		assert.equal(stored.size, 1, 'exactly one key generated despite 5 concurrent calls');
+		const kids = new Set(results.map((r) => r.kid));
+		assert.equal(kids.size, 1, 'all 5 calls resolve to the same kid');
+	});
+
+	it('single-flight: 3 concurrent rotation calls produce exactly one new key', async () => {
+		const veryOldTs = Math.floor(Date.now() / 1000) - 10_000;
+		seedKey(stored, { kid: 'old-key', created_at: veryOldTs });
+
+		// Slow put so all 3 calls race to the rotation boundary check.
+		global.databases.oauth.harper_oauth_mcp_keys.put = async (rec) => {
+			await new Promise((resolve) => setTimeout(resolve, 5));
+			stored.set(rec.kid, rec);
+		};
+
+		const results = await Promise.all([
+			store.getSigningKey({ keyRotationInterval: 60, accessTokenTtl: 3600 }),
+			store.getSigningKey({ keyRotationInterval: 60, accessTokenTtl: 3600 }),
+			store.getSigningKey({ keyRotationInterval: 60, accessTokenTtl: 3600 }),
+		]);
+
+		// old-key + exactly one rotation key.
+		assert.equal(stored.size, 2, 'exactly one rotation key generated despite 3 concurrent calls');
+		const rotationKids = new Set(results.map((r) => r.kid));
+		assert.equal(rotationKids.size, 1, 'all 3 calls resolve to the same new kid');
+		assert.ok(!rotationKids.has('old-key'), 'new key is not the old key');
+	});
+
+	// ---- Pin created_at bump (item 2) ----
+
+	it('pin bump: when pinned key is not the newest, created_at is bumped and it becomes signer', async () => {
+		// Seed a newer generated key (created 60s ago).
+		const nowSeconds = Math.floor(Date.now() / 1000);
+		const { privateKey: generatedPrivKey, publicKey: generatedPubKey } = generateKeyPairSync('rsa', {
+			modulusLength: 2048,
+			publicKeyEncoding: { type: 'spki', format: 'pem' },
+			privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+		});
+		stored.set('generated-uuid', {
+			kid: 'generated-uuid',
+			alg: 'RS256',
+			public_key_pem: generatedPubKey,
+			private_key_pem: generatedPrivKey,
+			created_at: nowSeconds - 60, // newer than pinned
+		});
+
+		// Seed the pinned key under rs256-default with an older created_at.
+		const { privateKey: pinnedPrivKey } = generateKeyPairSync('rsa', {
+			modulusLength: 2048,
+			publicKeyEncoding: { type: 'spki', format: 'pem' },
+			privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+		});
+		const pinnedPubKey = createPublicKey(pinnedPrivKey).export({ type: 'spki', format: 'pem' });
+		stored.set(SIGNING_KEY_ID, {
+			kid: SIGNING_KEY_ID,
+			alg: 'RS256',
+			public_key_pem: pinnedPubKey,
+			private_key_pem: pinnedPrivKey,
+			created_at: nowSeconds - 3600, // older than generated key
+		});
+
+		const signer = await store.getSigningKey({ signingKeyPem: pinnedPrivKey, accessTokenTtl: 3600 });
+
+		// Pinned key was bumped and is the signer.
+		assert.equal(signer.private_key_pem, pinnedPrivKey, 'pinned key signs');
+		// created_at was bumped — should be ≥ nowSeconds.
+		const persisted = stored.get(SIGNING_KEY_ID);
+		assert.ok(persisted.created_at >= nowSeconds, 'pinned key created_at bumped to now');
+
+		// GC regression: after 2×TTL the generated key should be collected.
+		// Simulate GC by re-running getSigningKey after the generated key's successor
+		// (the bumped pin, nowSeconds) is 2×TTL old.
+		// To test GC without sleeping, call garbageCollect indirectly via getSigningKey
+		// with a fake nowSeconds via future-dated stored records.
+		// Simplest check: both keys still exist (GC hasn't fired yet in this tick).
+		assert.equal(stored.size, 2, 'both keys still present before GC fires');
+	});
+
+	it('pin bump regression: generated key is GCd once window passes (no accumulation)', async () => {
+		// Arrange: generated key at a timestamp old enough to be GC'd once the bumped
+		// pin's created_at is treated as the successor.
+		const nowSeconds = Math.floor(Date.now() / 1000);
+		const generatedCreatedAt = nowSeconds - 9_000; // > 2×3600
+
+		const { privateKey: generatedPrivKey, publicKey: generatedPubKey } = generateKeyPairSync('rsa', {
+			modulusLength: 2048,
+			publicKeyEncoding: { type: 'spki', format: 'pem' },
+			privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+		});
+		stored.set('generated-uuid', {
+			kid: 'generated-uuid',
+			alg: 'RS256',
+			public_key_pem: generatedPubKey,
+			private_key_pem: generatedPrivKey,
+			created_at: generatedCreatedAt,
+		});
+
+		const { privateKey: pinnedPrivKey } = generateKeyPairSync('rsa', {
+			modulusLength: 2048,
+			publicKeyEncoding: { type: 'spki', format: 'pem' },
+			privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+		});
+		const pinnedPubKey = createPublicKey(pinnedPrivKey).export({ type: 'spki', format: 'pem' });
+		// Pinned key has an older created_at than the generated key.
+		stored.set(SIGNING_KEY_ID, {
+			kid: SIGNING_KEY_ID,
+			alg: 'RS256',
+			public_key_pem: pinnedPubKey,
+			private_key_pem: pinnedPrivKey,
+			created_at: nowSeconds - 10_000, // older than generated
+		});
+
+		// getSigningKey: pin path bumps created_at → pin becomes sorted[0].
+		// GC fires: generated key's successor (the bumped pin, created_at ≈ now)
+		// was "created" 0 s ago → 0 < 2×3600 → generated key is NOT retired yet.
+		await store.getSigningKey({ signingKeyPem: pinnedPrivKey, accessTokenTtl: 3600 });
+		await new Promise((resolve) => setImmediate(resolve));
+
+		// Both still present — generated key is not yet past the 2×TTL window from
+		// the bumped pin (bumped just now, window not yet elapsed).
+		assert.ok(stored.has('generated-uuid'), 'generated key still in table (window not elapsed)');
+
+		// Now simulate that the bumped pin was created 9000s ago (window passed).
+		// Directly update the bumped pin's created_at to force GC on next call.
+		const bumpedPin = stored.get(SIGNING_KEY_ID);
+		stored.set(SIGNING_KEY_ID, { ...bumpedPin, created_at: nowSeconds - 9_000 });
+		resetMCPKeysTableCache();
+
+		// Seed another fresh key so getSigningKey has a signer and can run GC.
+		const freshCreatedAt = nowSeconds;
+		const { privateKey: freshPrivKey, publicKey: freshPubKey } = generateKeyPairSync('rsa', {
+			modulusLength: 2048,
+			publicKeyEncoding: { type: 'spki', format: 'pem' },
+			privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+		});
+		stored.set('fresh-key', {
+			kid: 'fresh-key',
+			alg: 'RS256',
+			public_key_pem: freshPubKey,
+			private_key_pem: freshPrivKey,
+			created_at: freshCreatedAt,
+		});
+
+		// Re-run without pin — uses rotation path, GC fires on the old keys.
+		await store.getSigningKey({ accessTokenTtl: 3600 });
+		await new Promise((resolve) => setImmediate(resolve));
+
+		assert.ok(!stored.has('generated-uuid'), 'generated key GCd once successor (pin) is past 2×TTL');
+	});
+
+	// ---- Read-time retirement (item 3) ----
+
+	it('getAllPublicKeys excludes retired keys even without mint traffic', async () => {
+		const nowSeconds = Math.floor(Date.now() / 1000);
+
+		// old-key was superseded by new-key 9000s ago — past 2×3600.
+		const oldKey = seedKey(stored, { kid: 'old-key', created_at: nowSeconds - 15_000 });
+		seedKey(stored, { kid: 'new-key', created_at: nowSeconds - 9_000 });
+
+		// No getSigningKey call — no GC. But getAllPublicKeys must filter retired keys.
+		const keys = await store.getAllPublicKeys({ accessTokenTtl: 3600 });
+
+		const kids = keys.map((k) => k.kid);
+		assert.ok(!kids.includes('old-key'), 'retired old-key excluded from JWKS');
+		assert.ok(kids.includes('new-key'), 'live new-key included in JWKS');
+
+		// A token signed by the retired key FAILS against the filtered set.
+		const { token } = signAccessToken(
+			{
+				issuer: 'https://as.example.com',
+				subject: 'alice',
+				audience: 'https://app.example.com/mcp',
+				clientId: 'client-1',
+				ttlSeconds: 3600,
+			},
+			oldKey
+		);
+		assert.throws(
+			() =>
+				verifyAccessTokenWithKeySet(token, keys, {
+					audience: 'https://app.example.com/mcp',
+					issuer: 'https://as.example.com',
+				}),
+			'token signed by retired key rejected by filtered key set'
+		);
+	});
+
+	it('getAllPublicKeys keeps a key live until its successor is 2×TTL old', async () => {
+		const nowSeconds = Math.floor(Date.now() / 1000);
+		// Successor created only 100s ago — within the 2×3600s window.
+		seedKey(stored, { kid: 'still-live', created_at: nowSeconds - 5_000 });
+		seedKey(stored, { kid: 'signer', created_at: nowSeconds - 100 });
+
+		const keys = await store.getAllPublicKeys({ accessTokenTtl: 3600 });
+		const kids = keys.map((k) => k.kid);
+		assert.ok(kids.includes('still-live'), 'key within window stays live');
+		assert.ok(kids.includes('signer'), 'signer included');
+	});
+
+	// ---- Enumeration cache (item 4) ----
+
+	it('cache: two rapid getAllPublicKeys calls produce one table scan', async () => {
+		let searchCalls = 0;
+		const origSearch = global.databases.oauth.harper_oauth_mcp_keys.search;
+		global.databases.oauth.harper_oauth_mcp_keys.search = async function* () {
+			searchCalls++;
+			yield* origSearch();
+		};
+
+		seedKey(stored, { kid: 'k1' });
+
+		await store.getAllPublicKeys();
+		await store.getAllPublicKeys();
+
+		assert.equal(searchCalls, 1, 'second call served from cache');
+	});
+
+	it('cache: a MCPKeyStore put invalidates the cache; new key visible immediately', async () => {
+		let searchCalls = 0;
+		const origSearch = global.databases.oauth.harper_oauth_mcp_keys.search;
+		global.databases.oauth.harper_oauth_mcp_keys.search = async function* () {
+			searchCalls++;
+			yield* origSearch();
+		};
+
+		// Cold cache — first call goes to table.
+		await store.getAllPublicKeys(); // searchCalls = 1
+		const callsAfterFirstRead = searchCalls;
+
+		// Cache hit.
+		await store.getAllPublicKeys();
+		assert.equal(searchCalls, callsAfterFirstRead, 'cache hit');
+
+		// Write a key via MCPKeyStore (invalidates cache).
+		await store.getSigningKey(); // generates key → put → invalidateEnumCache
+		const callsAfterMint = searchCalls; // includes internal enumerations from getSigningKey
+
+		// Next getAllPublicKeys hits the DB again (cache was invalidated; post-write
+		// re-enumerate inside generateAndPersistFirstKey refills it).
+		const keys = await store.getAllPublicKeys();
+		assert.ok(keys.length > 0, 'new key visible after cache invalidation');
+		// The post-write enumerate inside generateAndPersistFirstKey already refilled
+		// the cache, so this getAllPublicKeys should be a cache hit.
+		assert.equal(searchCalls, callsAfterMint, 'cache refilled by post-write enumerate; getAllPublicKeys is a hit');
+	});
+
+	it('cache: TTL expiry causes re-fetch (inject clock override)', async () => {
+		let searchCalls = 0;
+		const origSearch = global.databases.oauth.harper_oauth_mcp_keys.search;
+		global.databases.oauth.harper_oauth_mcp_keys.search = async function* () {
+			searchCalls++;
+			yield* origSearch();
+		};
+		seedKey(stored, { kid: 'k1' });
+
+		let fakeNow = Date.now();
+		_setCacheNowMs(() => fakeNow);
+		try {
+			await store.getAllPublicKeys(); // cache miss → search 1
+			assert.equal(searchCalls, 1);
+
+			await store.getAllPublicKeys(); // cache hit → still 1
+			assert.equal(searchCalls, 1);
+
+			// Advance clock past 5s TTL.
+			fakeNow += 6_000;
+
+			await store.getAllPublicKeys(); // cache expired → search 2
+			assert.equal(searchCalls, 2, 'TTL expiry causes re-fetch');
+		} finally {
+			_setCacheNowMs(null); // Restore default clock.
+		}
 	});
 });

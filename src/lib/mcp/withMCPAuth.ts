@@ -49,7 +49,7 @@ import { emitMCPAuditEvent, type MCPTokenRejectedAuditPayload } from './audit.ts
 
 /** Minimal surface withMCPAuth needs from a key source (lets tests inject one). */
 interface KeySource {
-	getAllPublicKeys(): Promise<MCPSigningKeyRecord[]>;
+	getAllPublicKeys(mcpConfig?: MCPConfig): Promise<MCPSigningKeyRecord[]>;
 }
 
 export interface WithMCPAuthOptions {
@@ -244,7 +244,7 @@ export function withMCPAuth(handler: HttpListener, options: WithMCPAuthOptions =
 		let keys: MCPSigningKeyRecord[];
 		try {
 			const keyStore: KeySource = options.keyStore ?? new MCPKeyStore(logger);
-			keys = await keyStore.getAllPublicKeys();
+			keys = await keyStore.getAllPublicKeys(cfg);
 		} catch (error) {
 			logger?.error?.(
 				'withMCPAuth: failed to load MCP signing keys:',
