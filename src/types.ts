@@ -223,6 +223,13 @@ export interface MCPSigningKeyRecord {
 }
 
 /**
+ * Public-facing subset of MCPSigningKeyRecord returned by `getAllPublicKeys`.
+ * The private key is stripped before JWKS publication and token verification
+ * so private key material never escapes the key store's internal boundaries.
+ */
+export type MCPPublicKeyRecord = Omit<MCPSigningKeyRecord, 'private_key_pem'>;
+
+/**
  * MCP refresh-token family record (table `mcp_refresh_families`).
  *
  * The opaque token issued to the client is `<family_id>.<secret>`; only the

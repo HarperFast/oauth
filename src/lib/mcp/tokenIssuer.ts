@@ -13,7 +13,7 @@
 
 import { createPublicKey, randomUUID } from 'node:crypto';
 import jwt from 'jsonwebtoken';
-import type { MCPSigningKeyRecord } from '../../types.ts';
+import type { MCPPublicKeyRecord, MCPSigningKeyRecord } from '../../types.ts';
 
 export interface MintAccessTokenParams {
 	issuer: string;
@@ -103,7 +103,7 @@ export interface VerifyWithKeySetOptions {
  */
 export function verifyAccessTokenWithKeySet(
 	token: string,
-	keys: MCPSigningKeyRecord[],
+	keys: MCPPublicKeyRecord[],
 	options: VerifyWithKeySetOptions
 ): jwt.JwtPayload {
 	if (!keys || keys.length === 0) {
@@ -118,7 +118,7 @@ export function verifyAccessTokenWithKeySet(
 	}
 
 	const kid = decoded.header?.kid;
-	let key: MCPSigningKeyRecord | undefined;
+	let key: MCPPublicKeyRecord | undefined;
 	if (kid) {
 		key = keys.find((k) => k.kid === kid);
 		if (!key) throw new Error('unknown key id');

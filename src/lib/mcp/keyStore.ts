@@ -57,7 +57,7 @@
 
 import { createHash, createPublicKey, generateKeyPair, randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
-import type { Logger, MCPConfig, MCPSigningKeyRecord, Table } from '../../types.ts';
+import type { Logger, MCPConfig, MCPPublicKeyRecord, MCPSigningKeyRecord, Table } from '../../types.ts';
 
 const generateKeyPairAsync = promisify(generateKeyPair);
 
@@ -173,6 +173,7 @@ function sortByNewest(keys: MCPSigningKeyRecord[]): MCPSigningKeyRecord[] {
  * Newest `created_at` wins; tie-break on `kid` descending (lexicographic).
  */
 function selectNewestKey(keys: MCPSigningKeyRecord[]): MCPSigningKeyRecord {
+	if (keys.length === 0) throw new Error('MCP: selectNewestKey called with empty key set');
 	return keys.reduce((winner, candidate) => {
 		if (candidate.created_at > winner.created_at) return candidate;
 		if (candidate.created_at === winner.created_at && candidate.kid > winner.kid) return candidate;
@@ -254,8 +255,11 @@ export class MCPKeyStore {
 				records.push(decodeRecord(raw));
 			}
 		}
-		enumCache = { records, fetchedAt: nowMs };
-		return records;
+		// Pre-sort so downstream callers (partitionRetired, selectNewestKey) receive
+		// records in newest-first order without redundant sorts.
+		const sorted = sortByNewest(records);
+		enumCache = { records: sorted, fetchedAt: nowMs };
+		return sorted;
 	}
 
 	/**
@@ -276,11 +280,13 @@ export class MCPKeyStore {
 		condition: (keys: MCPSigningKeyRecord[]) => boolean,
 		fn: (freshKeys: MCPSigningKeyRecord[]) => Promise<MCPSigningKeyRecord[]>
 	): Promise<MCPSigningKeyRecord[]> {
-		// If a write is in flight, await it and re-evaluate.
-		if (pendingWrite !== null) {
+		// If a write is in flight, await it and re-evaluate. Loop: a chain of
+		// concurrent waiters may each trigger a new pendingWrite; keep waiting
+		// until there's no in-flight write before starting our own.
+		while (pendingWrite !== null) {
 			const concurrent = await pendingWrite;
 			if (condition(concurrent)) return concurrent;
-			// Condition not satisfied by the concurrent write — fall through to our own.
+			// Condition not satisfied by the concurrent write — fall through.
 		}
 
 		// Our write: re-check from the DB first (double-checked locking).
@@ -391,13 +397,14 @@ export class MCPKeyStore {
 	 * Read-only: never triggers key generation. Returns [] on table errors so the
 	 * JWKS endpoint doesn't 500 before the first key is minted.
 	 */
-	async getAllPublicKeys(mcpConfig?: MCPConfig): Promise<MCPSigningKeyRecord[]> {
+	async getAllPublicKeys(mcpConfig?: MCPConfig): Promise<MCPPublicKeyRecord[]> {
 		try {
 			const records = await this.enumerateKeys();
 			const accessTtl = coerceInterval(mcpConfig?.accessTokenTtl) || DEFAULT_ACCESS_TOKEN_TTL;
 			const nowSeconds = Math.floor(Date.now() / 1000);
 			const { live } = partitionRetired(records, accessTtl, nowSeconds);
-			return live;
+			// Strip private_key_pem: the private half must never leave the key store.
+			return live.map((k) => ({ kid: k.kid, alg: k.alg, public_key_pem: k.public_key_pem, created_at: k.created_at }));
 		} catch (error) {
 			this.logger?.error?.(
 				'Failed to read MCP signing keys for JWKS:',
@@ -483,7 +490,11 @@ export class MCPKeyStore {
 				} catch {
 					// Fall through to local fallback.
 				}
-				return afterBump.length > 0 ? afterBump : freshKeys.map((k) => (k.kid === bumped.kid ? bumped : k));
+				if (afterBump.length === 0) {
+					afterBump = sortByNewest(freshKeys.map((k) => (k.kid === bumped.kid ? bumped : k)));
+					enumCache = { records: afterBump, fetchedAt: _getCacheNowMs() };
+				}
+				return afterBump;
 			}
 
 			// Pin not in table — choose kid and persist.
@@ -512,7 +523,11 @@ export class MCPKeyStore {
 				// Fall through.
 				this.logger?.debug?.('MCP keys: post-write re-enumeration failed; using local fallback');
 			}
-			return afterWrite.length > 0 ? afterWrite : [...freshKeys, record];
+			if (afterWrite.length === 0) {
+				afterWrite = sortByNewest([...freshKeys, record]);
+				enumCache = { records: afterWrite, fetchedAt: _getCacheNowMs() };
+			}
+			return afterWrite;
 		});
 
 		const signerKey = allKeys.find((k) => k.public_key_pem === pinnedPublicKeyPem) ?? existing;
@@ -569,7 +584,14 @@ export class MCPKeyStore {
 				error instanceof Error ? error.message : String(error)
 			);
 		}
-		return afterWrite.length > 0 ? afterWrite : [record];
+		// If the DB read didn't reflect the write yet (timing), seed the cache with
+		// the local record so subsequent getAllPublicKeys calls see it immediately
+		// instead of serving a stale-empty cache entry.
+		if (afterWrite.length === 0) {
+			afterWrite = [record];
+			enumCache = { records: afterWrite, fetchedAt: _getCacheNowMs() };
+		}
+		return afterWrite;
 	}
 
 	/**
@@ -606,7 +628,11 @@ export class MCPKeyStore {
 				error instanceof Error ? error.message : String(error)
 			);
 		}
-		return afterRotate.length > 0 ? afterRotate : [...currentKeys, newKey];
+		if (afterRotate.length === 0) {
+			afterRotate = sortByNewest([...currentKeys, newKey]);
+			enumCache = { records: afterRotate, fetchedAt: _getCacheNowMs() };
+		}
+		return afterRotate;
 	}
 
 	/**

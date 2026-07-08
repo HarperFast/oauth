@@ -778,6 +778,44 @@ describe('MCPKeyStore', () => {
 		assert.equal(searchCalls, 1, 'second call served from cache');
 	});
 
+	it('cache: stale-empty cache after first-boot — getAllPublicKeys sees the new key', async () => {
+		// Simulate a slow DB write: getAllPublicKeys is called before any key exists
+		// (empty table → enumCache = {records: [], ...}), then getSigningKey generates
+		// and persists a key. The post-write re-enumerate returns [] (write not yet
+		// visible to search). Without the fix, the cache stays empty and the next
+		// getAllPublicKeys call returns [] → 401. With the fix the cache is seeded
+		// with the local record so the key is immediately visible.
+		const origSearch = global.databases.oauth.harper_oauth_mcp_keys.search;
+		let blockSearch = false;
+		global.databases.oauth.harper_oauth_mcp_keys.search = async function* () {
+			if (blockSearch) {
+				// Simulate write-not-yet-visible: return nothing.
+				return;
+			}
+			yield* origSearch();
+		};
+
+		try {
+			// Empty table: caches [].
+			const before = await store.getAllPublicKeys();
+			assert.equal(before.length, 0, 'empty before any key is minted');
+
+			// Block post-write DB visibility so generateAndPersistFirstKey falls back.
+			blockSearch = true;
+			await store.getSigningKey();
+
+			// Restore normal search so the assertion below can see the table.
+			blockSearch = false;
+
+			// getAllPublicKeys must return the new key despite the post-write read returning [].
+			const after = await store.getAllPublicKeys();
+			assert.equal(after.length, 1, 'new key visible immediately after mint (stale-empty cache fix)');
+			assert.ok(!Object.prototype.hasOwnProperty.call(after[0], 'private_key_pem'), 'private_key_pem not exposed');
+		} finally {
+			global.databases.oauth.harper_oauth_mcp_keys.search = origSearch;
+		}
+	});
+
 	it('cache: a MCPKeyStore put invalidates the cache; new key visible immediately', async () => {
 		let searchCalls = 0;
 		const origSearch = global.databases.oauth.harper_oauth_mcp_keys.search;
