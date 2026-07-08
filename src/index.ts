@@ -197,6 +197,15 @@ export async function handleApplication(scope: Scope): Promise<void> {
 				);
 			}
 		}
+		// Warn when the operator sets both a pinned key and a rotation interval —
+		// pin wins and rotation is silently skipped, which could surprise them.
+		if (mcpConfig?.signingKeyPem && mcpConfig?.keyRotationInterval) {
+			logger?.warn?.(
+				'MCP: mcp.signingKeyPem and mcp.keyRotationInterval are both set. ' +
+					'The pinned key takes precedence — key rotation is disabled. ' +
+					'Remove mcp.keyRotationInterval if you intend to use a fixed key.'
+			);
+		}
 
 		// Re-initialize providers from new configuration
 		// Clear existing providers and repopulate (don't reassign to preserve closure reference)

@@ -80,8 +80,22 @@ export interface MCPConfig {
 	 * set, it is persisted to the keys table on first use instead of generating
 	 * one — operators provide the same key on every node for deterministic,
 	 * race-free key material. When unset, a keypair is generated on first boot.
+	 *
+	 * Mutually exclusive with `keyRotationInterval`: pin wins; if both are set a
+	 * warning is logged and rotation is skipped.
 	 */
 	signingKeyPem?: string;
+	/**
+	 * Signing-key rotation interval in seconds. When set and > 0, a new RS256
+	 * keypair is lazily generated (at token mint time) whenever the newest key's
+	 * age exceeds this value. All public keys remain in the JWKS until their
+	 * access tokens can no longer be valid (2× accessTokenTtl after a newer key
+	 * supersedes them). Default: 0 (rotation disabled).
+	 *
+	 * Mutually exclusive with `signingKeyPem`: pin wins. If both are set a
+	 * warning is logged at startup and rotation is silently skipped.
+	 */
+	keyRotationInterval?: number;
 	/** Access-token lifetime in seconds. Default: 3600 (1h). */
 	accessTokenTtl?: number;
 	/** Refresh-token (family) lifetime in seconds. Default: 2592000 (30d). */
@@ -207,6 +221,13 @@ export interface MCPSigningKeyRecord {
 	private_key_pem: string;
 	created_at: number;
 }
+
+/**
+ * Public-facing subset of MCPSigningKeyRecord returned by `getAllPublicKeys`.
+ * The private key is stripped before JWKS publication and token verification
+ * so private key material never escapes the key store's internal boundaries.
+ */
+export type MCPPublicKeyRecord = Omit<MCPSigningKeyRecord, 'private_key_pem'>;
 
 /**
  * MCP refresh-token family record (table `mcp_refresh_families`).
@@ -502,6 +523,11 @@ export interface Table {
 	get(id: string): Promise<any>;
 	put(record: any): Promise<any>;
 	delete(id: string): Promise<void>;
+	/**
+	 * Enumerate records matching a query. An empty query (`{}`) returns all rows.
+	 * The runtime table returns an `AsyncIterable`; consume with `for await`.
+	 */
+	search(query: Record<string, any>): AsyncIterable<any>;
 }
 
 /**

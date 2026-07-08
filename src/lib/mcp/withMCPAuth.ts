@@ -40,7 +40,7 @@
  *   auth runs afterward and re-rejects the bearer token.
  */
 
-import type { Logger, MCPConfig, MCPRequestClaims, MCPSigningKeyRecord, Request } from '../../types.ts';
+import type { Logger, MCPConfig, MCPPublicKeyRecord, MCPRequestClaims, Request } from '../../types.ts';
 import { OAuthResource } from '../resource.ts';
 import { MCPKeyStore } from './keyStore.ts';
 import { verifyAccessTokenWithKeySet } from './tokenIssuer.ts';
@@ -49,7 +49,7 @@ import { emitMCPAuditEvent, type MCPTokenRejectedAuditPayload } from './audit.ts
 
 /** Minimal surface withMCPAuth needs from a key source (lets tests inject one). */
 interface KeySource {
-	getAllPublicKeys(): Promise<MCPSigningKeyRecord[]>;
+	getAllPublicKeys(mcpConfig?: MCPConfig): Promise<MCPPublicKeyRecord[]>;
 }
 
 export interface WithMCPAuthOptions {
@@ -241,10 +241,10 @@ export function withMCPAuth(handler: HttpListener, options: WithMCPAuthOptions =
 		// A bearer token was presented — any denial below is a rejected token (audited).
 		tokenPresented = true;
 
-		let keys: MCPSigningKeyRecord[];
+		let keys: MCPPublicKeyRecord[];
 		try {
 			const keyStore: KeySource = options.keyStore ?? new MCPKeyStore(logger);
-			keys = await keyStore.getAllPublicKeys();
+			keys = await keyStore.getAllPublicKeys(cfg);
 		} catch (error) {
 			logger?.error?.(
 				'withMCPAuth: failed to load MCP signing keys:',
