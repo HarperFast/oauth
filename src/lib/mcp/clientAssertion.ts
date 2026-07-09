@@ -250,6 +250,9 @@ export function verifyClientAssertion(params: VerifyClientAssertionParams): Clie
 	if (exp <= now - clockTolerance) {
 		return fail('client_assertion has expired');
 	}
+	// Primary window bound: `exp` is capped relative to NOW, so any single
+	// assertion is usable for at most ~maxExpiresIn seconds of wall-clock
+	// regardless of what `iat` claims — a far-future `exp` is rejected here.
 	if (exp > now + maxExpiresIn + clockTolerance) {
 		return fail(`client_assertion exp exceeds the maximum window of ${maxExpiresIn}s`);
 	}
@@ -260,6 +263,14 @@ export function verifyClientAssertion(params: VerifyClientAssertionParams): Clie
 	}
 	if (iat > now + clockTolerance) {
 		return fail('client_assertion iat is in the future');
+	}
+	// Strictness bound (defense-in-depth): reject an assertion whose self-declared
+	// lifetime (exp - iat) exceeds the policy window even when `exp` sits inside
+	// the now-relative bound above. Such a token isn't exploitable on its own (the
+	// now-relative cap already limits usable life), but it doesn't honor the
+	// ≤maxExpiresIn assertion contract, so a strict verifier refuses it.
+	if (exp - iat > maxExpiresIn + clockTolerance) {
+		return fail(`client_assertion lifetime (exp - iat) exceeds the maximum window of ${maxExpiresIn}s`);
 	}
 
 	if (payload.nbf !== undefined) {
