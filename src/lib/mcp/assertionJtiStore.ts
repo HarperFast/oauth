@@ -13,16 +13,26 @@
  * uniqueness per issuer), and hashing normalizes an arbitrary client-chosen
  * string to a fixed-length key.
  *
- * Accepted race (same precedent as MCPAuthCodeStore.consume): the check is
- * get-then-put with no atomic compare-and-set, and Harper replication is
- * async — two concurrent presentations of the same assertion can both pass on
- * different nodes inside the replication window. Bounded by the ≤60s `exp`
- * and accepted under Harper's single-trust-domain model; do NOT replace this
- * table with a per-process cache, which would not be shared at all.
+ * Enforcement uses `Table.create()` — Harper's insert-if-absent, which throws
+ * a 409 ClientError ("Record already exists") — rather than an awaited
+ * get-then-put a concurrent request could interleave.
  *
- * Unlike the other MCP stores, read errors here are NOT swallowed: treating
- * "could not check" as "not seen" would fail open on the one guard whose whole
- * job is rejecting repeats. Callers should map a throw to a 500, not issue.
+ * Residual race (documented, accepted): Harper currently enforces create()'s
+ * existence check against the pre-staging snapshot only, so concurrent
+ * in-flight creates can degrade to last-write-wins with both callers
+ * reporting success (HarperFast/harper#1745). Exposure is bounded to
+ * presentations in flight simultaneously — within the staging→commit interval
+ * on one node, or replication lag across nodes — NOT open reuse across the
+ * assertion's ~60s validity window; each duplicate mints one short-TTL token.
+ * If harper#1745 lands per-node enforcement, the 409 also surfaces on
+ * commit-time conflict and this guard becomes fully atomic per node with no
+ * code change here (the catch below already handles it). Do NOT replace this
+ * table with a per-process cache, which would not be shared across workers
+ * or nodes.
+ *
+ * Unlike the other MCP stores, storage errors here are NOT swallowed:
+ * treating "could not check" as "not seen" would fail open on the one guard
+ * whose whole job is rejecting repeats. Callers should map a throw to a 500.
  */
 
 import { createHash } from 'node:crypto';
@@ -73,26 +83,24 @@ export class MCPAssertionJtiStore {
 	/**
 	 * Record a (client_id, jti) sighting. Returns true when this is the first
 	 * sighting (proceed with issuance), false when the jti was already seen
-	 * (replay — reject). Storage errors on either the read or the write
-	 * propagate to the caller: this guard must fail closed, never
-	 * "couldn't check, assume fresh".
+	 * (replay — reject). Non-409 storage errors propagate to the caller: this
+	 * guard must fail closed, never "couldn't check, assume fresh".
 	 */
 	async checkAndRecord(clientId: string, jti: string): Promise<boolean> {
 		const table = getJtisTable();
 		const id = jtiKey(clientId, jti);
-
-		// ANY record under this key means the jti was seen — requiring a
-		// well-formed row (e.g. `existing.id`) would turn a malformed record
-		// into a fail-open bypass of the one guard that must fail closed.
-		const existing = await table.get(id);
-		if (existing) {
-			this.logger?.warn?.(`MCP assertion replay detected for client ${clientId}`);
-			return false;
+		try {
+			// Insert-if-absent; ANY existing record under this key is a replay.
+			// Only id + client_id are app-owned; `created_at` is stamped by
+			// Harper via @createdTime (see schema).
+			await table.create({ id, client_id: clientId });
+		} catch (error) {
+			if ((error as { statusCode?: number })?.statusCode === 409) {
+				this.logger?.warn?.(`MCP assertion replay detected for client ${clientId}`);
+				return false;
+			}
+			throw error;
 		}
-
-		// Only id + client_id are app-owned; `created_at` is stamped by Harper
-		// via @createdTime (see schema) — we don't hand-write record timestamps.
-		await table.put({ id, client_id: clientId });
 		this.logger?.debug?.(`Recorded MCP assertion jti for client ${clientId}`);
 		return true;
 	}

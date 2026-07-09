@@ -516,6 +516,14 @@ export interface ProviderRegistry {
 export interface Table {
 	get(id: string): Promise<any>;
 	put(record: any): Promise<any>;
+	/**
+	 * Insert-if-absent: creates the record, throwing a 409 `ClientError`
+	 * ("Record already exists") when a record with the same primary key
+	 * exists. NOTE: Harper currently enforces the existence check against the
+	 * pre-staging snapshot only — concurrent creates can degrade to
+	 * last-write-wins (HarperFast/harper#1745).
+	 */
+	create(record: any): Promise<any>;
 	delete(id: string): Promise<void>;
 }
 
