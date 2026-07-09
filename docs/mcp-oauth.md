@@ -485,6 +485,86 @@ set, a warning is logged at startup and rotation is silently skipped. Pick one:
 
 ---
 
+## Client ID Metadata Documents (CIMD)
+
+The MCP authorization spec allows a client to identify itself with an HTTPS URL
+instead of an opaque string. When the AS receives such a `client_id`, it fetches
+the URL as a JSON metadata document, validates the fields, and uses those values
+in place of a registered (DCR) client.
+
+CIMD is **enabled by default** when `mcp.enabled: true`. No configuration is needed
+for the basic case — any well-formed HTTPS client_id with a non-root path triggers
+automatic resolution.
+
+### How it works
+
+1. The MCP client sends `client_id=https://app.example.com/client.json` to
+   `/oauth/mcp/authorize`.
+2. The AS verifies the URL shape (HTTPS, non-root path, no IP literal host), then
+   does a DNS pre-flight check — **all** resolved addresses must be public (not
+   RFC 1918, loopback, link-local, or ULA). This blocks SSRF to internal services.
+3. The AS fetches the URL (5 s timeout, 64 KB cap, no redirects) and validates the
+   document: `client_id` must match the URL, `client_name` and `redirect_uris` are
+   required, grant types and auth methods must match supported values.
+4. Instead of immediately redirecting to the upstream IdP, the AS shows the user an
+   **interstitial confirmation page** that displays the `client_name` and redirect
+   URI hostname (with a loopback warning when applicable). This satisfies the MCP spec
+   requirement to clearly display who the user is authorizing.
+5. The user submits the form, which POSTs a one-time confirm token to
+   `/oauth/mcp/confirm`. The AS verifies and consumes the token, then performs the
+   upstream redirect exactly as it would for a DCR client.
+6. Resolved documents are **cached per process** with a TTL derived from
+   `Cache-Control: max-age` (clamped to [60 s, 86 400 s]; default 3 600 s).
+   Client-side validation failures are negatively cached for 60 s to avoid hammering
+   bad documents. Server-side errors (DNS, timeout) are _not_ negatively cached so
+   a transient outage doesn't lock out the client.
+
+### Security properties
+
+- SSRF: DNS pre-flight checks all A/AAAA records. IP-literal hosts in the URL are
+  rejected before DNS. DNS rebinding between the gate check and the actual fetch is a
+  residual risk (noted in #166); the gate mitigates the primary SSRF-reach risk.
+- XSS: `client_name` and all other client-supplied strings are HTML-escaped before
+  rendering in the interstitial page. Clients are attacker-controlled; treat every
+  field as untrusted.
+- Token binding: the confirm token embeds the full set of authorize parameters
+  (redirect_uri, code_challenge, resource, scope). Swapping params between the
+  interstitial and the confirm POST is not possible — the token is single-use and
+  binds all values at mint time.
+
+### Configuration
+
+```yaml
+mcp:
+  enabled: true
+  issuer: https://my-app.example.com
+  clientIdMetadataDocuments:
+    enabled: true # default; set false to disable CIMD entirely
+    allowedHosts: # optional allowlist; omit to allow any public host
+      - mcp-client.example.com
+      - tools.partner.com
+    fetchTimeoutMs: 5000 # default 5 000 ms
+    maxDocumentBytes: 65536 # default 64 KB
+```
+
+When `allowedHosts` is configured, any CIMD `client_id` whose host is not in the
+list is treated as an unknown client (`invalid_client`) without revealing whether
+the host would otherwise be valid — the list is not disclosed to the client.
+
+> **v1 limitation:** only `token_endpoint_auth_method: none` (public clients) is
+> supported for CIMD clients. `private_key_jwt` authentication will be activated
+> by issue [#159](https://github.com/HarperFast/oauth/issues/159). Other auth
+> methods are rejected with `invalid_client`.
+
+### Stored/DCR clients are unchanged
+
+CIMD resolution only applies to URL-shaped client IDs. Any `client_id` that does
+not parse as an HTTPS URL with a non-root path goes directly to the DCR store as
+before. CIMD clients and DCR clients can coexist; existing DCR registrations are
+not affected.
+
+---
+
 ## Not yet supported (v1.1+)
 
 These are **not** available and no config or code sample here implies them:

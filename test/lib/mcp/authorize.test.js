@@ -2,10 +2,18 @@
  * Tests for /oauth/mcp/authorize handler.
  */
 
-import { describe, it, before, after, beforeEach } from 'node:test';
+import { describe, it, before, after, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { handleAuthorize, redirectUriMatches, selectMCPProvider } from '../../../dist/lib/mcp/authorize.js';
+import {
+	handleAuthorize,
+	handleAuthorizeConfirm,
+	redirectUriMatches,
+	selectMCPProvider,
+	escapeHtml,
+	buildInterstitialPage,
+} from '../../../dist/lib/mcp/authorize.js';
 import { resetMCPClientsTableCache } from '../../../dist/lib/mcp/clientStore.js';
+import { _setDnsLookup, _setFetch, _clearCimdCache } from '../../../dist/lib/mcp/cimd.js';
 
 /**
  * Minimal RequestTarget stub for the existing target.get?.() pattern.
@@ -444,5 +452,322 @@ describe('handleAuthorize', () => {
 			const url = new URL(response.headers.Location);
 			assert.equal(url.host, 'upstream.example.com');
 		});
+	});
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// escapeHtml
+// ────────────────────────────────────────────────────────────────────────────
+
+describe('escapeHtml', () => {
+	it('escapes all five HTML special characters', () => {
+		assert.equal(escapeHtml('<script>alert(1)</script>'), '&lt;script&gt;alert(1)&lt;/script&gt;');
+		assert.equal(escapeHtml('"hello"'), '&quot;hello&quot;');
+		assert.equal(escapeHtml("it's"), 'it&#39;s');
+		assert.equal(escapeHtml('a & b'), 'a &amp; b');
+	});
+
+	it('escapes an XSS vector combining multiple specials', () => {
+		const xss = '<img src=x onerror=alert(1)>';
+		const escaped = escapeHtml(xss);
+		assert.ok(!escaped.includes('<'), 'no unescaped <');
+		assert.ok(!escaped.includes('>'), 'no unescaped >');
+		assert.match(escaped, /&lt;img/);
+	});
+
+	it('returns the input unchanged when no special chars present', () => {
+		assert.equal(escapeHtml('hello world'), 'hello world');
+		assert.equal(escapeHtml('example.com'), 'example.com');
+	});
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// buildInterstitialPage — XSS prevention
+// ────────────────────────────────────────────────────────────────────────────
+
+describe('buildInterstitialPage', () => {
+	const safeClient = {
+		client_id: 'https://example.com/client.json',
+		client_name: 'My App',
+		redirect_uris: ['https://example.com/cb'],
+	};
+
+	it('renders the client_name and redirect hostname', () => {
+		const html = buildInterstitialPage(safeClient, 'https://example.com/cb', 'tok123', '/oauth/mcp/confirm');
+		assert.match(html, /My App/);
+		assert.match(html, /example\.com/);
+	});
+
+	it('escapes XSS in client_name (attacker-controlled field)', () => {
+		const maliciousClient = {
+			...safeClient,
+			client_name: '<script>alert(1)</script><img onerror="steal()">',
+		};
+		const html = buildInterstitialPage(maliciousClient, 'https://example.com/cb', 'tok', '/oauth/mcp/confirm');
+		// Raw opening tags must not be present — after escaping, <script becomes &lt;script
+		// and <img becomes &lt;img, so neither tag can execute.
+		assert.ok(!html.includes('<script'), 'raw <script tag must not appear in output');
+		assert.ok(!html.includes('<img'), 'raw <img tag must not appear in output');
+		assert.match(html, /&lt;script/);
+	});
+
+	it('includes the confirm_token in the form', () => {
+		const html = buildInterstitialPage(safeClient, 'https://example.com/cb', 'my-token-value', '/oauth/mcp/confirm');
+		assert.match(html, /name="confirm_token"/);
+		assert.match(html, /value="my-token-value"/);
+	});
+
+	it('includes a loopback warning when redirect is to localhost', () => {
+		const html = buildInterstitialPage(safeClient, 'http://localhost:6274/cb', 'tok', '/oauth/mcp/confirm');
+		assert.match(html, /Warning/i);
+		assert.match(html, /loopback|local process/i);
+	});
+
+	it('does NOT include a loopback warning for non-loopback redirects', () => {
+		const html = buildInterstitialPage(safeClient, 'https://example.com/cb', 'tok', '/oauth/mcp/confirm');
+		assert.ok(!html.includes('Warning') || !html.includes('loopback'), 'no loopback warning for external redirect');
+	});
+
+	it('escapes the confirm_token value (defense-in-depth)', () => {
+		const dangerousToken = 'tok"><script>evil()</script>';
+		const html = buildInterstitialPage(safeClient, 'https://example.com/cb', dangerousToken, '/oauth/mcp/confirm');
+		assert.ok(!html.includes('<script>evil()'), 'token value must be escaped in HTML attribute');
+	});
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// handleAuthorize — CIMD interstitial path
+// ────────────────────────────────────────────────────────────────────────────
+
+describe('handleAuthorize — CIMD interstitial', () => {
+	let originalDatabases;
+
+	before(() => {
+		originalDatabases = global.databases;
+	});
+	after(() => {
+		global.databases = originalDatabases;
+	});
+
+	beforeEach(() => {
+		_clearCimdCache();
+		resetMCPClientsTableCache();
+		// Empty DCR store — all clients are CIMD.
+		global.databases = {
+			oauth: {
+				harper_oauth_mcp_clients: {
+					get: async () => null,
+					put: async () => {},
+					delete: async () => {},
+				},
+			},
+		};
+		// Stub DNS and fetch so CIMD resolution succeeds.
+		_setDnsLookup(async () => [{ address: '1.2.3.4', family: 4 }]);
+	});
+
+	afterEach(() => {
+		_setDnsLookup(null);
+		_setFetch(null);
+	});
+
+	function makeCimdDoc(clientId, overrides = {}) {
+		return {
+			client_id: clientId,
+			client_name: 'CIMD Test App',
+			redirect_uris: ['https://mcp-client.example.com/cb'],
+			...overrides,
+		};
+	}
+
+	function makeCimdFetch(doc) {
+		return async () => {
+			const body = JSON.stringify(doc);
+			const bytes = Buffer.from(body);
+			return {
+				ok: true,
+				status: 200,
+				headers: new Map([['content-type', 'application/json']]),
+				body: {
+					getReader: () => {
+						let sent = false;
+						return {
+							read: async () => (sent ? { done: true } : ((sent = true), { done: false, value: bytes })),
+							cancel: () => {},
+						};
+					},
+				},
+			};
+		};
+	}
+
+	const CIMD_CLIENT_ID = 'https://mcp-client.example.com/client.json';
+	const CIMD_QUERY = {
+		...BASE_QUERY,
+		client_id: CIMD_CLIENT_ID,
+		redirect_uri: 'https://mcp-client.example.com/cb',
+		resource: 'https://app.example.com/mcp',
+	};
+
+	it('returns 200 HTML interstitial page for a CIMD client (not 302)', async () => {
+		_setFetch(makeCimdFetch(makeCimdDoc(CIMD_CLIENT_ID)));
+		const { entries } = makeProviderRegistry('github');
+		const target = makeTarget(CIMD_QUERY);
+		const response = await handleAuthorize(makeRequest(), target, { enabled: true }, entries);
+
+		assert.equal(response.status, 200);
+		assert.match(response.headers['Content-Type'], /text\/html/);
+		assert.match(response.body, /CIMD Test App/);
+		assert.match(response.body, /mcp-client\.example\.com/);
+		assert.match(response.body, /confirm_token/);
+		assert.ok(!response.body.includes('<script>'), 'no raw script tags');
+	});
+
+	it('includes a loopback warning when the CIMD redirect is to localhost', async () => {
+		const doc = makeCimdDoc(CIMD_CLIENT_ID, { redirect_uris: ['http://localhost:6274/cb'] });
+		_setFetch(makeCimdFetch(doc));
+		const { entries } = makeProviderRegistry('github');
+		const target = makeTarget({ ...CIMD_QUERY, redirect_uri: 'http://localhost:6274/cb' });
+		const response = await handleAuthorize(makeRequest(), target, { enabled: true }, entries);
+
+		assert.equal(response.status, 200);
+		assert.match(response.body, /Warning|loopback/i);
+	});
+
+	it('stored/DCR clients bypass the interstitial and redirect directly (302)', async () => {
+		// Put a DCR client in the store
+		const dcrClient = VALID_CLIENT;
+		resetMCPClientsTableCache();
+		const storedClients = new Map([
+			[
+				dcrClient.client_id,
+				(() => {
+					const e = { ...dcrClient };
+					for (const f of ['redirect_uris', 'grant_types', 'response_types']) {
+						if (Array.isArray(e[f])) e[f] = JSON.stringify(e[f]);
+					}
+					return e;
+				})(),
+			],
+		]);
+		global.databases = {
+			oauth: {
+				harper_oauth_mcp_clients: {
+					get: async (id) => storedClients.get(id) ?? null,
+					put: async () => {},
+					delete: async () => {},
+				},
+			},
+		};
+		const { entries } = makeProviderRegistry('github');
+		const target = makeTarget(BASE_QUERY); // uses VALID_CLIENT.client_id
+		const response = await handleAuthorize(makeRequest(), target, { enabled: true }, entries);
+
+		assert.equal(response.status, 302, 'DCR client gets a direct redirect, no interstitial');
+		assert.match(response.headers.Location, /upstream\.example\.com/);
+	});
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// handleAuthorizeConfirm
+// ────────────────────────────────────────────────────────────────────────────
+
+describe('handleAuthorizeConfirm', () => {
+	const MCP_STATE = {
+		clientId: 'https://mcp-client.example.com/client.json',
+		resource: 'https://app.example.com/mcp',
+		codeChallenge: 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM',
+		codeChallengeMethod: 'S256',
+		redirectUri: 'https://mcp-client.example.com/cb',
+		scope: 'mcp:read',
+		clientState: 'state-xyz',
+	};
+
+	function makeProviderWithCsrf(name = 'github') {
+		// Simulate a simple token store: issued → consumed single-use.
+		const issued = new Map();
+		let counter = 0;
+		const provider = {
+			generateCSRFToken: async (metadata) => {
+				const token = `csrf-${++counter}`;
+				issued.set(token, metadata);
+				return token;
+			},
+			verifyCSRFToken: async (token) => {
+				const data = issued.get(token);
+				if (!data) return null;
+				issued.delete(token); // single-use
+				return data;
+			},
+			getAuthorizationUrl: (state) => `https://upstream.example.com/authorize?state=${encodeURIComponent(state)}`,
+		};
+		return {
+			entries: {
+				[name]: { provider, config: { provider: name, redirectUri: 'https://app.example.com/oauth/callback' } },
+			},
+			provider,
+		};
+	}
+
+	it('rejects missing confirm_token with 400', async () => {
+		const { entries } = makeProviderWithCsrf();
+		const result = await handleAuthorizeConfirm(makeRequest(), {}, { enabled: true }, entries);
+		assert.equal(result.status, 400);
+		assert.match(result.body.error_description, /confirm_token/);
+	});
+
+	it('rejects an invalid/unknown token with 400', async () => {
+		const { entries } = makeProviderWithCsrf();
+		const result = await handleAuthorizeConfirm(
+			makeRequest(),
+			{ confirm_token: 'not-a-real-token' },
+			{ enabled: true },
+			entries
+		);
+		assert.equal(result.status, 400);
+		assert.equal(result.body.error, 'invalid_request');
+	});
+
+	it('valid token → 302 redirect to upstream IdP with MCP state', async () => {
+		const { entries, provider } = makeProviderWithCsrf();
+		// Mint a confirm token as handleAuthorize would.
+		const token = await provider.generateCSRFToken({
+			providerName: 'github',
+			mcp: MCP_STATE,
+			_confirm: true,
+		});
+
+		const result = await handleAuthorizeConfirm(makeRequest(), { confirm_token: token }, { enabled: true }, entries);
+		assert.equal(result.status, 302);
+		assert.match(result.headers.Location, /upstream\.example\.com/);
+	});
+
+	it('token is single-use: second confirm returns 400', async () => {
+		const { entries, provider } = makeProviderWithCsrf();
+		const token = await provider.generateCSRFToken({
+			providerName: 'github',
+			mcp: MCP_STATE,
+			_confirm: true,
+		});
+
+		const first = await handleAuthorizeConfirm(makeRequest(), { confirm_token: token }, { enabled: true }, entries);
+		assert.equal(first.status, 302, 'first confirm succeeds');
+
+		const second = await handleAuthorizeConfirm(makeRequest(), { confirm_token: token }, { enabled: true }, entries);
+		assert.equal(second.status, 400, 'second confirm rejected (token consumed)');
+	});
+
+	it('rejects a token without the _confirm marker (prevents CSRF token abuse)', async () => {
+		const { entries, provider } = makeProviderWithCsrf();
+		// Mint a regular authorize CSRF token (no _confirm).
+		const token = await provider.generateCSRFToken({
+			providerName: 'github',
+			mcp: MCP_STATE,
+			// Note: no _confirm: true
+		});
+
+		const result = await handleAuthorizeConfirm(makeRequest(), { confirm_token: token }, { enabled: true }, entries);
+		assert.equal(result.status, 400);
+		assert.match(result.body.error_description, /Invalid confirm token/);
 	});
 });

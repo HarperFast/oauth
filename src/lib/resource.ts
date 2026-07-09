@@ -469,6 +469,7 @@ export class OAuthResource extends Resource {
 				request,
 				data,
 				OAuthResource.mcpConfig,
+				OAuthResource.providers,
 				OAuthResource.hookManager ?? undefined,
 				logger
 			);
