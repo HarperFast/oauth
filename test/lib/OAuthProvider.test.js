@@ -254,7 +254,8 @@ describe('OAuthProvider', () => {
 			const storedRecord = storedTokens.get(token);
 			assert.ok(storedRecord);
 			assert.ok(storedRecord.data);
-			assert.ok(storedRecord.created_at);
+			// created_at is Harper-managed (@createdTime), not hand-written.
+			assert.equal(storedRecord.created_at, undefined);
 		});
 
 		it('should verify and consume valid token', async () => {

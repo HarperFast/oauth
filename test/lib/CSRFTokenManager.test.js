@@ -65,7 +65,8 @@ describe('CSRFTokenManager', () => {
 			const storedRecord = storedRecords.get(tokenId);
 			assert.ok(storedRecord);
 			assert.equal(typeof storedRecord.data, 'string');
-			assert.ok(storedRecord.created_at);
+			// created_at is Harper-managed (@createdTime), not hand-written.
+			assert.equal(storedRecord.created_at, undefined);
 
 			// Retrieve and verify
 			const retrieved = await manager.get(tokenId);

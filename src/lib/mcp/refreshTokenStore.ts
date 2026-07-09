@@ -87,7 +87,6 @@ function encodeRecord(record: MCPRefreshFamilyRecord): Record<string, any> {
 		user: record.user,
 		resource: record.resource,
 		scope: record.scope,
-		created_at: record.created_at,
 		expires_at: record.expires_at,
 	};
 }
@@ -101,7 +100,6 @@ function decodeRecord(raw: Record<string, any>): MCPRefreshFamilyRecord {
 		user: raw.user,
 		resource: raw.resource,
 		scope: raw.scope ?? undefined,
-		created_at: raw.created_at,
 		expires_at: raw.expires_at,
 	};
 }

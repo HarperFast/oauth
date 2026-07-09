@@ -203,7 +203,6 @@ async function mintTokenPair(
 			user: grant.user,
 			resource: grant.resource,
 			scope: grant.scope,
-			created_at: now,
 			expires_at: now + refreshTtl,
 		});
 		responseBody.refresh_token = refreshToken;

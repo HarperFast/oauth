@@ -76,7 +76,8 @@ describe('handleMCPCallback', () => {
 		assert.equal(record.code_challenge_method, SAMPLE_MCP_STATE.codeChallengeMethod);
 		assert.equal(record.redirect_uri, SAMPLE_MCP_STATE.redirectUri);
 		assert.equal(record.scope, SAMPLE_MCP_STATE.scope);
-		assert.equal(typeof record.created_at, 'number');
+		// created_at is Harper-managed (@createdTime), not hand-written.
+		assert.equal(record.created_at, undefined);
 	});
 
 	it('redirects to the client redirect_uri with code and echoed state', async () => {
