@@ -239,7 +239,8 @@ export interface MCPRefreshFamilyRecord {
 export interface MCPAssertionJtiRecord {
 	id: string;
 	client_id: string;
-	created_at: number;
+	/** Harper-assigned (epoch ms) via @createdTime; never written by the app. */
+	created_at?: number;
 }
 
 /**

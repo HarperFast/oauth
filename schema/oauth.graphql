@@ -92,7 +92,7 @@ type mcp_refresh_families @table(database: "oauth", expiration: 2592000) {
 type mcp_assertion_jtis @table(database: "oauth", expiration: 120) {
 	id: ID @primaryKey
 	client_id: String
-	created_at: Float
+	created_at: Float @createdTime # Harper-assigned (epoch ms); not hand-written
 }
 
 ## OAuth User Session table (optional, for future use)

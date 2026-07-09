@@ -26,7 +26,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import type { Logger, MCPAssertionJtiRecord, Table } from '../../types.ts';
+import type { Logger, Table } from '../../types.ts';
 
 declare const databases: any;
 
@@ -90,14 +90,9 @@ export class MCPAssertionJtiStore {
 			return false;
 		}
 
-		const record: MCPAssertionJtiRecord = {
-			id,
-			client_id: clientId,
-			created_at: Math.floor(Date.now() / 1000),
-		};
-		// Explicit field access (no spread) per the tracked-object gotcha, kept
-		// even for this locally-built record so the stores stay uniform.
-		await table.put({ id: record.id, client_id: record.client_id, created_at: record.created_at });
+		// Only id + client_id are app-owned; `created_at` is stamped by Harper
+		// via @createdTime (see schema) — we don't hand-write record timestamps.
+		await table.put({ id, client_id: clientId });
 		this.logger?.debug?.(`Recorded MCP assertion jti for client ${clientId}`);
 		return true;
 	}

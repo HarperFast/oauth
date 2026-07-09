@@ -62,7 +62,8 @@ describe('MCPAssertionJtiStore', () => {
 		const stored = storedRecords.get(jtiKey('client-1', 'jti-abc'));
 		assert.ok(stored, 'record stored under sha256(client_id, jti)');
 		assert.equal(stored.client_id, 'client-1');
-		assert.equal(typeof stored.created_at, 'number');
+		// created_at is Harper-assigned via @createdTime — the app must NOT hand-write it.
+		assert.equal(stored.created_at, undefined);
 	});
 
 	it('returns false on a replayed jti (tracked-object Proxy read path)', async () => {
