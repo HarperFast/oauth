@@ -250,6 +250,21 @@ export interface MCPRefreshFamilyRecord {
 }
 
 /**
+ * MCP client-assertion replay-guard record (table `mcp_assertion_jtis`,
+ * `expiration: 120`).
+ *
+ * `id` is sha256(client_id, jti) — see assertionJtiStore.ts for the keying
+ * and accepted-race notes. Rows only need to outlive the maximum assertion
+ * window; the table TTL evicts them.
+ */
+export interface MCPAssertionJtiRecord {
+	id: string;
+	client_id: string;
+	/** Harper-assigned (epoch ms) via @createdTime; never written by the app. */
+	created_at?: number;
+}
+
+/**
  * OAuth Lifecycle Hooks
  * Callbacks invoked at key points in the OAuth flow
  */
@@ -522,6 +537,14 @@ export interface ProviderRegistry {
 export interface Table {
 	get(id: string): Promise<any>;
 	put(record: any): Promise<any>;
+	/**
+	 * Insert-if-absent: creates the record, throwing a 409 `ClientError`
+	 * ("Record already exists") when a record with the same primary key
+	 * exists. NOTE: Harper currently enforces the existence check against the
+	 * pre-staging snapshot only — concurrent creates can degrade to
+	 * last-write-wins (HarperFast/harper#1745).
+	 */
+	create(record: any): Promise<any>;
 	delete(id: string): Promise<void>;
 	/**
 	 * Enumerate records matching a query. An empty query (`{}`) returns all rows.
