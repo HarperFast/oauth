@@ -63,7 +63,6 @@ describe('MCPAuthCodeStore', () => {
 		code_challenge_method: 'S256',
 		redirect_uri: 'https://mcp-client.example.com/cb',
 		scope: 'mcp:read',
-		created_at: 1700000000,
 	};
 
 	it('persists and retrieves a code, preserving scalar fields through tracked-object Proxy', async () => {
@@ -79,7 +78,6 @@ describe('MCPAuthCodeStore', () => {
 		assert.equal(retrieved.code_challenge_method, sampleRecord.code_challenge_method);
 		assert.equal(retrieved.redirect_uri, sampleRecord.redirect_uri);
 		assert.equal(retrieved.scope, sampleRecord.scope);
-		assert.equal(retrieved.created_at, sampleRecord.created_at);
 	});
 
 	it('returns null for an unknown code', async () => {

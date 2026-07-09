@@ -95,7 +95,6 @@ describe('MCPRefreshFamilyStore', () => {
 		user: 'alice@example.com',
 		resource: 'https://app.example.com/mcp',
 		scope: 'mcp:read',
-		created_at: 1700000000,
 		expires_at: 1700086400,
 	};
 

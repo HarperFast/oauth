@@ -204,7 +204,6 @@ export interface MCPAuthCodeRecord {
 	code_challenge_method: string;
 	redirect_uri: string;
 	scope?: string;
-	created_at: number;
 }
 
 /**
@@ -245,7 +244,6 @@ export interface MCPRefreshFamilyRecord {
 	user: string;
 	resource: string;
 	scope?: string;
-	created_at: number;
 	expires_at: number;
 }
 

@@ -6,7 +6,7 @@
 type csrf_tokens @table(database: "oauth", expiration: 600) {
 	token_id: ID @primaryKey
 	data: String # JSON stringified CSRFTokenData
-	created_at: Float
+	created_at: Float @createdTime # Harper-assigned on insert (epoch ms)
 }
 
 ## MCP Dynamic Client Registration table (RFC 7591)
@@ -48,7 +48,7 @@ type mcp_auth_codes @table(database: "oauth", expiration: 300) {
 	code_challenge_method: String # Always "S256"
 	redirect_uri: String # Bound at issuance; /token must match
 	scope: String # Space-separated; may be empty
-	created_at: Float
+	created_at: Float @createdTime # Harper-assigned on insert (epoch ms)
 }
 
 ## MCP JWT signing keys (Stage 4)
@@ -62,7 +62,11 @@ type harper_oauth_mcp_keys @table(database: "oauth") {
 	alg: String # "RS256"
 	public_key_pem: String
 	private_key_pem: String
-	created_at: Float # Unix seconds
+	# Hand-managed (NOT @createdTime): keyStore deliberately mutates created_at
+	# to reorder GC/signer selection, and @createdTime would pin it to the
+	# original insert time. Unit is Unix SECONDS (keyStore computes nowSeconds -
+	# created_at) — do not conflate with the epoch-ms @createdTime fields above.
+	created_at: Float
 }
 
 ## MCP refresh-token families (Stage 4, OAuth 2.1 single-use rotation)
@@ -80,7 +84,7 @@ type mcp_refresh_families @table(database: "oauth", expiration: 2592000) {
 	user: String
 	resource: String
 	scope: String
-	created_at: Float # Unix seconds
+	created_at: Float @createdTime # Harper-assigned on insert; retained across rotation writes (epoch ms)
 	expires_at: Float # Unix seconds; refresh rejected once exceeded
 }
 

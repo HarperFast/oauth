@@ -83,7 +83,6 @@ export async function handleMCPCallback(
 		code_challenge_method: mcpState.codeChallengeMethod,
 		redirect_uri: mcpState.redirectUri,
 		scope: mcpState.scope,
-		created_at: Date.now(),
 	};
 
 	const store = new MCPAuthCodeStore(logger);

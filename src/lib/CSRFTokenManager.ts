@@ -51,10 +51,10 @@ export class CSRFTokenManager {
 		const table = getCSRFTable();
 
 		try {
+			// created_at is Harper-managed (@createdTime); do not hand-write it.
 			await table.put({
 				token_id: token,
 				data: JSON.stringify(data),
-				created_at: Date.now(),
 			});
 
 			this.logger?.debug?.(`Stored CSRF token: ${token}`);
