@@ -309,6 +309,45 @@ describe('verifyClientAssertion', () => {
 			});
 		});
 
+		it('does not fail open when window options are NaN/Infinity/negative (falls back to defaults)', () => {
+			const { privateKey, jwk } = makeKeyPair();
+			const farFuture = () => defaultPayload({ exp: nowSeconds() + 3600 });
+			const expired = () => defaultPayload({ exp: nowSeconds() - 3600, iat: nowSeconds() - 3630 });
+			// A poisoned maxExpiresInSeconds must not let a far-future exp through.
+			for (const bad of [NaN, Infinity, -Infinity, -5, 0]) {
+				const result = verify(makeAssertion({ privateKey, payload: farFuture() }), [jwk], {
+					maxExpiresInSeconds: bad,
+				});
+				assert.equal(result.valid, false, `far-future exp accepted with maxExpiresInSeconds=${bad}`);
+				assert.match(result.reason, /exceeds the maximum window/);
+			}
+			// A poisoned clockToleranceSeconds must not let an expired assertion through.
+			for (const bad of [NaN, Infinity, -1]) {
+				const result = verify(makeAssertion({ privateKey, payload: expired() }), [jwk], {
+					clockToleranceSeconds: bad,
+				});
+				assert.equal(result.valid, false, `expired assertion accepted with clockToleranceSeconds=${bad}`);
+				assert.match(result.reason, /has expired/);
+			}
+		});
+
+		it('accepts config-shaped numeric strings for the window options', () => {
+			const { privateKey, jwk } = makeKeyPair();
+			// exp within a string "10" window but tolerance "0" — mirrors YAML/${ENV} config.
+			const result = verify(makeAssertion({ privateKey, payload: defaultPayload({ exp: nowSeconds() + 5 }) }), [jwk], {
+				maxExpiresInSeconds: '10',
+				clockToleranceSeconds: '0',
+			});
+			assert.equal(result.valid, true);
+			// And the string window is still enforced as a bound.
+			const tooFar = verify(makeAssertion({ privateKey, payload: defaultPayload({ exp: nowSeconds() + 25 }) }), [jwk], {
+				maxExpiresInSeconds: '10',
+				clockToleranceSeconds: '0',
+			});
+			assert.equal(tooFar.valid, false);
+			assert.match(tooFar.reason, /exceeds the maximum window/);
+		});
+
 		it('rejects missing or future iat', () => {
 			rejectPayload(defaultPayload({ iat: undefined }), /iat is required/);
 			rejectPayload(defaultPayload({ iat: nowSeconds() + 120 }), /iat is in the future/);

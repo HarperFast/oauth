@@ -84,6 +84,23 @@ function fail(reason: string): ClientAssertionResult {
 	return { valid: false, reason };
 }
 
+/**
+ * Normalize a window option (seconds) to a safe finite number, falling back to
+ * the conservative default on anything non-finite. These options are the
+ * enforcement boundary for the RFC 7523 §3 validity-window checks, and the
+ * comparisons below fail OPEN on `NaN`/`Infinity` (e.g. `exp > now + NaN` is
+ * always false, so a far-future `exp` would be accepted). #162 will wire these
+ * from `mcp` config, where `${ENV}`/quoted-YAML can deliver a string or
+ * garbage — so coerce here, mirroring token.ts's `coerceTtl`. `allowZero`
+ * distinguishes the tolerance (0 is a valid "no skew") from the max window
+ * (0 would be a nonsensical always-reject, treated as misconfig → default).
+ */
+function coerceWindowSeconds(value: unknown, fallback: number, allowZero: boolean): number {
+	const n = typeof value === 'number' ? value : Number(value);
+	if (!Number.isFinite(n) || n < 0 || (n === 0 && !allowZero)) return fallback;
+	return n;
+}
+
 function decodeSegment(segment: string): Record<string, unknown> | null {
 	if (!BASE64URL_PATTERN.test(segment)) return null;
 	let parsed: unknown;
@@ -154,8 +171,10 @@ function selectKey(
  */
 export function verifyClientAssertion(params: VerifyClientAssertionParams): ClientAssertionResult {
 	const { assertion, clientId, tokenEndpoint, jwks } = params;
-	const maxExpiresIn = params.maxExpiresInSeconds ?? DEFAULT_MAX_EXPIRES_IN_SECONDS;
-	const clockTolerance = params.clockToleranceSeconds ?? DEFAULT_CLOCK_TOLERANCE_SECONDS;
+	// Coerce the window options up front — a NaN/Infinity here would make the
+	// time-window comparisons fail open (see coerceWindowSeconds).
+	const maxExpiresIn = coerceWindowSeconds(params.maxExpiresInSeconds, DEFAULT_MAX_EXPIRES_IN_SECONDS, false);
+	const clockTolerance = coerceWindowSeconds(params.clockToleranceSeconds, DEFAULT_CLOCK_TOLERANCE_SECONDS, true);
 
 	if (typeof assertion !== 'string' || assertion.length === 0) {
 		return fail('client_assertion is required');
