@@ -210,7 +210,7 @@ function parseCacheControlMaxAge(header: string | null): number {
 function validateCimdDocument(
 	doc: unknown,
 	clientId: string,
-	cimdConfig: MCPClientIdMetadataDocumentsConfig | undefined
+	allowedRedirectUriHosts: string[] | undefined
 ): MCPClientRecord {
 	if (!doc || typeof doc !== 'object' || Array.isArray(doc)) {
 		throw new CimdClientError('invalid_client', 'CIMD document must be a JSON object');
@@ -233,10 +233,13 @@ function validateCimdDocument(
 		throw new CimdClientError('invalid_client', 'CIMD document missing required field: redirect_uris');
 	}
 
-	// Validate redirect_uris using the same DCR rules.
-	const allowedRedirectHosts = cimdConfig?.allowedHosts; // reuse for redirect URI validation
+	// Validate redirect_uris with the same structural rules AND the same
+	// redirect-host policy as DCR (`dynamicClientRegistration.allowedRedirectUriHosts`).
+	// Deliberately NOT `clientIdMetadataDocuments.allowedHosts` — that list governs
+	// which hosts may SERVE metadata documents; a client's redirect targets are a
+	// separate policy and need not share the document's host.
 	for (const uri of d.redirect_uris) {
-		const err = validateRedirectUri(uri, allowedRedirectHosts);
+		const err = validateRedirectUri(uri, allowedRedirectUriHosts);
 		if (err) throw new CimdClientError('invalid_client', `CIMD document: ${err}`);
 	}
 
@@ -313,6 +316,7 @@ function validateCimdDocument(
 export async function resolveCimdClient(
 	clientId: string,
 	cimdConfig: MCPClientIdMetadataDocumentsConfig | undefined,
+	allowedRedirectUriHosts?: string[],
 	logger?: Logger
 ): Promise<MCPClientRecord | null> {
 	// allowedHosts policy gate: when configured, only listed hosts are accepted.
@@ -409,7 +413,7 @@ export async function resolveCimdClient(
 			throw new CimdClientError('invalid_client', 'CIMD document is not valid JSON');
 		}
 
-		record = validateCimdDocument(doc, clientId, cimdConfig);
+		record = validateCimdDocument(doc, clientId, allowedRedirectUriHosts);
 
 		// Positive cache.
 		const ttlSeconds = parseCacheControlMaxAge(cacheControlHeader);
@@ -458,7 +462,12 @@ export async function resolveClient(
 	// CIMD is enabled by default when mcp.enabled; disabled only by explicit `enabled: false`.
 	const cimdEnabled = cimdConfig?.enabled !== false;
 	if (cimdEnabled && isCimdClientId(clientId)) {
-		return resolveCimdClient(clientId, cimdConfig, logger);
+		return resolveCimdClient(
+			clientId,
+			cimdConfig,
+			mcpConfig?.dynamicClientRegistration?.allowedRedirectUriHosts,
+			logger
+		);
 	}
 	return new MCPClientStore(logger).get(clientId);
 }

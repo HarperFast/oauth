@@ -186,6 +186,29 @@ describe('resolveCimdClient — allowedHosts policy', () => {
 		assert.ok(result);
 		assert.equal(result.client_id, VALID_URL);
 	});
+
+	it('allowedHosts governs the document host only — NOT redirect URI hosts', async () => {
+		// A trusted vendor's document may declare redirect targets on other hosts;
+		// the redirect-host policy is dynamicClientRegistration.allowedRedirectUriHosts,
+		// passed separately. With no redirect policy set, an off-document-host
+		// https redirect URI must be accepted even under a tight allowedHosts.
+		_setDnsLookup(makeDnsOk());
+		const doc = { ...VALID_DOC, redirect_uris: ['https://agent.other-host.example/callback'] };
+		_setFetch(makeOkFetch(doc));
+		const result = await resolveCimdClient(VALID_URL, { allowedHosts: ['example.com'] });
+		assert.ok(result, 'redirect host outside allowedHosts must not be rejected');
+		assert.deepEqual(result.redirect_uris, ['https://agent.other-host.example/callback']);
+	});
+
+	it('redirect URIs are enforced against the DCR redirect-host policy when provided', async () => {
+		_setDnsLookup(makeDnsOk());
+		const doc = { ...VALID_DOC, redirect_uris: ['https://agent.other-host.example/callback'] };
+		_setFetch(makeOkFetch(doc));
+		await assert.rejects(
+			() => resolveCimdClient(VALID_URL, { allowedHosts: ['example.com'] }, ['app.example.com']),
+			/not in allowlist/
+		);
+	});
 });
 
 describe('resolveCimdClient — document validation', () => {
