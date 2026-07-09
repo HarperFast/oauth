@@ -302,8 +302,11 @@ export function verifyClientAssertion(params: VerifyClientAssertionParams): Clie
 	}
 
 	const jti = payload.jti;
-	if (typeof jti !== 'string' || jti.length === 0 || jti.length > MAX_JTI_LENGTH) {
+	if (typeof jti !== 'string' || jti.length === 0) {
 		return fail('client_assertion jti is required');
+	}
+	if (jti.length > MAX_JTI_LENGTH) {
+		return fail('client_assertion jti exceeds the maximum length');
 	}
 
 	return {

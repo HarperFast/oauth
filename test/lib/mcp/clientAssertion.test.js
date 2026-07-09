@@ -358,11 +358,14 @@ describe('verifyClientAssertion', () => {
 			rejectPayload(defaultPayload({ nbf: 'later' }), /nbf is invalid/);
 		});
 
-		it('rejects a missing, empty, non-string, or oversized jti', () => {
+		it('rejects a missing, empty, or non-string jti as required', () => {
 			rejectPayload(defaultPayload({ jti: undefined }), /jti is required/);
 			rejectPayload(defaultPayload({ jti: '' }), /jti is required/);
 			rejectPayload(defaultPayload({ jti: 42 }), /jti is required/);
-			rejectPayload(defaultPayload({ jti: 'x'.repeat(257) }), /jti is required/);
+		});
+
+		it('rejects an oversized jti with a length-specific message (not "required")', () => {
+			rejectPayload(defaultPayload({ jti: 'x'.repeat(257) }), /jti exceeds the maximum length/);
 		});
 	});
 });
