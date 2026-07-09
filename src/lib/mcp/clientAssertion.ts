@@ -36,6 +36,12 @@ const DEFAULT_MAX_EXPIRES_IN_SECONDS = 60;
 const DEFAULT_CLOCK_TOLERANCE_SECONDS = 5;
 /** Bound what a client can force into the replay table. */
 const MAX_JTI_LENGTH = 256;
+/**
+ * Cap on the whole compact JWT before any split/decode work — a legitimate
+ * Ed25519 assertion with our claim set is well under 1KB, so 8KB is generous.
+ * Same defense-in-depth family as the repo's 2048-char request-path cap.
+ */
+const MAX_ASSERTION_LENGTH = 8192;
 /** Ed25519 signatures are always exactly 64 bytes (RFC 8032). */
 const ED25519_SIGNATURE_LENGTH = 64;
 
@@ -122,16 +128,23 @@ function selectKey(
 	if (!Array.isArray(jwks) || jwks.length === 0) {
 		return { error: 'client has no registered JWKs' };
 	}
+	// Registration (#161) should never store non-object entries, but this
+	// module promises "never throws" — so a null/primitive element must fail
+	// the lookup, not TypeError inside it.
 	if (kid !== undefined) {
 		if (typeof kid !== 'string' || kid.length === 0) return { error: 'assertion kid must be a non-empty string' };
-		const matches = jwks.filter((k) => k.kid === kid);
+		const matches = jwks.filter((k) => k !== null && typeof k === 'object' && k.kid === kid);
 		if (matches.length !== 1) return { error: 'assertion kid does not match exactly one registered key' };
 		return { jwk: matches[0] };
 	}
 	if (jwks.length !== 1) {
 		return { error: 'assertion kid is required when multiple keys are registered' };
 	}
-	return { jwk: jwks[0] };
+	const singleKey = jwks[0];
+	if (singleKey === null || typeof singleKey !== 'object') {
+		return { error: 'registered JWK is malformed' };
+	}
+	return { jwk: singleKey };
 }
 
 /**
@@ -146,6 +159,9 @@ export function verifyClientAssertion(params: VerifyClientAssertionParams): Clie
 
 	if (typeof assertion !== 'string' || assertion.length === 0) {
 		return fail('client_assertion is required');
+	}
+	if (assertion.length > MAX_ASSERTION_LENGTH) {
+		return fail('client_assertion exceeds the maximum allowed length');
 	}
 	if (typeof clientId !== 'string' || clientId.length === 0) {
 		return fail('client_id is required');

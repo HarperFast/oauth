@@ -71,6 +71,11 @@ describe('MCPAssertionJtiStore', () => {
 		assert.equal(storedRecords.size, 1, 'replay does not write a second record');
 	});
 
+	it('treats ANY truthy stored record as a replay, even a malformed one without id', async () => {
+		storedRecords.set(jtiKey('client-1', 'jti-abc'), {});
+		assert.equal(await store.checkAndRecord('client-1', 'jti-abc'), false);
+	});
+
 	it('scopes replay per client: the same jti from another client is fresh', async () => {
 		assert.equal(await store.checkAndRecord('client-1', 'shared-jti'), true);
 		assert.equal(await store.checkAndRecord('client-2', 'shared-jti'), true);

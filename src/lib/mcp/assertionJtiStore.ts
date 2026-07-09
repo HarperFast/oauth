@@ -7,9 +7,11 @@
  * `expiration: 120`, comfortably past the maximum assertion window (60s `exp`
  * + clock tolerance), so rows self-evict; runtime never needs to prune.
  *
- * Keys are `sha256(client_id \n jti)` — replay scope is per client (RFC 7523
- * defines `jti` uniqueness per issuer), and hashing normalizes an arbitrary
- * client-chosen string to a fixed-length key.
+ * Keys are `sha256(len:client_id:jti)` — the client_id is length-prefixed so
+ * the component boundary is unambiguous (plain delimiter concatenation lets
+ * crafted inputs collide). Replay scope is per client (RFC 7523 defines `jti`
+ * uniqueness per issuer), and hashing normalizes an arbitrary client-chosen
+ * string to a fixed-length key.
  *
  * Accepted race (same precedent as MCPAuthCodeStore.consume): the check is
  * get-then-put with no atomic compare-and-set, and Harper replication is
@@ -79,8 +81,11 @@ export class MCPAssertionJtiStore {
 		const table = getJtisTable();
 		const id = jtiKey(clientId, jti);
 
+		// ANY record under this key means the jti was seen — requiring a
+		// well-formed row (e.g. `existing.id`) would turn a malformed record
+		// into a fail-open bypass of the one guard that must fail closed.
 		const existing = await table.get(id);
-		if (existing && existing.id) {
+		if (existing) {
 			this.logger?.warn?.(`MCP assertion replay detected for client ${clientId}`);
 			return false;
 		}

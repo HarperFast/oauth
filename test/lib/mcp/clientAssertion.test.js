@@ -113,6 +113,15 @@ describe('verifyClientAssertion', () => {
 			}
 		});
 
+		it('rejects an assertion over the 8KB length cap before any decode work', () => {
+			const { privateKey, jwk } = makeKeyPair();
+			const good = makeAssertion({ privateKey });
+			const oversized = good + 'A'.repeat(8192);
+			const result = verify(oversized, [jwk]);
+			assert.equal(result.valid, false);
+			assert.match(result.reason, /maximum allowed length/);
+		});
+
 		it('rejects base64url segments containing invalid characters', () => {
 			const { privateKey, jwk } = makeKeyPair();
 			const good = makeAssertion({ privateKey });
@@ -196,6 +205,21 @@ describe('verifyClientAssertion', () => {
 			const result = verify(makeAssertion({ privateKey }), [withPrivate]);
 			assert.equal(result.valid, false);
 			assert.match(result.reason, /not a public Ed25519 key/);
+		});
+
+		it('rejects null/primitive JWK Set entries without throwing (never-throws contract)', () => {
+			const { privateKey, jwk } = makeKeyPair();
+			// Single-entry sets on the no-kid path.
+			for (const entry of [null, 42, 'key']) {
+				const result = verify(makeAssertion({ privateKey }), [entry]);
+				assert.equal(result.valid, false, `expected rejection for single entry ${JSON.stringify(entry)}`);
+			}
+			// Mixed sets on the kid path: the null entry must not throw during selection.
+			const result = verify(makeAssertion({ header: { alg: 'EdDSA', kid: 'key-a' }, privateKey }), [
+				null,
+				{ ...jwk, kid: 'key-a' },
+			]);
+			assert.equal(result.valid, true);
 		});
 
 		it('rejects non-OKP and non-Ed25519 JWKs', () => {
