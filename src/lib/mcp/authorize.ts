@@ -40,6 +40,7 @@ import { LOCAL_HOSTS } from './clientValidator.ts';
 import {
 	buildConsentCookie,
 	consentNonceMatches,
+	generateConsentFlowId,
 	generateConsentNonce,
 	hashConsentNonce,
 	readConsentNonce,
@@ -462,16 +463,18 @@ export async function handleAuthorize(
 		}
 		const providerEntry = providers[selection.providerName];
 
-		// Browser binding: the nonce cookie set below must accompany both the
-		// /confirm POST and the eventual upstream callback; only its hash is
-		// stored server-side (see consentBinding.ts).
+		// Browser binding: the per-flow nonce cookie set below must accompany both
+		// the /confirm POST and the eventual upstream callback; only its hash is
+		// stored server-side (see consentBinding.ts). The flow id names the cookie
+		// so parallel authorization flows in one browser don't collide.
+		const consentFlowId = generateConsentFlowId();
 		const consentNonce = generateConsentNonce();
 
 		let confirmToken: string;
 		try {
 			confirmToken = await providerEntry.provider.generateCSRFToken({
 				providerName: selection.providerName,
-				mcp: { ...mcpState, browserNonceHash: hashConsentNonce(consentNonce) },
+				mcp: { ...mcpState, browserNonceHash: hashConsentNonce(consentNonce), consentFlowId },
 				_confirm: true,
 			});
 		} catch (error) {
@@ -495,7 +498,7 @@ export async function handleAuthorize(
 				'X-Frame-Options': 'DENY',
 				'Content-Security-Policy': "frame-ancestors 'none'",
 				'Cache-Control': 'no-store',
-				'Set-Cookie': buildConsentCookie(consentNonce),
+				'Set-Cookie': buildConsentCookie(consentFlowId, consentNonce),
 			},
 			body: html,
 		};
@@ -572,10 +575,13 @@ export async function handleAuthorizeConfirm(
 	}
 
 	// Browser binding: the confirm POST must come from the browser that was
-	// served the interstitial (and its nonce cookie). Without this, the
+	// served the interstitial (and its per-flow nonce cookie). Without this, the
 	// malicious client itself could fetch and "confirm" the interstitial, then
 	// hand the victim the resulting upstream URL — consent bypassed.
-	if (!mcpState.browserNonceHash || !consentNonceMatches(readConsentNonce(request), mcpState.browserNonceHash)) {
+	if (
+		!mcpState.browserNonceHash ||
+		!consentNonceMatches(readConsentNonce(request, mcpState.consentFlowId), mcpState.browserNonceHash)
+	) {
 		logger?.warn?.(`MCP confirm: consent browser binding mismatch for client=${mcpState.clientId}`);
 		return {
 			status: 400,

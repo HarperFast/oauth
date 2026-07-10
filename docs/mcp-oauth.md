@@ -502,30 +502,39 @@ automatic resolution.
    `/oauth/mcp/authorize`.
 2. The AS verifies the URL shape (HTTPS, non-root path, no dot path segments, no
    IP literal host), then does a DNS pre-flight check — **all** resolved addresses
-   must be globally routable. IPv4 rejects `0/8`, `10/8`, `100.64/10` (CGNAT),
-   `127/8`, `169.254/16`, `172.16/12`, `192.168/16`, `198.18/15`, and `224/4`+;
-   IPv6 allows only global unicast (`2000::/3`), with v4-mapped addresses
-   classified by their embedded IPv4 address. This blocks SSRF to internal
-   services. All DNS-gate rejections return one generic `invalid_client` message
-   so callers cannot probe the server's internal DNS view.
+   must be globally routable, checked against the full IANA special-purpose
+   registries. IPv4 rejects `0/8`, `10/8`, `100.64/10` (CGNAT), `127/8`,
+   `169.254/16`, `172.16/12`, `192.0.0/24`, `192.0.2/24`, `192.88.99/24`,
+   `192.168/16`, `198.18/15`, `198.51.100/24`, `203.0.113/24`, `224/4`+, and the
+   AS112/AMT blocks; IPv6 allows only global unicast (`2000::/3`), with v4-mapped
+   and 6to4/ISATAP transition forms classified by their embedded IPv4 and the
+   in-`2000::/3` special-use prefixes (Teredo, ORCHID, documentation) also
+   rejected. This blocks SSRF to internal services. All DNS-gate rejections return
+   one generic `invalid_client` message so callers cannot probe the server's
+   internal DNS view. Concurrent resolutions are globally bounded (getaddrinfo
+   runs on an uncancellable thread pool) and deduped per client_id.
 3. The AS fetches the URL (5 s deadline covering DNS, connect, and the full body;
-   64 KB cap; no redirects; only `200 OK` accepted) and validates the document:
-   `client_id` must match the URL, `client_name` and `redirect_uris` are
-   required, grant types and auth methods must match supported values.
+   64 KB cap; no redirects; only `200 OK` accepted) over a **connection pinned to
+   the address the gate validated** — the socket connects to that exact IP while
+   the hostname is used for TLS SNI and certificate verification, so DNS rebinding
+   between the gate and the connection cannot re-target the fetch. It then
+   validates the document: `client_id` must match the URL, `client_name` and
+   `redirect_uris` are required, grant types and auth methods must match supported
+   values.
 4. Instead of immediately redirecting to the upstream IdP, the AS shows the user an
    **interstitial confirmation page** that displays the `client_id` host (the
    authoritative CIMD identity), the `client_name`, and the redirect URI hostname
    (with a loopback warning when applicable). This satisfies the MCP spec
    requirement to clearly display who the user is authorizing. The page is served
    with `X-Frame-Options: DENY`, `Content-Security-Policy: frame-ancestors 'none'`,
-   and `Cache-Control: no-store`, and it sets an HttpOnly consent cookie that
-   binds the rest of the flow to this browser.
+   and `Cache-Control: no-store`, and it sets a per-flow `__Host-` consent cookie
+   that binds the rest of the flow to this browser.
 5. The user submits the form, which POSTs a one-time confirm token to
    `/oauth/mcp/confirm`. The AS verifies and consumes the token, checks that the
    consent cookie matches the hash bound into the token, then performs the
    upstream redirect exactly as it would for a DCR client. The same cookie is
-   re-checked when the upstream IdP redirects back, before any authorization code
-   is issued.
+   re-checked when the upstream IdP redirects back, **before** the upstream code
+   is exchanged or any authorization code is issued.
 6. Successfully resolved documents are **cached per process** (LRU-bounded to
    1 000 entries) with a TTL derived from `Cache-Control: max-age` (clamped to
    [60 s, 86 400 s]; default 3 600 s; `no-store`/`no-cache` floor at 60 s as
@@ -536,9 +545,13 @@ automatic resolution.
 
 ### Security properties
 
-- SSRF: DNS pre-flight checks all A/AAAA records. IP-literal hosts in the URL are
-  rejected before DNS. DNS rebinding between the gate check and the actual fetch is a
-  residual risk (noted in #166); the gate mitigates the primary SSRF-reach risk.
+- SSRF: DNS pre-flight checks all A/AAAA records against the IANA special-purpose
+  registries; IP-literal hosts in the URL are rejected before DNS. The fetch is
+  **pinned** to the validated address (custom `lookup`), so DNS rebinding between
+  the gate and the connection cannot re-target the socket — the hostname is still
+  used for TLS SNI and certificate verification. Concurrent DNS resolutions are
+  globally bounded so a flood of blackholed-DNS client_ids can't exhaust the
+  thread pool.
 - XSS: `client_name` and all other client-supplied strings are HTML-escaped before
   rendering in the interstitial page. Clients are attacker-controlled; treat every
   field as untrusted. `client_uri` is labelled as unverified — only the `client_id`
@@ -547,15 +560,25 @@ automatic resolution.
   (redirect_uri, code_challenge, resource, scope). Swapping params between the
   interstitial and the confirm POST is not possible — the token is single-use and
   binds all values at mint time.
-- Browser binding: consent is bound to the approving browser via an HttpOnly,
-  Secure, SameSite=Lax nonce cookie whose SHA-256 hash travels inside the
-  server-side state. Both `/oauth/mcp/confirm` and the upstream OAuth callback
-  require the cookie to match, so a malicious client cannot approve the
-  interstitial itself and hand the victim a ready-made upstream login URL.
-  Cookies must be enabled in the user's browser for CIMD authorization.
+- Browser binding: consent is bound to the approving browser via a per-flow
+  `__Host-`-prefixed, Secure, HttpOnly, SameSite=Lax nonce cookie whose SHA-256
+  hash travels inside the server-side state. The `__Host-` prefix means a sibling
+  origin (e.g. `evil.example.com` against `auth.example.com`) cannot plant a
+  parent-domain cookie to forge the binding — plain `SameSite=Lax` does not stop
+  that, since sibling subdomains are same-site. Both `/oauth/mcp/confirm` and the
+  upstream OAuth callback require the cookie to match — the callback checks it
+  **before** exchanging the upstream code or running the `onLogin` hook, so a
+  mismatched (self-approved) flow triggers no side effects. A malicious client
+  therefore cannot approve the interstitial itself and hand the victim a
+  ready-made upstream login URL. Cookies must be enabled in the user's browser for
+  CIMD authorization.
 - Token purpose: confirm tokens are rejected if presented as upstream OAuth
   callback `state` (and vice versa) — each token is only accepted by the
   endpoint it was minted for.
+- Config safety: `mcp.enabled`, `clientIdMetadataDocuments.enabled`, and
+  `allowedHosts` are normalized at load — an env-expanded `"false"` disables the
+  feature (not left truthy), and `allowedHosts` is coerced to an array of exact,
+  lowercased hostnames (never substring-matched).
 
 ### Configuration
 
@@ -575,6 +598,10 @@ mcp:
 When `allowedHosts` is configured, any CIMD `client_id` whose host is not in the
 list is treated as an unknown client (`invalid_client`) without revealing whether
 the host would otherwise be valid — the list is not disclosed to the client.
+Entries are matched exactly (case-insensitive) against the URL host; a single
+hostname string is accepted and normalized to a one-element list. Omitting
+`allowedHosts` (or an empty list) allows any globally-routable host — the SSRF
+gate still applies.
 
 > **v1 limitation:** only `token_endpoint_auth_method: none` (public clients) is
 > supported for CIMD clients. `private_key_jwt` authentication will be activated

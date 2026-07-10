@@ -9,26 +9,44 @@
  * IdP session still produces an authorization code at the attacker's
  * redirect_uri.
  *
- * Binding: when the interstitial is served, a random nonce is set as an
- * HttpOnly cookie and its SHA-256 hash is stored in the confirm token's
- * `mcp` state. POST /oauth/mcp/confirm requires the cookie to hash-match, and
- * the hash is carried through the upstream CSRF state so the OAuth callback
- * re-checks the same cookie before minting an MCP authorization code.
- * SameSite=Lax keeps the cookie on the top-level redirect back from the IdP
- * while excluding it from cross-site subresource/framed requests.
+ * Binding: when the interstitial is served, a random nonce is set as a cookie
+ * and its SHA-256 hash is stored in the confirm token's `mcp` state. POST
+ * /oauth/mcp/confirm requires the cookie to hash-match, and the hash is carried
+ * through the upstream CSRF state so the OAuth callback re-checks the same
+ * cookie before minting an MCP authorization code.
  *
- * Only the hash ever leaves the cookie: the state payload lives server-side
- * in the CSRF store, so a party that observes or replays state tokens still
- * cannot reconstruct the cookie value.
+ * Cookie hardening:
+ * - `__Host-` prefix: the browser only accepts a `__Host-`-named cookie when it
+ *   is `Secure`, `Path=/`, and has NO `Domain` — which means a sibling origin
+ *   (evil.example.com attacking auth.example.com) CANNOT plant a parent-domain
+ *   cookie to forge the binding. Plain `SameSite=Lax` does not stop that,
+ *   because sibling subdomains are same-site. (RFC 6265bis §4.1.3.2.)
+ * - Per-flow name: the cookie name embeds a random flow id (also carried in the
+ *   confirm/upstream state), so concurrent authorization flows in the same
+ *   browser (parallel tabs) don't overwrite each other's binding.
+ * - `SameSite=Lax` keeps the cookie on the top-level redirect back from the
+ *   IdP while excluding it from cross-site subresource/framed requests;
+ *   `HttpOnly` keeps it out of script.
+ *
+ * Only the hash ever leaves the cookie: the state payload lives server-side in
+ * the CSRF store, so a party that observes or replays state tokens still cannot
+ * reconstruct the cookie value. Cookies expire via `Max-Age`; per-flow naming
+ * makes explicit clearing unnecessary for correctness.
  */
 
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { Request } from '../../types.ts';
 
-export const CONSENT_COOKIE_NAME = 'mcp_consent';
+/** `__Host-` prefix + a per-flow id suffix. See module header for why. */
+const CONSENT_COOKIE_PREFIX = '__Host-mcp_consent_';
 
 /** Must comfortably outlast the interstitial pause plus the upstream IdP login. */
 const CONSENT_COOKIE_MAX_AGE_S = 900;
+
+/** Random, cookie-name-safe id identifying one authorization flow. */
+export function generateConsentFlowId(): string {
+	return randomBytes(16).toString('base64url');
+}
 
 export function generateConsentNonce(): string {
 	return randomBytes(32).toString('base64url');
@@ -38,19 +56,28 @@ export function hashConsentNonce(nonce: string): string {
 	return createHash('sha256').update(nonce).digest('base64url');
 }
 
-/** Set-Cookie value pairing the interstitial page with its confirm token. */
-export function buildConsentCookie(nonce: string): string {
-	return `${CONSENT_COOKIE_NAME}=${nonce}; Max-Age=${CONSENT_COOKIE_MAX_AGE_S}; Path=/; HttpOnly; Secure; SameSite=Lax`;
+function cookieName(flowId: string): string {
+	return CONSENT_COOKIE_PREFIX + flowId;
 }
 
-/** Read the consent nonce from the request's Cookie header, if present. */
-export function readConsentNonce(request: Request | undefined): string | undefined {
+/**
+ * Set-Cookie value pairing the interstitial page with its confirm token.
+ * `__Host-` requires exactly `Secure` + `Path=/` + no `Domain`.
+ */
+export function buildConsentCookie(flowId: string, nonce: string): string {
+	return `${cookieName(flowId)}=${nonce}; Max-Age=${CONSENT_COOKIE_MAX_AGE_S}; Path=/; Secure; HttpOnly; SameSite=Lax`;
+}
+
+/** Read this flow's consent nonce from the request's Cookie header, if present. */
+export function readConsentNonce(request: Request | undefined, flowId: string | undefined): string | undefined {
+	if (!flowId) return undefined;
 	const header = request?.headers?.cookie;
 	if (typeof header !== 'string' || !header) return undefined;
+	const name = cookieName(flowId);
 	for (const part of header.split(';')) {
 		const eq = part.indexOf('=');
 		if (eq === -1) continue;
-		if (part.slice(0, eq).trim() === CONSENT_COOKIE_NAME) {
+		if (part.slice(0, eq).trim() === name) {
 			return part.slice(eq + 1).trim();
 		}
 	}

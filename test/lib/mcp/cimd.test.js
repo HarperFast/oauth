@@ -156,7 +156,12 @@ describe('resolveCimdClient — SSRF DNS gate', () => {
 			'172.16.0.1',
 			'192.168.1.1',
 			'169.254.1.1',
+			'192.0.0.1', // IETF protocol assignments
+			'192.0.2.1', // TEST-NET-1
+			'192.88.99.1', // 6to4 relay anycast (deprecated)
 			'198.18.0.1', // benchmarking
+			'198.51.100.1', // TEST-NET-2
+			'203.0.113.1', // TEST-NET-3
 			'224.0.0.1', // multicast
 			'240.0.0.1', // reserved
 			'255.255.255.255',
@@ -189,6 +194,10 @@ describe('resolveCimdClient — SSRF DNS gate', () => {
 			'::ffff:127.0.0.1',
 			'::ffff:7f00:1', // v4-mapped loopback, hex form
 			'64:ff9b::8.8.8.8', // NAT64 — outside 2000::/3, fail closed
+			'2001:db8::1', // documentation (inside 2000::/3)
+			'2001:2::1', // benchmarking (inside 2000::/3)
+			'2001:10::1', // ORCHID (inside 2000::/3)
+			'3fff::1', // documentation (inside 2000::/3)
 			'not-an-address', // unparseable — fail closed
 		]) {
 			_clearCimdCache();
@@ -281,6 +290,63 @@ describe('resolveCimdClient — SSRF DNS gate', () => {
 	it('DNS lookups are bounded by the fetch deadline', async () => {
 		_setDnsLookup(() => new Promise(() => {})); // hangs forever
 		await assert.rejects(() => resolveCimdClient(VALID_URL, { fetchTimeoutMs: 50 }), /CIMD DNS lookup timed out/);
+	});
+});
+
+describe('resolveCimdClient — concurrency + pinning', () => {
+	beforeEach(() => _clearCimdCache());
+	afterEach(() => {
+		_setDnsLookup(null);
+		_setFetch(null);
+	});
+
+	it('bounds concurrent DNS lookups and fast-rejects when saturated', async () => {
+		let concurrent = 0;
+		let peak = 0;
+		_setDnsLookup(async () => {
+			concurrent++;
+			peak = Math.max(peak, concurrent);
+			await new Promise((r) => setTimeout(r, 5));
+			concurrent--;
+			return [{ address: '93.184.216.34', family: 4 }];
+		});
+		_setFetch(makeOkFetch(VALID_DOC));
+		const results = await Promise.allSettled(
+			Array.from({ length: 30 }, (_, i) => resolveCimdClient(`https://h${i}.example.com/client.json`, undefined))
+		);
+		assert.ok(peak <= 8, `peak concurrent getaddrinfo ${peak} must not exceed the cap (8)`);
+		const capacityRejects = results.filter(
+			(r) => r.status === 'rejected' && r.reason?.oauthError === 'temporarily_unavailable'
+		);
+		assert.ok(capacityRejects.length > 0, 'a burst past the cap fast-rejects some requests');
+	});
+
+	it('dedups concurrent resolutions of the same client_id into one fetch', async () => {
+		let fetchCalls = 0;
+		_setDnsLookup(makeDnsOk());
+		_setFetch(async (...args) => {
+			fetchCalls++;
+			await new Promise((r) => setTimeout(r, 5));
+			return makeOkFetch(VALID_DOC)(...args);
+		});
+		const [a, b] = await Promise.all([
+			resolveCimdClient(VALID_URL, undefined),
+			resolveCimdClient(VALID_URL, undefined),
+		]);
+		assert.equal(fetchCalls, 1, 'concurrent identical resolutions share a single fetch');
+		assert.equal(a.client_id, b.client_id);
+	});
+
+	it('pins the fetch to the SSRF-validated addresses (rebind cannot re-target the socket)', async () => {
+		const validated = [{ address: '93.184.216.34', family: 4 }];
+		_setDnsLookup(async () => validated);
+		let receivedInit;
+		_setFetch(async (url, init) => {
+			receivedInit = init;
+			return makeOkFetch(VALID_DOC)(url, init);
+		});
+		await resolveCimdClient(VALID_URL, undefined);
+		assert.deepEqual(receivedInit.pinnedAddresses, validated, 'the connection is pinned to the validated addresses');
 	});
 });
 

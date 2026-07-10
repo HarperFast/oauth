@@ -17,7 +17,7 @@ export { MCPAuthCodeStore, resetMCPAuthCodesTableCache } from './authCodeStore.t
 export { handleAuthorize, handleAuthorizeConfirm, selectMCPProvider } from './authorize.ts';
 export { handleMCPCallback } from './callback.ts';
 export { isCimdClientId, resolveClient, CimdClientError } from './cimd.ts';
-export { CONSENT_COOKIE_NAME } from './consentBinding.ts';
+export { buildConsentCookie, generateConsentFlowId, hashConsentNonce } from './consentBinding.ts';
 export { MCPClientStore, resetMCPClientsTableCache } from './clientStore.ts';
 export { handleRegister } from './dcr.ts';
 export { MCPKeyStore, resetMCPKeysTableCache, SIGNING_KEY_ID } from './keyStore.ts';

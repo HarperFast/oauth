@@ -213,6 +213,19 @@ export async function handleCallback(
 		return { status: 302, headers: { Location: errorUrl } };
 	}
 
+	// CIMD browser binding — checked BEFORE the upstream code exchange and the
+	// onLogin hook, so a mismatched (self-approved) flow triggers no upstream
+	// exchange, no userinfo fetch, and no provisioning side-effects; it only
+	// applies when the state carries a binding (CIMD), so DCR/human flows are
+	// unaffected. SameSite=Lax sends the per-flow nonce cookie on the top-level
+	// redirect back from the IdP.
+	if (mcpState?.browserNonceHash) {
+		if (!consentNonceMatches(readConsentNonce(request, mcpState.consentFlowId), mcpState.browserNonceHash)) {
+			logger?.warn?.(`MCP callback: consent browser binding mismatch for client=${mcpState.clientId}`);
+			return mcpErrorRedirect(mcpState, 'access_denied', 'Authorization must complete in the browser that approved it');
+		}
+	}
+
 	// Now that we know the flow context, handle upstream IdP errors.
 	if (error) {
 		logger?.error?.(`OAuth error: ${error} - ${errorDescription}`);
@@ -275,19 +288,7 @@ export async function handleCallback(
 		// Pass the onLogin-mapped username so the issued auth code (and the
 		// JWT exchanged for it in Stage 4) is bound to the correct identity.
 		if (mcpState) {
-			// CIMD browser binding: the callback must arrive in the same browser
-			// that approved the consent interstitial (SameSite=Lax sends the
-			// nonce cookie on the top-level redirect from the IdP). Without this
-			// check an attacker could self-approve the interstitial and hand the
-			// victim the upstream IdP URL. Absent hash = DCR flow (no interstitial).
-			if (mcpState.browserNonceHash && !consentNonceMatches(readConsentNonce(request), mcpState.browserNonceHash)) {
-				logger?.warn?.(`MCP callback: consent browser binding mismatch for client=${mcpState.clientId}`);
-				return mcpErrorRedirect(
-					mcpState,
-					'access_denied',
-					'Authorization must complete in the browser that approved it'
-				);
-			}
+			// Browser binding already verified above, before the code exchange.
 			const userIdentifier = hookData?.user ?? user.username;
 			return handleMCPCallback(request, mcpState, userIdentifier, mcpConfig ?? {}, logger);
 		}

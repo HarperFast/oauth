@@ -233,12 +233,18 @@ export interface MCPAuthorizeState {
 	/** Original `state` parameter from the MCP client; echoed verbatim on redirect */
 	clientState?: string;
 	/**
-	 * CIMD consent browser binding: SHA-256 of the nonce cookie set with the
-	 * consent interstitial. Present only on CIMD flows; /oauth/mcp/confirm and
-	 * the upstream OAuth callback both require the caller's cookie to
-	 * hash-match before proceeding (see lib/mcp/consentBinding.ts).
+	 * CIMD consent browser binding: SHA-256 of the per-flow nonce cookie set with
+	 * the consent interstitial. Present only on CIMD flows; /oauth/mcp/confirm and
+	 * the upstream OAuth callback both require the caller's cookie to hash-match
+	 * before proceeding (see lib/mcp/consentBinding.ts).
 	 */
 	browserNonceHash?: string;
+	/**
+	 * CIMD consent flow id: identifies which per-flow `__Host-` cookie carries
+	 * this flow's nonce, so concurrent authorization flows in one browser don't
+	 * collide. Paired with `browserNonceHash`.
+	 */
+	consentFlowId?: string;
 }
 
 /**

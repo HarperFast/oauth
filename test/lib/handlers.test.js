@@ -902,19 +902,22 @@ describe('OAuth Handlers', () => {
 
 		describe('CIMD consent browser binding', () => {
 			const NONCE = 'callback-consent-nonce';
-			let hashConsentNonce, CONSENT_COOKIE_NAME;
+			const FLOW_ID = 'cbflow';
+			let hashConsentNonce, buildConsentCookie, cookieHeader;
 
 			beforeEach(async () => {
-				({ hashConsentNonce, CONSENT_COOKIE_NAME } = await import('../../dist/lib/mcp/consentBinding.js'));
+				({ hashConsentNonce, buildConsentCookie } = await import('../../dist/lib/mcp/consentBinding.js'));
+				// The per-flow Set-Cookie value minus its attributes → a Cookie header pair.
+				cookieHeader = buildConsentCookie(FLOW_ID, NONCE).split(';')[0];
 				mockProvider.verifyCSRFToken = createMockFn(async () => ({
 					timestamp: Date.now(),
 					providerName: 'test-provider',
-					mcp: { ...MCP_STATE, browserNonceHash: hashConsentNonce(NONCE) },
+					mcp: { ...MCP_STATE, browserNonceHash: hashConsentNonce(NONCE), consentFlowId: FLOW_ID },
 				}));
 			});
 
 			it('completes when the callback arrives with the consent cookie', async () => {
-				mockRequest.headers.cookie = `${CONSENT_COOKIE_NAME}=${NONCE}`;
+				mockRequest.headers.cookie = cookieHeader;
 				const result = await handleCallback(
 					mockRequest,
 					mockTarget,
@@ -952,7 +955,7 @@ describe('OAuth Handlers', () => {
 			});
 
 			it('rejects when the consent cookie does not match the bound hash', async () => {
-				mockRequest.headers.cookie = `${CONSENT_COOKIE_NAME}=some-other-browser-nonce`;
+				mockRequest.headers.cookie = buildConsentCookie(FLOW_ID, 'some-other-browser-nonce').split(';')[0];
 				const result = await handleCallback(
 					mockRequest,
 					mockTarget,

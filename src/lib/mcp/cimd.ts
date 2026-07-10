@@ -10,16 +10,24 @@
  * - HTTPS only (lowercase-canonical scheme), non-root path required, no
  *   userinfo/fragment, no dot path segments (raw or percent-encoded).
  * - No IP-literal hosts in the URL (rejected before DNS).
- * - DNS gate: all resolved addresses are checked against non-global ranges.
- *   IPv4 rejects 0/8, 10/8, 100.64/10, 127/8, 169.254/16, 172.16/12,
- *   192.168/16, 198.18/15, and 224/4+. IPv6 fails closed to "global unicast
- *   (2000::/3) only", with v4-mapped addresses classified by their embedded
- *   IPv4 address. DNS-rebinding is a noted residual risk (lookup-gate, not
- *   pinned-connect) — the fetched content is only trusted for exact URL
- *   identity, so the primary SSRF-reach risk is addressed by the DNS gate.
- * - `redirect: 'error'` — no following of 3xx responses.
- * - Only `200 OK` responses are accepted.
+ * - DNS gate: all resolved addresses are checked against the full IANA
+ *   special-purpose registries. IPv4 rejects 0/8, 10/8, 100.64/10, 127/8,
+ *   169.254/16, 172.16/12, 192.0.0/24, 192.0.2/24, 192.88.99/24, 192.168/16,
+ *   198.18/15, 198.51.100/24, 203.0.113/24, 224/4+, and the AS112/AMT blocks.
+ *   IPv6 fails closed to "global unicast (2000::/3) only", with v4-mapped and
+ *   6to4/ISATAP transition forms classified by their embedded IPv4 address and
+ *   the in-2000::/3 special-use prefixes (Teredo, ORCHID, documentation) also
+ *   rejected.
+ * - Pinned-connect: the fetch connects to the exact address the gate validated
+ *   (custom `lookup`), while the hostname is kept for TLS SNI + certificate
+ *   verification — so DNS rebinding between the gate and the connection cannot
+ *   redirect the socket to an unvalidated address.
+ * - `https.request` does not follow redirects, so a 3xx surfaces as a non-200
+ *   and is rejected; only `200 OK` is accepted.
  * - 5 s deadline (configurable) covering DNS, connect, headers, AND body.
+ * - Concurrent DNS resolutions are globally bounded (getaddrinfo runs on the
+ *   uncancellable libuv pool); over the bound, resolution fast-rejects.
+ *   Concurrent resolutions of the same client_id are deduped to one fetch.
  * - 64 KB document size cap (configurable).
  * - `Accept: application/json` only; non-JSON responses rejected.
  * - Timeout/size config values are coerced to finite positive numbers;
@@ -56,6 +64,8 @@
  */
 
 import { lookup } from 'node:dns/promises';
+import { request as httpsRequest } from 'node:https';
+import { Readable } from 'node:stream';
 import type { Logger, MCPClientIdMetadataDocumentsConfig, MCPClientRecord, MCPConfig } from '../../types.ts';
 import { MCPClientStore } from './clientStore.ts';
 import {
@@ -72,9 +82,23 @@ const CACHE_MAX_TTL_S = 86_400;
 const CACHE_DEFAULT_TTL_S = 3_600;
 const CACHE_MAX_ENTRIES = 1_000;
 
+// Bound concurrent DNS resolutions: `dns.lookup` (getaddrinfo) runs on libuv's
+// fixed thread pool and cannot be cancelled, so a flood of client_ids under
+// blackholed DNS zones would otherwise pin every pool thread. The permit is
+// held until the *underlying* lookup settles (not when the caller times out),
+// which is what actually bounds pool occupancy.
+const MAX_CONCURRENT_DNS = 8;
+let activeDnsLookups = 0;
+
+type ResolvedAddress = { address: string; family: number };
+
 type CacheEntry = { record: MCPClientRecord; expiresAt: number };
 
 const cimdCache = new Map<string, CacheEntry>();
+
+// Dedup concurrent resolutions of the same client_id so N parallel authorize
+// requests for one uncached URL trigger a single fetch (thundering-herd guard).
+const inFlightResolutions = new Map<string, Promise<MCPClientRecord | null>>();
 
 /**
  * Thrown when CIMD resolution fails due to a client-side issue (bad URL,
@@ -104,10 +128,69 @@ export function _setDnsLookup(
 	_dnsLookup = fn ?? ((hostname) => lookup(hostname, { all: true }));
 }
 
-export let _fetch: typeof globalThis.fetch = (...args) => globalThis.fetch(...args);
+/**
+ * Minimal response shape the resolver consumes. The production `_fetch`
+ * (`pinnedHttpsFetch`) returns this; tests stub it directly.
+ */
+export type CimdResponse = {
+	status: number;
+	headers: { get(name: string): string | null };
+	body: { getReader(): ReadableStreamDefaultReader<Uint8Array> } | null;
+};
 
-export function _setFetch(fn: typeof globalThis.fetch | null): void {
-	_fetch = fn ?? ((...args) => globalThis.fetch(...args));
+export type CimdFetchInit = {
+	headers: Record<string, string>;
+	signal: AbortSignal;
+	/**
+	 * Pre-validated addresses from the SSRF gate. The connection is PINNED to
+	 * these (no re-resolution at connect time), which closes the DNS-rebinding
+	 * TOCTOU: the socket connects to exactly the address that passed the gate,
+	 * while the hostname is still used for TLS SNI and certificate validation.
+	 */
+	pinnedAddresses: ResolvedAddress[];
+};
+
+export type CimdFetch = (url: string, init: CimdFetchInit) => Promise<CimdResponse>;
+
+/**
+ * Fetch a CIMD document over HTTPS, pinning the TCP connection to a
+ * pre-validated address via a custom `lookup`. `https.request` never follows
+ * redirects, so a 3xx simply surfaces as a non-200 status (rejected upstream).
+ */
+function pinnedHttpsFetch(urlStr: string, init: CimdFetchInit): Promise<CimdResponse> {
+	const url = new URL(urlStr);
+	const pinned = init.pinnedAddresses;
+	// The lookup ignores DNS and returns the already-validated address, so the
+	// connect cannot race a rebind to a fresh (unvalidated) resolution.
+	const lookup = (
+		_host: string,
+		options: { all?: boolean },
+		callback: (err: Error | null, address?: any, family?: number) => void
+	) => {
+		if (options && options.all) return callback(null, pinned);
+		callback(null, pinned[0].address, pinned[0].family);
+	};
+	return new Promise((resolve, reject) => {
+		const req = httpsRequest(
+			url,
+			{ method: 'GET', headers: init.headers, servername: url.hostname, lookup: lookup as any, signal: init.signal },
+			(res) => {
+				resolve({
+					status: res.statusCode ?? 0,
+					headers: new Headers(res.headers as Record<string, string>),
+					body: Readable.toWeb(res) as unknown as CimdResponse['body'],
+				});
+			}
+		);
+		req.on('error', reject);
+		req.end();
+	});
+}
+
+export let _fetch: CimdFetch = pinnedHttpsFetch;
+
+export function _setFetch(fn: CimdFetch | null): void {
+	_fetch = fn ?? pinnedHttpsFetch;
 }
 
 /** Clear the CIMD cache (for testing). @internal */
@@ -124,21 +207,46 @@ function isIpLiteral(hostname: string): boolean {
 	return /^\d{1,3}(\.\d{1,3}){3}$/.test(hostname);
 }
 
+/**
+ * IANA IPv4 special-purpose prefixes that must never be fetched (SSRF): every
+ * non-global-unicast range from the IPv4 Special-Purpose Address Registry.
+ * `[first-octet-quad, prefix-bits]`; checked as CIDRs against the address int.
+ */
+const IPV4_SPECIAL_USE: Array<[number, number, number, number, number]> = [
+	[0, 0, 0, 0, 8], // "this network"
+	[10, 0, 0, 0, 8], // private
+	[100, 64, 0, 0, 10], // CGNAT / shared address space
+	[127, 0, 0, 0, 8], // loopback
+	[169, 254, 0, 0, 16], // link-local
+	[172, 16, 0, 0, 12], // private
+	[192, 0, 0, 0, 24], // IETF protocol assignments
+	[192, 0, 2, 0, 24], // TEST-NET-1 (documentation)
+	[192, 31, 196, 0, 24], // AS112-v4
+	[192, 52, 193, 0, 24], // AMT
+	[192, 88, 99, 0, 24], // 6to4 relay anycast (deprecated)
+	[192, 168, 0, 0, 16], // private
+	[192, 175, 48, 0, 24], // direct-delegation AS112
+	[198, 18, 0, 0, 15], // benchmarking
+	[198, 51, 100, 0, 24], // TEST-NET-2 (documentation)
+	[203, 0, 113, 0, 24], // TEST-NET-3 (documentation)
+	[240, 0, 0, 0, 4], // reserved (incl. 255.255.255.255 broadcast)
+];
+
+function ipv4ToInt(a: number, b: number, c: number, d: number): number {
+	return ((a << 24) >>> 0) + (b << 16) + (c << 8) + d;
+}
+
 function isPrivateIpv4(address: string): boolean {
 	const parts = address.split('.').map(Number);
 	if (parts.length !== 4 || parts.some((p) => !Number.isInteger(p) || p < 0 || p > 255)) return true; // malformed → fail closed
-	const [a, b] = parts;
-	return (
-		a === 0 || // 0.0.0.0/8 "this network" (0.0.0.0 routes to loopback on Linux)
-		a === 127 || // 127.0.0.0/8 loopback
-		a === 10 || // 10.0.0.0/8
-		(a === 100 && b >= 64 && b <= 127) || // 100.64.0.0/10 CGNAT / shared address space
-		(a === 172 && b >= 16 && b <= 31) || // 172.16.0.0/12
-		(a === 192 && b === 168) || // 192.168.0.0/16
-		(a === 169 && b === 254) || // 169.254.0.0/16 link-local
-		(a === 198 && (b === 18 || b === 19)) || // 198.18.0.0/15 benchmarking
-		a >= 224 // 224.0.0.0/4 multicast + 240.0.0.0/4 reserved + broadcast
-	);
+	const [a, b, c, d] = parts;
+	if (a >= 224) return true; // 224.0.0.0/4 multicast + 240.0.0.0/4 reserved
+	const ip = ipv4ToInt(a, b, c, d);
+	for (const [wa, wb, wc, wd, bits] of IPV4_SPECIAL_USE) {
+		const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0;
+		if ((ip & mask) === (ipv4ToInt(wa, wb, wc, wd) & mask)) return true;
+	}
+	return false;
 }
 
 /**
@@ -192,19 +300,46 @@ function parseIpv6Groups(address: string): number[] | null {
 	return groups && groups.length === 8 ? groups : null;
 }
 
+function ipv6ToBigInt(groups: number[]): bigint {
+	let v = 0n;
+	for (const g of groups) v = (v << 16n) | BigInt(g);
+	return v;
+}
+
+/** Build a `[baseBigInt, prefixBits]` entry from a textual IPv6 prefix. */
+function cidr6(prefix: string, bits: number): [bigint, number] {
+	const groups = parseIpv6Groups(prefix);
+	if (!groups) throw new Error(`invalid IPv6 prefix in special-use table: ${prefix}`);
+	return [ipv6ToBigInt(groups), bits];
+}
+
+/**
+ * IANA IPv6 special-purpose prefixes that fall *inside* global unicast
+ * (2000::/3) and would otherwise pass the allow — documentation, benchmarking,
+ * Teredo, ORCHID. Everything outside 2000::/3 (loopback, ULA, link-local,
+ * multicast, NAT64, etc.) is already rejected by the global check below.
+ */
+const IPV6_SPECIAL_USE: Array<[bigint, number]> = [
+	cidr6('2001:0000::', 32), // Teredo
+	cidr6('2001:2::', 48), // benchmarking
+	cidr6('2001:10::', 28), // ORCHID (deprecated)
+	cidr6('2001:20::', 28), // ORCHIDv2
+	cidr6('2001:db8::', 32), // documentation
+	cidr6('3fff::', 20), // documentation
+];
+
 /**
  * Fail-closed IPv6 policy: only global unicast (2000::/3) is allowed, with
  * v4-mapped addresses (::ffff:a.b.c.d) classified by their embedded IPv4
  * address. Everything else — `::` unspecified, `::1` loopback in any textual
- * form, fc00::/7 ULA, fe80::/10 link-local, ff00::/8 multicast, reserved
- * blocks, unparseable input — is treated as private.
+ * form, fc00::/7 ULA, fe80::/10 link-local, ff00::/8 multicast, NAT64,
+ * reserved blocks, unparseable input — is treated as private.
  *
  * The IPv4-in-IPv6 transition forms sit *inside* 2000::/3 yet can target a
  * private IPv4, so they're decoded rather than blanket-allowed: 6to4
  * (2002::/16) and ISATAP embed a plaintext IPv4 (classified via
- * `isPrivateIpv4`), and Teredo (2001:0000::/32) is rejected outright — its
- * client address is XOR-obfuscated and no legitimate CIMD host is a Teredo
- * endpoint.
+ * `isPrivateIpv4`). Special-use prefixes inside 2000::/3 (Teredo, ORCHID,
+ * documentation, benchmarking) are rejected via `IPV6_SPECIAL_USE`.
  */
 function isPrivateIpv6(address: string): boolean {
 	const groups = parseIpv6Groups(address);
@@ -217,12 +352,14 @@ function isPrivateIpv6(address: string): boolean {
 	if (g0 === 0x2002) {
 		return isPrivateIpv4(`${g1 >> 8}.${g1 & 0xff}.${g2 >> 8}.${g2 & 0xff}`);
 	}
-	// Teredo (2001:0000::/32) — tunneling form, obfuscated embedded IPv4; not a
-	// legitimate CIMD host, so reject the whole range.
-	if (g0 === 0x2001 && g1 === 0x0000) return true;
 	// ISATAP (interface identifier 0000:5efe:a.b.c.d or 0200:5efe:a.b.c.d)
 	if ((g4 === 0x0000 || g4 === 0x0200) && g5 === 0x5efe) {
 		return isPrivateIpv4(`${g6 >> 8}.${g6 & 0xff}.${g7 >> 8}.${g7 & 0xff}`);
+	}
+	const ip = ipv6ToBigInt(groups);
+	for (const [base, bits] of IPV6_SPECIAL_USE) {
+		const mask = ((1n << 128n) - 1n) ^ ((1n << BigInt(128 - bits)) - 1n);
+		if ((ip & mask) === (base & mask)) return true;
 	}
 	return (g0 & 0xe000) !== 0x2000;
 }
@@ -237,20 +374,38 @@ function isPrivateIpv6(address: string): boolean {
 const DNS_GATE_REJECTION = 'client_id metadata document host could not be resolved to a permitted address';
 
 /**
- * DNS SSRF gate: resolves all addresses for `hostname` and rejects if any
- * falls outside the allowed (global unicast) ranges.
- *
- * Note: this is a lookup-gate, not pinned-connect. DNS rebinding between the
- * gate check and the actual HTTP connection is a residual risk acknowledged in
- * the CIMD security considerations (#166). The primary SSRF-reach risk is
- * mitigated by this gate; connecting to an already-validated external address
- * that was then rebinded to private is a secondary, harder-to-exploit risk.
+ * Resolve `hostname` under a global concurrency permit. `dns.lookup` uses the
+ * uncancellable libuv thread pool, so the permit is released only when the
+ * *underlying* lookup settles — a caller that gives up early (deadline) does
+ * NOT free a pool slot for a fresh lookup. When saturated we fast-reject
+ * rather than queue unboundedly.
  */
-async function checkHostSsrf(hostname: string, logger?: Logger): Promise<void> {
-	let addresses: Array<{ address: string; family: number }>;
+async function boundedDnsLookup(hostname: string): Promise<ResolvedAddress[]> {
+	if (activeDnsLookups >= MAX_CONCURRENT_DNS) {
+		throw new CimdClientError('temporarily_unavailable', 'CIMD resolution capacity reached; retry shortly');
+	}
+	activeDnsLookups++;
+	const raw = _dnsLookup(hostname, { all: true });
+	// Release strictly on the RAW settle — not on the caller's (possibly earlier)
+	// timeout — so concurrent getaddrinfo calls stay bounded by MAX_CONCURRENT_DNS.
+	raw.then(
+		() => activeDnsLookups--,
+		() => activeDnsLookups--
+	);
+	return raw;
+}
+
+/**
+ * DNS SSRF gate: resolves all addresses for `hostname`, rejects if any falls
+ * outside the allowed (global unicast) ranges, and returns the validated set so
+ * the caller can PIN the connection to it (closing the rebind TOCTOU).
+ */
+async function checkHostSsrf(hostname: string, logger?: Logger): Promise<ResolvedAddress[]> {
+	let addresses: ResolvedAddress[];
 	try {
-		addresses = await _dnsLookup(hostname, { all: true });
+		addresses = await boundedDnsLookup(hostname);
 	} catch (error) {
+		if (error instanceof CimdClientError) throw error; // capacity fast-reject
 		logger?.warn?.(`CIMD: DNS resolution failed for host ${hostname}`);
 		throw new CimdClientError('invalid_client', DNS_GATE_REJECTION, { cause: error });
 	}
@@ -267,6 +422,7 @@ async function checkHostSsrf(hostname: string, logger?: Logger): Promise<void> {
 			throw new CimdClientError('invalid_client', DNS_GATE_REJECTION);
 		}
 	}
+	return addresses;
 }
 
 // --- URL shape checks ---
@@ -521,7 +677,24 @@ export async function resolveCimdClient(
 		}
 	}
 
-	// --- Fetch ---
+	// Dedup concurrent resolutions of the same uncached client_id → single fetch.
+	const existing = inFlightResolutions.get(clientId);
+	if (existing) return existing;
+	const pending = fetchAndValidateCimd(clientId, cimdConfig, allowedRedirectUriHosts, logger).finally(() =>
+		inFlightResolutions.delete(clientId)
+	);
+	inFlightResolutions.set(clientId, pending);
+	return pending;
+}
+
+/** Fetch + validate + cache a CIMD document (the deduped, network-bound half of
+ * `resolveCimdClient`). */
+async function fetchAndValidateCimd(
+	clientId: string,
+	cimdConfig: MCPClientIdMetadataDocumentsConfig | undefined,
+	allowedRedirectUriHosts: string[] | undefined,
+	logger?: Logger
+): Promise<MCPClientRecord | null> {
 	let record: MCPClientRecord;
 	try {
 		const parsedUrl = new URL(clientId);
@@ -537,15 +710,20 @@ export async function resolveCimdClient(
 		let body: string;
 		let cacheControlHeader: string | null = null;
 		try {
-			// SSRF gate: check DNS before connecting (raced against the deadline;
-			// dns.lookup does not take an AbortSignal).
-			await withAbort(checkHostSsrf(parsedUrl.hostname, logger), controller.signal, 'CIMD DNS lookup timed out');
+			// SSRF gate: resolve + validate before connecting (raced against the
+			// deadline; dns.lookup does not take an AbortSignal). The returned
+			// addresses are PINNED into the fetch so the connection can't race a
+			// rebind to a fresh, unvalidated resolution.
+			const validatedAddresses = await withAbort(
+				checkHostSsrf(parsedUrl.hostname, logger),
+				controller.signal,
+				'CIMD DNS lookup timed out'
+			);
 
 			const response = await _fetch(clientId, {
-				method: 'GET',
 				headers: { Accept: 'application/json' },
-				redirect: 'error',
 				signal: controller.signal,
+				pinnedAddresses: validatedAddresses,
 			});
 
 			// Only 200 is acceptable — the CIMD draft requires the document to be
@@ -612,7 +790,7 @@ export async function resolveCimdClient(
 		const ttlSeconds = parseCacheControlMaxAge(cacheControlHeader);
 		cimdCache.set(clientId, {
 			record,
-			expiresAt: now + ttlSeconds * 1000,
+			expiresAt: Date.now() + ttlSeconds * 1000,
 		});
 
 		logger?.info?.(`CIMD: resolved client ${clientId} (cached for ${ttlSeconds}s)`);

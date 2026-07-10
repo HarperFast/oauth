@@ -14,7 +14,7 @@ import {
 } from '../../../dist/lib/mcp/authorize.js';
 import { resetMCPClientsTableCache } from '../../../dist/lib/mcp/clientStore.js';
 import { _setDnsLookup, _setFetch, _clearCimdCache } from '../../../dist/lib/mcp/cimd.js';
-import { CONSENT_COOKIE_NAME, hashConsentNonce } from '../../../dist/lib/mcp/consentBinding.js';
+import { buildConsentCookie, hashConsentNonce } from '../../../dist/lib/mcp/consentBinding.js';
 
 /**
  * Minimal RequestTarget stub for the existing target.get?.() pattern.
@@ -648,14 +648,17 @@ describe('handleAuthorize — CIMD interstitial', () => {
 
 		const setCookie = response.headers['Set-Cookie'];
 		assert.ok(setCookie, 'interstitial sets the consent cookie');
-		assert.match(setCookie, new RegExp(`^${CONSENT_COOKIE_NAME}=`));
+		assert.match(setCookie, /^__Host-mcp_consent_[A-Za-z0-9_-]+=/, 'per-flow __Host- cookie');
 		assert.match(setCookie, /HttpOnly/);
 		assert.match(setCookie, /Secure/);
 		assert.match(setCookie, /SameSite=Lax/);
+		assert.doesNotMatch(setCookie, /Domain=/i, '__Host- forbids Domain (blocks sibling injection)');
 
-		const nonce = setCookie.split(';')[0].split('=')[1];
+		const [cookieName, nonce] = setCookie.split(';')[0].split('=');
+		const flowId = cookieName.replace('__Host-mcp_consent_', '');
 		const minted = harnesses.github.generatedTokens[0];
 		assert.equal(minted._confirm, true);
+		assert.equal(minted.mcp.consentFlowId, flowId, 'state carries the cookie flow id');
 		assert.equal(minted.mcp.browserNonceHash, hashConsentNonce(nonce), 'state carries sha256(cookie nonce)');
 	});
 
@@ -726,6 +729,7 @@ describe('handleAuthorize — CIMD interstitial', () => {
 
 describe('handleAuthorizeConfirm', () => {
 	const NONCE = 'test-consent-nonce';
+	const FLOW_ID = 'testflowid';
 	const MCP_STATE = {
 		clientId: 'https://mcp-client.example.com/client.json',
 		resource: 'https://app.example.com/mcp',
@@ -735,12 +739,13 @@ describe('handleAuthorizeConfirm', () => {
 		scope: 'mcp:read',
 		clientState: 'state-xyz',
 		browserNonceHash: hashConsentNonce(NONCE),
+		consentFlowId: FLOW_ID,
 	};
 
-	/** Request carrying the consent nonce cookie, as the interstitial browser would. */
-	function makeConsentRequest(nonce = NONCE) {
+	/** Request carrying the per-flow consent nonce cookie, as the interstitial browser would. */
+	function makeConsentRequest(nonce = NONCE, flowId = FLOW_ID) {
 		return makeRequest({
-			headers: { host: 'app.example.com', cookie: `other=1; ${CONSENT_COOKIE_NAME}=${nonce}` },
+			headers: { host: 'app.example.com', cookie: `other=1; ${buildConsentCookie(flowId, nonce).split(';')[0]}` },
 		});
 	}
 
