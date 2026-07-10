@@ -222,6 +222,47 @@ describe('resolveCimdClient — SSRF DNS gate', () => {
 		}
 	});
 
+	it('rejects IPv6 transition forms that embed or tunnel to a private IPv4', async () => {
+		for (const address of [
+			'2002:0a00:0001::', // 6to4 embedding 10.0.0.1
+			'2002:c0a8:0101::', // 6to4 embedding 192.168.1.1
+			'2002:7f00:0001::', // 6to4 embedding 127.0.0.1
+			'2001:0000:4136:e378:8000:63bf:3fff:fdd2', // Teredo (2001:0000::/32)
+			'fe80::5efe:10.0.0.1', // ISATAP embedding 10.0.0.1
+			'2001:db8::5efe:192.168.0.1', // ISATAP (global prefix) embedding 192.168.0.1
+		]) {
+			_clearCimdCache();
+			_setDnsLookup(makeDnsOk([{ address, family: 6 }]));
+			await assert.rejects(
+				() => resolveCimdClient(VALID_URL, undefined),
+				(err) => {
+					assert.ok(err instanceof CimdClientError, `expected CimdClientError for ${address}`);
+					assert.match(err.message, GENERIC_GATE);
+					return true;
+				}
+			);
+		}
+	});
+
+	it('allows a 6to4 address that embeds a public IPv4', async () => {
+		_setDnsLookup(makeDnsOk([{ address: '2002:5db8:d822::', family: 6 }])); // 6to4 for 93.184.216.34
+		_setFetch(makeOkFetch(VALID_DOC));
+		const record = await resolveCimdClient(VALID_URL, undefined);
+		assert.ok(record, '6to4 wrapping a public IPv4 is reachable and allowed');
+	});
+
+	it('fails closed on an unexpected DNS address family', async () => {
+		_setDnsLookup(makeDnsOk([{ address: 'anything', family: 0 }]));
+		await assert.rejects(
+			() => resolveCimdClient(VALID_URL, undefined),
+			(err) => {
+				assert.ok(err instanceof CimdClientError);
+				assert.match(err.message, GENERIC_GATE);
+				return true;
+			}
+		);
+	});
+
 	it('rejects when DNS resolution fails — same generic message, no detail leak', async () => {
 		_setDnsLookup(async () => {
 			throw new Error('DNS NXDOMAIN');

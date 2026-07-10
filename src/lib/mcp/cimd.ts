@@ -198,12 +198,30 @@ function parseIpv6Groups(address: string): number[] | null {
  * address. Everything else — `::` unspecified, `::1` loopback in any textual
  * form, fc00::/7 ULA, fe80::/10 link-local, ff00::/8 multicast, reserved
  * blocks, unparseable input — is treated as private.
+ *
+ * The IPv4-in-IPv6 transition forms sit *inside* 2000::/3 yet can target a
+ * private IPv4, so they're decoded rather than blanket-allowed: 6to4
+ * (2002::/16) and ISATAP embed a plaintext IPv4 (classified via
+ * `isPrivateIpv4`), and Teredo (2001:0000::/32) is rejected outright — its
+ * client address is XOR-obfuscated and no legitimate CIMD host is a Teredo
+ * endpoint.
  */
 function isPrivateIpv6(address: string): boolean {
 	const groups = parseIpv6Groups(address);
 	if (!groups) return true;
 	const [g0, g1, g2, g3, g4, g5, g6, g7] = groups;
 	if (g0 === 0 && g1 === 0 && g2 === 0 && g3 === 0 && g4 === 0 && g5 === 0xffff) {
+		return isPrivateIpv4(`${g6 >> 8}.${g6 & 0xff}.${g7 >> 8}.${g7 & 0xff}`);
+	}
+	// 6to4 (2002::/16) embeds an IPv4 address in groups 1 and 2
+	if (g0 === 0x2002) {
+		return isPrivateIpv4(`${g1 >> 8}.${g1 & 0xff}.${g2 >> 8}.${g2 & 0xff}`);
+	}
+	// Teredo (2001:0000::/32) — tunneling form, obfuscated embedded IPv4; not a
+	// legitimate CIMD host, so reject the whole range.
+	if (g0 === 0x2001 && g1 === 0x0000) return true;
+	// ISATAP (interface identifier 0000:5efe:a.b.c.d or 0200:5efe:a.b.c.d)
+	if ((g4 === 0x0000 || g4 === 0x0200) && g5 === 0x5efe) {
 		return isPrivateIpv4(`${g6 >> 8}.${g6 & 0xff}.${g7 >> 8}.${g7 & 0xff}`);
 	}
 	return (g0 & 0xe000) !== 0x2000;
@@ -241,8 +259,11 @@ async function checkHostSsrf(hostname: string, logger?: Logger): Promise<void> {
 		throw new CimdClientError('invalid_client', DNS_GATE_REJECTION);
 	}
 	for (const { address, family } of addresses) {
-		if ((family === 4 && isPrivateIpv4(address)) || (family === 6 && isPrivateIpv6(address))) {
-			logger?.warn?.(`CIMD: host ${hostname} resolves to a blocked address: ${address}`);
+		// Fail closed on any family the resolver reports other than 4/6 — an
+		// unclassified address must never skip both range checks.
+		const blocked = family === 4 ? isPrivateIpv4(address) : family === 6 ? isPrivateIpv6(address) : true;
+		if (blocked) {
+			logger?.warn?.(`CIMD: host ${hostname} resolves to a blocked address: ${address} (family ${family})`);
 			throw new CimdClientError('invalid_client', DNS_GATE_REJECTION);
 		}
 	}
