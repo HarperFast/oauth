@@ -8,7 +8,7 @@
  *
  * SSRF guards:
  * - HTTPS only (lowercase-canonical scheme), non-root path required, no
- *   userinfo/fragment, no dot path segments (raw or percent-encoded).
+ *   userinfo/fragment/query, no dot path segments (raw or percent-encoded).
  * - No IP-literal hosts in the URL (rejected before DNS).
  * - DNS gate: all resolved addresses are checked against the full IANA
  *   special-purpose registries. IPv4 rejects 0/8, 10/8, 100.64/10, 127/8,
@@ -455,6 +455,9 @@ function hasDotPathSegments(clientId: string): boolean {
  * - No dot path segments, raw or percent-encoded
  * - No userinfo (username / password)
  * - No fragment
+ * - No query string (the draft says SHOULD NOT; enforced here — a dynamic
+ *   server could otherwise mint unlimited exact-match client_id aliases of
+ *   one document by echoing query variants)
  * - Host is NOT an IP literal (IPv4 dotted-quad or IPv6 [bracket] form)
  *
  * This is a structural check only — no network I/O, no policy enforcement.
@@ -473,6 +476,7 @@ export function isCimdClientId(clientId: string): boolean {
 	if (hasDotPathSegments(clientId)) return false;
 	if (url.username || url.password) return false;
 	if (url.hash) return false;
+	if (url.search) return false;
 	if (isIpLiteral(url.hostname)) return false;
 	return true;
 }

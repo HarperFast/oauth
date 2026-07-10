@@ -95,6 +95,11 @@ describe('isCimdClientId', () => {
 		assert.equal(isCimdClientId('https://example.com/client.json#section'), false);
 	});
 
+	it('rejects URLs with a query string', () => {
+		assert.equal(isCimdClientId('https://example.com/client.json?v=1'), false);
+		assert.equal(isCimdClientId('https://example.com/client.json?x'), false);
+	});
+
 	it('rejects IPv4 literal hosts', () => {
 		assert.equal(isCimdClientId('https://192.168.1.1/client.json'), false);
 		assert.equal(isCimdClientId('https://127.0.0.1/client.json'), false);
