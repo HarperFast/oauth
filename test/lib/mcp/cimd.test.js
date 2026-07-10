@@ -2,9 +2,11 @@
  * Tests for CIMD (Client ID Metadata Document) resolution.
  *
  * Covers:
- * - isCimdClientId URL-shape detection
- * - resolveCimdClient: allowedHosts policy, SSRF DNS gate, fetch,
- *   document validation, cache (TTL honoring, negative cache)
+ * - isCimdClientId URL-shape detection (incl. dot-segment rejection)
+ * - resolveCimdClient: allowedHosts policy, SSRF DNS gate (v4 + v6 ranges,
+ *   generic rejection message), fetch (200-only, full-fetch deadline,
+ *   config coercion), document validation, cache (TTL honoring, LRU bound,
+ *   no negative caching, live redirect-policy revalidation)
  * - resolveClient routing (CIMD vs DCR)
  * - CimdClientError typing
  */
@@ -110,6 +112,23 @@ describe('isCimdClientId', () => {
 		assert.equal(isCimdClientId(''), false);
 	});
 
+	it('rejects dot path segments, raw and percent-encoded', () => {
+		assert.equal(isCimdClientId('https://example.com/a/../client.json'), false);
+		assert.equal(isCimdClientId('https://example.com/./client.json'), false);
+		assert.equal(isCimdClientId('https://example.com/a/..'), false);
+		assert.equal(isCimdClientId('https://example.com/a/%2e%2e/client.json'), false);
+		assert.equal(isCimdClientId('https://example.com/a/%2E%2E/client.json'), false);
+		assert.equal(isCimdClientId('https://example.com/%2e/client.json'), false);
+		// Dots inside a segment name are fine.
+		assert.equal(isCimdClientId('https://example.com/client.v1.json'), true);
+		assert.equal(isCimdClientId('https://example.com/.well-known/client.json'), true);
+	});
+
+	it('rejects non-canonical scheme spellings', () => {
+		assert.equal(isCimdClientId('HTTPS://example.com/client.json'), false);
+		assert.equal(isCimdClientId('hTtPs://example.com/client.json'), false);
+	});
+
 	it('DCR-issued UUIDs are not CIMD', () => {
 		assert.equal(isCimdClientId('a1b2c3d4-e5f6-7890-abcd-ef1234567890'), false);
 	});
@@ -122,29 +141,63 @@ describe('resolveCimdClient — SSRF DNS gate', () => {
 		_setFetch(null);
 	});
 
-	it('rejects private IPv4 addresses (loopback, RFC1918, link-local)', async () => {
-		for (const address of ['127.0.0.1', '10.0.0.1', '172.16.0.1', '192.168.1.1', '169.254.1.1']) {
+	// Every DNS-gate rejection uses one generic message — anything specific
+	// (the address, resolve-vs-blocked) would let callers probe internal DNS.
+	const GENERIC_GATE = /could not be resolved to a permitted address/;
+
+	it('rejects non-global IPv4 addresses', async () => {
+		for (const address of [
+			'0.0.0.0', // 0/8 routes to loopback on Linux
+			'0.255.1.2',
+			'127.0.0.1',
+			'10.0.0.1',
+			'100.64.0.1', // CGNAT
+			'100.127.255.254',
+			'172.16.0.1',
+			'192.168.1.1',
+			'169.254.1.1',
+			'198.18.0.1', // benchmarking
+			'224.0.0.1', // multicast
+			'240.0.0.1', // reserved
+			'255.255.255.255',
+		]) {
 			_clearCimdCache();
 			_setDnsLookup(makeDnsOk([{ address, family: 4 }]));
 			await assert.rejects(
 				() => resolveCimdClient(VALID_URL, undefined),
 				(err) => {
 					assert.ok(err instanceof CimdClientError, `expected CimdClientError for ${address}`);
-					assert.match(err.message, /private/, `expected 'private' in error for ${address}`);
+					assert.match(err.message, GENERIC_GATE, `expected generic gate message for ${address}`);
 					return true;
 				}
 			);
 		}
 	});
 
-	it('rejects private IPv6 addresses (::1, fc00::/7, fe80::/10, ::ffff:)', async () => {
-		for (const address of ['::1', 'fc00::1', 'fd12::abcd', 'fe80::1', '::ffff:192.168.1.1']) {
+	it('rejects non-global IPv6 addresses including non-canonical forms', async () => {
+		for (const address of [
+			'::', // unspecified — routes to loopback
+			'::1',
+			'::01', // non-canonical loopback
+			'0:0:0:0:0:0:0:1', // expanded loopback
+			'fc00::1',
+			'fd12::abcd',
+			'fe80::1',
+			'fe80::1%eth0', // zone index
+			'ff02::1', // multicast
+			'::ffff:192.168.1.1', // v4-mapped private
+			'::ffff:127.0.0.1',
+			'::ffff:7f00:1', // v4-mapped loopback, hex form
+			'64:ff9b::8.8.8.8', // NAT64 — outside 2000::/3, fail closed
+			'not-an-address', // unparseable — fail closed
+		]) {
 			_clearCimdCache();
 			_setDnsLookup(makeDnsOk([{ address, family: 6 }]));
 			await assert.rejects(
 				() => resolveCimdClient(VALID_URL, undefined),
 				(err) => {
 					assert.ok(err instanceof CimdClientError, `expected CimdClientError for ${address}`);
+					assert.match(err.message, GENERIC_GATE, `expected generic gate message for ${address}`);
 					return true;
 				}
 			);
@@ -159,11 +212,34 @@ describe('resolveCimdClient — SSRF DNS gate', () => {
 		assert.equal(record.client_id, VALID_URL);
 	});
 
-	it('rejects when DNS resolution fails', async () => {
+	it('allows global IPv6 and public v4-mapped addresses', async () => {
+		for (const address of ['2606:4700::6810:84e5', '::ffff:93.184.216.34', '::ffff:5db8:d822']) {
+			_clearCimdCache();
+			_setDnsLookup(makeDnsOk([{ address, family: 6 }]));
+			_setFetch(makeOkFetch(VALID_DOC));
+			const record = await resolveCimdClient(VALID_URL, undefined);
+			assert.ok(record, `expected ${address} to be allowed`);
+		}
+	});
+
+	it('rejects when DNS resolution fails — same generic message, no detail leak', async () => {
 		_setDnsLookup(async () => {
 			throw new Error('DNS NXDOMAIN');
 		});
-		await assert.rejects(() => resolveCimdClient(VALID_URL, undefined), /DNS resolution failed/);
+		await assert.rejects(
+			() => resolveCimdClient(VALID_URL, undefined),
+			(err) => {
+				assert.ok(err instanceof CimdClientError);
+				assert.match(err.message, GENERIC_GATE);
+				assert.doesNotMatch(err.message, /NXDOMAIN/);
+				return true;
+			}
+		);
+	});
+
+	it('DNS lookups are bounded by the fetch deadline', async () => {
+		_setDnsLookup(() => new Promise(() => {})); // hangs forever
+		await assert.rejects(() => resolveCimdClient(VALID_URL, { fetchTimeoutMs: 50 }), /CIMD DNS lookup timed out/);
 	});
 });
 
@@ -288,6 +364,74 @@ describe('resolveCimdClient — document validation', () => {
 		await assert.rejects(() => resolveCimdClient(VALID_URL, undefined), TypeError);
 	});
 
+	it('rejects non-200 responses even with a valid JSON body', async () => {
+		for (const status of [404, 500, 201, 204]) {
+			_clearCimdCache();
+			_setDnsLookup(makeDnsOk());
+			_setFetch(async (...args) => {
+				const response = await makeOkFetch(VALID_DOC)(...args);
+				return { ...response, ok: status < 300, status };
+			});
+			await assert.rejects(
+				() => resolveCimdClient(VALID_URL, undefined),
+				(err) => {
+					assert.ok(err instanceof CimdClientError, `expected CimdClientError for status ${status}`);
+					assert.match(err.message, new RegExp(`status ${status}`));
+					return true;
+				}
+			);
+		}
+	});
+
+	it('size cap fails closed when maxDocumentBytes is NaN/Infinity/garbage', async () => {
+		// A ~70 KB document exceeds the 64 KB default; NaN/Infinity would
+		// disable the comparison entirely if used unvalidated.
+		const bigDoc = { ...VALID_DOC, padding: 'x'.repeat(70 * 1024) };
+		for (const maxDocumentBytes of [NaN, Infinity, 'not-a-number', -1, 0]) {
+			_clearCimdCache();
+			_setDnsLookup(makeDnsOk());
+			_setFetch(makeOkFetch(bigDoc));
+			await assert.rejects(
+				() => resolveCimdClient(VALID_URL, { maxDocumentBytes }),
+				(err) => {
+					assert.ok(err instanceof CimdClientError, `expected size rejection for ${maxDocumentBytes}`);
+					assert.match(err.message, /size limit|exceeds limit/);
+					return true;
+				}
+			);
+		}
+	});
+
+	it('numeric-string config values are honored', async () => {
+		_setDnsLookup(makeDnsOk());
+		_setFetch(makeOkFetch(VALID_DOC));
+		const record = await resolveCimdClient(VALID_URL, { maxDocumentBytes: '2048', fetchTimeoutMs: '5000' });
+		assert.ok(record);
+	});
+
+	it('deadline covers the body read, not just headers', async () => {
+		_setDnsLookup(makeDnsOk());
+		_setFetch(async (url, opts) => ({
+			ok: true,
+			status: 200,
+			headers: new Map([['content-type', 'application/json']]),
+			body: {
+				getReader: () => ({
+					// Headers arrive fine, then the body trickles forever; the
+					// abort signal must terminate the read.
+					read: () =>
+						new Promise((resolve, reject) => {
+							opts.signal.addEventListener('abort', () => reject(new Error('body read aborted')), {
+								once: true,
+							});
+						}),
+					cancel: () => {},
+				}),
+			},
+		}));
+		await assert.rejects(() => resolveCimdClient(VALID_URL, { fetchTimeoutMs: 50 }), /body read aborted/);
+	});
+
 	it('rejects unsupported token_endpoint_auth_method for CIMD', async () => {
 		setupOk({ ...VALID_DOC, token_endpoint_auth_method: 'private_key_jwt' });
 		await assert.rejects(
@@ -358,26 +502,71 @@ describe('resolveCimdClient — cache', () => {
 		assert.equal(fetchCalls, 0, 'clamped TTL (>=60s) keeps the cache warm');
 	});
 
-	it('negative-caches failures; second call does not fetch', async () => {
+	it('failures are never cached — the CIMD draft forbids caching errors/invalid documents', async () => {
 		let fetchCalls = 0;
-		_setDnsLookup(async () => {
-			throw new Error('DNS failure');
-		});
-
-		await assert.rejects(() => resolveCimdClient(VALID_URL, undefined));
-
-		// DNS failures are NOT negative-cached (server-side errors); fetch is the next step.
-		// Validate that CimdClientError failures ARE negative-cached.
-		_clearCimdCache();
 		_setDnsLookup(makeDnsOk());
 		_setFetch(async (...args) => {
 			fetchCalls++;
 			return makeOkFetch({ ...VALID_DOC, client_id: 'https://other.example.com/different' })(...args);
 		});
 		await assert.rejects(() => resolveCimdClient(VALID_URL, undefined), CimdClientError);
-		// Second call hits negative cache — fetch is NOT called again.
 		await assert.rejects(() => resolveCimdClient(VALID_URL, undefined), CimdClientError);
-		assert.equal(fetchCalls, 1, 'only one fetch; second rejection from negative cache');
+		assert.equal(fetchCalls, 2, 'invalid documents must be re-fetched, not served from a negative cache');
+	});
+
+	it('honors no-store/no-cache as the minimum TTL (DoS floor), not literally', async () => {
+		_setDnsLookup(makeDnsOk());
+		_setFetch(makeOkFetch(VALID_DOC, { cacheControl: 'no-store' }));
+		await resolveCimdClient(VALID_URL, undefined);
+		let fetchCalls = 0;
+		_setFetch(async (...args) => {
+			fetchCalls++;
+			return makeOkFetch(VALID_DOC)(...args);
+		});
+		await resolveCimdClient(VALID_URL, undefined);
+		assert.equal(fetchCalls, 0, 'no-store floors at 60s — an immediate re-resolve stays cached');
+	});
+
+	it('cache is LRU-bounded — attacker-chosen keys cannot grow it unbounded', async () => {
+		_setDnsLookup(makeDnsOk());
+		const fetched = [];
+		_setFetch(async (url, ...rest) => {
+			fetched.push(url);
+			return makeOkFetch({ ...VALID_DOC, client_id: url })(url, ...rest);
+		});
+		// Fill past the 1000-entry bound, then re-resolve the first URL: it must
+		// have been evicted (re-fetched), while a recent one stays cached.
+		for (let i = 0; i < 1001; i++) {
+			await resolveCimdClient(`https://example.com/client-${i}.json`, undefined);
+		}
+		fetched.length = 0;
+		await resolveCimdClient('https://example.com/client-0.json', undefined);
+		assert.equal(fetched.length, 1, 'oldest entry was evicted at the bound');
+		fetched.length = 0;
+		await resolveCimdClient('https://example.com/client-1000.json', undefined);
+		assert.equal(fetched.length, 0, 'recent entry is still cached');
+	});
+
+	it('cached records are revalidated against the live redirect-host policy', async () => {
+		_setDnsLookup(makeDnsOk());
+		let fetchCalls = 0;
+		_setFetch(async (...args) => {
+			fetchCalls++;
+			return makeOkFetch(VALID_DOC)(...args);
+		});
+		// Cached under a permissive policy...
+		const record = await resolveCimdClient(VALID_URL, undefined);
+		assert.ok(record);
+		// ...must not survive the operator tightening allowedRedirectUriHosts.
+		await assert.rejects(
+			() => resolveCimdClient(VALID_URL, undefined, ['app.trusted.example']),
+			(err) => {
+				assert.ok(err instanceof CimdClientError);
+				assert.match(err.message, /not in allowlist/);
+				return true;
+			}
+		);
+		assert.equal(fetchCalls, 1, 'rejection came from revalidation, not a re-fetch');
 	});
 });
 

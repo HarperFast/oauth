@@ -9,6 +9,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { RequestTarget } from 'harper';
 import type { Request, Logger, IOAuthProvider, MCPAuthorizeState, MCPConfig, OAuthProviderConfig } from '../types.ts';
+import { consentNonceMatches, readConsentNonce } from './mcp/consentBinding.ts';
 import { handleMCPCallback } from './mcp/index.ts';
 import { resolveIssuer } from './mcp/wellKnown.ts';
 import type { HookManager } from './hookManager.ts';
@@ -182,6 +183,19 @@ export async function handleCallback(
 		return { status: 302, headers: { Location: loginUrl } };
 	}
 
+	// Token purpose enforcement: a CIMD confirm token (minted for POST
+	// /oauth/mcp/confirm) also carries `mcp` + `providerName` and would
+	// otherwise be accepted here as upstream state — letting a malicious
+	// client skip the consent interstitial entirely by feeding its confirm
+	// token to the IdP as `state`. Treat it exactly like an invalid token
+	// (same generic response; nothing in a mis-purposed token is trusted,
+	// including its mcp redirect_uri).
+	if (tokenData._confirm) {
+		logger?.warn?.('CIMD confirm token presented as upstream OAuth state; rejecting');
+		const loginUrl = `/oauth/${providerName}/login?error=session_expired`;
+		return { status: 302, headers: { Location: loginUrl } };
+	}
+
 	const mcpState = tokenData.mcp as MCPAuthorizeState | undefined;
 
 	// Verify state token was issued for THIS provider (prevents cross-provider attacks).
@@ -261,6 +275,19 @@ export async function handleCallback(
 		// Pass the onLogin-mapped username so the issued auth code (and the
 		// JWT exchanged for it in Stage 4) is bound to the correct identity.
 		if (mcpState) {
+			// CIMD browser binding: the callback must arrive in the same browser
+			// that approved the consent interstitial (SameSite=Lax sends the
+			// nonce cookie on the top-level redirect from the IdP). Without this
+			// check an attacker could self-approve the interstitial and hand the
+			// victim the upstream IdP URL. Absent hash = DCR flow (no interstitial).
+			if (mcpState.browserNonceHash && !consentNonceMatches(readConsentNonce(request), mcpState.browserNonceHash)) {
+				logger?.warn?.(`MCP callback: consent browser binding mismatch for client=${mcpState.clientId}`);
+				return mcpErrorRedirect(
+					mcpState,
+					'access_denied',
+					'Authorization must complete in the browser that approved it'
+				);
+			}
 			const userIdentifier = hookData?.user ?? user.username;
 			return handleMCPCallback(request, mcpState, userIdentifier, mcpConfig ?? {}, logger);
 		}

@@ -7,24 +7,42 @@
  * document (instead of doing a DCR lookup) and validates the result.
  *
  * SSRF guards:
- * - HTTPS only, non-root path required, no userinfo/fragment.
+ * - HTTPS only (lowercase-canonical scheme), non-root path required, no
+ *   userinfo/fragment, no dot path segments (raw or percent-encoded).
  * - No IP-literal hosts in the URL (rejected before DNS).
- * - DNS gate: all resolved addresses are checked against private/loopback
- *   ranges (127/8, 10/8, 172.16/12, 192.168/16, 169.254/16, ::1,
- *   fc00::/7, fe80::/10, ::ffff:0/96). DNS-rebinding is a noted residual
- *   risk (lookup-gate, not pinned-connect) — the fetched content is only
- *   trusted for exact URL identity, so the primary SSRF-reach risk is
- *   addressed by the DNS gate.
+ * - DNS gate: all resolved addresses are checked against non-global ranges.
+ *   IPv4 rejects 0/8, 10/8, 100.64/10, 127/8, 169.254/16, 172.16/12,
+ *   192.168/16, 198.18/15, and 224/4+. IPv6 fails closed to "global unicast
+ *   (2000::/3) only", with v4-mapped addresses classified by their embedded
+ *   IPv4 address. DNS-rebinding is a noted residual risk (lookup-gate, not
+ *   pinned-connect) — the fetched content is only trusted for exact URL
+ *   identity, so the primary SSRF-reach risk is addressed by the DNS gate.
  * - `redirect: 'error'` — no following of 3xx responses.
- * - 5 s fetch timeout (configurable).
+ * - Only `200 OK` responses are accepted.
+ * - 5 s deadline (configurable) covering DNS, connect, headers, AND body.
  * - 64 KB document size cap (configurable).
  * - `Accept: application/json` only; non-JSON responses rejected.
+ * - Timeout/size config values are coerced to finite positive numbers;
+ *   anything else (NaN, Infinity, non-numeric strings) falls back to the
+ *   defaults rather than failing open.
+ * - Rejections never echo the resolved address or DNS outcome to the caller
+ *   (that would let unauthenticated clients probe the server's internal DNS
+ *   view); details are logged server-side only.
  *
  * Caching:
- * - Per-process Map keyed by URL.
+ * - Per-process Map keyed by URL, LRU-bounded to 1000 entries (the key is
+ *   attacker-chosen, so the cache must not grow unbounded).
  * - TTL: honor `Cache-Control: max-age` clamped to [60 s, 86400 s];
- *   default 3600 s when absent.
- * - Negative-cache failures for 60 s to avoid hammering on bad documents.
+ *   default 3600 s when absent. `no-store`/`no-cache` are honored as the
+ *   60 s floor rather than literally — the floor is deliberate DoS
+ *   protection (an attacker's document must not be able to force a fetch
+ *   per authorize request).
+ * - Failures are NOT cached (the CIMD draft forbids caching error responses
+ *   and invalid documents); repeated fetches of bad documents are left to
+ *   rate limiting (#163).
+ * - Cached records are revalidated against the live redirect-host policy on
+ *   every hit, so tightening `allowedRedirectUriHosts` takes effect
+ *   immediately instead of after cache expiry (up to 24 h).
  *
  * Token auth method:
  * - Only `token_endpoint_auth_method: none` (public clients) is supported
@@ -52,11 +70,9 @@ const DEFAULT_MAX_DOCUMENT_BYTES = 64 * 1024; // 64 KB
 const CACHE_MIN_TTL_S = 60;
 const CACHE_MAX_TTL_S = 86_400;
 const CACHE_DEFAULT_TTL_S = 3_600;
-const NEGATIVE_CACHE_TTL_S = 60;
+const CACHE_MAX_ENTRIES = 1_000;
 
-type CacheHit = { kind: 'record'; record: MCPClientRecord; expiresAt: number };
-type CacheMiss = { kind: 'error'; message: string; oauthError: string; expiresAt: number };
-type CacheEntry = CacheHit | CacheMiss;
+type CacheEntry = { record: MCPClientRecord; expiresAt: number };
 
 const cimdCache = new Map<string, CacheEntry>();
 
@@ -69,8 +85,8 @@ const cimdCache = new Map<string, CacheEntry>();
 export class CimdClientError extends Error {
 	readonly oauthError: string;
 
-	constructor(oauthError: string, message: string) {
-		super(message);
+	constructor(oauthError: string, message: string, options?: { cause?: unknown }) {
+		super(message, options);
 		this.name = 'CimdClientError';
 		this.oauthError = oauthError;
 	}
@@ -110,35 +126,101 @@ function isIpLiteral(hostname: string): boolean {
 
 function isPrivateIpv4(address: string): boolean {
 	const parts = address.split('.').map(Number);
-	if (parts.length !== 4 || parts.some((p) => isNaN(p))) return false;
+	if (parts.length !== 4 || parts.some((p) => !Number.isInteger(p) || p < 0 || p > 255)) return true; // malformed → fail closed
 	const [a, b] = parts;
 	return (
+		a === 0 || // 0.0.0.0/8 "this network" (0.0.0.0 routes to loopback on Linux)
 		a === 127 || // 127.0.0.0/8 loopback
 		a === 10 || // 10.0.0.0/8
+		(a === 100 && b >= 64 && b <= 127) || // 100.64.0.0/10 CGNAT / shared address space
 		(a === 172 && b >= 16 && b <= 31) || // 172.16.0.0/12
 		(a === 192 && b === 168) || // 192.168.0.0/16
-		(a === 169 && b === 254) // 169.254.0.0/16 link-local
+		(a === 169 && b === 254) || // 169.254.0.0/16 link-local
+		(a === 198 && (b === 18 || b === 19)) || // 198.18.0.0/15 benchmarking
+		a >= 224 // 224.0.0.0/4 multicast + 240.0.0.0/4 reserved + broadcast
 	);
 }
 
-function isPrivateIpv6(address: string): boolean {
-	if (address === '::1') return true;
-	const lower = address.toLowerCase();
-	// v4-mapped ::ffff:x.x.x.x or ::ffff:hhhh:hhhh
-	if (lower.startsWith('::ffff:')) return true;
-	// Extract first 16-bit group to check fc00::/7 and fe80::/10
-	const firstGroup = lower.split(':')[0];
-	if (!firstGroup) return false;
-	const n = parseInt(firstGroup.padStart(4, '0'), 16);
-	if (isNaN(n)) return false;
-	if ((n & 0xfe00) === 0xfc00) return true; // fc00::/7 ULA (fc00–fdff)
-	if ((n & 0xffc0) === 0xfe80) return true; // fe80::/10 link-local
-	return false;
+/**
+ * Expand an IPv6 address into its 8 16-bit groups. Handles `::` compression,
+ * a trailing embedded dotted-quad (v4-mapped/compat forms), and zone indexes.
+ * Returns null when the address doesn't parse — callers treat that as
+ * non-global (fail closed).
+ */
+function parseIpv6Groups(address: string): number[] | null {
+	let addr = address;
+	const zoneIdx = addr.indexOf('%');
+	if (zoneIdx !== -1) addr = addr.slice(0, zoneIdx);
+	addr = addr.toLowerCase();
+	if (!addr) return null;
+
+	// Convert a trailing dotted-quad into its two hex groups.
+	if (addr.includes('.')) {
+		const lastColon = addr.lastIndexOf(':');
+		if (lastColon === -1) return null;
+		const octets = addr
+			.slice(lastColon + 1)
+			.split('.')
+			.map((o) => (/^\d{1,3}$/.test(o) ? parseInt(o, 10) : -1));
+		if (octets.length !== 4 || octets.some((o) => o < 0 || o > 255)) return null;
+		addr =
+			addr.slice(0, lastColon + 1) +
+			((octets[0] << 8) | octets[1]).toString(16) +
+			':' +
+			((octets[2] << 8) | octets[3]).toString(16);
+	}
+
+	const halves = addr.split('::');
+	if (halves.length > 2) return null;
+	const parseSide = (side: string): number[] | null => {
+		if (side === '') return [];
+		const out: number[] = [];
+		for (const group of side.split(':')) {
+			if (!/^[0-9a-f]{1,4}$/.test(group)) return null;
+			out.push(parseInt(group, 16));
+		}
+		return out;
+	};
+
+	if (halves.length === 2) {
+		const left = parseSide(halves[0]);
+		const right = parseSide(halves[1]);
+		if (!left || !right || left.length + right.length > 7) return null;
+		return [...left, ...new Array(8 - left.length - right.length).fill(0), ...right];
+	}
+	const groups = parseSide(addr);
+	return groups && groups.length === 8 ? groups : null;
 }
 
 /**
+ * Fail-closed IPv6 policy: only global unicast (2000::/3) is allowed, with
+ * v4-mapped addresses (::ffff:a.b.c.d) classified by their embedded IPv4
+ * address. Everything else — `::` unspecified, `::1` loopback in any textual
+ * form, fc00::/7 ULA, fe80::/10 link-local, ff00::/8 multicast, reserved
+ * blocks, unparseable input — is treated as private.
+ */
+function isPrivateIpv6(address: string): boolean {
+	const groups = parseIpv6Groups(address);
+	if (!groups) return true;
+	const [g0, g1, g2, g3, g4, g5, g6, g7] = groups;
+	if (g0 === 0 && g1 === 0 && g2 === 0 && g3 === 0 && g4 === 0 && g5 === 0xffff) {
+		return isPrivateIpv4(`${g6 >> 8}.${g6 & 0xff}.${g7 >> 8}.${g7 & 0xff}`);
+	}
+	return (g0 & 0xe000) !== 0x2000;
+}
+
+/**
+ * Uniform client-facing message for every DNS-gate rejection. Deliberately
+ * carries no detail: distinguishing "didn't resolve" from "resolved to a
+ * private address" (or echoing the address) would let unauthenticated
+ * callers probe the server's internal DNS view with guessed hostnames.
+ * Details go to the server-side log only.
+ */
+const DNS_GATE_REJECTION = 'client_id metadata document host could not be resolved to a permitted address';
+
+/**
  * DNS SSRF gate: resolves all addresses for `hostname` and rejects if any
- * falls within a private/loopback/link-local/ULA range.
+ * falls outside the allowed (global unicast) ranges.
  *
  * Note: this is a lookup-gate, not pinned-connect. DNS rebinding between the
  * gate check and the actual HTTP connection is a residual risk acknowledged in
@@ -146,22 +228,22 @@ function isPrivateIpv6(address: string): boolean {
  * mitigated by this gate; connecting to an already-validated external address
  * that was then rebinded to private is a secondary, harder-to-exploit risk.
  */
-async function checkHostSsrf(hostname: string): Promise<void> {
+async function checkHostSsrf(hostname: string, logger?: Logger): Promise<void> {
 	let addresses: Array<{ address: string; family: number }>;
 	try {
 		addresses = await _dnsLookup(hostname, { all: true });
-	} catch {
-		throw new Error(`DNS resolution failed for CIMD host: ${hostname}`);
+	} catch (error) {
+		logger?.warn?.(`CIMD: DNS resolution failed for host ${hostname}`);
+		throw new CimdClientError('invalid_client', DNS_GATE_REJECTION, { cause: error });
 	}
 	if (addresses.length === 0) {
-		throw new Error(`No addresses resolved for CIMD host: ${hostname}`);
+		logger?.warn?.(`CIMD: no addresses resolved for host ${hostname}`);
+		throw new CimdClientError('invalid_client', DNS_GATE_REJECTION);
 	}
 	for (const { address, family } of addresses) {
-		if (family === 4 && isPrivateIpv4(address)) {
-			throw new CimdClientError('invalid_client', `CIMD host resolves to a private address: ${address}`);
-		}
-		if (family === 6 && isPrivateIpv6(address)) {
-			throw new CimdClientError('invalid_client', `CIMD host resolves to a private IPv6 address: ${address}`);
+		if ((family === 4 && isPrivateIpv4(address)) || (family === 6 && isPrivateIpv6(address))) {
+			logger?.warn?.(`CIMD: host ${hostname} resolves to a blocked address: ${address}`);
+			throw new CimdClientError('invalid_client', DNS_GATE_REJECTION);
 		}
 	}
 }
@@ -169,9 +251,31 @@ async function checkHostSsrf(hostname: string): Promise<void> {
 // --- URL shape checks ---
 
 /**
+ * Return true when `clientId` contains a dot path segment (`/./` or `/../`),
+ * raw or percent-encoded. Checked against the RAW string because WHATWG URL
+ * parsing normalizes dot segments away before `URL.pathname` can see them —
+ * `https://example.com/a/../client.json` must not alias
+ * `https://example.com/client.json` when client_ids are compared as simple
+ * strings (the CIMD draft prohibits dot path components).
+ */
+function hasDotPathSegments(clientId: string): boolean {
+	const afterAuthority = clientId.slice('https://'.length);
+	const pathStart = afterAuthority.indexOf('/');
+	if (pathStart === -1) return false;
+	let path = afterAuthority.slice(pathStart);
+	const queryStart = path.search(/[?#]/);
+	if (queryStart !== -1) path = path.slice(0, queryStart);
+	const decoded = path.replace(/%2e/gi, '.');
+	return /(^|\/)\.\.?(\/|$)/.test(decoded);
+}
+
+/**
  * Return true when `clientId` has the shape of a CIMD client_id:
- * - https scheme
+ * - https scheme, written in canonical lowercase `https://` form (the
+ *   document's client_id must string-match the URL exactly, so
+ *   non-canonical scheme spellings can never validate anyway)
  * - Non-root path (pathname !== '' and pathname !== '/')
+ * - No dot path segments, raw or percent-encoded
  * - No userinfo (username / password)
  * - No fragment
  * - Host is NOT an IP literal (IPv4 dotted-quad or IPv6 [bracket] form)
@@ -180,6 +284,7 @@ async function checkHostSsrf(hostname: string): Promise<void> {
  * Policy checks (allowedHosts, SSRF gate) happen inside `resolveCimdClient`.
  */
 export function isCimdClientId(clientId: string): boolean {
+	if (!clientId.startsWith('https://')) return false;
 	let url: URL;
 	try {
 		url = new URL(clientId);
@@ -188,6 +293,7 @@ export function isCimdClientId(clientId: string): boolean {
 	}
 	if (url.protocol !== 'https:') return false;
 	if (url.pathname === '' || url.pathname === '/') return false;
+	if (hasDotPathSegments(clientId)) return false;
 	if (url.username || url.password) return false;
 	if (url.hash) return false;
 	if (isIpLiteral(url.hostname)) return false;
@@ -198,11 +304,45 @@ export function isCimdClientId(clientId: string): boolean {
 
 function parseCacheControlMaxAge(header: string | null): number {
 	if (!header) return CACHE_DEFAULT_TTL_S;
+	// `no-store`/`no-cache` are honored as the minimum TTL, not literally —
+	// the floor is deliberate DoS protection (see module header).
+	if (/\bno-store\b|\bno-cache\b/i.test(header)) return CACHE_MIN_TTL_S;
 	const match = /\bmax-age\s*=\s*(\d+)/i.exec(header);
 	if (!match) return CACHE_DEFAULT_TTL_S;
 	const seconds = parseInt(match[1], 10);
 	if (isNaN(seconds)) return CACHE_DEFAULT_TTL_S;
 	return Math.max(CACHE_MIN_TTL_S, Math.min(CACHE_MAX_TTL_S, seconds));
+}
+
+/**
+ * Coerce a config value to a finite positive number, falling back to
+ * `fallback` otherwise. Config values can arrive as env-expanded strings, and
+ * `NaN`/`Infinity` would silently disable the `>` comparisons the size and
+ * time caps rely on — fail closed to the default instead.
+ */
+function toFinitePositive(value: unknown, fallback: number): number {
+	const n = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
+	return typeof n === 'number' && Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+/** Reject `promise` with `message` if `signal` aborts first (for operations
+ * like `dns.lookup` that don't accept an AbortSignal themselves). */
+function withAbort<T>(promise: Promise<T>, signal: AbortSignal, message: string): Promise<T> {
+	if (signal.aborted) return Promise.reject(new Error(message));
+	return new Promise((resolve, reject) => {
+		const onAbort = () => reject(new Error(message));
+		signal.addEventListener('abort', onAbort, { once: true });
+		promise.then(
+			(value) => {
+				signal.removeEventListener('abort', onAbort);
+				resolve(value);
+			},
+			(error) => {
+				signal.removeEventListener('abort', onAbort);
+				reject(error);
+			}
+		);
+	});
 }
 
 // --- Document validation ---
@@ -307,11 +447,12 @@ function validateCimdDocument(
  * Returns a synthesized `MCPClientRecord` (with `_cimd: true`) on success.
  * Returns `null` when the URL's host is not in `allowedHosts` (treated as
  * "not found" — avoids leaking whether the host would be valid).
- * Throws `CimdClientError` for client-side validation failures.
- * Throws `Error` for server-side failures (DNS, network).
+ * Throws `CimdClientError` for client-side validation failures (including
+ * every DNS-gate rejection — see `DNS_GATE_REJECTION`).
+ * Throws `Error` for server-side failures (network, timeout).
  *
- * Results are cached per URL per process; negative results are cached
- * briefly to avoid hammering on consistently-bad documents.
+ * Successful results are cached per URL per process (LRU-bounded); failures
+ * are never cached (the CIMD draft forbids it).
  */
 export async function resolveCimdClient(
 	clientId: string,
@@ -338,87 +479,117 @@ export async function resolveCimdClient(
 	// Cache lookup.
 	const now = Date.now();
 	const cached = cimdCache.get(clientId);
-	if (cached && cached.expiresAt > now) {
-		if (cached.kind === 'record') return cached.record;
-		// Negative cache: re-throw the original error type.
-		throw new CimdClientError(cached.oauthError, cached.message);
+	if (cached) {
+		if (cached.expiresAt <= now) {
+			cimdCache.delete(clientId);
+		} else {
+			// Revalidate against the LIVE redirect-host policy: a record cached
+			// under a looser `allowedRedirectUriHosts` must not survive the
+			// operator tightening it (cache TTL can be up to 24 h).
+			for (const uri of cached.record.redirect_uris) {
+				const policyErr = validateRedirectUri(uri, allowedRedirectUriHosts);
+				if (policyErr) {
+					cimdCache.delete(clientId);
+					throw new CimdClientError('invalid_client', `CIMD document: ${policyErr}`);
+				}
+			}
+			// LRU refresh: re-insert so eviction targets the least recently used.
+			cimdCache.delete(clientId);
+			cimdCache.set(clientId, cached);
+			return cached.record;
+		}
 	}
 
 	// --- Fetch ---
 	let record: MCPClientRecord;
 	try {
 		const parsedUrl = new URL(clientId);
-		// SSRF gate: check DNS before connecting.
-		await checkHostSsrf(parsedUrl.hostname);
+		const fetchTimeout = toFinitePositive(cimdConfig?.fetchTimeoutMs, DEFAULT_FETCH_TIMEOUT_MS);
+		const maxBytes = toFinitePositive(cimdConfig?.maxDocumentBytes, DEFAULT_MAX_DOCUMENT_BYTES);
 
-		const fetchTimeout = cimdConfig?.fetchTimeoutMs ?? DEFAULT_FETCH_TIMEOUT_MS;
-		const maxBytes = cimdConfig?.maxDocumentBytes ?? DEFAULT_MAX_DOCUMENT_BYTES;
+		// One deadline across DNS gate, connect, headers, AND body read — a
+		// hostile server must not be able to hold a connection open past the
+		// timeout by trickling headers or body bytes.
 		const controller = new AbortController();
 		const timer = setTimeout(() => controller.abort(), fetchTimeout);
 
-		let response: Response;
+		let body: string;
+		let cacheControlHeader: string | null = null;
 		try {
-			response = await _fetch(clientId, {
+			// SSRF gate: check DNS before connecting (raced against the deadline;
+			// dns.lookup does not take an AbortSignal).
+			await withAbort(checkHostSsrf(parsedUrl.hostname, logger), controller.signal, 'CIMD DNS lookup timed out');
+
+			const response = await _fetch(clientId, {
 				method: 'GET',
 				headers: { Accept: 'application/json' },
 				redirect: 'error',
 				signal: controller.signal,
 			});
+
+			// Only 200 is acceptable — the CIMD draft requires the document to be
+			// served with 200 OK; a 404/500 with a JSON body is not a client.
+			if (response.status !== 200) {
+				throw new CimdClientError('invalid_client', `CIMD document fetch returned status ${response.status}`);
+			}
+
+			// Reject non-JSON content-type.
+			const contentType = response.headers.get('content-type') ?? '';
+			if (!contentType.includes('application/json')) {
+				throw new CimdClientError('invalid_client', `CIMD document has non-JSON content-type: ${contentType}`);
+			}
+
+			cacheControlHeader = response.headers.get('cache-control');
+
+			// Enforce size cap.
+			const clHeader = response.headers.get('content-length');
+			if (clHeader && parseInt(clHeader, 10) > maxBytes) {
+				throw new CimdClientError(
+					'invalid_client',
+					`CIMD document content-length (${clHeader}) exceeds limit (${maxBytes})`
+				);
+			}
+
+			// Read up to maxBytes (reader.read() rejects when the deadline aborts).
+			const chunks: Uint8Array[] = [];
+			let total = 0;
+			const reader = response.body?.getReader();
+			if (!reader) {
+				throw new Error('CIMD fetch: response body is not readable');
+			}
+			while (true) {
+				const { done, value } = await reader.read();
+				if (done) break;
+				if (value) {
+					total += value.length;
+					if (total > maxBytes) {
+						reader.cancel();
+						throw new CimdClientError('invalid_client', `CIMD document exceeds size limit (${maxBytes} bytes)`);
+					}
+					chunks.push(value);
+				}
+			}
+			body = Buffer.concat(chunks.map((c) => Buffer.from(c))).toString('utf8');
 		} finally {
 			clearTimeout(timer);
 		}
 
-		// Reject non-JSON content-type.
-		const contentType = response.headers.get('content-type') ?? '';
-		if (!contentType.includes('application/json')) {
-			throw new CimdClientError('invalid_client', `CIMD document has non-JSON content-type: ${contentType}`);
-		}
-
-		// Enforce size cap.
-		const clHeader = response.headers.get('content-length');
-		if (clHeader && parseInt(clHeader, 10) > maxBytes) {
-			throw new CimdClientError(
-				'invalid_client',
-				`CIMD document content-length (${clHeader}) exceeds limit (${maxBytes})`
-			);
-		}
-
-		const cacheControlHeader = response.headers.get('cache-control');
-
-		// Read up to maxBytes.
-		const chunks: Uint8Array[] = [];
-		let total = 0;
-		const reader = response.body?.getReader();
-		if (!reader) {
-			throw new Error('CIMD fetch: response body is not readable');
-		}
-		while (true) {
-			const { done, value } = await reader.read();
-			if (done) break;
-			if (value) {
-				total += value.length;
-				if (total > maxBytes) {
-					reader.cancel();
-					throw new CimdClientError('invalid_client', `CIMD document exceeds size limit (${maxBytes} bytes)`);
-				}
-				chunks.push(value);
-			}
-		}
-
-		const body = Buffer.concat(chunks.map((c) => Buffer.from(c))).toString('utf8');
 		let doc: unknown;
 		try {
 			doc = JSON.parse(body);
-		} catch {
-			throw new CimdClientError('invalid_client', 'CIMD document is not valid JSON');
+		} catch (error) {
+			throw new CimdClientError('invalid_client', 'CIMD document is not valid JSON', { cause: error });
 		}
 
 		record = validateCimdDocument(doc, clientId, allowedRedirectUriHosts);
 
-		// Positive cache.
+		// Positive cache, LRU-bounded (the key is attacker-chosen input).
+		if (cimdCache.size >= CACHE_MAX_ENTRIES) {
+			const oldest = cimdCache.keys().next().value;
+			if (oldest !== undefined) cimdCache.delete(oldest);
+		}
 		const ttlSeconds = parseCacheControlMaxAge(cacheControlHeader);
 		cimdCache.set(clientId, {
-			kind: 'record',
 			record,
 			expiresAt: now + ttlSeconds * 1000,
 		});
@@ -426,19 +597,13 @@ export async function resolveCimdClient(
 		logger?.info?.(`CIMD: resolved client ${clientId} (cached for ${ttlSeconds}s)`);
 		return record;
 	} catch (err) {
+		// Failures are never cached — the CIMD draft forbids caching error
+		// responses and invalid documents. Fetch amplification from repeated
+		// bad requests is rate limiting's job (#163).
 		if (err instanceof CimdClientError) {
-			// Negative-cache client errors briefly to avoid hammering.
-			cimdCache.set(clientId, {
-				kind: 'error',
-				message: err.message,
-				oauthError: err.oauthError,
-				expiresAt: now + NEGATIVE_CACHE_TTL_S * 1000,
-			});
 			logger?.warn?.(`CIMD: rejected client ${clientId}: ${err.message}`);
 			throw err;
 		}
-		// Server-side failures (DNS, timeout, network) are NOT negative-cached
-		// so a transient outage doesn't lock out the client for 60 s.
 		logger?.error?.(`CIMD: fetch failed for ${clientId}: ${err instanceof Error ? err.message : String(err)}`);
 		throw err;
 	}

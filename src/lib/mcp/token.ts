@@ -129,6 +129,7 @@ async function authenticateClient(
 		if (err instanceof CimdClientError) {
 			return { error: errorResponse(401, err.oauthError, err.message) };
 		}
+		logger?.error?.('MCP token: client lookup failed:', err instanceof Error ? err.message : String(err));
 		return { error: errorResponse(500, 'server_error', 'Client lookup failed') };
 	}
 	if (!client) {

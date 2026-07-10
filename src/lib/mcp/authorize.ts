@@ -7,11 +7,16 @@
  * to the upstream provider's authorize URL.
  *
  * For CIMD-resolved clients the handler returns an interstitial HTML page
- * instead of immediately redirecting. The page shows the client_name and
- * redirect URI hostname (with a loopback warning), and requires an explicit
- * user confirmation via POST /oauth/mcp/confirm. This satisfies the
- * MCP auth spec requirement to "clearly display the redirect URI hostname
- * during authorization."
+ * instead of immediately redirecting. The page shows the client_id host
+ * (the authoritative CIMD identity), client_name, and redirect URI hostname
+ * (with a loopback warning), and requires an explicit user confirmation via
+ * POST /oauth/mcp/confirm. This satisfies the MCP auth spec requirement to
+ * "clearly display the redirect URI hostname during authorization."
+ *
+ * The consent is bound to the user's browser via a nonce cookie whose hash
+ * travels in the confirm token and upstream state; /confirm and the OAuth
+ * callback both verify it (see consentBinding.ts). The page is served with
+ * anti-framing headers — a framed consent page can be clickjacked.
  *
  * Two-phase validation per OAuth 2.1 §3.1.2.5:
  *   - Pre-redirect: client_id + redirect_uri must match a registered
@@ -32,6 +37,13 @@ import type {
 } from '../../types.ts';
 import { CimdClientError, resolveClient } from './cimd.ts';
 import { LOCAL_HOSTS } from './clientValidator.ts';
+import {
+	buildConsentCookie,
+	consentNonceMatches,
+	generateConsentNonce,
+	hashConsentNonce,
+	readConsentNonce,
+} from './consentBinding.ts';
 import { resolveIssuer, resolveResource } from './wellKnown.ts';
 
 type ErrorJSON = {
@@ -46,7 +58,7 @@ type Redirect = {
 
 type HtmlResponse = {
 	status: 200;
-	headers: { 'Content-Type': string };
+	headers: Record<string, string>;
 	body: string;
 };
 
@@ -216,14 +228,34 @@ export function buildInterstitialPage(
 	confirmPath: string
 ): string {
 	const clientName = escapeHtml(client.client_name ?? client.client_id);
-	const redirectHostname = escapeHtml(new URL(redirectUri).hostname);
+	// redirect_uri was validated upstream, but render defensively — an
+	// unparseable value must degrade to escaped text, not a 500.
+	let redirectHostname: string;
+	try {
+		redirectHostname = escapeHtml(new URL(redirectUri).hostname);
+	} catch {
+		redirectHostname = escapeHtml(redirectUri);
+	}
 	const loopback = isLoopbackRedirect(redirectUri);
+
+	// The client_id host is the AUTHORITATIVE identity for a CIMD client —
+	// it's the domain that served the metadata document. client_name and
+	// client_uri are self-asserted inside that document, so the page must
+	// anchor the user's decision on the client_id host (CIMD phishing
+	// guidance) and label the rest as unverified.
+	let clientIdHostname = '';
+	try {
+		clientIdHostname = escapeHtml(new URL(client.client_id).hostname);
+	} catch {
+		// Non-URL client_id — not a CIMD client; the section is omitted.
+	}
+	const clientIdSection = clientIdHostname ? `<p>Client identity: <strong>${clientIdHostname}</strong></p>` : '';
 
 	let clientUriSection = '';
 	if (client.client_uri) {
 		try {
 			const uriHost = escapeHtml(new URL(client.client_uri).hostname);
-			clientUriSection = `<p class="meta">Application domain: <strong>${uriHost}</strong></p>`;
+			clientUriSection = `<p class="meta">Claimed application domain (unverified): <strong>${uriHost}</strong></p>`;
 		} catch {
 			// Ignore malformed client_uri — it passed validation at resolve time.
 		}
@@ -262,6 +294,7 @@ button:hover{background:#004499}
 <div class="card">
 <h1>Sign in to <span class="client-name">${clientName}</span></h1>
 <div class="info">
+${clientIdSection}
 <p>Redirect hostname: <strong>${redirectHostname}</strong></p>
 ${clientUriSection}
 </div>
@@ -429,11 +462,16 @@ export async function handleAuthorize(
 		}
 		const providerEntry = providers[selection.providerName];
 
+		// Browser binding: the nonce cookie set below must accompany both the
+		// /confirm POST and the eventual upstream callback; only its hash is
+		// stored server-side (see consentBinding.ts).
+		const consentNonce = generateConsentNonce();
+
 		let confirmToken: string;
 		try {
 			confirmToken = await providerEntry.provider.generateCSRFToken({
 				providerName: selection.providerName,
-				mcp: mcpState,
+				mcp: { ...mcpState, browserNonceHash: hashConsentNonce(consentNonce) },
 				_confirm: true,
 			});
 		} catch (error) {
@@ -449,7 +487,16 @@ export async function handleAuthorize(
 		const html = buildInterstitialPage(client, query.redirect_uri, confirmToken, '/oauth/mcp/confirm');
 		return {
 			status: 200,
-			headers: { 'Content-Type': 'text/html; charset=utf-8' },
+			headers: {
+				'Content-Type': 'text/html; charset=utf-8',
+				// The consent page is the anti-phishing gate — it must not be
+				// frameable (clickjacking the Continue button defeats it) and the
+				// body carries a single-use confirm token, so it must not be cached.
+				'X-Frame-Options': 'DENY',
+				'Content-Security-Policy': "frame-ancestors 'none'",
+				'Cache-Control': 'no-store',
+				'Set-Cookie': buildConsentCookie(consentNonce),
+			},
 			body: html,
 		};
 	}
@@ -499,7 +546,11 @@ export async function handleAuthorizeConfirm(
 			};
 		}
 		state = verified as Record<string, any>;
-	} catch {
+	} catch (error) {
+		logger?.error?.(
+			'MCP confirm: failed to verify confirm token:',
+			error instanceof Error ? error.message : String(error)
+		);
 		return {
 			status: 400,
 			body: { error: 'invalid_request', error_description: 'Confirm token is invalid or expired' },
@@ -517,6 +568,21 @@ export async function handleAuthorizeConfirm(
 		return {
 			status: 400,
 			body: { error: 'invalid_request', error_description: 'Confirm token payload is incomplete' },
+		};
+	}
+
+	// Browser binding: the confirm POST must come from the browser that was
+	// served the interstitial (and its nonce cookie). Without this, the
+	// malicious client itself could fetch and "confirm" the interstitial, then
+	// hand the victim the resulting upstream URL — consent bypassed.
+	if (!mcpState.browserNonceHash || !consentNonceMatches(readConsentNonce(request), mcpState.browserNonceHash)) {
+		logger?.warn?.(`MCP confirm: consent browser binding mismatch for client=${mcpState.clientId}`);
+		return {
+			status: 400,
+			body: {
+				error: 'invalid_request',
+				error_description: 'Confirmation must come from the browser that started authorization (cookies are required)',
+			},
 		};
 	}
 

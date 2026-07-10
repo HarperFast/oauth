@@ -873,6 +873,120 @@ describe('OAuth Handlers', () => {
 			assert.ok(tokenResponse, 'token response forwarded to onLogin');
 			assert.equal(providerName, 'test-provider');
 		});
+
+		it('rejects a CIMD confirm token presented as upstream state (token purpose enforcement)', async () => {
+			// Attack: feed the interstitial's confirm_token to the IdP as `state`;
+			// it carries providerName + mcp and would otherwise mint an auth code
+			// without /confirm ever running.
+			mockProvider.verifyCSRFToken = createMockFn(async () => ({
+				timestamp: Date.now(),
+				providerName: 'test-provider',
+				mcp: { ...MCP_STATE },
+				_confirm: true,
+			}));
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				{ mcpConfig: MCP_CONFIG, logger: mockLogger }
+			);
+			assert.equal(result.status, 302);
+			assert.match(result.headers.Location, /error=session_expired/, 'treated exactly like an invalid token');
+			assert.ok(!result.headers.Location.includes('code='), 'no auth code minted');
+			assert.equal(storedAuthCodes.size, 0, 'no auth code persisted');
+			assert.equal(mockProvider.exchangeCodeForToken.mock.calls.length, 0, 'upstream code never exchanged');
+		});
+
+		describe('CIMD consent browser binding', () => {
+			const NONCE = 'callback-consent-nonce';
+			let hashConsentNonce, CONSENT_COOKIE_NAME;
+
+			beforeEach(async () => {
+				({ hashConsentNonce, CONSENT_COOKIE_NAME } = await import('../../dist/lib/mcp/consentBinding.js'));
+				mockProvider.verifyCSRFToken = createMockFn(async () => ({
+					timestamp: Date.now(),
+					providerName: 'test-provider',
+					mcp: { ...MCP_STATE, browserNonceHash: hashConsentNonce(NONCE) },
+				}));
+			});
+
+			it('completes when the callback arrives with the consent cookie', async () => {
+				mockRequest.headers.cookie = `${CONSENT_COOKIE_NAME}=${NONCE}`;
+				const result = await handleCallback(
+					mockRequest,
+					mockTarget,
+					mockProvider,
+					mockConfig,
+					mockHookManager,
+					'test-provider',
+					{ mcpConfig: MCP_CONFIG, logger: mockLogger }
+				);
+				assert.equal(result.status, 302);
+				const url = new URL(result.headers.Location);
+				assert.ok(url.searchParams.get('code'), 'auth code minted for the bound browser');
+			});
+
+			it('rejects when the consent cookie is missing — victim browser never approved', async () => {
+				// Attack: the malicious client self-approves the interstitial, then
+				// sends the victim the upstream IdP URL. The victim's browser has no
+				// (or a different) consent cookie, so no code may be minted.
+				delete mockRequest.headers.cookie;
+				const result = await handleCallback(
+					mockRequest,
+					mockTarget,
+					mockProvider,
+					mockConfig,
+					mockHookManager,
+					'test-provider',
+					{ mcpConfig: MCP_CONFIG, logger: mockLogger }
+				);
+				assert.equal(result.status, 302);
+				const url = new URL(result.headers.Location);
+				assert.equal(url.origin + url.pathname, MCP_STATE.redirectUri, 'error routed to the client redirect_uri');
+				assert.equal(url.searchParams.get('error'), 'access_denied');
+				assert.equal(url.searchParams.get('code'), null, 'no auth code issued');
+				assert.equal(storedAuthCodes.size, 0);
+			});
+
+			it('rejects when the consent cookie does not match the bound hash', async () => {
+				mockRequest.headers.cookie = `${CONSENT_COOKIE_NAME}=some-other-browser-nonce`;
+				const result = await handleCallback(
+					mockRequest,
+					mockTarget,
+					mockProvider,
+					mockConfig,
+					mockHookManager,
+					'test-provider',
+					{ mcpConfig: MCP_CONFIG, logger: mockLogger }
+				);
+				const url = new URL(result.headers.Location);
+				assert.equal(url.searchParams.get('error'), 'access_denied');
+				assert.equal(storedAuthCodes.size, 0);
+			});
+
+			it('DCR flows (no browserNonceHash) are unaffected', async () => {
+				mockProvider.verifyCSRFToken = createMockFn(async () => ({
+					timestamp: Date.now(),
+					providerName: 'test-provider',
+					mcp: { ...MCP_STATE },
+				}));
+				delete mockRequest.headers.cookie;
+				const result = await handleCallback(
+					mockRequest,
+					mockTarget,
+					mockProvider,
+					mockConfig,
+					mockHookManager,
+					'test-provider',
+					{ mcpConfig: MCP_CONFIG, logger: mockLogger }
+				);
+				const url = new URL(result.headers.Location);
+				assert.ok(url.searchParams.get('code'), 'DCR callback mints a code without a consent cookie');
+			});
+		});
 	});
 
 	describe('handleLogout', () => {

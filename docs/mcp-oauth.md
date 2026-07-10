@@ -500,24 +500,39 @@ automatic resolution.
 
 1. The MCP client sends `client_id=https://app.example.com/client.json` to
    `/oauth/mcp/authorize`.
-2. The AS verifies the URL shape (HTTPS, non-root path, no IP literal host), then
-   does a DNS pre-flight check — **all** resolved addresses must be public (not
-   RFC 1918, loopback, link-local, or ULA). This blocks SSRF to internal services.
-3. The AS fetches the URL (5 s timeout, 64 KB cap, no redirects) and validates the
-   document: `client_id` must match the URL, `client_name` and `redirect_uris` are
+2. The AS verifies the URL shape (HTTPS, non-root path, no dot path segments, no
+   IP literal host), then does a DNS pre-flight check — **all** resolved addresses
+   must be globally routable. IPv4 rejects `0/8`, `10/8`, `100.64/10` (CGNAT),
+   `127/8`, `169.254/16`, `172.16/12`, `192.168/16`, `198.18/15`, and `224/4`+;
+   IPv6 allows only global unicast (`2000::/3`), with v4-mapped addresses
+   classified by their embedded IPv4 address. This blocks SSRF to internal
+   services. All DNS-gate rejections return one generic `invalid_client` message
+   so callers cannot probe the server's internal DNS view.
+3. The AS fetches the URL (5 s deadline covering DNS, connect, and the full body;
+   64 KB cap; no redirects; only `200 OK` accepted) and validates the document:
+   `client_id` must match the URL, `client_name` and `redirect_uris` are
    required, grant types and auth methods must match supported values.
 4. Instead of immediately redirecting to the upstream IdP, the AS shows the user an
-   **interstitial confirmation page** that displays the `client_name` and redirect
-   URI hostname (with a loopback warning when applicable). This satisfies the MCP spec
-   requirement to clearly display who the user is authorizing.
+   **interstitial confirmation page** that displays the `client_id` host (the
+   authoritative CIMD identity), the `client_name`, and the redirect URI hostname
+   (with a loopback warning when applicable). This satisfies the MCP spec
+   requirement to clearly display who the user is authorizing. The page is served
+   with `X-Frame-Options: DENY`, `Content-Security-Policy: frame-ancestors 'none'`,
+   and `Cache-Control: no-store`, and it sets an HttpOnly consent cookie that
+   binds the rest of the flow to this browser.
 5. The user submits the form, which POSTs a one-time confirm token to
-   `/oauth/mcp/confirm`. The AS verifies and consumes the token, then performs the
-   upstream redirect exactly as it would for a DCR client.
-6. Resolved documents are **cached per process** with a TTL derived from
-   `Cache-Control: max-age` (clamped to [60 s, 86 400 s]; default 3 600 s).
-   Client-side validation failures are negatively cached for 60 s to avoid hammering
-   bad documents. Server-side errors (DNS, timeout) are _not_ negatively cached so
-   a transient outage doesn't lock out the client.
+   `/oauth/mcp/confirm`. The AS verifies and consumes the token, checks that the
+   consent cookie matches the hash bound into the token, then performs the
+   upstream redirect exactly as it would for a DCR client. The same cookie is
+   re-checked when the upstream IdP redirects back, before any authorization code
+   is issued.
+6. Successfully resolved documents are **cached per process** (LRU-bounded to
+   1 000 entries) with a TTL derived from `Cache-Control: max-age` (clamped to
+   [60 s, 86 400 s]; default 3 600 s; `no-store`/`no-cache` floor at 60 s as
+   deliberate DoS protection). Failures are never cached (the CIMD draft forbids
+   caching error responses and invalid documents). Cached records are revalidated
+   against the live `allowedRedirectUriHosts` policy on every hit, so tightening
+   that setting takes effect immediately.
 
 ### Security properties
 
@@ -526,11 +541,21 @@ automatic resolution.
   residual risk (noted in #166); the gate mitigates the primary SSRF-reach risk.
 - XSS: `client_name` and all other client-supplied strings are HTML-escaped before
   rendering in the interstitial page. Clients are attacker-controlled; treat every
-  field as untrusted.
+  field as untrusted. `client_uri` is labelled as unverified — only the `client_id`
+  host is an authenticated identity.
 - Token binding: the confirm token embeds the full set of authorize parameters
   (redirect_uri, code_challenge, resource, scope). Swapping params between the
   interstitial and the confirm POST is not possible — the token is single-use and
   binds all values at mint time.
+- Browser binding: consent is bound to the approving browser via an HttpOnly,
+  Secure, SameSite=Lax nonce cookie whose SHA-256 hash travels inside the
+  server-side state. Both `/oauth/mcp/confirm` and the upstream OAuth callback
+  require the cookie to match, so a malicious client cannot approve the
+  interstitial itself and hand the victim a ready-made upstream login URL.
+  Cookies must be enabled in the user's browser for CIMD authorization.
+- Token purpose: confirm tokens are rejected if presented as upstream OAuth
+  callback `state` (and vice versa) — each token is only accepted by the
+  endpoint it was minted for.
 
 ### Configuration
 

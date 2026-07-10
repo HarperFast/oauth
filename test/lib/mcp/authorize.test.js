@@ -14,6 +14,7 @@ import {
 } from '../../../dist/lib/mcp/authorize.js';
 import { resetMCPClientsTableCache } from '../../../dist/lib/mcp/clientStore.js';
 import { _setDnsLookup, _setFetch, _clearCimdCache } from '../../../dist/lib/mcp/cimd.js';
+import { CONSENT_COOKIE_NAME, hashConsentNonce } from '../../../dist/lib/mcp/consentBinding.js';
 
 /**
  * Minimal RequestTarget stub for the existing target.get?.() pattern.
@@ -528,6 +529,12 @@ describe('buildInterstitialPage', () => {
 		assert.ok(!html.includes('Warning') || !html.includes('loopback'), 'no loopback warning for external redirect');
 	});
 
+	it('renders defensively when redirect_uri is unparseable (no throw)', () => {
+		const client = { client_id: 'client-x', client_name: 'App', redirect_uris: [] };
+		const html = buildInterstitialPage(client, 'not-a-valid-url', 'tok', '/oauth/mcp/confirm');
+		assert.match(html, /not-a-valid-url/);
+	});
+
 	it('escapes the confirm_token value (defense-in-depth)', () => {
 		const dangerousToken = 'tok"><script>evil()</script>';
 		const html = buildInterstitialPage(safeClient, 'https://example.com/cb', dangerousToken, '/oauth/mcp/confirm');
@@ -623,6 +630,51 @@ describe('handleAuthorize — CIMD interstitial', () => {
 		assert.ok(!response.body.includes('<script>'), 'no raw script tags');
 	});
 
+	it('serves the interstitial with anti-clickjacking and no-store headers', async () => {
+		_setFetch(makeCimdFetch(makeCimdDoc(CIMD_CLIENT_ID)));
+		const { entries } = makeProviderRegistry('github');
+		const response = await handleAuthorize(makeRequest(), makeTarget(CIMD_QUERY), { enabled: true }, entries);
+
+		assert.equal(response.status, 200);
+		assert.equal(response.headers['X-Frame-Options'], 'DENY');
+		assert.match(response.headers['Content-Security-Policy'], /frame-ancestors 'none'/);
+		assert.equal(response.headers['Cache-Control'], 'no-store');
+	});
+
+	it('sets the consent cookie whose hash is bound into the confirm token state', async () => {
+		_setFetch(makeCimdFetch(makeCimdDoc(CIMD_CLIENT_ID)));
+		const { entries, harnesses } = makeProviderRegistry('github');
+		const response = await handleAuthorize(makeRequest(), makeTarget(CIMD_QUERY), { enabled: true }, entries);
+
+		const setCookie = response.headers['Set-Cookie'];
+		assert.ok(setCookie, 'interstitial sets the consent cookie');
+		assert.match(setCookie, new RegExp(`^${CONSENT_COOKIE_NAME}=`));
+		assert.match(setCookie, /HttpOnly/);
+		assert.match(setCookie, /Secure/);
+		assert.match(setCookie, /SameSite=Lax/);
+
+		const nonce = setCookie.split(';')[0].split('=')[1];
+		const minted = harnesses.github.generatedTokens[0];
+		assert.equal(minted._confirm, true);
+		assert.equal(minted.mcp.browserNonceHash, hashConsentNonce(nonce), 'state carries sha256(cookie nonce)');
+	});
+
+	it('displays the authoritative client_id hostname and labels client_uri unverified', async () => {
+		const doc = makeCimdDoc(CIMD_CLIENT_ID, {
+			redirect_uris: ['https://other-app.example.net/cb'],
+			client_uri: 'https://claimed-brand.example.org/',
+		});
+		_setFetch(makeCimdFetch(doc));
+		const { entries } = makeProviderRegistry('github');
+		const target = makeTarget({ ...CIMD_QUERY, redirect_uri: 'https://other-app.example.net/cb' });
+		const response = await handleAuthorize(makeRequest(), target, { enabled: true }, entries);
+
+		assert.equal(response.status, 200);
+		assert.match(response.body, /Client identity: <strong>mcp-client\.example\.com<\/strong>/);
+		assert.match(response.body, /Redirect hostname: <strong>other-app\.example\.net<\/strong>/);
+		assert.match(response.body, /unverified.*claimed-brand\.example\.org/i);
+	});
+
 	it('includes a loopback warning when the CIMD redirect is to localhost', async () => {
 		const doc = makeCimdDoc(CIMD_CLIENT_ID, { redirect_uris: ['http://localhost:6274/cb'] });
 		_setFetch(makeCimdFetch(doc));
@@ -673,6 +725,7 @@ describe('handleAuthorize — CIMD interstitial', () => {
 // ────────────────────────────────────────────────────────────────────────────
 
 describe('handleAuthorizeConfirm', () => {
+	const NONCE = 'test-consent-nonce';
 	const MCP_STATE = {
 		clientId: 'https://mcp-client.example.com/client.json',
 		resource: 'https://app.example.com/mcp',
@@ -681,7 +734,15 @@ describe('handleAuthorizeConfirm', () => {
 		redirectUri: 'https://mcp-client.example.com/cb',
 		scope: 'mcp:read',
 		clientState: 'state-xyz',
+		browserNonceHash: hashConsentNonce(NONCE),
 	};
+
+	/** Request carrying the consent nonce cookie, as the interstitial browser would. */
+	function makeConsentRequest(nonce = NONCE) {
+		return makeRequest({
+			headers: { host: 'app.example.com', cookie: `other=1; ${CONSENT_COOKIE_NAME}=${nonce}` },
+		});
+	}
 
 	function makeProviderWithCsrf(name = 'github') {
 		// Simulate a simple token store: issued → consumed single-use.
@@ -728,7 +789,7 @@ describe('handleAuthorizeConfirm', () => {
 		assert.equal(result.body.error, 'invalid_request');
 	});
 
-	it('valid token → 302 redirect to upstream IdP with MCP state', async () => {
+	it('valid token + matching consent cookie → 302 redirect to upstream IdP with MCP state', async () => {
 		const { entries, provider } = makeProviderWithCsrf();
 		// Mint a confirm token as handleAuthorize would.
 		const token = await provider.generateCSRFToken({
@@ -737,7 +798,12 @@ describe('handleAuthorizeConfirm', () => {
 			_confirm: true,
 		});
 
-		const result = await handleAuthorizeConfirm(makeRequest(), { confirm_token: token }, { enabled: true }, entries);
+		const result = await handleAuthorizeConfirm(
+			makeConsentRequest(),
+			{ confirm_token: token },
+			{ enabled: true },
+			entries
+		);
 		assert.equal(result.status, 302);
 		assert.match(result.headers.Location, /upstream\.example\.com/);
 	});
@@ -750,10 +816,20 @@ describe('handleAuthorizeConfirm', () => {
 			_confirm: true,
 		});
 
-		const first = await handleAuthorizeConfirm(makeRequest(), { confirm_token: token }, { enabled: true }, entries);
+		const first = await handleAuthorizeConfirm(
+			makeConsentRequest(),
+			{ confirm_token: token },
+			{ enabled: true },
+			entries
+		);
 		assert.equal(first.status, 302, 'first confirm succeeds');
 
-		const second = await handleAuthorizeConfirm(makeRequest(), { confirm_token: token }, { enabled: true }, entries);
+		const second = await handleAuthorizeConfirm(
+			makeConsentRequest(),
+			{ confirm_token: token },
+			{ enabled: true },
+			entries
+		);
 		assert.equal(second.status, 400, 'second confirm rejected (token consumed)');
 	});
 
@@ -766,8 +842,64 @@ describe('handleAuthorizeConfirm', () => {
 			// Note: no _confirm: true
 		});
 
-		const result = await handleAuthorizeConfirm(makeRequest(), { confirm_token: token }, { enabled: true }, entries);
+		const result = await handleAuthorizeConfirm(
+			makeConsentRequest(),
+			{ confirm_token: token },
+			{ enabled: true },
+			entries
+		);
 		assert.equal(result.status, 400);
 		assert.match(result.body.error_description, /Invalid confirm token/);
+	});
+
+	it('rejects a confirm without the consent cookie — the malicious client cannot self-approve', async () => {
+		const { entries, provider } = makeProviderWithCsrf();
+		const token = await provider.generateCSRFToken({
+			providerName: 'github',
+			mcp: MCP_STATE,
+			_confirm: true,
+		});
+
+		// No cookie header at all (e.g. the client POSTs the token server-side).
+		const result = await handleAuthorizeConfirm(makeRequest(), { confirm_token: token }, { enabled: true }, entries);
+		assert.equal(result.status, 400);
+		assert.match(result.body.error_description, /browser/);
+	});
+
+	it('rejects a confirm with a non-matching consent cookie', async () => {
+		const { entries, provider } = makeProviderWithCsrf();
+		const token = await provider.generateCSRFToken({
+			providerName: 'github',
+			mcp: MCP_STATE,
+			_confirm: true,
+		});
+
+		const result = await handleAuthorizeConfirm(
+			makeConsentRequest('a-different-nonce'),
+			{ confirm_token: token },
+			{ enabled: true },
+			entries
+		);
+		assert.equal(result.status, 400);
+		assert.match(result.body.error_description, /browser/);
+	});
+
+	it('rejects a confirm token minted without a browser binding', async () => {
+		const { entries, provider } = makeProviderWithCsrf();
+		const unboundState = { ...MCP_STATE };
+		delete unboundState.browserNonceHash;
+		const token = await provider.generateCSRFToken({
+			providerName: 'github',
+			mcp: unboundState,
+			_confirm: true,
+		});
+
+		const result = await handleAuthorizeConfirm(
+			makeConsentRequest(),
+			{ confirm_token: token },
+			{ enabled: true },
+			entries
+		);
+		assert.equal(result.status, 400, 'unbound confirm tokens are never accepted');
 	});
 });
