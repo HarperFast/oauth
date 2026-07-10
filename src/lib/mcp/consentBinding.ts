@@ -68,7 +68,15 @@ export function buildConsentCookie(flowId: string, nonce: string): string {
 	return `${cookieName(flowId)}=${nonce}; Max-Age=${CONSENT_COOKIE_MAX_AGE_S}; Path=/; Secure; HttpOnly; SameSite=Lax`;
 }
 
-/** Read this flow's consent nonce from the request's Cookie header, if present. */
+/**
+ * Read this flow's consent nonce from the request's Cookie header, if present.
+ *
+ * Simple split parser, first name-match wins. Safe because both the name
+ * suffix (flow id) and the value (nonce) are base64url — no `=`, `;`, quotes,
+ * or spaces — and `__Host-` naming means a same-name cookie can only be set
+ * by this origin over TLS at `Path=/` (one cookie per name+host+path in the
+ * jar). Revisit the parser if the encoding ever changes.
+ */
 export function readConsentNonce(request: Request | undefined, flowId: string | undefined): string | undefined {
 	if (!flowId) return undefined;
 	const header = request?.headers?.cookie;

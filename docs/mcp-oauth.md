@@ -571,7 +571,11 @@ automatic resolution.
   mismatched (self-approved) flow triggers no side effects. A malicious client
   therefore cannot approve the interstitial itself and hand the victim a
   ready-made upstream login URL. Cookies must be enabled in the user's browser for
-  CIMD authorization.
+  CIMD authorization. Because the consent cookie is `__Host-`/`Secure`, CIMD
+  interactive authorization requires the AS to be served over **HTTPS** — on a
+  plain-HTTP origin the browser silently drops the cookie and `/oauth/mcp/confirm`
+  always rejects. Most browsers carve out `http://localhost` as trustworthy for
+  development, but behavior varies; use TLS for anything beyond local testing.
 - Token purpose: confirm tokens are rejected if presented as upstream OAuth
   callback `state` (and vice versa) — each token is only accepted by the
   endpoint it was minted for.

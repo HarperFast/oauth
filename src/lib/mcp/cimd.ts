@@ -245,6 +245,7 @@ const IPV4_SPECIAL_USE: Array<[number, number, number, number, number]> = [
 	[198, 18, 0, 0, 15], // benchmarking
 	[198, 51, 100, 0, 24], // TEST-NET-2 (documentation)
 	[203, 0, 113, 0, 24], // TEST-NET-3 (documentation)
+	[224, 0, 0, 0, 4], // multicast
 	[240, 0, 0, 0, 4], // reserved (incl. 255.255.255.255 broadcast)
 ];
 
@@ -256,7 +257,7 @@ function isPrivateIpv4(address: string): boolean {
 	const parts = address.split('.').map(Number);
 	if (parts.length !== 4 || parts.some((p) => !Number.isInteger(p) || p < 0 || p > 255)) return true; // malformed → fail closed
 	const [a, b, c, d] = parts;
-	if (a >= 224) return true; // 224.0.0.0/4 multicast + 240.0.0.0/4 reserved
+	if (a >= 224) return true; // fast path — 224/4 + 240/4 are also table entries, so the table alone stays complete
 	const ip = ipv4ToInt(a, b, c, d);
 	for (const [wa, wb, wc, wd, bits] of IPV4_SPECIAL_USE) {
 		const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0;
