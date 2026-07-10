@@ -154,10 +154,6 @@ export interface MCPClientMetadata {
 	application_type?: string;
 	software_id?: string;
 	software_version?: string;
-	/** JWKS document for `private_key_jwt` auth (CIMD / #159 integration point). */
-	jwks?: Record<string, unknown>;
-	/** JWKS URI for `private_key_jwt` auth (CIMD / #159 integration point). */
-	jwks_uri?: string;
 }
 
 /**

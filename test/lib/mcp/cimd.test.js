@@ -319,11 +319,60 @@ describe('resolveCimdClient — concurrency + pinning', () => {
 		const results = await Promise.allSettled(
 			Array.from({ length: 30 }, (_, i) => resolveCimdClient(`https://h${i}.example.com/client.json`, undefined))
 		);
-		assert.ok(peak <= 8, `peak concurrent getaddrinfo ${peak} must not exceed the cap (8)`);
+		assert.ok(peak <= 2, `peak concurrent getaddrinfo ${peak} must not exceed the cap (2)`);
 		const capacityRejects = results.filter(
 			(r) => r.status === 'rejected' && r.reason?.oauthError === 'temporarily_unavailable'
 		);
 		assert.ok(capacityRejects.length > 0, 'a burst past the cap fast-rejects some requests');
+	});
+
+	it('bounds total concurrent resolutions and fast-rejects past the cap', async () => {
+		_setDnsLookup(makeDnsOk());
+		let release;
+		const gate = new Promise((r) => (release = r));
+		let started = 0;
+		_setFetch(async (url, init) => {
+			started++;
+			await gate;
+			return makeOkFetch(VALID_DOC)(url, init);
+		});
+		const pending = [];
+		for (let i = 0; i < 20; i++) {
+			pending.push(resolveCimdClient(`https://h${i}.example.com/client.json`, undefined).catch((err) => err));
+			// Stagger so each start clears the (instant) DNS permit — this test
+			// exercises the TOTAL resolution cap, not the DNS cap.
+			await new Promise((r) => setImmediate(r));
+		}
+		release();
+		const results = await Promise.all(pending);
+		assert.equal(started, 16, 'only the cap (16) resolutions may reach the fetch');
+		const capacityRejects = results.filter(
+			(r) => r instanceof CimdClientError && r.oauthError === 'temporarily_unavailable'
+		);
+		assert.equal(capacityRejects.length, 4, 'starts past the cap fast-reject');
+	});
+
+	it('aborts the connection when a response is rejected after headers', async () => {
+		_setDnsLookup(makeDnsOk());
+		let signal;
+		_setFetch(async (url, init) => {
+			signal = init.signal;
+			return { ...(await makeOkFetch(VALID_DOC)(url, init)), status: 500 };
+		});
+		await assert.rejects(() => resolveCimdClient(VALID_URL, undefined), /returned status 500/);
+		assert.equal(signal.aborted, true, 'a post-headers rejection must tear down the pinned socket');
+	});
+
+	it('does not abort the connection on a successful resolution', async () => {
+		_setDnsLookup(makeDnsOk());
+		let signal;
+		_setFetch(async (url, init) => {
+			signal = init.signal;
+			return makeOkFetch(VALID_DOC)(url, init);
+		});
+		const record = await resolveCimdClient(VALID_URL, undefined);
+		assert.ok(record);
+		assert.equal(signal.aborted, false);
 	});
 
 	it('dedups concurrent resolutions of the same client_id into one fetch', async () => {
@@ -565,15 +614,15 @@ describe('resolveCimdClient — document validation', () => {
 		assert.equal(record._cimd, true);
 	});
 
-	it('carries through jwks and jwks_uri fields (#159 integration point)', async () => {
+	it('does not carry jwks fields through in v1 (deferred to #159 with validation)', async () => {
 		setupOk({
 			...VALID_DOC,
 			jwks_uri: 'https://example.com/.well-known/jwks.json',
 			jwks: { keys: [] },
 		});
 		const record = await resolveCimdClient(VALID_URL, undefined);
-		assert.equal(record.jwks_uri, 'https://example.com/.well-known/jwks.json');
-		assert.deepEqual(record.jwks, { keys: [] });
+		assert.equal(record.jwks_uri, undefined);
+		assert.equal(record.jwks, undefined);
 	});
 });
 

@@ -25,9 +25,16 @@
  * - `https.request` does not follow redirects, so a 3xx surfaces as a non-200
  *   and is rejected; only `200 OK` is accepted.
  * - 5 s deadline (configurable) covering DNS, connect, headers, AND body.
- * - Concurrent DNS resolutions are globally bounded (getaddrinfo runs on the
- *   uncancellable libuv pool); over the bound, resolution fast-rejects.
- *   Concurrent resolutions of the same client_id are deduped to one fetch.
+ * - Any rejection after headers (non-200, non-JSON, oversize) aborts the
+ *   request, tearing down the pinned socket — a hostile endpoint can't hold
+ *   connections open past the rejection.
+ * - Concurrent DNS resolutions are globally bounded below libuv's default
+ *   4-thread pool (getaddrinfo runs on that uncancellable pool and must not
+ *   starve fs/crypto users), and TOTAL concurrent resolutions (DNS + connect
+ *   + body) are separately bounded so unique client_ids can't fan out into
+ *   unbounded outbound HTTPS work; over either bound, resolution
+ *   fast-rejects. Concurrent resolutions of the same client_id are deduped
+ *   to one fetch.
  * - 64 KB document size cap (configurable).
  * - `Accept: application/json` only; non-JSON responses rejected.
  * - Timeout/size config values are coerced to finite positive numbers;
@@ -58,9 +65,9 @@
  *   are rejected with a clear `invalid_client` error.
  *
  * #159 integration point:
- * - `jwks`, `jwks_uri`, and `token_endpoint_auth_method` are carried
- *   through on the resolved record so assertion verification (#159) can
- *   consume them without re-fetching.
+ * - `jwks` / `jwks_uri` are deliberately NOT carried through in v1 — they
+ *   have no consumer or validation until private_key_jwt assertion
+ *   verification (#159), which adds the plumbing alongside both.
  */
 
 import { lookup } from 'node:dns/promises';
@@ -86,9 +93,18 @@ const CACHE_MAX_ENTRIES = 1_000;
 // fixed thread pool and cannot be cancelled, so a flood of client_ids under
 // blackholed DNS zones would otherwise pin every pool thread. The permit is
 // held until the *underlying* lookup settles (not when the caller times out),
-// which is what actually bounds pool occupancy.
-const MAX_CONCURRENT_DNS = 8;
+// which is what actually bounds pool occupancy. Kept below the default
+// UV_THREADPOOL_SIZE (4) so CIMD lookups can never occupy the whole pool —
+// fs/crypto/zlib share it; legit lookups settle in milliseconds, so the
+// permit turns over fast.
+const MAX_CONCURRENT_DNS = 2;
 let activeDnsLookups = 0;
+
+// Bound TOTAL concurrent CIMD resolutions (DNS + connect + body read): the DNS
+// permit alone doesn't cap outbound HTTPS work — fast-resolving unique
+// client_ids would otherwise fan out into unbounded concurrent fetches. The
+// in-flight dedup map doubles as the counter (entries are removed on settle).
+const MAX_CONCURRENT_RESOLUTIONS = 16;
 
 type ResolvedAddress = { address: string; family: number };
 
@@ -608,12 +624,6 @@ function validateCimdDocument(
 		application_type: typeof d.application_type === 'string' ? d.application_type : 'web',
 		software_id: typeof d.software_id === 'string' ? d.software_id : undefined,
 		software_version: typeof d.software_version === 'string' ? d.software_version : undefined,
-		// #159 integration: carry JWKS config through without activating private_key_jwt.
-		jwks:
-			d.jwks !== undefined && typeof d.jwks === 'object' && d.jwks !== null
-				? (d.jwks as Record<string, unknown>)
-				: undefined,
-		jwks_uri: typeof d.jwks_uri === 'string' ? d.jwks_uri : undefined,
 		redirect_uris: d.redirect_uris as string[],
 		client_id_issued_at: 0, // CIMD records are not persisted; no issued-at timestamp.
 		_cimd: true,
@@ -684,6 +694,11 @@ export async function resolveCimdClient(
 	// Dedup concurrent resolutions of the same uncached client_id → single fetch.
 	const existing = inFlightResolutions.get(clientId);
 	if (existing) return existing;
+	// Total-concurrency bound: the in-flight map IS the counter (no await sits
+	// between this check and the set below, so the cap cannot be raced past).
+	if (inFlightResolutions.size >= MAX_CONCURRENT_RESOLUTIONS) {
+		throw new CimdClientError('temporarily_unavailable', 'CIMD resolution capacity reached; retry shortly');
+	}
 	const pending = fetchAndValidateCimd(clientId, cimdConfig, allowedRedirectUriHosts, logger).finally(() =>
 		inFlightResolutions.delete(clientId)
 	);
@@ -773,6 +788,12 @@ async function fetchAndValidateCimd(
 				}
 			}
 			body = Buffer.concat(chunks).toString('utf8');
+		} catch (error) {
+			// A rejection between headers and the full body read must tear down
+			// the pinned socket — the deadline timer is cleared below, so nothing
+			// else would ever abort a connection the server holds open.
+			controller.abort();
+			throw error;
 		} finally {
 			clearTimeout(timer);
 		}
