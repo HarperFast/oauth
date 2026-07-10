@@ -768,7 +768,7 @@ async function fetchAndValidateCimd(
 					chunks.push(value);
 				}
 			}
-			body = Buffer.concat(chunks.map((c) => Buffer.from(c))).toString('utf8');
+			body = Buffer.concat(chunks).toString('utf8');
 		} finally {
 			clearTimeout(timer);
 		}
