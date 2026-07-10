@@ -13,7 +13,8 @@
  * - DNS gate: all resolved addresses are checked against the full IANA
  *   special-purpose registries. IPv4 rejects 0/8, 10/8, 100.64/10, 127/8,
  *   169.254/16, 172.16/12, 192.0.0/24, 192.0.2/24, 192.88.99/24, 192.168/16,
- *   198.18/15, 198.51.100/24, 203.0.113/24, 224/4+, and the AS112/AMT blocks.
+ *   198.18/15, 198.51.100/24, 203.0.113/24, 224/4 (multicast), 240/4
+ *   (reserved, incl. broadcast), and the AS112/AMT blocks.
  *   IPv6 fails closed to "global unicast (2000::/3) only", with v4-mapped and
  *   6to4/ISATAP transition forms classified by their embedded IPv4 address and
  *   the in-2000::/3 special-use prefixes (Teredo, ORCHID, documentation) also
