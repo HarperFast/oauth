@@ -5,7 +5,13 @@
  * Supports any standard OAuth 2.0 provider through configuration.
  */
 
-import { initializeProviders, expandEnvVar, expandEnvVarsDeep, extractPluginDefaults } from './lib/config.ts';
+import {
+	initializeProviders,
+	expandEnvVar,
+	expandEnvVarsDeep,
+	extractPluginDefaults,
+	normalizeMcpSecurityConfig,
+} from './lib/config.ts';
 import { OAuthResource } from './lib/resource.ts';
 import { validateAndRefreshSession } from './lib/sessionValidator.ts';
 import { clearOAuthSession } from './lib/handlers.ts';
@@ -149,6 +155,10 @@ export async function handleApplication(scope: Scope): Promise<void> {
 		// sensitive leaves (mcp.dynamicClientRegistration.initialAccessToken) and
 		// a pinned issuer/resource support ${ENV_VAR}.
 		const mcpConfig = options.mcp ? expandEnvVarsDeep(options.mcp) : undefined;
+		// Coerce documented boolean strings and normalize allowedHosts BEFORE any
+		// `enabled` check, so an env-expanded "false" can't leave a security switch
+		// truthy or turn a scalar allowedHosts into substring matching.
+		if (mcpConfig) normalizeMcpSecurityConfig(mcpConfig);
 		if (mcpConfig?.enabled && !mcpConfig.issuer) {
 			// Without a pinned issuer, resolveIssuer() (wellKnown.ts) derives it from
 			// the client-controlled Host header — and resolveResource() defaults to

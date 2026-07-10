@@ -100,6 +100,12 @@ export interface MCPConfig {
 	accessTokenTtl?: number;
 	/** Refresh-token (family) lifetime in seconds. Default: 2592000 (30d). */
 	refreshTokenTtl?: number;
+	/**
+	 * Client ID Metadata Document (CIMD) resolution settings.
+	 * CIMD is enabled by default when `mcp.enabled: true`. Override here
+	 * to opt out or restrict which hosts may be used as CIMD client_ids.
+	 */
+	clientIdMetadataDocuments?: MCPClientIdMetadataDocumentsConfig;
 }
 
 /**
@@ -163,6 +169,40 @@ export interface MCPClientRecord extends MCPClientMetadata {
 	client_id_issued_at: number;
 	/** Unix timestamp (seconds) when client_secret expires; 0 = never */
 	client_secret_expires_at?: number;
+	/**
+	 * Set to true on records resolved from a Client ID Metadata Document
+	 * (not persisted in Harper). Callers use this to decide whether to show
+	 * the CIMD interstitial confirmation page.
+	 * @internal
+	 */
+	_cimd?: boolean;
+}
+
+/**
+ * Configuration for Client ID Metadata Document (CIMD) resolution.
+ *
+ * CIMD is enabled by default when `mcp.enabled: true`. Set `enabled: false`
+ * to opt out; set `allowedHosts` to restrict which hosts may be used as
+ * CIMD client_ids.
+ */
+export interface MCPClientIdMetadataDocumentsConfig {
+	/**
+	 * Enable CIMD resolution. Default: true when `mcp.enabled`.
+	 * Set to false to accept only DCR-registered clients.
+	 */
+	enabled?: boolean;
+	/**
+	 * Allowlist of hostnames permitted as CIMD client_id URLs. When set,
+	 * only these hosts (plus their HTTPS URLs with non-root paths) are
+	 * resolved; all other URL client_ids are rejected with `invalid_client`.
+	 * When unset, any externally reachable HTTPS host is accepted (subject
+	 * to SSRF guards).
+	 */
+	allowedHosts?: string[];
+	/** Fetch timeout in milliseconds. Default: 5000. */
+	fetchTimeoutMs?: number;
+	/** Maximum document size in bytes. Default: 65536 (64 KB). */
+	maxDocumentBytes?: number;
 }
 
 /**
@@ -188,6 +228,19 @@ export interface MCPAuthorizeState {
 	scope?: string;
 	/** Original `state` parameter from the MCP client; echoed verbatim on redirect */
 	clientState?: string;
+	/**
+	 * CIMD consent browser binding: SHA-256 of the per-flow nonce cookie set with
+	 * the consent interstitial. Present only on CIMD flows; /oauth/mcp/confirm and
+	 * the upstream OAuth callback both require the caller's cookie to hash-match
+	 * before proceeding (see lib/mcp/consentBinding.ts).
+	 */
+	browserNonceHash?: string;
+	/**
+	 * CIMD consent flow id: identifies which per-flow `__Host-` cookie carries
+	 * this flow's nonce, so concurrent authorization flows in one browser don't
+	 * collide. Paired with `browserNonceHash`.
+	 */
+	consentFlowId?: string;
 }
 
 /**

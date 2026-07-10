@@ -14,16 +14,19 @@ import { randomUUID, randomBytes, timingSafeEqual } from 'node:crypto';
 import { logger as harperLogger } from 'harper';
 import type { Logger, MCPClientMetadata, MCPClientRecord, MCPConfig } from '../../types.ts';
 import { MCPClientStore } from './clientStore.ts';
+import {
+	SUPPORTED_GRANT_TYPES,
+	SUPPORTED_RESPONSE_TYPES,
+	SUPPORTED_AUTH_METHODS,
+	validateOptionalString,
+	validateRedirectUri,
+	validateStringArray,
+} from './clientValidator.ts';
 
 type ErrorResponse = {
 	status: number;
 	body: { error: string; error_description?: string };
 };
-
-const SUPPORTED_GRANT_TYPES = new Set(['authorization_code', 'refresh_token']);
-const SUPPORTED_RESPONSE_TYPES = new Set(['code']);
-const SUPPORTED_AUTH_METHODS = new Set(['none', 'client_secret_basic', 'client_secret_post']);
-const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
 
 /**
  * Validate the Authorization header against a configured initial access token.
@@ -51,49 +54,6 @@ function checkInitialAccessToken(authHeader: string | undefined, configured: str
 			status: 401,
 			body: { error: 'invalid_token', error_description: 'Invalid initial access token' },
 		};
-	}
-	return null;
-}
-
-function validateOptionalString(value: unknown, fieldName: string): string | null {
-	if (value === undefined) return null;
-	if (typeof value !== 'string') return `${fieldName} must be a string`;
-	return null;
-}
-
-/**
- * Validate a single redirect URI against RFC 7591 + RFC 8252 rules.
- * Returns an error message on failure, null on success.
- */
-function validateRedirectUri(uri: unknown, allowedHosts: string[] | undefined): string | null {
-	if (typeof uri !== 'string' || uri.length === 0) {
-		return 'redirect_uris must contain non-empty strings';
-	}
-	let parsed: URL;
-	try {
-		parsed = new URL(uri);
-	} catch {
-		return `redirect_uri is not a valid URL: ${uri}`;
-	}
-	if (parsed.hash) {
-		return `redirect_uri must not contain a fragment: ${uri}`;
-	}
-	const isLocal = LOCAL_HOSTS.has(parsed.hostname);
-	// HTTPS is required except for loopback addresses (RFC 8252 §8.3).
-	if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && isLocal)) {
-		return `redirect_uri must use https (or http to a loopback address): ${uri}`;
-	}
-	if (allowedHosts && allowedHosts.length > 0 && !isLocal && !allowedHosts.includes(parsed.hostname)) {
-		return `redirect_uri host not in allowlist: ${parsed.hostname}`;
-	}
-	return null;
-}
-
-function validateStringArray(value: unknown, fieldName: string): string | null {
-	if (value === undefined) return null;
-	if (!Array.isArray(value)) return `${fieldName} must be an array of strings`;
-	for (const item of value) {
-		if (typeof item !== 'string') return `${fieldName} must be an array of strings`;
 	}
 	return null;
 }

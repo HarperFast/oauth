@@ -151,6 +151,8 @@ export function buildAuthorizationServerMetadata(
 	mcpConfig: MCPConfig
 ): Record<string, unknown> {
 	const issuer = resolveIssuer(request, mcpConfig);
+	// CIMD is enabled by default when mcp.enabled; disabled by explicit enabled: false.
+	const cimdEnabled = mcpConfig.clientIdMetadataDocuments?.enabled !== false;
 	return {
 		issuer,
 		authorization_endpoint: `${issuer}/oauth/mcp/authorize`,
@@ -168,6 +170,8 @@ export function buildAuthorizationServerMetadata(
 		resource_parameter_supported: true,
 		// RFC 9207: server emits `iss` on every authorization response redirect.
 		authorization_response_iss_parameter_supported: true,
+		// Advertise CIMD support when enabled (default: true when mcp.enabled).
+		...(cimdEnabled ? { client_id_metadata_document_supported: true } : {}),
 	};
 }
 

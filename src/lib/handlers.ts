@@ -9,6 +9,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { RequestTarget } from 'harper';
 import type { Request, Logger, IOAuthProvider, MCPAuthorizeState, MCPConfig, OAuthProviderConfig } from '../types.ts';
+import { consentNonceMatches, readConsentNonce } from './mcp/consentBinding.ts';
 import { handleMCPCallback } from './mcp/index.ts';
 import { resolveIssuer } from './mcp/wellKnown.ts';
 import type { HookManager } from './hookManager.ts';
@@ -182,6 +183,19 @@ export async function handleCallback(
 		return { status: 302, headers: { Location: loginUrl } };
 	}
 
+	// Token purpose enforcement: a CIMD confirm token (minted for POST
+	// /oauth/mcp/confirm) also carries `mcp` + `providerName` and would
+	// otherwise be accepted here as upstream state — letting a malicious
+	// client skip the consent interstitial entirely by feeding its confirm
+	// token to the IdP as `state`. Treat it exactly like an invalid token
+	// (same generic response; nothing in a mis-purposed token is trusted,
+	// including its mcp redirect_uri).
+	if (tokenData._confirm) {
+		logger?.warn?.('CIMD confirm token presented as upstream OAuth state; rejecting');
+		const loginUrl = `/oauth/${providerName}/login?error=session_expired`;
+		return { status: 302, headers: { Location: loginUrl } };
+	}
+
 	const mcpState = tokenData.mcp as MCPAuthorizeState | undefined;
 
 	// Verify state token was issued for THIS provider (prevents cross-provider attacks).
@@ -197,6 +211,19 @@ export async function handleCallback(
 			reason: 'csrf',
 		});
 		return { status: 302, headers: { Location: errorUrl } };
+	}
+
+	// CIMD browser binding — checked BEFORE the upstream code exchange and the
+	// onLogin hook, so a mismatched (self-approved) flow triggers no upstream
+	// exchange, no userinfo fetch, and no provisioning side-effects; it only
+	// applies when the state carries a binding (CIMD), so DCR/human flows are
+	// unaffected. SameSite=Lax sends the per-flow nonce cookie on the top-level
+	// redirect back from the IdP.
+	if (mcpState?.browserNonceHash) {
+		if (!consentNonceMatches(readConsentNonce(request, mcpState.consentFlowId), mcpState.browserNonceHash)) {
+			logger?.warn?.(`MCP callback: consent browser binding mismatch for client=${mcpState.clientId}`);
+			return mcpErrorRedirect(mcpState, 'access_denied', 'Authorization must complete in the browser that approved it');
+		}
 	}
 
 	// Now that we know the flow context, handle upstream IdP errors.
@@ -261,6 +288,7 @@ export async function handleCallback(
 		// Pass the onLogin-mapped username so the issued auth code (and the
 		// JWT exchanged for it in Stage 4) is bound to the correct identity.
 		if (mcpState) {
+			// Browser binding already verified above, before the code exchange.
 			const userIdentifier = hookData?.user ?? user.username;
 			return handleMCPCallback(request, mcpState, userIdentifier, mcpConfig ?? {}, logger);
 		}

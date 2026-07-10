@@ -10,6 +10,8 @@ import {
 	initializeProviders,
 	expandEnvVar,
 	expandEnvVarsDeep,
+	coerceConfigBoolean,
+	normalizeMcpSecurityConfig,
 } from '../../dist/lib/config.js';
 
 describe('OAuth Configuration', () => {
@@ -40,6 +42,55 @@ describe('OAuth Configuration', () => {
 			error: () => {},
 			debug: () => {},
 		};
+	});
+
+	describe('coerceConfigBoolean', () => {
+		it('passes real booleans through', () => {
+			assert.equal(coerceConfigBoolean(true), true);
+			assert.equal(coerceConfigBoolean(false), false);
+		});
+		it('coerces documented boolean strings (case/space-insensitive)', () => {
+			assert.equal(coerceConfigBoolean('true'), true);
+			assert.equal(coerceConfigBoolean('false'), false);
+			assert.equal(coerceConfigBoolean(' FALSE '), false);
+			assert.equal(coerceConfigBoolean('True'), true);
+		});
+		it('returns undefined for anything else (caller applies its default)', () => {
+			assert.equal(coerceConfigBoolean('yes'), undefined);
+			assert.equal(coerceConfigBoolean(1), undefined);
+			assert.equal(coerceConfigBoolean(undefined), undefined);
+		});
+	});
+
+	describe('normalizeMcpSecurityConfig', () => {
+		it('coerces an env-expanded "false" so the feature is truly disabled', () => {
+			const cfg = { enabled: 'false', clientIdMetadataDocuments: { enabled: 'false' } };
+			normalizeMcpSecurityConfig(cfg);
+			assert.equal(cfg.enabled, false);
+			assert.equal(cfg.clientIdMetadataDocuments.enabled, false);
+		});
+		it('leaves real booleans and absent values alone', () => {
+			const cfg = { enabled: true, clientIdMetadataDocuments: {} };
+			normalizeMcpSecurityConfig(cfg);
+			assert.equal(cfg.enabled, true);
+			assert.equal(cfg.clientIdMetadataDocuments.enabled, undefined);
+		});
+		it('wraps a scalar allowedHosts into a lowercased exact-match array (no substring matching)', () => {
+			const cfg = { clientIdMetadataDocuments: { allowedHosts: 'Trusted.Example.COM' } };
+			normalizeMcpSecurityConfig(cfg);
+			assert.deepEqual(cfg.clientIdMetadataDocuments.allowedHosts, ['trusted.example.com']);
+		});
+		it('normalizes an array of hostnames (trim + lowercase, drops empties)', () => {
+			const cfg = { clientIdMetadataDocuments: { allowedHosts: [' A.com ', 'B.COM', ''] } };
+			normalizeMcpSecurityConfig(cfg);
+			assert.deepEqual(cfg.clientIdMetadataDocuments.allowedHosts, ['a.com', 'b.com']);
+		});
+		it('rejects a non-string allowedHosts entry rather than failing open', () => {
+			assert.throws(
+				() => normalizeMcpSecurityConfig({ clientIdMetadataDocuments: { allowedHosts: [123] } }),
+				/allowedHosts must be/
+			);
+		});
 	});
 
 	describe('expandEnvVar', () => {

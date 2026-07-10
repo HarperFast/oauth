@@ -57,6 +57,55 @@ export function expandEnvVarsDeep<T>(value: T): T {
 }
 
 /**
+ * Coerce a config value that documents a boolean but may arrive as an
+ * env-expanded string (`enabled: ${FLAG}` → `"false"`). Returns the boolean
+ * for `true`/`false` (case-insensitive), otherwise `undefined` (so callers
+ * apply their own default). A real boolean passes through unchanged.
+ */
+export function coerceConfigBoolean(value: unknown): boolean | undefined {
+	if (typeof value === 'boolean') return value;
+	if (typeof value === 'string') {
+		const v = value.trim().toLowerCase();
+		if (v === 'true') return true;
+		if (v === 'false') return false;
+	}
+	return undefined;
+}
+
+/**
+ * Normalize the security-relevant fields of the `mcp` config block in place,
+ * so a mis-typed value can never silently fail open:
+ * - `mcp.enabled` and `mcp.clientIdMetadataDocuments.enabled` are coerced from
+ *   documented boolean strings to real booleans (an env-expanded `"false"`
+ *   would otherwise be truthy and enable the feature the operator disabled).
+ * - `mcp.clientIdMetadataDocuments.allowedHosts` is normalized to an array of
+ *   exact, lowercased hostnames. A scalar string (which `Array.includes` /
+ *   `String.includes` would turn into substring matching) is wrapped into a
+ *   single-element array; anything that isn't a string or array of strings is
+ *   rejected rather than treated as "no restriction".
+ */
+export function normalizeMcpSecurityConfig(mcpConfig: Record<string, any>): void {
+	const enabled = coerceConfigBoolean(mcpConfig.enabled);
+	if (enabled !== undefined) mcpConfig.enabled = enabled;
+
+	const cimd = mcpConfig.clientIdMetadataDocuments;
+	if (cimd && typeof cimd === 'object') {
+		const cimdEnabled = coerceConfigBoolean(cimd.enabled);
+		if (cimdEnabled !== undefined) cimd.enabled = cimdEnabled;
+
+		if (cimd.allowedHosts !== undefined) {
+			const raw = Array.isArray(cimd.allowedHosts) ? cimd.allowedHosts : [cimd.allowedHosts];
+			if (raw.some((h: unknown) => typeof h !== 'string')) {
+				throw new Error(
+					'mcp.clientIdMetadataDocuments.allowedHosts must be a hostname string or an array of hostname strings'
+				);
+			}
+			cimd.allowedHosts = raw.map((h: string) => h.trim().toLowerCase()).filter((h: string) => h.length > 0);
+		}
+	}
+}
+
+/**
  * Build configuration for a specific provider
  */
 export function buildProviderConfig(

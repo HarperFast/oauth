@@ -15,7 +15,7 @@ import type { HookManager } from '../hookManager.ts';
 import type { Logger, MCPClientRecord, MCPConfig, Request } from '../../types.ts';
 import { emitMCPAuditEvent } from './audit.ts';
 import { MCPAuthCodeStore } from './authCodeStore.ts';
-import { MCPClientStore } from './clientStore.ts';
+import { CimdClientError, resolveClient } from './cimd.ts';
 import { MCPKeyStore } from './keyStore.ts';
 import {
 	hashRefreshToken,
@@ -100,7 +100,12 @@ type ClientAuthResult = { client: MCPClientRecord } | { error: TokenResponse };
  * or the body (client_secret_post); public clients (`none`) present only a
  * client_id and rely on PKCE. Mixing methods is rejected (RFC 6749 §2.3).
  */
-async function authenticateClient(request: Request | undefined, body: any, logger?: Logger): Promise<ClientAuthResult> {
+async function authenticateClient(
+	request: Request | undefined,
+	body: any,
+	mcpConfig: MCPConfig | undefined,
+	logger?: Logger
+): Promise<ClientAuthResult> {
 	const basic = parseBasicAuth(request?.headers?.authorization);
 	const bodyClientId = typeof body?.client_id === 'string' ? body.client_id : undefined;
 	const bodyClientSecret = typeof body?.client_secret === 'string' ? body.client_secret : undefined;
@@ -117,7 +122,16 @@ async function authenticateClient(request: Request | undefined, body: any, logge
 		return { error: errorResponse(400, 'invalid_request', 'client_id is required') };
 	}
 
-	const client = await new MCPClientStore(logger).get(clientId);
+	let client;
+	try {
+		client = await resolveClient(clientId, mcpConfig, logger);
+	} catch (err) {
+		if (err instanceof CimdClientError) {
+			return { error: errorResponse(401, err.oauthError, err.message) };
+		}
+		logger?.error?.('MCP token: client lookup failed:', err instanceof Error ? err.message : String(err));
+		return { error: errorResponse(500, 'server_error', 'Client lookup failed') };
+	}
 	if (!client) {
 		return { error: errorResponse(401, 'invalid_client', 'Unknown client') };
 	}
@@ -425,7 +439,7 @@ export async function handleToken(
 			return errorResponse(400, 'unsupported_grant_type', 'grant_type must be authorization_code or refresh_token');
 		}
 
-		const auth = await authenticateClient(request, body, logger);
+		const auth = await authenticateClient(request, body, mcpConfig, logger);
 		if ('error' in auth) {
 			return auth.error;
 		}

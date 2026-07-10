@@ -9,13 +9,15 @@
 import type { RequestTarget } from 'harper';
 import type { HookManager } from '../hookManager.ts';
 import type { Logger, MCPConfig, ProviderRegistry, Request } from '../../types.ts';
-import { handleAuthorize } from './authorize.ts';
+import { handleAuthorize, handleAuthorizeConfirm } from './authorize.ts';
 import { handleRegister } from './dcr.ts';
 import { handleToken } from './token.ts';
 
 export { MCPAuthCodeStore, resetMCPAuthCodesTableCache } from './authCodeStore.ts';
-export { handleAuthorize, selectMCPProvider } from './authorize.ts';
+export { handleAuthorize, handleAuthorizeConfirm, selectMCPProvider } from './authorize.ts';
 export { handleMCPCallback } from './callback.ts';
+export { isCimdClientId, resolveClient, CimdClientError } from './cimd.ts';
+export { buildConsentCookie, generateConsentFlowId, hashConsentNonce } from './consentBinding.ts';
 export { MCPClientStore, resetMCPClientsTableCache } from './clientStore.ts';
 export { handleRegister } from './dcr.ts';
 export { MCPKeyStore, resetMCPKeysTableCache, SIGNING_KEY_ID } from './keyStore.ts';
@@ -40,6 +42,7 @@ export async function handleMCPPost(
 	request: Request,
 	body: any,
 	mcpConfig: MCPConfig | undefined,
+	providers: ProviderRegistry,
 	hookManager?: HookManager,
 	logger?: Logger
 ): Promise<any> {
@@ -53,6 +56,10 @@ export async function handleMCPPost(
 
 	if (action === 'token') {
 		return handleToken(request, body, mcpConfig, hookManager, logger);
+	}
+
+	if (action === 'confirm') {
+		return handleAuthorizeConfirm(request, body, mcpConfig, providers, logger);
 	}
 
 	return { status: 404, body: { error: 'Not found' } };

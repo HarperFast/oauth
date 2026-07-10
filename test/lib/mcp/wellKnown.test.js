@@ -134,6 +134,22 @@ describe('MCP well-known: AS metadata document (RFC 8414)', () => {
 		const doc = buildAuthorizationServerMetadata(makeRequest(), { enabled: true });
 		assert.equal(doc.authorization_response_iss_parameter_supported, true);
 	});
+
+	it('advertises client_id_metadata_document_supported when CIMD is enabled (default)', () => {
+		const doc = buildAuthorizationServerMetadata(makeRequest(), { enabled: true });
+		assert.equal(doc.client_id_metadata_document_supported, true);
+	});
+
+	it('does not advertise client_id_metadata_document_supported when CIMD is explicitly disabled', () => {
+		const doc = buildAuthorizationServerMetadata(makeRequest(), {
+			enabled: true,
+			clientIdMetadataDocuments: { enabled: false },
+		});
+		assert.ok(
+			!('client_id_metadata_document_supported' in doc) || doc.client_id_metadata_document_supported === false,
+			'CIMD flag must be absent or false when disabled'
+		);
+	});
 });
 
 describe('MCP well-known: JWKS document', () => {
