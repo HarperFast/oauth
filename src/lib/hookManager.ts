@@ -79,7 +79,14 @@ export class HookManager {
 	 * never surfaced to the caller.
 	 */
 	callOnMCPTokenIssued(
-		event: { type: 'access' | 'refresh'; client_id: string; sub: string; aud: string; scope?: string; jti: string },
+		event: {
+			type: 'access' | 'refresh' | 'client_credentials';
+			client_id: string;
+			sub: string;
+			aud: string;
+			scope?: string;
+			jti: string;
+		},
 		request: any
 	): void {
 		const hook = this.hooks.onMCPTokenIssued;

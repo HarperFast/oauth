@@ -107,6 +107,25 @@ describe('MCP well-known: AS metadata document (RFC 8414)', () => {
 		assert.deepEqual(doc.grant_types_supported, ['authorization_code', 'refresh_token']);
 	});
 
+	it('advertises client_credentials + private_key_jwt + EdDSA only when the grant is enabled', () => {
+		const doc = buildAuthorizationServerMetadata(makeRequest(), {
+			enabled: true,
+			clientCredentials: { enabled: true },
+		});
+		assert.ok(doc.grant_types_supported.includes('client_credentials'));
+		assert.ok(doc.token_endpoint_auth_methods_supported.includes('private_key_jwt'));
+		assert.deepEqual(doc.token_endpoint_auth_signing_alg_values_supported, ['EdDSA']);
+	});
+
+	it('omits client_credentials discovery when the grant is disabled or unset', () => {
+		for (const mcpConfig of [{ enabled: true }, { enabled: true, clientCredentials: { enabled: false } }]) {
+			const doc = buildAuthorizationServerMetadata(makeRequest(), mcpConfig);
+			assert.ok(!doc.grant_types_supported.includes('client_credentials'));
+			assert.ok(!doc.token_endpoint_auth_methods_supported.includes('private_key_jwt'));
+			assert.equal(doc.token_endpoint_auth_signing_alg_values_supported, undefined);
+		}
+	});
+
 	it('advertises only `code` response type', () => {
 		const doc = buildAuthorizationServerMetadata(makeRequest(), { enabled: true });
 		assert.deepEqual(doc.response_types_supported, ['code']);

@@ -69,6 +69,14 @@ describe('OAuth Configuration', () => {
 			assert.equal(cfg.enabled, false);
 			assert.equal(cfg.clientIdMetadataDocuments.enabled, false);
 		});
+		it('coerces clientCredentials.enabled the same way (token-minting switch must not be string-truthy)', () => {
+			const cfg = { clientCredentials: { enabled: 'false' } };
+			normalizeMcpSecurityConfig(cfg);
+			assert.equal(cfg.clientCredentials.enabled, false);
+			const cfgTrue = { clientCredentials: { enabled: 'true' } };
+			normalizeMcpSecurityConfig(cfgTrue);
+			assert.equal(cfgTrue.clientCredentials.enabled, true);
+		});
 		it('leaves real booleans and absent values alone', () => {
 			const cfg = { enabled: true, clientIdMetadataDocuments: {} };
 			normalizeMcpSecurityConfig(cfg);

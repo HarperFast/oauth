@@ -112,6 +112,36 @@ describe('OAuth Plugin Options Watcher', () => {
 		assert.ok(resources.oauth, 'OAuth resource should be registered');
 	});
 
+	it('should fail to start when clientCredentials is enabled without an allowedHosts allowlist', async () => {
+		scope.options._config.mcp = {
+			enabled: true,
+			issuer: 'https://app.example.com',
+			clientCredentials: { enabled: true },
+		};
+		await assert.rejects(handleApplication(scope), /requires a non-empty mcp\.clientIdMetadataDocuments\.allowedHosts/);
+	});
+
+	it('should fail to start when clientCredentials is enabled but CIMD is disabled', async () => {
+		scope.options._config.mcp = {
+			enabled: true,
+			issuer: 'https://app.example.com',
+			clientCredentials: { enabled: true },
+			clientIdMetadataDocuments: { enabled: false, allowedHosts: ['agents.example.com'] },
+		};
+		await assert.rejects(handleApplication(scope), /requires CIMD resolution/);
+	});
+
+	it('should start when clientCredentials is enabled with a pinned allowlist', async () => {
+		scope.options._config.mcp = {
+			enabled: true,
+			issuer: 'https://app.example.com',
+			clientCredentials: { enabled: true },
+			clientIdMetadataDocuments: { allowedHosts: ['agents.example.com'] },
+		};
+		await handleApplication(scope);
+		assert.ok(resources.oauth, 'OAuth resource should be registered');
+	});
+
 	it('should fail to start when mcp.issuer is schemeless', async () => {
 		scope.options._config.mcp = { enabled: true, issuer: 'as.example.com' };
 		await assert.rejects(handleApplication(scope), /mcp\.issuer must be an absolute http\(s\) origin/);

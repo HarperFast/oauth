@@ -207,6 +207,27 @@ export async function handleApplication(scope: Scope): Promise<void> {
 				);
 			}
 		}
+		// client_credentials mints tokens for headless agents with no human in
+		// the loop, so its prerequisites are startup errors, not runtime 4xxs:
+		// the CIMD allowlist must be pinned (hosting a reachable metadata
+		// document must never suffice to mint tokens — #159 design update) and
+		// CIMD resolution must be on (DCR never registers private_key_jwt
+		// clients, so without CIMD the grant could authenticate no one).
+		if (mcpConfig?.enabled && mcpConfig.clientCredentials?.enabled === true) {
+			const allowedHosts = mcpConfig.clientIdMetadataDocuments?.allowedHosts;
+			if (!Array.isArray(allowedHosts) || allowedHosts.length === 0) {
+				throw new Error(
+					'mcp.clientCredentials.enabled requires a non-empty mcp.clientIdMetadataDocuments.allowedHosts ' +
+						'allowlist — pin the hosts that may serve agent metadata documents.'
+				);
+			}
+			if (mcpConfig.clientIdMetadataDocuments?.enabled === false) {
+				throw new Error(
+					'mcp.clientCredentials.enabled requires CIMD resolution ' +
+						'(mcp.clientIdMetadataDocuments.enabled must not be false).'
+				);
+			}
+		}
 		// Warn when the operator sets both a pinned key and a rotation interval —
 		// pin wins and rotation is silently skipped, which could surprise them.
 		if (mcpConfig?.signingKeyPem && mcpConfig?.keyRotationInterval) {

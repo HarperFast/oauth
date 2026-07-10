@@ -106,6 +106,25 @@ export interface MCPConfig {
 	 * to opt out or restrict which hosts may be used as CIMD client_ids.
 	 */
 	clientIdMetadataDocuments?: MCPClientIdMetadataDocumentsConfig;
+	/**
+	 * RFC 7523 client_credentials grant for headless agents (#159/#162).
+	 * Explicit opt-in — disabled unless `enabled: true`, and requires a
+	 * non-empty `clientIdMetadataDocuments.allowedHosts` allowlist (enforced
+	 * at startup): hosting a reachable metadata document must never suffice
+	 * to mint tokens.
+	 */
+	clientCredentials?: MCPClientCredentialsConfig;
+}
+
+/** Configuration for the RFC 7523 client_credentials grant (#162). */
+export interface MCPClientCredentialsConfig {
+	/** Enable the grant. Default: false (explicit opt-in). */
+	enabled?: boolean;
+	/**
+	 * Access-token lifetime in seconds for this grant. Default: 300 (5 min) —
+	 * agents re-mint on 401; no refresh token is ever issued.
+	 */
+	accessTokenTtl?: number;
 }
 
 /**
@@ -137,8 +156,13 @@ export interface MCPDynamicClientRegistrationConfig {
  * optional in the request and populated by the registration handler.
  */
 export interface MCPClientMetadata {
-	/** Required: array of allowed redirect URIs (exact-match validated on /authorize) */
-	redirect_uris: string[];
+	/**
+	 * Allowed redirect URIs (exact-match validated on /authorize). Required
+	 * for redirect-based grants (enforced at registration/resolution);
+	 * absent on client_credentials-only CIMD clients, which have no
+	 * redirect surface (RFC 7591 §2 requires it only for redirect flows).
+	 */
+	redirect_uris?: string[];
 	client_name?: string;
 	client_uri?: string;
 	logo_uri?: string;
@@ -154,6 +178,12 @@ export interface MCPClientMetadata {
 	application_type?: string;
 	software_id?: string;
 	software_version?: string;
+	/**
+	 * Public Ed25519 JWK Set for private_key_jwt client authentication.
+	 * Present only on client_credentials CIMD clients (#161); validated at
+	 * resolution (OKP/Ed25519, public keys only, bounded count).
+	 */
+	jwks?: { keys: Record<string, unknown>[] };
 }
 
 /**
@@ -417,7 +447,15 @@ export interface OAuthHooks {
 	 *   Harper version independence). NOT sanitized — see SECURITY above.
 	 */
 	onMCPTokenIssued?: (
-		event: { type: 'access' | 'refresh'; client_id: string; sub: string; aud: string; scope?: string; jti: string },
+		event: {
+			/** 'access' = authorization_code; 'client_credentials' = headless agent grant (sub is the client, not a user). */
+			type: 'access' | 'refresh' | 'client_credentials';
+			client_id: string;
+			sub: string;
+			aud: string;
+			scope?: string;
+			jti: string;
+		},
 		request: any
 	) => Promise<void>;
 }

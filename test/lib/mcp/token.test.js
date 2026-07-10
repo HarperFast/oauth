@@ -6,9 +6,11 @@
 
 import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash, generateKeyPairSync, randomBytes } from 'node:crypto';
+import { createHash, generateKeyPairSync, randomBytes, sign } from 'node:crypto';
 import { handleToken } from '../../../dist/lib/mcp/token.js';
+import { resetMCPAssertionJtisTableCache } from '../../../dist/lib/mcp/assertionJtiStore.js';
 import { resetMCPAuthCodesTableCache } from '../../../dist/lib/mcp/authCodeStore.js';
+import { _clearCimdCache, _setDnsLookup, _setFetch } from '../../../dist/lib/mcp/cimd.js';
 import { resetMCPClientsTableCache } from '../../../dist/lib/mcp/clientStore.js';
 import { resetMCPKeysTableCache, SIGNING_KEY_ID } from '../../../dist/lib/mcp/keyStore.js';
 import { resetMCPRefreshFamiliesTableCache, makeRefreshToken } from '../../../dist/lib/mcp/refreshTokenStore.js';
@@ -633,5 +635,246 @@ describe('handleToken', () => {
 			mcpConfig
 		);
 		assert.equal(res.body.error, 'invalid_grant');
+	});
+});
+
+describe('handleToken — client_credentials grant (#162)', () => {
+	let originalDatabases;
+	let clients;
+	let keys;
+	let jtis;
+	let hookEvents;
+
+	const edKeypair = generateKeyPairSync('ed25519');
+	const AGENT_JWK = edKeypair.publicKey.export({ format: 'jwk' });
+	const AGENT_CLIENT_ID = 'https://agents.example.com/fleet/agent-1.json';
+	const TOKEN_ENDPOINT = `${ISSUER}/oauth/mcp/token`;
+
+	const AGENT_DOC = {
+		client_id: AGENT_CLIENT_ID,
+		client_name: 'Fleet Agent 1',
+		grant_types: ['client_credentials'],
+		token_endpoint_auth_method: 'private_key_jwt',
+		jwks: { keys: [AGENT_JWK] },
+	};
+
+	const ccConfig = {
+		...mcpConfig,
+		clientIdMetadataDocuments: { allowedHosts: ['agents.example.com'] },
+		clientCredentials: { enabled: true, accessTokenTtl: 300 },
+	};
+
+	const hookManager = {
+		callOnMCPTokenIssued(event) {
+			hookEvents.push(event);
+		},
+	};
+
+	function signAssertion(overrides = {}) {
+		const now = Math.floor(Date.now() / 1000);
+		const {
+			iss = AGENT_CLIENT_ID,
+			sub = iss,
+			aud = TOKEN_ENDPOINT,
+			exp = now + 30,
+			iat = now,
+			jti = randomBytes(8).toString('hex'),
+			key = edKeypair.privateKey,
+		} = overrides;
+		const header = Buffer.from(JSON.stringify({ alg: 'EdDSA', typ: 'JWT' })).toString('base64url');
+		const payload = Buffer.from(JSON.stringify({ iss, sub, aud, exp, iat, jti })).toString('base64url');
+		const signature = sign(null, Buffer.from(`${header}.${payload}`), key).toString('base64url');
+		return `${header}.${payload}.${signature}`;
+	}
+
+	function grantBody(overrides = {}) {
+		return {
+			grant_type: 'client_credentials',
+			client_id: AGENT_CLIENT_ID,
+			client_assertion_type: 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer',
+			client_assertion: signAssertion(),
+			...overrides,
+		};
+	}
+
+	before(() => {
+		originalDatabases = global.databases;
+	});
+	after(() => {
+		global.databases = originalDatabases;
+		_setDnsLookup(null);
+		_setFetch(null);
+	});
+
+	beforeEach(() => {
+		resetMCPClientsTableCache();
+		resetMCPKeysTableCache();
+		resetMCPAssertionJtisTableCache();
+		_clearCimdCache();
+		hookEvents = [];
+
+		clients = new Map();
+		keys = new Map();
+		jtis = new Map();
+		keys.set(SIGNING_KEY_ID, {
+			kid: SIGNING_KEY_ID,
+			alg: 'RS256',
+			public_key_pem: keypair.publicKey,
+			private_key_pem: keypair.privateKey,
+			created_at: 1700000000,
+		});
+		// A DCR public client, to prove stored clients can't use this grant.
+		clients.set('public-1', {
+			client_id: 'public-1',
+			token_endpoint_auth_method: 'none',
+			redirect_uris: JSON.stringify([REDIRECT]),
+			client_id_issued_at: 1700000000,
+		});
+
+		global.databases = {
+			oauth: {
+				harper_oauth_mcp_clients: makeTable(clients, 'client_id'),
+				harper_oauth_mcp_keys: makeTable(keys, 'kid'),
+				mcp_assertion_jtis: {
+					...makeTable(jtis, 'id'),
+					create: async (record) => {
+						if (jtis.has(record.id)) {
+							const err = new Error('Record already exists');
+							err.statusCode = 409;
+							throw err;
+						}
+						jtis.set(record.id, record);
+					},
+				},
+			},
+		};
+
+		// Serve the agent's CIMD document through the stubbed resolver.
+		_setDnsLookup(async () => [{ address: '93.184.216.34', family: 4 }]);
+		_setFetch(async () => {
+			const bytes = Buffer.from(JSON.stringify(AGENT_DOC));
+			return {
+				status: 200,
+				headers: new Map([
+					['content-type', 'application/json'],
+					['content-length', String(bytes.length)],
+				]),
+				body: {
+					getReader: () => {
+						let sent = false;
+						return {
+							read: async () =>
+								sent ? { done: true, value: undefined } : ((sent = true), { done: false, value: bytes }),
+							cancel: () => {},
+						};
+					},
+				},
+			};
+		});
+	});
+
+	it('issues a short-TTL token with no refresh token (sub = client identity)', async () => {
+		const res = await handleToken({ headers: {} }, grantBody(), ccConfig, hookManager);
+		assert.equal(res.status, 200, JSON.stringify(res.body));
+		assert.equal(res.body.token_type, 'Bearer');
+		assert.equal(res.body.expires_in, 300);
+		assert.equal(res.body.refresh_token, undefined, 'client_credentials must never issue a refresh token');
+		const claims = verifyAccessToken(res.body.access_token, keypair.publicKey);
+		assert.equal(claims.sub, AGENT_CLIENT_ID);
+		assert.equal(claims.aud, RESOURCE);
+		assert.equal(claims.client_id, AGENT_CLIENT_ID);
+		assert.equal(hookEvents.length, 1);
+		assert.equal(hookEvents[0].type, 'client_credentials');
+	});
+
+	it('rejects a replayed jti', async () => {
+		const body = grantBody();
+		const first = await handleToken({ headers: {} }, body, ccConfig);
+		assert.equal(first.status, 200);
+		const replay = await handleToken({ headers: {} }, body, ccConfig);
+		assert.equal(replay.status, 400);
+		assert.equal(replay.body.error, 'invalid_grant');
+		assert.match(replay.body.error_description, /already been used/);
+	});
+
+	it('rejects a wrong audience', async () => {
+		const res = await handleToken(
+			{ headers: {} },
+			grantBody({ client_assertion: signAssertion({ aud: 'https://other.example.com/token' }) }),
+			ccConfig
+		);
+		assert.equal(res.status, 401);
+		assert.equal(res.body.error, 'invalid_client');
+		assert.match(res.body.error_description, /aud/);
+	});
+
+	it('rejects an expired assertion', async () => {
+		const past = Math.floor(Date.now() / 1000) - 120;
+		const res = await handleToken(
+			{ headers: {} },
+			grantBody({ client_assertion: signAssertion({ exp: past + 30, iat: past }) }),
+			ccConfig
+		);
+		assert.equal(res.status, 401);
+		assert.equal(res.body.error, 'invalid_client');
+	});
+
+	it('rejects an assertion signed by a different key', async () => {
+		const rogue = generateKeyPairSync('ed25519');
+		const res = await handleToken(
+			{ headers: {} },
+			grantBody({ client_assertion: signAssertion({ key: rogue.privateKey }) }),
+			ccConfig
+		);
+		assert.equal(res.status, 401);
+		assert.match(res.body.error_description, /signature/);
+	});
+
+	it('rejects an iss/client_id mismatch', async () => {
+		const res = await handleToken(
+			{ headers: {} },
+			grantBody({ client_assertion: signAssertion({ iss: 'https://agents.example.com/fleet/agent-2.json' }) }),
+			ccConfig
+		);
+		assert.equal(res.status, 401);
+		assert.match(res.body.error_description, /iss/);
+	});
+
+	it('accepts an exact resource match and rejects any other target', async () => {
+		const ok = await handleToken({ headers: {} }, grantBody({ resource: RESOURCE }), ccConfig);
+		assert.equal(ok.status, 200);
+		const bad = await handleToken({ headers: {} }, grantBody({ resource: `${RESOURCE}/sub` }), ccConfig);
+		assert.equal(bad.status, 400);
+		assert.equal(bad.body.error, 'invalid_target');
+	});
+
+	it('is indistinguishable from an unknown grant when disabled', async () => {
+		const res = await handleToken({ headers: {} }, grantBody(), mcpConfig);
+		assert.equal(res.status, 400);
+		assert.equal(res.body.error, 'unsupported_grant_type');
+		assert.equal(res.body.error_description, 'grant_type must be authorization_code or refresh_token');
+	});
+
+	it('requires the RFC 7523 assertion type and the assertion itself', async () => {
+		const wrongType = await handleToken({ headers: {} }, grantBody({ client_assertion_type: 'urn:nope' }), ccConfig);
+		assert.equal(wrongType.status, 400);
+		assert.equal(wrongType.body.error, 'invalid_request');
+		const missing = await handleToken({ headers: {} }, grantBody({ client_assertion: undefined }), ccConfig);
+		assert.equal(missing.status, 400);
+		assert.equal(missing.body.error, 'invalid_request');
+	});
+
+	it('rejects a Basic header or client_secret riding along (key possession only)', async () => {
+		const withBasic = await handleToken({ headers: basicHeader('admin', 'admin-secret') }, grantBody(), ccConfig);
+		assert.equal(withBasic.status, 400);
+		assert.equal(withBasic.body.error, 'invalid_request');
+		const withSecret = await handleToken({ headers: {} }, grantBody({ client_secret: 'oops' }), ccConfig);
+		assert.equal(withSecret.status, 400);
+	});
+
+	it('rejects a stored (DCR) client on this grant', async () => {
+		const res = await handleToken({ headers: {} }, grantBody({ client_id: 'public-1' }), ccConfig);
+		assert.equal(res.status, 400);
+		assert.equal(res.body.error, 'unauthorized_client');
 	});
 });
