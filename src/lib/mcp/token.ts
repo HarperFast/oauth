@@ -465,8 +465,9 @@ async function handleClientCredentialsGrant(
 	}
 	// Proof of key possession is the ONLY accepted authentication for this
 	// grant — a Basic header or client_secret must not ride along (#159 req 6:
-	// no credential type may substitute for the private key).
-	if (request?.headers?.authorization?.startsWith('Basic ') || typeof body?.client_secret === 'string') {
+	// no credential type may substitute for the private key). Scheme match is
+	// case-insensitive per RFC 9110 §11.1.
+	if (/^basic\s/i.test(request?.headers?.authorization ?? '') || typeof body?.client_secret === 'string') {
 		return errorResponse(
 			400,
 			'invalid_request',
@@ -508,19 +509,22 @@ async function handleClientCredentialsGrant(
 		return errorResponse(401, 'invalid_client', `client_assertion verification failed: ${result.reason}`);
 	}
 
-	// Replay guard: a storage failure here THROWS to the top-level 500 handler
-	// — "could not check" must never degrade to "not seen" (fail closed).
-	const fresh = await new MCPAssertionJtiStore(logger).checkAndRecord(clientId, result.claims.jti);
-	if (!fresh) {
-		return errorResponse(400, 'invalid_grant', 'client_assertion jti has already been used');
-	}
-
 	// RFC 8707 resource binding: exact match against the canonical MCP
 	// resource, fail closed — no prefix or wildcard comparisons (#159 req 3).
+	// Checked BEFORE the jti is consumed: a recoverable request-param mistake
+	// must not burn the single-use assertion.
 	const canonicalResource = resolveResource(request as any, mcpConfig);
 	const requestedResource = typeof body?.resource === 'string' ? body.resource : undefined;
 	if (requestedResource !== undefined && requestedResource !== canonicalResource) {
 		return errorResponse(400, 'invalid_target', 'resource does not match the configured MCP resource');
+	}
+
+	// Replay guard: a storage failure here THROWS to the top-level 500 handler
+	// — "could not check" must never degrade to "not seen" (fail closed). Runs
+	// LAST: consuming the jti is the one irreversible step before minting.
+	const fresh = await new MCPAssertionJtiStore(logger).checkAndRecord(clientId, result.claims.jti);
+	if (!fresh) {
+		return errorResponse(400, 'invalid_grant', 'client_assertion jti has already been used');
 	}
 
 	return mintTokenPair(

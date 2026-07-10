@@ -848,6 +848,22 @@ describe('handleToken — client_credentials grant (#162)', () => {
 		assert.equal(bad.body.error, 'invalid_target');
 	});
 
+	it('does not burn the jti on a resource mismatch — the same assertion retries successfully', async () => {
+		const assertion = signAssertion();
+		const bad = await handleToken(
+			{ headers: {} },
+			grantBody({ client_assertion: assertion, resource: `${RESOURCE}/sub` }),
+			ccConfig
+		);
+		assert.equal(bad.body.error, 'invalid_target');
+		const retry = await handleToken(
+			{ headers: {} },
+			grantBody({ client_assertion: assertion, resource: RESOURCE }),
+			ccConfig
+		);
+		assert.equal(retry.status, 200, 'a recoverable request-param mistake must not consume the single-use jti');
+	});
+
 	it('is indistinguishable from an unknown grant when disabled', async () => {
 		const res = await handleToken({ headers: {} }, grantBody(), mcpConfig);
 		assert.equal(res.status, 400);
@@ -870,6 +886,15 @@ describe('handleToken — client_credentials grant (#162)', () => {
 		assert.equal(withBasic.body.error, 'invalid_request');
 		const withSecret = await handleToken({ headers: {} }, grantBody({ client_secret: 'oops' }), ccConfig);
 		assert.equal(withSecret.status, 400);
+		// RFC 9110 §11.1: auth schemes are case-insensitive — a lowercase
+		// `basic` must not slip past the mixed-auth guard.
+		const lowercase = await handleToken(
+			{ headers: { authorization: basicHeader('admin', 'admin-secret').authorization.replace(/^Basic/, 'basic') } },
+			grantBody(),
+			ccConfig
+		);
+		assert.equal(lowercase.status, 400);
+		assert.equal(lowercase.body.error, 'invalid_request');
 	});
 
 	it('rejects a stored (DCR) client on this grant', async () => {
