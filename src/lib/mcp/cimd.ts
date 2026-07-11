@@ -860,20 +860,22 @@ export async function resolveCimdClient(
 	// Dedup concurrent resolutions of the same uncached client_id → single fetch.
 	const existing = inFlightResolutions.get(clientId);
 	if (existing) return existing;
+	// Total-concurrency bound: the in-flight map IS the counter (no await sits
+	// between this check and the set below, so the cap cannot be raced past).
+	// Checked BEFORE the rate-limit take so a capacity reject doesn't spend a
+	// token without a fetch (keeps "only actual fetch attempts consume" true).
+	if (inFlightResolutions.size >= MAX_CONCURRENT_RESOLUTIONS) {
+		throw new CimdClientError('temporarily_unavailable', 'CIMD resolution capacity reached; retry shortly');
+	}
 	// Per-URL fetch rate limit (#163): only actual fetch attempts consume —
-	// cache hits returned above and dedup'd joiners never reach this. Fixed
-	// policy (no knob): legit clients are served from the cache after their
-	// first success; repeated attempts are the bad-document amplification
-	// vector this closes.
+	// cache hits returned above, dedup'd joiners, and capacity rejects never
+	// reach this. Fixed policy (no knob): legit clients are served from the
+	// cache after their first success; repeated attempts are the bad-document
+	// amplification vector this closes.
 	const rateLimit = cimdFetchLimiter.tryTake(clientId);
 	if (!rateLimit.allowed) {
 		logger?.warn?.(`CIMD: fetch rate limit reached for ${clientId}`);
 		throw new CimdClientError('temporarily_unavailable', 'CIMD resolution rate limit reached; retry shortly');
-	}
-	// Total-concurrency bound: the in-flight map IS the counter (no await sits
-	// between this check and the set below, so the cap cannot be raced past).
-	if (inFlightResolutions.size >= MAX_CONCURRENT_RESOLUTIONS) {
-		throw new CimdClientError('temporarily_unavailable', 'CIMD resolution capacity reached; retry shortly');
 	}
 	const pending = fetchAndValidateCimd(clientId, cimdConfig, allowedRedirectUriHosts, logger).finally(() =>
 		inFlightResolutions.delete(clientId)

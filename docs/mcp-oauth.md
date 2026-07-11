@@ -716,7 +716,12 @@ CIMD metadata fetches are separately limited at a fixed 10 attempts/min per
 `client_id` URL — cache hits don't consume, so only failing documents repeat.
 Both limits are per-node token buckets (a replicated counter would be a
 hot-write anti-pattern; the assertion replay guard and ≤60s window bound
-cross-node abuse).
+cross-node abuse). The bucket state is per worker thread: if the plugin runs
+across N HTTP worker threads on a node, the effective ceiling is N × the
+configured limit per `client_id` (as with the CIMD fetch cache and concurrency
+caps, which are likewise per-thread). This is intentional for a defense-in-depth
+control — treat the configured value as a per-thread floor, not a hard node-wide
+cap.
 
 Key rotation / revocation semantics: the fleet rotates a key by updating the
 agent's metadata document. The change takes effect within the CIMD cache TTL
