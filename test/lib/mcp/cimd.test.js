@@ -872,6 +872,84 @@ describe('resolveCimdClient — cache', () => {
 	});
 });
 
+describe('resolveCimdClient — per-URL fetch rate limit (#163)', () => {
+	beforeEach(() => _clearCimdCache());
+	afterEach(() => {
+		_setDnsLookup(null);
+		_setFetch(null);
+	});
+
+	// Fails validation (client_id mismatch) → never cached → every attempt fetches.
+	const BAD_DOC = { client_id: 'https://elsewhere.example.com/x.json', client_name: 'x', redirect_uris: [] };
+
+	it('rejects the 11th fetch attempt for one URL within the window', async () => {
+		_setDnsLookup(makeDnsOk());
+		_setFetch(makeOkFetch(BAD_DOC));
+		for (let i = 0; i < 10; i++) {
+			await assert.rejects(
+				() => resolveCimdClient(VALID_URL, undefined),
+				(err) => err instanceof CimdClientError && err.oauthError === 'invalid_client'
+			);
+		}
+		await assert.rejects(
+			() => resolveCimdClient(VALID_URL, undefined),
+			(err) => {
+				assert.equal(err.oauthError, 'temporarily_unavailable');
+				assert.match(err.message, /rate limit reached/);
+				return true;
+			}
+		);
+	});
+
+	it('is per-URL — one throttled URL does not affect another', async () => {
+		_setDnsLookup(makeDnsOk());
+		_setFetch(makeOkFetch(BAD_DOC));
+		for (let i = 0; i < 10; i++) {
+			await resolveCimdClient(VALID_URL, undefined).catch(() => {});
+		}
+		await assert.rejects(() => resolveCimdClient(VALID_URL, undefined), /rate limit reached/);
+		const OTHER_URL = 'https://other.example.com/client.json';
+		_setFetch(
+			makeOkFetch({ client_id: OTHER_URL, client_name: 'Other', redirect_uris: ['https://other.example.com/cb'] })
+		);
+		const record = await resolveCimdClient(OTHER_URL, undefined);
+		assert.ok(record, 'a different client_id URL has its own bucket');
+	});
+
+	it('cache hits do not consume fetch-attempt tokens', async () => {
+		_setDnsLookup(makeDnsOk());
+		_setFetch(makeOkFetch(VALID_DOC));
+		await resolveCimdClient(VALID_URL, undefined);
+		for (let i = 0; i < 30; i++) {
+			const record = await resolveCimdClient(VALID_URL, undefined);
+			assert.ok(record, 'cached resolutions are never rate-limited');
+		}
+	});
+
+	it('deduped concurrent resolutions consume a single attempt', async () => {
+		_setDnsLookup(makeDnsOk());
+		let release;
+		const gate = new Promise((resolve) => (release = resolve));
+		_setFetch(async (url, init) => {
+			await gate;
+			return makeOkFetch(BAD_DOC)(url, init);
+		});
+		const batch = Array.from({ length: 5 }, () => resolveCimdClient(VALID_URL, undefined).catch((err) => err));
+		release();
+		await Promise.all(batch);
+		// The 5-caller batch consumed exactly one attempt → 9 more pass the
+		// limiter (failing validation), and the 11th is rate-limited.
+		_setFetch(makeOkFetch(BAD_DOC));
+		for (let i = 0; i < 9; i++) {
+			await assert.rejects(
+				() => resolveCimdClient(VALID_URL, undefined),
+				(err) => err instanceof CimdClientError && err.oauthError === 'invalid_client'
+			);
+		}
+		await assert.rejects(() => resolveCimdClient(VALID_URL, undefined), /rate limit reached/);
+	});
+});
+
 describe('resolveClient — routing', () => {
 	let originalDatabases;
 	let storedClients;

@@ -19,6 +19,7 @@ import { MCPAuthCodeStore } from './authCodeStore.ts';
 import { CimdClientError, resolveClient } from './cimd.ts';
 import { CLIENT_ASSERTION_TYPE_JWT_BEARER, verifyClientAssertion } from './clientAssertion.ts';
 import { MCPKeyStore } from './keyStore.ts';
+import { createRateLimiter, type RateLimiter } from './rateLimit.ts';
 import {
 	hashRefreshToken,
 	makeRefreshToken,
@@ -70,6 +71,44 @@ function nowSeconds(): number {
 function coerceTtl(value: unknown, fallback: number): number {
 	const n = typeof value === 'number' ? value : Number(value);
 	return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+// --- client_credentials issuance rate limiting (#163) ---
+
+const RATE_LIMIT_DEFAULT_PER_MINUTE = 30;
+
+/**
+ * Resolve `mcp.clientCredentials.rateLimit` to requests/minute or `false`
+ * (disabled). `false`/`0` (and their env-expanded string forms) disable the
+ * limiter explicitly; anything non-finite/non-positive falls back to the
+ * default rather than failing open — mirrors `coerceTtl`.
+ */
+function resolveRateLimit(value: unknown): number | false {
+	if (value === false || value === 0 || value === 'false' || value === '0') return false;
+	if (value === undefined || value === null) return RATE_LIMIT_DEFAULT_PER_MINUTE;
+	const n = typeof value === 'number' ? value : Number(value);
+	return Number.isFinite(n) && n > 0 ? n : RATE_LIMIT_DEFAULT_PER_MINUTE;
+}
+
+// Per-node bucket keyed by client_id; memoized on the configured rate so a
+// live config change rebuilds it (dropping state — acceptable, the limiter is
+// defense-in-depth, not an accounting ledger). Per-node rationale: see
+// rateLimit.ts module header.
+let grantLimiter: RateLimiter | undefined;
+let grantLimiterRate: number | undefined;
+
+function getGrantLimiter(ratePerMinute: number): RateLimiter {
+	if (!grantLimiter || grantLimiterRate !== ratePerMinute) {
+		grantLimiter = createRateLimiter({ capacity: ratePerMinute, refillPerMinute: ratePerMinute });
+		grantLimiterRate = ratePerMinute;
+	}
+	return grantLimiter;
+}
+
+/** Drop grant-limiter state (for testing). @internal */
+export function _resetGrantRateLimiter(): void {
+	grantLimiter = undefined;
+	grantLimiterRate = undefined;
 }
 
 /** Does the client's registered grant_types permit refresh tokens? Defaults to true when unspecified (DCR default includes refresh_token). */
@@ -473,6 +512,20 @@ async function handleClientCredentialsGrant(
 			'invalid_request',
 			'client_credentials accepts only a client_assertion (no secret or Basic auth)'
 		);
+	}
+
+	// Issuance rate limit (#163, #159 req 5): checked BEFORE resolveClient so
+	// an over-limit client cannot trigger CIMD fetches or crypto work. Keyed
+	// by the requested client_id — attacker-chosen, but the bucket map is
+	// LRU-bounded and the point is bounding per-identity issuance.
+	const ratePerMinute = resolveRateLimit(mcpConfig.clientCredentials?.rateLimit);
+	if (ratePerMinute !== false) {
+		const limit = getGrantLimiter(ratePerMinute).tryTake(clientId);
+		if (!limit.allowed) {
+			const response = errorResponse(429, 'slow_down', 'Token issuance rate limit reached for this client');
+			response.headers = { ...response.headers, 'Retry-After': String(limit.retryAfterSeconds) };
+			return response;
+		}
 	}
 
 	let client: MCPClientRecord | null;

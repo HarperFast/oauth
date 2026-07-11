@@ -54,8 +54,10 @@
  *   protection (an attacker's document must not be able to force a fetch
  *   per authorize request).
  * - Failures are NOT cached (the CIMD draft forbids caching error responses
- *   and invalid documents); repeated fetches of bad documents are left to
- *   rate limiting (#163).
+ *   and invalid documents); repeated fetch attempts are instead rate-limited
+ *   per client_id URL (fixed 10/min token bucket, #163) — legit clients hit
+ *   the cache after their first success, so only failures repeat. Issuance
+ *   itself is separately rate-limited at the client_credentials grant.
  * - Cached records are revalidated against the live redirect-host policy on
  *   every hit, so tightening `allowedRedirectUriHosts` takes effect
  *   immediately instead of after cache expiry (up to 24 h).
@@ -76,6 +78,7 @@ import { request as httpsRequest } from 'node:https';
 import { Readable } from 'node:stream';
 import type { Logger, MCPClientIdMetadataDocumentsConfig, MCPClientRecord, MCPConfig } from '../../types.ts';
 import { MCPClientStore } from './clientStore.ts';
+import { createRateLimiter } from './rateLimit.ts';
 import {
 	validateGrantTypes,
 	validateRedirectUri,
@@ -116,6 +119,16 @@ const cimdCache = new Map<string, CacheEntry>();
 // Dedup concurrent resolutions of the same client_id so N parallel authorize
 // requests for one uncached URL trigger a single fetch (thundering-herd guard).
 const inFlightResolutions = new Map<string, Promise<MCPClientRecord | null>>();
+
+// Per-URL fetch-attempt rate limit (#163) — fixed policy, no config knob:
+// legit clients hit the cache after their first success (only failures
+// repeat, and failures are never cached per the CIMD draft). Per-node
+// semantics: see rateLimit.ts module header.
+const CIMD_FETCH_ATTEMPTS_PER_MINUTE = 10;
+const cimdFetchLimiter = createRateLimiter({
+	capacity: CIMD_FETCH_ATTEMPTS_PER_MINUTE,
+	refillPerMinute: CIMD_FETCH_ATTEMPTS_PER_MINUTE,
+});
 
 /**
  * Thrown when CIMD resolution fails due to a client-side issue (bad URL,
@@ -210,9 +223,12 @@ export function _setFetch(fn: CimdFetch | null): void {
 	_fetch = fn ?? pinnedHttpsFetch;
 }
 
-/** Clear the CIMD cache (for testing). @internal */
+/** Clear the CIMD cache AND the per-URL fetch limiter (for testing) — tests
+ * that loop many resolution attempts against one URL rely on the limiter
+ * resetting alongside the cache. @internal */
 export function _clearCimdCache(): void {
 	cimdCache.clear();
+	cimdFetchLimiter._reset();
 }
 
 // --- SSRF guard helpers ---
@@ -844,6 +860,16 @@ export async function resolveCimdClient(
 	// Dedup concurrent resolutions of the same uncached client_id → single fetch.
 	const existing = inFlightResolutions.get(clientId);
 	if (existing) return existing;
+	// Per-URL fetch rate limit (#163): only actual fetch attempts consume —
+	// cache hits returned above and dedup'd joiners never reach this. Fixed
+	// policy (no knob): legit clients are served from the cache after their
+	// first success; repeated attempts are the bad-document amplification
+	// vector this closes.
+	const rateLimit = cimdFetchLimiter.tryTake(clientId);
+	if (!rateLimit.allowed) {
+		logger?.warn?.(`CIMD: fetch rate limit reached for ${clientId}`);
+		throw new CimdClientError('temporarily_unavailable', 'CIMD resolution rate limit reached; retry shortly');
+	}
 	// Total-concurrency bound: the in-flight map IS the counter (no await sits
 	// between this check and the set below, so the cap cannot be raced past).
 	if (inFlightResolutions.size >= MAX_CONCURRENT_RESOLUTIONS) {
@@ -977,8 +1003,9 @@ async function fetchAndValidateCimd(
 		return record;
 	} catch (err) {
 		// Failures are never cached — the CIMD draft forbids caching error
-		// responses and invalid documents. Fetch amplification from repeated
-		// bad requests is rate limiting's job (#163).
+		// responses and invalid documents. Amplification from repeated bad
+		// requests is bounded by the per-URL fetch rate limit in
+		// `resolveCimdClient` (#163) instead.
 		if (err instanceof CimdClientError) {
 			logger?.warn?.(`CIMD: rejected client ${clientId}: ${err.message}`);
 			throw err;
