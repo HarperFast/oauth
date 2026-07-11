@@ -711,9 +711,13 @@ RFC 6749 §3.3 downscoping-on-request is future work).
 Issuance is **rate-limited per `client_id`** (`mcp.clientCredentials.rateLimit`,
 default 30 requests/min, `false` disables): over-limit requests receive `429`
 with `error: "slow_down"` and a `Retry-After` header (seconds until a retry can
-succeed), and are rejected **before** any client resolution or crypto work.
-CIMD metadata fetches are separately limited at a fixed 10 attempts/min per
-`client_id` URL — cache hits don't consume, so only failing documents repeat.
+succeed). The limit is debited **after** the client assertion is verified, so it
+counts only authenticated issuance — a caller cannot drain a real agent's quota
+by replaying the agent's public `client_id` URL with a bogus assertion (those
+fail verification with `401` and never touch the bucket). Pre-auth work is
+bounded separately: CIMD metadata fetches are limited at a fixed 10 attempts/min
+per `client_id` URL (cache hits don't consume, so only failing documents
+repeat), and resolution/DNS concurrency is capped globally.
 Both limits are per-node token buckets (a replicated counter would be a
 hot-write anti-pattern; the assertion replay guard and ≤60s window bound
 cross-node abuse). The bucket state is per worker thread: if the plugin runs
