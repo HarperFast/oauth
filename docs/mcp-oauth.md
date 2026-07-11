@@ -702,7 +702,10 @@ The issued token is the same RS256 Bearer JWT as the interactive flow, with two
 differences: **`sub` is the client identity** (`sub` = `client_id`, RFC 9068
 §2.2 — there is no end user in this grant) and **no refresh token is ever
 issued** — the default TTL is 5 minutes and agents simply re-mint on 401.
-`onMCPTokenIssued` fires with `type: 'client_credentials'`.
+`onMCPTokenIssued` fires with `type: 'client_credentials'`. The token's scope
+is the document-declared `scope`; a `scope` parameter on the token request is
+not honored (a client can never escalate past its registered scope, and
+RFC 6749 §3.3 downscoping-on-request is future work).
 
 Key rotation / revocation semantics: the fleet rotates a key by updating the
 agent's metadata document. The change takes effect within the CIMD cache TTL
