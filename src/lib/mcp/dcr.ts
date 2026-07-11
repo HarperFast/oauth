@@ -261,7 +261,7 @@ export async function handleRegister(
 	}
 
 	logger?.info?.(
-		`MCP client registered: ${clientId} (${isConfidential ? 'confidential' : 'public'}, ${record.redirect_uris.length} redirect URI(s))`
+		`MCP client registered: ${clientId} (${isConfidential ? 'confidential' : 'public'}, ${record.redirect_uris?.length ?? 0} redirect URI(s))`
 	);
 
 	return {

@@ -403,7 +403,7 @@ export async function handleAuthorize(
 		};
 	}
 
-	if (!query.redirect_uri || !redirectUriMatches(query.redirect_uri, client.redirect_uris)) {
+	if (!query.redirect_uri || !redirectUriMatches(query.redirect_uri, client.redirect_uris ?? [])) {
 		return {
 			status: 400,
 			body: {

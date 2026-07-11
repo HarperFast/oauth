@@ -14,8 +14,10 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 import type { HookManager } from '../hookManager.ts';
 import type { Logger, MCPClientRecord, MCPConfig, Request } from '../../types.ts';
 import { emitMCPAuditEvent } from './audit.ts';
+import { MCPAssertionJtiStore } from './assertionJtiStore.ts';
 import { MCPAuthCodeStore } from './authCodeStore.ts';
 import { CimdClientError, resolveClient } from './cimd.ts';
+import { CLIENT_ASSERTION_TYPE_JWT_BEARER, verifyClientAssertion } from './clientAssertion.ts';
 import { MCPKeyStore } from './keyStore.ts';
 import {
 	hashRefreshToken,
@@ -25,10 +27,13 @@ import {
 	parseRefreshToken,
 } from './refreshTokenStore.ts';
 import { signAccessToken } from './tokenIssuer.ts';
-import { resolveIssuer } from './wellKnown.ts';
+import { resolveIssuer, resolveResource } from './wellKnown.ts';
 
 const DEFAULT_ACCESS_TOKEN_TTL = 3600; // 1 hour
 const DEFAULT_REFRESH_TOKEN_TTL = 2592000; // 30 days
+// client_credentials tokens are re-minted on demand (no refresh token), so
+// they stay short — ≤5 minutes per #159 security req 2.
+const DEFAULT_CLIENT_CREDENTIALS_TTL = 300;
 
 // RFC 7636 §4.1: code_verifier = 43*128unreserved. Mirrors the code_challenge
 // check at authorize.ts so a malformed verifier fails fast here too.
@@ -176,12 +181,22 @@ function pkceMatches(codeVerifier: string, storedChallenge: string): boolean {
 async function mintTokenPair(
 	request: Request | undefined,
 	mcpConfig: MCPConfig,
-	grant: { user: string; resource: string; scope?: string; clientId: string; issueRefresh: boolean },
+	grant: {
+		user: string;
+		resource: string;
+		scope?: string;
+		clientId: string;
+		issueRefresh: boolean;
+		/** Pre-coerced TTL override (client_credentials); defaults to mcp.accessTokenTtl. */
+		accessTtl?: number;
+		/** Hook event type; defaults to 'access' (authorization_code). */
+		hookType?: 'access' | 'client_credentials';
+	},
 	hookManager?: HookManager,
 	logger?: Logger
 ): Promise<TokenResponse> {
 	const issuer = resolveIssuer(request as any, mcpConfig);
-	const accessTtl = coerceTtl(mcpConfig.accessTokenTtl, DEFAULT_ACCESS_TOKEN_TTL);
+	const accessTtl = grant.accessTtl ?? coerceTtl(mcpConfig.accessTokenTtl, DEFAULT_ACCESS_TOKEN_TTL);
 	const refreshTtl = coerceTtl(mcpConfig.refreshTokenTtl, DEFAULT_REFRESH_TOKEN_TTL);
 
 	const key = await new MCPKeyStore(logger).getSigningKey(mcpConfig);
@@ -239,7 +254,14 @@ async function mintTokenPair(
 	});
 	if (hookManager) {
 		hookManager.callOnMCPTokenIssued(
-			{ type: 'access', client_id: grant.clientId, sub: grant.user, aud: grant.resource, scope: grant.scope, jti },
+			{
+				type: grant.hookType ?? 'access',
+				client_id: grant.clientId,
+				sub: grant.user,
+				aud: grant.resource,
+				scope: grant.scope,
+				jti,
+			},
 			request
 		);
 	}
@@ -414,6 +436,126 @@ async function handleRefreshTokenGrant(
 }
 
 /**
+ * RFC 7523 client_credentials grant for headless agents (#162): the client
+ * authenticates with a signed EdDSA assertion (private_key_jwt) instead of an
+ * interactive consent flow. Client identity resolves through `resolveClient()`
+ * — in practice a CIMD document (#161), since DCR never registers
+ * private_key_jwt clients. No refresh token is ever issued: agents re-mint on
+ * 401, and the short TTL bounds leak blast radius (#159 req 2).
+ */
+async function handleClientCredentialsGrant(
+	request: Request | undefined,
+	body: any,
+	mcpConfig: MCPConfig,
+	hookManager?: HookManager,
+	logger?: Logger
+): Promise<TokenResponse> {
+	const clientId = typeof body?.client_id === 'string' ? body.client_id : undefined;
+	const assertionType = typeof body?.client_assertion_type === 'string' ? body.client_assertion_type : undefined;
+	const assertion = typeof body?.client_assertion === 'string' ? body.client_assertion : undefined;
+
+	if (!clientId) {
+		return errorResponse(400, 'invalid_request', 'client_id is required');
+	}
+	if (assertionType !== CLIENT_ASSERTION_TYPE_JWT_BEARER) {
+		return errorResponse(400, 'invalid_request', `client_assertion_type must be ${CLIENT_ASSERTION_TYPE_JWT_BEARER}`);
+	}
+	if (!assertion) {
+		return errorResponse(400, 'invalid_request', 'client_assertion is required');
+	}
+	// Proof of key possession is the ONLY accepted authentication for this
+	// grant — a Basic header or client_secret must not ride along (#159 req 6:
+	// no credential type may substitute for the private key). Scheme match is
+	// case-insensitive per RFC 9110 §11.1.
+	if (/^basic\s/i.test(request?.headers?.authorization ?? '') || typeof body?.client_secret === 'string') {
+		return errorResponse(
+			400,
+			'invalid_request',
+			'client_credentials accepts only a client_assertion (no secret or Basic auth)'
+		);
+	}
+
+	let client: MCPClientRecord | null;
+	try {
+		client = await resolveClient(clientId, mcpConfig, logger);
+	} catch (err) {
+		if (err instanceof CimdClientError) {
+			return errorResponse(401, err.oauthError, err.message);
+		}
+		logger?.error?.('MCP token: client lookup failed:', err instanceof Error ? err.message : String(err));
+		return errorResponse(500, 'server_error', 'Client lookup failed');
+	}
+	if (!client) {
+		return errorResponse(401, 'invalid_client', 'Unknown client');
+	}
+	// Pinned to CIMD-resolved clients: the allowedHosts allowlist — the gate
+	// that stands between "hosts a reachable document" and "mints tokens" —
+	// is enforced on the CIMD resolution path. A stored (DCR) record must
+	// never mint here, even if a future DCR surface could register this
+	// shape; lifting this requires its own registration gate (#161's
+	// optional initialAccessToken leg).
+	if (
+		client._cimd !== true ||
+		client.token_endpoint_auth_method !== 'private_key_jwt' ||
+		client.grant_types?.length !== 1 ||
+		client.grant_types[0] !== 'client_credentials'
+	) {
+		return errorResponse(400, 'unauthorized_client', 'Client is not registered for the client_credentials grant');
+	}
+
+	const issuer = resolveIssuer(request as any, mcpConfig);
+	const keys = Array.isArray(client.jwks?.keys) ? client.jwks.keys : [];
+	const result = verifyClientAssertion({
+		assertion,
+		clientId,
+		tokenEndpoint: `${issuer}/oauth/mcp/token`,
+		jwks: keys,
+	});
+	if (!result.valid) {
+		logger?.warn?.(`MCP token: client_assertion rejected for ${clientId}: ${result.reason}`);
+		return errorResponse(401, 'invalid_client', `client_assertion verification failed: ${result.reason}`);
+	}
+
+	// RFC 8707 resource binding: exact match against the canonical MCP
+	// resource, fail closed — no prefix or wildcard comparisons (#159 req 3).
+	// Checked BEFORE the jti is consumed: a recoverable request-param mistake
+	// must not burn the single-use assertion.
+	const canonicalResource = resolveResource(request as any, mcpConfig);
+	const requestedResource = typeof body?.resource === 'string' ? body.resource : undefined;
+	if (requestedResource !== undefined && requestedResource !== canonicalResource) {
+		return errorResponse(400, 'invalid_target', 'resource does not match the configured MCP resource');
+	}
+
+	// Replay guard: a storage failure here THROWS to the top-level 500 handler
+	// — "could not check" must never degrade to "not seen" (fail closed). Runs
+	// LAST: consuming the jti is the one irreversible step before minting.
+	// Single-use is best-effort under concurrency — see the bound documented in
+	// assertionJtiStore.ts and docs/mcp-oauth.md (atomic reserve: harper#1745).
+	const fresh = await new MCPAssertionJtiStore(logger).checkAndRecord(clientId, result.claims.jti);
+	if (!fresh) {
+		return errorResponse(400, 'invalid_grant', 'client_assertion jti has already been used');
+	}
+
+	return mintTokenPair(
+		request,
+		mcpConfig,
+		{
+			// RFC 9068 §2.2: for client_credentials, sub is the CLIENT identity —
+			// there is no end user in this grant.
+			user: clientId,
+			resource: canonicalResource,
+			scope: client.scope,
+			clientId,
+			issueRefresh: false,
+			accessTtl: coerceTtl(mcpConfig.clientCredentials?.accessTokenTtl, DEFAULT_CLIENT_CREDENTIALS_TTL),
+			hookType: 'client_credentials',
+		},
+		hookManager,
+		logger
+	);
+}
+
+/**
  * Handle POST /oauth/mcp/token. Returns `{ status, body }`; the `enabled` gate
  * is applied upstream in handleMCPPost.
  *
@@ -435,8 +577,20 @@ export async function handleToken(
 	// their own 4xx errors; this only catches the unexpected.
 	try {
 		const grantType = typeof body?.grant_type === 'string' ? body.grant_type : undefined;
+		// client_credentials is explicit opt-in (default OFF); when disabled it
+		// is indistinguishable from any other unsupported grant.
+		const clientCredentialsEnabled = mcpConfig.clientCredentials?.enabled === true;
+		if (grantType === 'client_credentials' && clientCredentialsEnabled) {
+			return await handleClientCredentialsGrant(request, body, mcpConfig, hookManager, logger);
+		}
 		if (grantType !== 'authorization_code' && grantType !== 'refresh_token') {
-			return errorResponse(400, 'unsupported_grant_type', 'grant_type must be authorization_code or refresh_token');
+			return errorResponse(
+				400,
+				'unsupported_grant_type',
+				clientCredentialsEnabled
+					? 'grant_type must be authorization_code, refresh_token, or client_credentials'
+					: 'grant_type must be authorization_code or refresh_token'
+			);
 		}
 
 		const auth = await authenticateClient(request, body, mcpConfig, logger);

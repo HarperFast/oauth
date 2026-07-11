@@ -60,15 +60,15 @@
  *   every hit, so tightening `allowedRedirectUriHosts` takes effect
  *   immediately instead of after cache expiry (up to 24 h).
  *
- * Token auth method:
- * - Only `token_endpoint_auth_method: none` (public clients) is supported
- *   in v1. `private_key_jwt` will be activated by issue #159. Other values
- *   are rejected with a clear `invalid_client` error.
- *
- * #159 integration point:
- * - `jwks` / `jwks_uri` are deliberately NOT carried through in v1 — they
- *   have no consumer or validation until private_key_jwt assertion
- *   verification (#159), which adds the plumbing alongside both.
+ * Document shapes:
+ * - Interactive (redirect-based) documents: `token_endpoint_auth_method:
+ *   none` (public clients + PKCE), redirect_uris required.
+ * - Headless client_credentials documents (#161): grant_types exactly
+ *   ["client_credentials"], `token_endpoint_auth_method: private_key_jwt`,
+ *   an inline public Ed25519 JWK Set (`jwks_uri` rejected — no second SSRF
+ *   surface), NO redirect_uris/response_types — and only accepted when the
+ *   operator has pinned `clientIdMetadataDocuments.allowedHosts` (hosting a
+ *   reachable document must never suffice to mint tokens).
  */
 
 import { lookup } from 'node:dns/promises';
@@ -549,7 +549,8 @@ function withAbort<T>(promise: Promise<T>, signal: AbortSignal, message: string)
 function validateCimdDocument(
 	doc: unknown,
 	clientId: string,
-	allowedRedirectUriHosts: string[] | undefined
+	allowedRedirectUriHosts: string[] | undefined,
+	allowedHostsConfigured: boolean
 ): MCPClientRecord {
 	if (!doc || typeof doc !== 'object' || Array.isArray(doc)) {
 		throw new CimdClientError('invalid_client', 'CIMD document must be a JSON object');
@@ -568,6 +569,26 @@ function validateCimdDocument(
 	if (typeof d.client_name !== 'string' || !d.client_name) {
 		throw new CimdClientError('invalid_client', 'CIMD document missing required field: client_name');
 	}
+
+	// Optional array fields — validated before branching, because the
+	// credentials branch below is selected on grant_types, which must be a
+	// clean string array first.
+	for (const [field, value] of Object.entries({
+		contacts: d.contacts,
+		grant_types: d.grant_types,
+		response_types: d.response_types,
+	})) {
+		const err = validateStringArray(value, field);
+		if (err) throw new CimdClientError('invalid_client', `CIMD document: ${err}`);
+	}
+
+	// client_credentials documents (headless agents, #161) have a distinct
+	// shape: no redirect surface, private_key_jwt + an inline Ed25519 JWK Set.
+	if (Array.isArray(d.grant_types) && (d.grant_types as string[]).includes('client_credentials')) {
+		return validateCredentialsDocument(d, clientId, allowedHostsConfigured);
+	}
+
+	// --- Interactive (redirect-based) document shape ---
 	if (!Array.isArray(d.redirect_uris) || d.redirect_uris.length === 0) {
 		throw new CimdClientError('invalid_client', 'CIMD document missing required field: redirect_uris');
 	}
@@ -579,16 +600,6 @@ function validateCimdDocument(
 	// separate policy and need not share the document's host.
 	for (const uri of d.redirect_uris) {
 		const err = validateRedirectUri(uri, allowedRedirectUriHosts);
-		if (err) throw new CimdClientError('invalid_client', `CIMD document: ${err}`);
-	}
-
-	// Optional array fields.
-	for (const [field, value] of Object.entries({
-		contacts: d.contacts,
-		grant_types: d.grant_types,
-		response_types: d.response_types,
-	})) {
-		const err = validateStringArray(value, field);
 		if (err) throw new CimdClientError('invalid_client', `CIMD document: ${err}`);
 	}
 
@@ -604,12 +615,13 @@ function validateCimdDocument(
 	const responseErr = validateResponseTypes(responseTypes);
 	if (responseErr) throw new CimdClientError('invalid_client', `CIMD document: ${responseErr}`);
 
-	// token_endpoint_auth_method: only 'none' supported in v1 for CIMD clients.
+	// token_endpoint_auth_method: interactive CIMD clients are public clients
+	// ('none' + PKCE); 'private_key_jwt' exists only in the credentials shape.
 	const authMethod = typeof d.token_endpoint_auth_method === 'string' ? d.token_endpoint_auth_method : 'none';
 	if (authMethod !== 'none') {
 		throw new CimdClientError(
 			'invalid_client',
-			`token_endpoint_auth_method '${authMethod}' is not yet supported for CIMD clients (awaiting #159); use 'none'`
+			`token_endpoint_auth_method '${authMethod}' is not supported for interactive CIMD clients; use 'none'`
 		);
 	}
 
@@ -627,6 +639,131 @@ function validateCimdDocument(
 		software_id: typeof d.software_id === 'string' ? d.software_id : undefined,
 		software_version: typeof d.software_version === 'string' ? d.software_version : undefined,
 		redirect_uris: d.redirect_uris as string[],
+		client_id_issued_at: 0, // CIMD records are not persisted; no issued-at timestamp.
+		_cimd: true,
+	};
+}
+
+/** Cap on registered assertion keys per client — bounds per-assertion verify
+ * work and the jti-store keyspace a single document can claim. */
+const MAX_CREDENTIALS_JWKS_KEYS = 8;
+
+/**
+ * Validate the client_credentials (headless agent) document shape (#161):
+ * grant_types exactly ["client_credentials"], token_endpoint_auth_method
+ * 'private_key_jwt', an inline JWK Set of 1..MAX_CREDENTIALS_JWKS_KEYS PUBLIC
+ * Ed25519 keys, and no redirect surface — redirect_uris / response_types must
+ * be ABSENT (RFC 7591 requires redirect_uris only for redirect-based grants,
+ * and declaring one here would imply a flow this shape can never perform).
+ * `jwks_uri` is rejected outright: the document itself is the hosted-key
+ * story, and a second SSRF-fetch surface is not worth an indirection (#164).
+ *
+ * These documents only materialize when the operator has pinned
+ * `clientIdMetadataDocuments.allowedHosts` — hosting a reachable document
+ * must never suffice to mint tokens (#159 design update).
+ */
+function validateCredentialsDocument(
+	d: Record<string, unknown>,
+	clientId: string,
+	allowedHostsConfigured: boolean
+): MCPClientRecord {
+	if (!allowedHostsConfigured) {
+		throw new CimdClientError(
+			'invalid_client',
+			'client_credentials CIMD clients require the server to pin clientIdMetadataDocuments.allowedHosts'
+		);
+	}
+	if ((d.grant_types as string[]).length !== 1) {
+		throw new CimdClientError(
+			'invalid_client',
+			'CIMD document: client_credentials must not be combined with other grant types'
+		);
+	}
+	if (d.redirect_uris !== undefined) {
+		throw new CimdClientError(
+			'invalid_client',
+			'CIMD document: client_credentials clients must not declare redirect_uris'
+		);
+	}
+	if (d.response_types !== undefined) {
+		throw new CimdClientError(
+			'invalid_client',
+			'CIMD document: client_credentials clients must not declare response_types'
+		);
+	}
+	if (d.token_endpoint_auth_method !== 'private_key_jwt') {
+		throw new CimdClientError(
+			'invalid_client',
+			"CIMD document: client_credentials clients must use token_endpoint_auth_method 'private_key_jwt'"
+		);
+	}
+	if (d.jwks_uri !== undefined) {
+		throw new CimdClientError(
+			'invalid_client',
+			'CIMD document: jwks_uri is not supported; declare the public keys inline in jwks'
+		);
+	}
+	const jwks = d.jwks;
+	if (!jwks || typeof jwks !== 'object' || Array.isArray(jwks) || !Array.isArray((jwks as { keys?: unknown }).keys)) {
+		throw new CimdClientError('invalid_client', 'CIMD document: client_credentials clients require a jwks JWK Set');
+	}
+	const keys = (jwks as { keys: unknown[] }).keys;
+	if (keys.length === 0 || keys.length > MAX_CREDENTIALS_JWKS_KEYS) {
+		throw new CimdClientError(
+			'invalid_client',
+			`CIMD document: jwks.keys must hold between 1 and ${MAX_CREDENTIALS_JWKS_KEYS} keys`
+		);
+	}
+	// Beyond the security checks (public-only, Ed25519-only), enforce the shape
+	// `selectKey` needs at verify time: verification fails CLOSED on missing or
+	// duplicate kids anyway, but rejecting here surfaces a clear error when the
+	// document is resolved instead of a confusing one on every assertion.
+	const seenKids = new Set<string>();
+	for (const key of keys) {
+		if (!key || typeof key !== 'object' || Array.isArray(key)) {
+			throw new CimdClientError('invalid_client', 'CIMD document: every jwks key must be a JWK object');
+		}
+		const k = key as Record<string, unknown>;
+		if ('d' in k) {
+			throw new CimdClientError(
+				'invalid_client',
+				'CIMD document: jwks must contain only PUBLIC keys (found private key material)'
+			);
+		}
+		// Ed25519 public keys are exactly 32 bytes → 43 base64url chars; a precise
+		// shape check keeps malformed keys out of the cache.
+		if (k.kty !== 'OKP' || k.crv !== 'Ed25519' || typeof k.x !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(k.x)) {
+			throw new CimdClientError('invalid_client', 'CIMD document: jwks keys must be public OKP/Ed25519 JWKs');
+		}
+		if (keys.length > 1 && k.kid === undefined) {
+			throw new CimdClientError(
+				'invalid_client',
+				'CIMD document: jwks keys must each have a kid when multiple keys are present'
+			);
+		}
+		if (k.kid !== undefined) {
+			if (typeof k.kid !== 'string' || k.kid.length === 0) {
+				throw new CimdClientError('invalid_client', 'CIMD document: jwks key kid must be a non-empty string');
+			}
+			if (seenKids.has(k.kid)) {
+				throw new CimdClientError('invalid_client', 'CIMD document: jwks keys must have unique kid values');
+			}
+			seenKids.add(k.kid);
+		}
+	}
+
+	return {
+		client_id: clientId,
+		client_name: d.client_name as string,
+		client_uri: typeof d.client_uri === 'string' ? d.client_uri : undefined,
+		logo_uri: typeof d.logo_uri === 'string' ? d.logo_uri : undefined,
+		scope: typeof d.scope === 'string' ? d.scope : undefined,
+		contacts: Array.isArray(d.contacts) ? (d.contacts as string[]) : undefined,
+		grant_types: ['client_credentials'],
+		token_endpoint_auth_method: 'private_key_jwt',
+		software_id: typeof d.software_id === 'string' ? d.software_id : undefined,
+		software_version: typeof d.software_version === 'string' ? d.software_version : undefined,
+		jwks: { keys: keys as Record<string, unknown>[] },
 		client_id_issued_at: 0, // CIMD records are not persisted; no issued-at timestamp.
 		_cimd: true,
 	};
@@ -676,10 +813,21 @@ export async function resolveCimdClient(
 		if (cached.expiresAt <= now) {
 			cimdCache.delete(clientId);
 		} else {
-			// Revalidate against the LIVE redirect-host policy: a record cached
-			// under a looser `allowedRedirectUriHosts` must not survive the
-			// operator tightening it (cache TTL can be up to 24 h).
-			for (const uri of cached.record.redirect_uris) {
+			// Revalidate against the LIVE policies: a record cached under a looser
+			// `allowedRedirectUriHosts` — or a credentials record cached while
+			// `allowedHosts` was pinned — must not survive the operator tightening
+			// or dropping the policy (cache TTL can be up to 24 h).
+			if (
+				cached.record.grant_types?.includes('client_credentials') &&
+				!(cimdConfig?.allowedHosts && cimdConfig.allowedHosts.length > 0)
+			) {
+				cimdCache.delete(clientId);
+				throw new CimdClientError(
+					'invalid_client',
+					'client_credentials CIMD clients require the server to pin clientIdMetadataDocuments.allowedHosts'
+				);
+			}
+			for (const uri of cached.record.redirect_uris ?? []) {
 				const policyErr = validateRedirectUri(uri, allowedRedirectUriHosts);
 				if (policyErr) {
 					cimdCache.delete(clientId);
@@ -807,7 +955,12 @@ async function fetchAndValidateCimd(
 			throw new CimdClientError('invalid_client', 'CIMD document is not valid JSON', { cause: error });
 		}
 
-		record = validateCimdDocument(doc, clientId, allowedRedirectUriHosts);
+		record = validateCimdDocument(
+			doc,
+			clientId,
+			allowedRedirectUriHosts,
+			!!(cimdConfig?.allowedHosts && cimdConfig.allowedHosts.length > 0)
+		);
 
 		// Positive cache, LRU-bounded (the key is attacker-chosen input).
 		if (cimdCache.size >= CACHE_MAX_ENTRIES) {

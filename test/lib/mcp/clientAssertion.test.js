@@ -296,6 +296,11 @@ describe('verifyClientAssertion', () => {
 			rejectPayload(defaultPayload({ exp: nowSeconds() + 300 }), /exceeds the maximum window/);
 		});
 
+		it('rejects a non-positive lifetime (exp <= iat) as malformed', () => {
+			rejectPayload(defaultPayload({ iat: nowSeconds() + 2, exp: nowSeconds() + 1 }), /must be positive/);
+			rejectPayload(defaultPayload({ iat: nowSeconds(), exp: nowSeconds() }), /must be positive/);
+		});
+
 		it('rejects an over-long self-declared lifetime (old iat, near-now exp)', () => {
 			// exp is inside the now-relative window, but exp - iat advertises a
 			// far-longer lifetime than the policy allows — strict verifier refuses it.

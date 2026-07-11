@@ -593,13 +593,13 @@ describe('resolveCimdClient — document validation', () => {
 		await assert.rejects(() => resolveCimdClient(VALID_URL, { fetchTimeoutMs: 50 }), /body read aborted/);
 	});
 
-	it('rejects unsupported token_endpoint_auth_method for CIMD', async () => {
+	it('rejects unsupported token_endpoint_auth_method for interactive CIMD clients', async () => {
 		setupOk({ ...VALID_DOC, token_endpoint_auth_method: 'private_key_jwt' });
 		await assert.rejects(
 			() => resolveCimdClient(VALID_URL, undefined),
 			(err) => {
 				assert.ok(err instanceof CimdClientError);
-				assert.match(err.message, /not yet supported/);
+				assert.match(err.message, /not supported for interactive CIMD clients/);
 				assert.equal(err.oauthError, 'invalid_client');
 				return true;
 			}
@@ -614,7 +614,7 @@ describe('resolveCimdClient — document validation', () => {
 		assert.equal(record._cimd, true);
 	});
 
-	it('does not carry jwks fields through in v1 (deferred to #159 with validation)', async () => {
+	it('interactive documents do not carry jwks fields (only credentials documents do)', async () => {
 		setupOk({
 			...VALID_DOC,
 			jwks_uri: 'https://example.com/.well-known/jwks.json',
@@ -623,6 +623,147 @@ describe('resolveCimdClient — document validation', () => {
 		const record = await resolveCimdClient(VALID_URL, undefined);
 		assert.equal(record.jwks_uri, undefined);
 		assert.equal(record.jwks, undefined);
+	});
+});
+
+describe('resolveCimdClient — client_credentials documents (#161)', () => {
+	beforeEach(() => _clearCimdCache());
+	afterEach(() => {
+		_setDnsLookup(null);
+		_setFetch(null);
+	});
+
+	const AGENT_JWK = { kty: 'OKP', crv: 'Ed25519', x: 'A'.repeat(43), kid: 'agent-key-1' };
+	const CREDENTIALS_DOC = {
+		client_id: VALID_URL,
+		client_name: 'Fleet Agent',
+		grant_types: ['client_credentials'],
+		token_endpoint_auth_method: 'private_key_jwt',
+		jwks: { keys: [AGENT_JWK] },
+	};
+	// The allowlist gate is a hard prerequisite for this shape.
+	const GATED = { allowedHosts: ['example.com'] };
+
+	function setup(doc) {
+		_setDnsLookup(makeDnsOk());
+		_setFetch(makeOkFetch(doc));
+	}
+
+	async function rejects(doc, pattern, cimdConfig = GATED) {
+		_clearCimdCache();
+		setup(doc);
+		await assert.rejects(
+			() => resolveCimdClient(VALID_URL, cimdConfig),
+			(err) => {
+				assert.ok(err instanceof CimdClientError, `expected CimdClientError, got: ${err?.message}`);
+				assert.equal(err.oauthError, 'invalid_client');
+				assert.match(err.message, pattern);
+				return true;
+			}
+		);
+	}
+
+	it('resolves a valid credentials document (jwks carried, no redirect surface)', async () => {
+		setup(CREDENTIALS_DOC);
+		const record = await resolveCimdClient(VALID_URL, GATED);
+		assert.ok(record);
+		assert.deepEqual(record.grant_types, ['client_credentials']);
+		assert.equal(record.token_endpoint_auth_method, 'private_key_jwt');
+		assert.deepEqual(record.jwks, { keys: [AGENT_JWK] });
+		assert.equal(record.redirect_uris, undefined);
+		assert.equal(record.response_types, undefined);
+		assert.equal(record._cimd, true);
+	});
+
+	it('fails closed when allowedHosts is not configured', async () => {
+		// Passed inline (not via the helper): an explicit `undefined` third
+		// argument would trigger the helper's GATED default parameter.
+		setup(CREDENTIALS_DOC);
+		await assert.rejects(
+			() => resolveCimdClient(VALID_URL, undefined),
+			(err) => err instanceof CimdClientError && /allowedHosts/.test(err.message)
+		);
+	});
+
+	it('fails closed when allowedHosts is empty', async () => {
+		await rejects(CREDENTIALS_DOC, /allowedHosts/, { allowedHosts: [] });
+	});
+
+	it('a cached credentials record does not survive the allowlist being dropped', async () => {
+		setup(CREDENTIALS_DOC);
+		assert.ok(await resolveCimdClient(VALID_URL, GATED));
+		// Same URL, allowlist now gone: the cache hit must reject, not serve.
+		await assert.rejects(
+			() => resolveCimdClient(VALID_URL, undefined),
+			(err) => err instanceof CimdClientError && /allowedHosts/.test(err.message)
+		);
+	});
+
+	it('rejects client_credentials combined with other grants', async () => {
+		await rejects({ ...CREDENTIALS_DOC, grant_types: ['client_credentials', 'refresh_token'] }, /must not be combined/);
+		await rejects(
+			{ ...CREDENTIALS_DOC, grant_types: ['authorization_code', 'client_credentials'] },
+			/must not be combined/
+		);
+	});
+
+	it('rejects a declared redirect surface', async () => {
+		await rejects({ ...CREDENTIALS_DOC, redirect_uris: ['https://example.com/cb'] }, /must not declare redirect_uris/);
+		await rejects({ ...CREDENTIALS_DOC, response_types: ['code'] }, /must not declare response_types/);
+	});
+
+	it('rejects any auth method other than private_key_jwt', async () => {
+		await rejects({ ...CREDENTIALS_DOC, token_endpoint_auth_method: 'none' }, /private_key_jwt/);
+		const withoutMethod = { ...CREDENTIALS_DOC };
+		delete withoutMethod.token_endpoint_auth_method;
+		await rejects(withoutMethod, /private_key_jwt/);
+	});
+
+	it('rejects jwks_uri outright (no second SSRF surface)', async () => {
+		await rejects(
+			{ ...CREDENTIALS_DOC, jwks_uri: 'https://example.com/.well-known/jwks.json' },
+			/jwks_uri is not supported/
+		);
+	});
+
+	it('rejects a missing or malformed jwks', async () => {
+		const withoutJwks = { ...CREDENTIALS_DOC };
+		delete withoutJwks.jwks;
+		await rejects(withoutJwks, /require a jwks JWK Set/);
+		await rejects({ ...CREDENTIALS_DOC, jwks: 'not-an-object' }, /require a jwks JWK Set/);
+		await rejects({ ...CREDENTIALS_DOC, jwks: { keys: 'nope' } }, /require a jwks JWK Set/);
+	});
+
+	it('bounds the key count to 1..8', async () => {
+		await rejects({ ...CREDENTIALS_DOC, jwks: { keys: [] } }, /between 1 and 8/);
+		await rejects({ ...CREDENTIALS_DOC, jwks: { keys: new Array(9).fill(AGENT_JWK) } }, /between 1 and 8/);
+	});
+
+	it('rejects private key material and non-Ed25519 keys', async () => {
+		await rejects({ ...CREDENTIALS_DOC, jwks: { keys: [{ ...AGENT_JWK, d: 'B'.repeat(43) }] } }, /PUBLIC keys/);
+		await rejects({ ...CREDENTIALS_DOC, jwks: { keys: [{ kty: 'RSA', n: 'x', e: 'AQAB' }] } }, /OKP\/Ed25519/);
+		await rejects(
+			{ ...CREDENTIALS_DOC, jwks: { keys: [{ kty: 'OKP', crv: 'X25519', x: 'A'.repeat(43) }] } },
+			/OKP\/Ed25519/
+		);
+		await rejects({ ...CREDENTIALS_DOC, jwks: { keys: [null] } }, /must be a JWK object/);
+	});
+
+	it('enforces kid presence + uniqueness on multi-key sets and precise x shape', async () => {
+		const secondKey = { kty: 'OKP', crv: 'Ed25519', x: 'B'.repeat(43), kid: 'agent-key-2' };
+		const kidless = { kty: 'OKP', crv: 'Ed25519', x: 'C'.repeat(43) };
+		await rejects({ ...CREDENTIALS_DOC, jwks: { keys: [AGENT_JWK, kidless] } }, /must each have a kid/);
+		await rejects(
+			{ ...CREDENTIALS_DOC, jwks: { keys: [AGENT_JWK, { ...secondKey, kid: 'agent-key-1' }] } },
+			/unique kid/
+		);
+		await rejects({ ...CREDENTIALS_DOC, jwks: { keys: [{ ...AGENT_JWK, x: 'A'.repeat(42) }] } }, /OKP\/Ed25519/);
+		await rejects({ ...CREDENTIALS_DOC, jwks: { keys: [{ ...AGENT_JWK, x: '!'.repeat(43) }] } }, /OKP\/Ed25519/);
+		// A well-formed rotation set (distinct kids) still resolves.
+		_clearCimdCache();
+		setup({ ...CREDENTIALS_DOC, jwks: { keys: [AGENT_JWK, secondKey] } });
+		const record = await resolveCimdClient(VALID_URL, GATED);
+		assert.equal(record.jwks.keys.length, 2);
 	});
 });
 

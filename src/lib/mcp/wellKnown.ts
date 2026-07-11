@@ -153,6 +153,8 @@ export function buildAuthorizationServerMetadata(
 	const issuer = resolveIssuer(request, mcpConfig);
 	// CIMD is enabled by default when mcp.enabled; disabled by explicit enabled: false.
 	const cimdEnabled = mcpConfig.clientIdMetadataDocuments?.enabled !== false;
+	// client_credentials is explicit opt-in (#162); advertised only when enabled.
+	const clientCredentialsEnabled = mcpConfig.clientCredentials?.enabled === true;
 	return {
 		issuer,
 		authorization_endpoint: `${issuer}/oauth/mcp/authorize`,
@@ -160,9 +162,20 @@ export function buildAuthorizationServerMetadata(
 		registration_endpoint: `${issuer}/oauth/mcp/register`,
 		jwks_uri: `${issuer}${JWKS_PATH}`,
 		response_types_supported: ['code'],
-		grant_types_supported: ['authorization_code', 'refresh_token'],
+		grant_types_supported: [
+			'authorization_code',
+			'refresh_token',
+			...(clientCredentialsEnabled ? ['client_credentials'] : []),
+		],
 		code_challenge_methods_supported: ['S256'],
-		token_endpoint_auth_methods_supported: ['none', 'client_secret_basic', 'client_secret_post'],
+		token_endpoint_auth_methods_supported: [
+			'none',
+			'client_secret_basic',
+			'client_secret_post',
+			...(clientCredentialsEnabled ? ['private_key_jwt'] : []),
+		],
+		// EdDSA is the only assertion alg the client_credentials grant verifies.
+		...(clientCredentialsEnabled ? { token_endpoint_auth_signing_alg_values_supported: ['EdDSA'] } : {}),
 		// RS256 only in v1 — jsonwebtoken cannot emit EdDSA. Matches the key
 		// served at the JWKS endpoint; EdDSA is deferred (would need a JOSE lib).
 		id_token_signing_alg_values_supported: ['RS256'],

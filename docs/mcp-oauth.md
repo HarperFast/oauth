@@ -168,7 +168,7 @@ form the `WWW-Authenticate` challenge advertises.
 | ---------------------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
 | `/oauth/mcp/register`  | POST   | RFC 7591 Dynamic Client Registration. Open by default; gate with `initialAccessToken`. Returns `201`.                                     |
 | `/oauth/mcp/authorize` | GET    | OAuth 2.1 + PKCE. Requires `client_id`, `redirect_uri`, `response_type=code`, `code_challenge`, `code_challenge_method=S256`, `resource`. |
-| `/oauth/mcp/token`     | POST   | Grants: `authorization_code`, `refresh_token`. Returns the token pair with `Cache-Control: no-store`.                                     |
+| `/oauth/mcp/token`     | POST   | Grants: `authorization_code`, `refresh_token`, and (opt-in) `client_credentials`. Returns the token pair with `Cache-Control: no-store`.  |
 
 > `mcp` is a reserved provider name — the plugin refuses to start if you configure
 > a provider called `mcp`, because it would collide with `/oauth/mcp/*`.
@@ -608,9 +608,9 @@ hostname string is accepted and normalized to a one-element list. Omitting
 gate still applies.
 
 > **v1 limitation:** only `token_endpoint_auth_method: none` (public clients) is
-> supported for CIMD clients. `private_key_jwt` authentication will be activated
-> by issue [#159](https://github.com/HarperFast/oauth/issues/159). Other auth
-> methods are rejected with `invalid_client`.
+> supported for **interactive** CIMD clients. `private_key_jwt` is accepted only
+> in the [headless-agent document shape](#headless-agents-client_credentials) —
+> any other combination is rejected with `invalid_client`.
 
 ### Stored/DCR clients are unchanged
 
@@ -618,6 +618,102 @@ CIMD resolution only applies to URL-shaped client IDs. Any `client_id` that does
 not parse as an HTTPS URL with a non-root path goes directly to the DCR store as
 before. CIMD clients and DCR clients can coexist; existing DCR registrations are
 not affected.
+
+## Headless agents (client_credentials)
+
+Autonomous agents — no browser, no human at request time — authenticate **as
+themselves** with the RFC 7523 `client_credentials` grant (`private_key_jwt`,
+EdDSA/Ed25519). The grant is **explicit opt-in** and gated on a pinned CIMD
+allowlist:
+
+```yaml
+mcp:
+  enabled: true
+  issuer: https://as.example.com
+  clientIdMetadataDocuments:
+    allowedHosts:
+      - agents.example.com # REQUIRED for client_credentials — startup error without it
+  clientCredentials:
+    enabled: true
+    accessTokenTtl: 300 # default; agents re-mint on 401
+```
+
+Agents don't register. Each agent's `client_id` is an HTTPS URL to a CIMD
+document carrying its public Ed25519 key set:
+
+```json
+{
+	"client_id": "https://agents.example.com/fleet/agent-1.json",
+	"client_name": "Fleet Agent 1",
+	"grant_types": ["client_credentials"],
+	"token_endpoint_auth_method": "private_key_jwt",
+	"jwks": { "keys": [{ "kty": "OKP", "crv": "Ed25519", "x": "…", "kid": "agent-key-1" }] }
+}
+```
+
+Document rules (all rejections are `invalid_client`):
+
+- `grant_types` must be exactly `["client_credentials"]` — no mixing with
+  redirect-based grants or `refresh_token`.
+- `token_endpoint_auth_method` must be `private_key_jwt`.
+- `jwks` is required inline: 1–8 **public** OKP/Ed25519 keys. Any key carrying
+  private material (`d`) rejects the whole document. `jwks_uri` is rejected —
+  the document itself is the hosted-key story, and a second SSRF-fetch surface
+  isn't worth an indirection.
+- `redirect_uris` / `response_types` must be **absent**. This deviates from the
+  CIMD draft's required-fields list deliberately: RFC 7591 §2 requires
+  `redirect_uris` only for redirect-based grant types, and a
+  `client_credentials`-only client has no redirect surface by construction.
+  (The MCP [OAuth Client Credentials extension](https://modelcontextprotocol.io/extensions/auth/oauth-client-credentials)
+  doesn't profile the document shape; if it later does, revisit.)
+- The document's host must be in `clientIdMetadataDocuments.allowedHosts`. The
+  grant refuses to start without a non-empty allowlist (startup error) and
+  refuses credentials documents at resolution without it — hosting a reachable
+  document must never suffice to mint tokens.
+
+The token request (RFC 7523 §2.2 client authentication):
+
+```
+POST /oauth/mcp/token
+grant_type=client_credentials
+client_id=https://agents.example.com/fleet/agent-1.json
+client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer
+client_assertion=<EdDSA-signed JWT>
+resource=https://app.example.com/mcp   (optional; must exactly match when present)
+```
+
+Assertion requirements: `alg: EdDSA`; `iss` = `sub` = the `client_id`; `aud` =
+the token endpoint URL exactly; `exp` within 60 s of now; `jti` required and
+single-use (a replay is rejected via the shared `mcp_assertion_jtis` table).
+A `Basic` header or `client_secret` alongside the assertion is rejected — proof
+of key possession is the only accepted authentication for this grant.
+
+> **Replay-guard bound:** `jti` single-use is enforced best-effort under
+> concurrency — Harper's `Table.create()` existence check is not atomic across
+> simultaneous in-flight requests ([harper#1745](https://github.com/HarperFast/harper/issues/1745)
+> tracks the atomic-reserve contract), so concurrent presentations of the same
+> assertion can race; anything after the first row lands is rejected. The
+> residual is deliberately narrow: assertions live ≤ 60 s, the grant requires
+> an `https:` issuer, and capturing a live assertion in transit therefore
+> implies a vantage point (TLS interception, host access) from which the
+> minted bearer token itself is equally exposed.
+
+The issued token is the same RS256 Bearer JWT as the interactive flow, with two
+differences: **`sub` is the client identity** (`sub` = `client_id`, RFC 9068
+§2.2 — there is no end user in this grant) and **no refresh token is ever
+issued** — the default TTL is 5 minutes and agents simply re-mint on 401.
+`onMCPTokenIssued` fires with `type: 'client_credentials'`. The token's scope
+is the document-declared `scope`; a `scope` parameter on the token request is
+not honored (a client can never escalate past its registered scope, and
+RFC 6749 §3.3 downscoping-on-request is future work).
+
+Key rotation / revocation semantics: the fleet rotates a key by updating the
+agent's metadata document. The change takes effect within the CIMD cache TTL
+(up to 24 h, typically 1 h — bound it with `Cache-Control: max-age` on the
+document), further bounded by the ≤60 s assertion window and the short access
+token TTL. Removing the document (or the host from `allowedHosts`) revokes the
+agent on the same schedule; a dropped allowlist takes effect immediately, even
+for cached documents.
 
 ---
 

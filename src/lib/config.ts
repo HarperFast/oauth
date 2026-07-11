@@ -83,10 +83,19 @@ export function coerceConfigBoolean(value: unknown): boolean | undefined {
  *   `String.includes` would turn into substring matching) is wrapped into a
  *   single-element array; anything that isn't a string or array of strings is
  *   rejected rather than treated as "no restriction".
+ * - `mcp.clientCredentials.enabled` is coerced the same way — this flag mints
+ *   tokens for headless agents, so a stray truthy string must not enable it
+ *   (it is explicit opt-in, default OFF).
  */
 export function normalizeMcpSecurityConfig(mcpConfig: Record<string, any>): void {
 	const enabled = coerceConfigBoolean(mcpConfig.enabled);
 	if (enabled !== undefined) mcpConfig.enabled = enabled;
+
+	const clientCredentials = mcpConfig.clientCredentials;
+	if (clientCredentials && typeof clientCredentials === 'object') {
+		const ccEnabled = coerceConfigBoolean(clientCredentials.enabled);
+		if (ccEnabled !== undefined) clientCredentials.enabled = ccEnabled;
+	}
 
 	const cimd = mcpConfig.clientIdMetadataDocuments;
 	if (cimd && typeof cimd === 'object') {

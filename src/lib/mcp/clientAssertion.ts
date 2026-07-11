@@ -89,8 +89,8 @@ function fail(reason: string): ClientAssertionResult {
  * the conservative default on anything non-finite. These options are the
  * enforcement boundary for the RFC 7523 §3 validity-window checks, and the
  * comparisons below fail OPEN on `NaN`/`Infinity` (e.g. `exp > now + NaN` is
- * always false, so a far-future `exp` would be accepted). #162 will wire these
- * from `mcp` config, where `${ENV}`/quoted-YAML can deliver a string or
+ * always false, so a far-future `exp` would be accepted). Callers may wire
+ * these from config, where `${ENV}`/quoted-YAML can deliver a string or
  * garbage — so coerce here, mirroring token.ts's `coerceTtl`. `allowZero`
  * distinguishes the tolerance (0 is a valid "no skew") from the max window
  * (0 would be a nonsensical always-reject, treated as misconfig → default).
@@ -282,6 +282,12 @@ export function verifyClientAssertion(params: VerifyClientAssertionParams): Clie
 	}
 	if (iat > now + clockTolerance) {
 		return fail('client_assertion iat is in the future');
+	}
+	// A non-positive lifetime is malformed — expired-at-issuance tokens are
+	// already unusable via the now-relative bound above; reject them as
+	// structurally invalid rather than letting them ride the tolerance window.
+	if (exp <= iat) {
+		return fail('client_assertion lifetime (exp - iat) must be positive');
 	}
 	// Strictness bound (defense-in-depth): reject an assertion whose self-declared
 	// lifetime (exp - iat) exceeds the policy window even when `exp` sits inside

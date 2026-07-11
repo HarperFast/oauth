@@ -342,14 +342,21 @@ Called after an MCP access or refresh token is minted. Because it runs detached 
 
 ```typescript
 async function onMCPTokenIssued(
-	event: { type: 'access' | 'refresh'; client_id: string; sub: string; aud: string; scope?: string; jti: string },
+	event: {
+		type: 'access' | 'refresh' | 'client_credentials';
+		client_id: string;
+		sub: string;
+		aud: string;
+		scope?: string;
+		jti: string;
+	},
 	request: Request
 ): Promise<void>;
 ```
 
 **Parameters:**
 
-- `event` - Identifies the token issued: `type` (`access` for the authorization-code grant, `refresh` for a rotation), `client_id`, `sub`, `aud`, `scope` (optional), and `jti` (the token id)
+- `event` - Identifies the token issued: `type` (`access` for the authorization-code grant, `refresh` for a rotation, `client_credentials` for the headless-agent grant — where `sub` is the client, not a user), `client_id`, `sub`, `aud`, `scope` (optional), and `jti` (the token id)
 - `request` - The HTTP request that triggered issuance
 
 **Returns:** void. Fire-and-forget — the hook is **not awaited** (it runs detached, so it never delays or blocks token issuance); a throwing hook is caught and logged, never surfaced.
