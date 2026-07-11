@@ -529,6 +529,8 @@ async function handleClientCredentialsGrant(
 	// Replay guard: a storage failure here THROWS to the top-level 500 handler
 	// — "could not check" must never degrade to "not seen" (fail closed). Runs
 	// LAST: consuming the jti is the one irreversible step before minting.
+	// Single-use is best-effort under concurrency — see the bound documented in
+	// assertionJtiStore.ts and docs/mcp-oauth.md (atomic reserve: harper#1745).
 	const fresh = await new MCPAssertionJtiStore(logger).checkAndRecord(clientId, result.claims.jti);
 	if (!fresh) {
 		return errorResponse(400, 'invalid_grant', 'client_assertion jti has already been used');

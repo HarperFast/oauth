@@ -688,6 +688,16 @@ single-use (a replay is rejected via the shared `mcp_assertion_jtis` table).
 A `Basic` header or `client_secret` alongside the assertion is rejected — proof
 of key possession is the only accepted authentication for this grant.
 
+> **Replay-guard bound:** `jti` single-use is enforced best-effort under
+> concurrency — Harper's `Table.create()` existence check is not atomic across
+> simultaneous in-flight requests ([harper#1745](https://github.com/HarperFast/harper/issues/1745)
+> tracks the atomic-reserve contract), so concurrent presentations of the same
+> assertion can race; anything after the first row lands is rejected. The
+> residual is deliberately narrow: assertions live ≤ 60 s, the grant requires
+> an `https:` issuer, and capturing a live assertion in transit therefore
+> implies a vantage point (TLS interception, host access) from which the
+> minted bearer token itself is equally exposed.
+
 The issued token is the same RS256 Bearer JWT as the interactive flow, with two
 differences: **`sub` is the client identity** (`sub` = `client_id`, RFC 9068
 §2.2 — there is no end user in this grant) and **no refresh token is ever
