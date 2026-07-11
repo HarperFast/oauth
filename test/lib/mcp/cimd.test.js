@@ -894,7 +894,11 @@ describe('resolveCimdClient — per-URL fetch rate limit (#163)', () => {
 		await assert.rejects(
 			() => resolveCimdClient(VALID_URL, undefined),
 			(err) => {
-				assert.equal(err.oauthError, 'temporarily_unavailable');
+				// Throttle surfaces as slow_down + 429 + Retry-After, mirroring the
+				// issuance limiter — not the old auth-flavoured temporarily_unavailable.
+				assert.equal(err.oauthError, 'slow_down');
+				assert.equal(err.statusCode, 429);
+				assert.ok(err.retryAfterSeconds >= 1, 'carries a Retry-After hint');
 				assert.match(err.message, /rate limit reached/);
 				return true;
 			}

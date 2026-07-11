@@ -16,7 +16,7 @@ import type { Logger, MCPClientRecord, MCPConfig, Request } from '../../types.ts
 import { emitMCPAuditEvent } from './audit.ts';
 import { MCPAssertionJtiStore } from './assertionJtiStore.ts';
 import { MCPAuthCodeStore } from './authCodeStore.ts';
-import { CimdClientError, resolveClient } from './cimd.ts';
+import { CimdClientError, MAX_CLIENT_ID_LENGTH, resolveClient } from './cimd.ts';
 import { CLIENT_ASSERTION_TYPE_JWT_BEARER, verifyClientAssertion } from './clientAssertion.ts';
 import { MCPKeyStore } from './keyStore.ts';
 import { createRateLimiter, type RateLimiter } from './rateLimit.ts';
@@ -58,6 +58,20 @@ function errorResponse(status: number, error: string, description?: string): Tok
 	};
 }
 
+/**
+ * Map a CimdClientError to a token-endpoint response. A throttle rejection
+ * carries `statusCode` (429) and, for the fetch rate limit, `retryAfterSeconds`
+ * — surface those (with a `Retry-After` header) instead of the default 401, so
+ * a rate-limited client backs off rather than treating it as an auth failure.
+ */
+function cimdErrorResponse(err: CimdClientError): TokenResponse {
+	const response = errorResponse(err.statusCode ?? 401, err.oauthError, err.message);
+	if (err.retryAfterSeconds !== undefined) {
+		response.headers = { ...response.headers, 'Retry-After': String(err.retryAfterSeconds) };
+	}
+	return response;
+}
+
 function nowSeconds(): number {
 	return Math.floor(Date.now() / 1000);
 }
@@ -76,11 +90,6 @@ function coerceTtl(value: unknown, fallback: number): number {
 // --- client_credentials issuance rate limiting (#163) ---
 
 const RATE_LIMIT_DEFAULT_PER_MINUTE = 30;
-
-// Upper bound on an accepted client_id, applied before it becomes a
-// rate-limiter map key. Same defense-in-depth family as the repo's 2048-char
-// request-path cap and the assertion/jti length caps in clientAssertion.ts.
-const MAX_CLIENT_ID_LENGTH = 2048;
 
 /**
  * Resolve `mcp.clientCredentials.rateLimit` to requests/minute or `false`
@@ -176,7 +185,7 @@ async function authenticateClient(
 		client = await resolveClient(clientId, mcpConfig, logger);
 	} catch (err) {
 		if (err instanceof CimdClientError) {
-			return { error: errorResponse(401, err.oauthError, err.message) };
+			return { error: cimdErrorResponse(err) };
 		}
 		logger?.error?.('MCP token: client lookup failed:', err instanceof Error ? err.message : String(err));
 		return { error: errorResponse(500, 'server_error', 'Client lookup failed') };
@@ -531,7 +540,7 @@ async function handleClientCredentialsGrant(
 		client = await resolveClient(clientId, mcpConfig, logger);
 	} catch (err) {
 		if (err instanceof CimdClientError) {
-			return errorResponse(401, err.oauthError, err.message);
+			return cimdErrorResponse(err);
 		}
 		logger?.error?.('MCP token: client lookup failed:', err instanceof Error ? err.message : String(err));
 		return errorResponse(500, 'server_error', 'Client lookup failed');

@@ -131,18 +131,35 @@ const cimdFetchLimiter = createRateLimiter({
 });
 
 /**
+ * Upper bound on a client_id length, shared by every entry point that uses a
+ * caller-supplied client_id as a lookup or rate-limiter map key. Same
+ * defense-in-depth family as the repo's 2048-char request-path cap.
+ */
+export const MAX_CLIENT_ID_LENGTH = 2048;
+
+/**
  * Thrown when CIMD resolution fails due to a client-side issue (bad URL,
  * invalid document, unsupported auth method, allowedHosts policy).
  * Callers should surface this as the given `oauthError` with the `message`
- * as the `error_description`.
+ * as the `error_description`. Throttle rejections additionally carry a
+ * `statusCode` (429) and `retryAfterSeconds` so callers can emit a proper
+ * `Retry-After` instead of a misleading auth error.
  */
 export class CimdClientError extends Error {
 	readonly oauthError: string;
+	readonly statusCode?: number;
+	readonly retryAfterSeconds?: number;
 
-	constructor(oauthError: string, message: string, options?: { cause?: unknown }) {
+	constructor(
+		oauthError: string,
+		message: string,
+		options?: { cause?: unknown; statusCode?: number; retryAfterSeconds?: number }
+	) {
 		super(message, options);
 		this.name = 'CimdClientError';
 		this.oauthError = oauthError;
+		this.statusCode = options?.statusCode;
+		this.retryAfterSeconds = options?.retryAfterSeconds;
 	}
 }
 
@@ -865,7 +882,9 @@ export async function resolveCimdClient(
 	// Checked BEFORE the rate-limit take so a capacity reject doesn't spend a
 	// token without a fetch (keeps "only actual fetch attempts consume" true).
 	if (inFlightResolutions.size >= MAX_CONCURRENT_RESOLUTIONS) {
-		throw new CimdClientError('temporarily_unavailable', 'CIMD resolution capacity reached; retry shortly');
+		throw new CimdClientError('temporarily_unavailable', 'CIMD resolution capacity reached; retry shortly', {
+			statusCode: 429,
+		});
 	}
 	// Per-URL fetch rate limit (#163): only actual fetch attempts consume —
 	// cache hits returned above, dedup'd joiners, and capacity rejects never
@@ -875,7 +894,10 @@ export async function resolveCimdClient(
 	const rateLimit = cimdFetchLimiter.tryTake(clientId);
 	if (!rateLimit.allowed) {
 		logger?.warn?.(`CIMD: fetch rate limit reached for ${clientId}`);
-		throw new CimdClientError('temporarily_unavailable', 'CIMD resolution rate limit reached; retry shortly');
+		throw new CimdClientError('slow_down', 'CIMD resolution rate limit reached; retry shortly', {
+			statusCode: 429,
+			retryAfterSeconds: rateLimit.retryAfterSeconds,
+		});
 	}
 	const pending = fetchAndValidateCimd(clientId, cimdConfig, allowedRedirectUriHosts, logger).finally(() =>
 		inFlightResolutions.delete(clientId)
@@ -1031,6 +1053,9 @@ export async function resolveClient(
 	mcpConfig: MCPConfig | undefined,
 	logger?: Logger
 ): Promise<MCPClientRecord | null> {
+	// An over-length client_id is never a real client — reject before it becomes
+	// a CIMD fetch-limiter key or a store lookup (unknown-client null, no leak).
+	if (clientId.length > MAX_CLIENT_ID_LENGTH) return null;
 	const cimdConfig = mcpConfig?.clientIdMetadataDocuments;
 	// CIMD is enabled by default when mcp.enabled; disabled only by explicit `enabled: false`.
 	const cimdEnabled = cimdConfig?.enabled !== false;

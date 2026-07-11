@@ -48,8 +48,9 @@ import {
 import { resolveIssuer, resolveResource } from './wellKnown.ts';
 
 type ErrorJSON = {
-	status: 400 | 500;
+	status: 400 | 429 | 500;
 	body: { error: string; error_description?: string };
+	headers?: Record<string, string>;
 };
 
 type Redirect = {
@@ -384,10 +385,12 @@ export async function handleAuthorize(
 		client = await resolveClient(query.client_id, mcpConfig, logger);
 	} catch (error) {
 		if (error instanceof CimdClientError) {
-			return {
-				status: 400,
+			const json: ErrorJSON = {
+				status: error.statusCode === 429 ? 429 : 400,
 				body: { error: error.oauthError, error_description: error.message },
 			};
+			if (error.retryAfterSeconds !== undefined) json.headers = { 'Retry-After': String(error.retryAfterSeconds) };
+			return json;
 		}
 		logger?.error?.('MCP authorize: client lookup failed:', error instanceof Error ? error.message : String(error));
 		return {
