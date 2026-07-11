@@ -84,6 +84,19 @@ describe('createRateLimiter', () => {
 		assert.equal(limiter.tryTake('k').allowed, true, 'refills at the configured slow rate');
 	});
 
+	it('bounds memory under a long, unique-key flood — keys are fingerprinted, LRU still evicts', () => {
+		const clock = makeClock();
+		const limiter = createRateLimiter({ capacity: 1, refillPerMinute: 1, maxKeys: 3, now: clock.now });
+		// Keys of arbitrary length must not grow the map beyond maxKeys, and each
+		// distinct key still gets its own bucket (fingerprints don't collide).
+		const long = (n) => `https://attacker.example.com/${'x'.repeat(4000)}/${n}`;
+		for (let i = 0; i < 1000; i++) assert.equal(limiter.tryTake(long(i)).allowed, true);
+		// The three most-recent keys retain state; older ones were evicted, so a
+		// re-request of a recent drained key is still blocked (state survived).
+		assert.equal(limiter.tryTake(long(999)).allowed, false, 'recent key keeps its drained bucket');
+		assert.equal(limiter.tryTake(long(0)).allowed, true, 'long-evicted key returns fresh');
+	});
+
 	it('_reset drops all bucket state', () => {
 		const limiter = createRateLimiter({ capacity: 1, refillPerMinute: 1 });
 		limiter.tryTake('k');

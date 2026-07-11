@@ -526,20 +526,6 @@ async function handleClientCredentialsGrant(
 		);
 	}
 
-	// Issuance rate limit (#163, #159 req 5): checked BEFORE resolveClient so
-	// an over-limit client cannot trigger CIMD fetches or crypto work. Keyed
-	// by the requested client_id — attacker-chosen, but the bucket map is
-	// LRU-bounded and the point is bounding per-identity issuance.
-	const ratePerMinute = resolveRateLimit(mcpConfig.clientCredentials?.rateLimit);
-	if (ratePerMinute !== false) {
-		const limit = getGrantLimiter(ratePerMinute).tryTake(clientId);
-		if (!limit.allowed) {
-			const response = errorResponse(429, 'slow_down', 'Token issuance rate limit reached for this client');
-			response.headers = { ...response.headers, 'Retry-After': String(limit.retryAfterSeconds) };
-			return response;
-		}
-	}
-
 	let client: MCPClientRecord | null;
 	try {
 		client = await resolveClient(clientId, mcpConfig, logger);
@@ -579,6 +565,23 @@ async function handleClientCredentialsGrant(
 	if (!result.valid) {
 		logger?.warn?.(`MCP token: client_assertion rejected for ${clientId}: ${result.reason}`);
 		return errorResponse(401, 'invalid_client', `client_assertion verification failed: ${result.reason}`);
+	}
+
+	// Issuance rate limit (#163, #159 req 5): applied AFTER proof-of-possession,
+	// keyed by the now-verified client_id. Running it pre-auth would let any
+	// caller drain a real agent's quota by replaying the agent's PUBLIC CIMD
+	// client_id URL with a bogus assertion (429 the victim before its valid
+	// assertion is even checked). Pre-auth work is bounded elsewhere: CIMD
+	// fetches by the per-URL fetch limiter + resolution/DNS concurrency caps,
+	// signature verification by Node's request concurrency (no I/O, no jti burn).
+	const ratePerMinute = resolveRateLimit(mcpConfig.clientCredentials?.rateLimit);
+	if (ratePerMinute !== false) {
+		const limit = getGrantLimiter(ratePerMinute).tryTake(clientId);
+		if (!limit.allowed) {
+			const response = errorResponse(429, 'slow_down', 'Token issuance rate limit reached for this client');
+			response.headers = { ...response.headers, 'Retry-After': String(limit.retryAfterSeconds) };
+			return response;
+		}
 	}
 
 	// RFC 8707 resource binding: exact match against the canonical MCP

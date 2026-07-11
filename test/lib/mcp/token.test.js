@@ -943,37 +943,23 @@ describe('handleToken — client_credentials grant (#162)', () => {
 		}
 	});
 
-	it('the limiter runs before client resolution — an over-limit request triggers no fetch', async () => {
-		const limited = { ...ccConfig, clientCredentials: { ...ccConfig.clientCredentials, rateLimit: 1 } };
-		let fetchCalls = 0;
-		_setFetch(async () => {
-			fetchCalls++;
-			const bytes = Buffer.from(JSON.stringify(AGENT_DOC));
-			return {
-				status: 200,
-				headers: new Map([
-					['content-type', 'application/json'],
-					['content-length', String(bytes.length)],
-				]),
-				body: {
-					getReader: () => {
-						let sent = false;
-						return {
-							read: async () =>
-								sent ? { done: true, value: undefined } : ((sent = true), { done: false, value: bytes }),
-							cancel: () => {},
-						};
-					},
-				},
-			};
-		});
+	it('bogus assertions cannot drain a real client’s issuance quota (limiter is post-auth)', async () => {
+		// The limiter is keyed by the client_id but debited only AFTER
+		// proof-of-possession. An attacker who knows the victim’s public CIMD
+		// client_id but not its key can flood the endpoint; every request fails
+		// verification (401) and none touches the victim’s bucket.
+		const limited = { ...ccConfig, clientCredentials: { ...ccConfig.clientCredentials, rateLimit: 2 } };
+		const rogue = generateKeyPairSync('ed25519');
+		for (let i = 0; i < 5; i++) {
+			const forged = await handleToken(
+				{ headers: {} },
+				grantBody({ client_assertion: signAssertion({ key: rogue.privateKey }) }),
+				limited
+			);
+			assert.equal(forged.status, 401, 'forged assertion rejected');
+		}
+		// The genuine agent’s quota is untouched: two valid mints still succeed.
 		assert.equal((await handleToken({ headers: {} }, grantBody(), limited)).status, 200);
-		assert.equal(fetchCalls, 1);
-		// Clear the CIMD cache so a second request WOULD have to fetch if it got
-		// past the limiter — proving the 429 short-circuits before resolution.
-		_clearCimdCache();
-		const blocked = await handleToken({ headers: {} }, grantBody(), limited);
-		assert.equal(blocked.status, 429);
-		assert.equal(fetchCalls, 1, 'an over-limit request must not reach CIMD resolution');
+		assert.equal((await handleToken({ headers: {} }, grantBody(), limited)).status, 200);
 	});
 });

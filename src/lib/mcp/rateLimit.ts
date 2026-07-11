@@ -10,12 +10,16 @@
  *
  * Buckets refill continuously (elapsed-time based — no interval timers), so a
  * limit of N/min admits a burst of up to N and then one request per 60/N
- * seconds. Keys are ATTACKER-CHOSEN strings (client_ids, URLs), so the key
- * space is LRU-bounded: at `maxKeys` the least-recently-used bucket is
- * evicted. An evicted bucket forgets that key's spend history — acceptable:
- * eviction requires `maxKeys` distinct keys inside one window, and the
- * global concurrency caps still bound aggregate work.
+ * seconds. Keys may be ATTACKER-CHOSEN strings (client_ids, URLs), so: (1) the
+ * key space is LRU-bounded — at `maxKeys` the least-recently-used bucket is
+ * evicted (an evicted bucket forgets that key's spend history, acceptable
+ * because eviction requires `maxKeys` distinct keys inside one window and the
+ * global concurrency caps still bound aggregate work); and (2) the key is
+ * stored as a fixed-size SHA-256 fingerprint, so a flood of long distinct keys
+ * bounds map memory to `maxKeys` × a constant, not × the raw key length.
  */
+
+import { createHash } from 'node:crypto';
 
 type BucketState = { tokens: number; lastRefill: number };
 
@@ -50,16 +54,19 @@ export function createRateLimiter(options: {
 
 	return {
 		tryTake(key: string): RateLimitResult {
+			// Fixed-size fingerprint: the raw key may be an attacker-chosen URL of
+			// arbitrary length, and it is retained in the map until evicted.
+			const mapKey = createHash('sha256').update(key).digest('base64url');
 			const at = now();
-			let bucket = buckets.get(key);
+			let bucket = buckets.get(mapKey);
 			if (bucket) {
 				const elapsedMs = at - bucket.lastRefill;
 				if (elapsedMs > 0) {
 					bucket.tokens = Math.min(capacity, bucket.tokens + (elapsedMs / 60_000) * refillPerMinute);
 					bucket.lastRefill = at;
 				}
-				// Delete + re-insert so Map iteration order tracks recency (LRU).
-				buckets.delete(key);
+				// Delete now; the set below re-inserts so Map order tracks recency (LRU).
+				buckets.delete(mapKey);
 			} else {
 				bucket = { tokens: capacity, lastRefill: at };
 				if (buckets.size >= maxKeys) {
@@ -67,14 +74,16 @@ export function createRateLimiter(options: {
 					if (oldest !== undefined) buckets.delete(oldest);
 				}
 			}
+			let result: RateLimitResult;
 			if (bucket.tokens >= 1) {
 				bucket.tokens -= 1;
-				buckets.set(key, bucket);
-				return { allowed: true };
+				result = { allowed: true };
+			} else {
+				const deficit = 1 - bucket.tokens;
+				result = { allowed: false, retryAfterSeconds: Math.ceil((deficit * 60) / refillPerMinute) };
 			}
-			buckets.set(key, bucket);
-			const deficit = 1 - bucket.tokens;
-			return { allowed: false, retryAfterSeconds: Math.ceil((deficit * 60) / refillPerMinute) };
+			buckets.set(mapKey, bucket);
+			return result;
 		},
 		_reset(): void {
 			buckets.clear();
