@@ -97,6 +97,16 @@ describe('createRateLimiter', () => {
 		assert.equal(limiter.tryTake(long(0)).allowed, true, 'long-evicted key returns fresh');
 	});
 
+	it('caps retryAfterSeconds at a sane upper bound for tiny rates', () => {
+		const clock = makeClock();
+		// 1e-5/min would compute a ~6,000,000 s wait; capped to the int32-second max.
+		const limiter = createRateLimiter({ capacity: 1, refillPerMinute: 0.00001, now: clock.now });
+		limiter.tryTake('k');
+		const blocked = limiter.tryTake('k');
+		assert.equal(blocked.allowed, false);
+		assert.equal(blocked.retryAfterSeconds, 2_147_483);
+	});
+
 	it('_reset drops all bucket state', () => {
 		const limiter = createRateLimiter({ capacity: 1, refillPerMinute: 1 });
 		limiter.tryTake('k');

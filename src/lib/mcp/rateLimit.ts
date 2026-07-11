@@ -33,6 +33,11 @@ export type RateLimiter = {
 
 const DEFAULT_MAX_KEYS = 10_000;
 
+// Cap the advertised Retry-After. A tiny configured rate (e.g. 0.001/min)
+// would otherwise yield an absurd multi-year value; ~2.1e9 s (≈24.8 days) is
+// the largest that stays within an int32 of seconds for any client parsing it.
+const MAX_RETRY_AFTER_SECONDS = 2_147_483;
+
 export function createRateLimiter(options: {
 	/** Bucket capacity (maximum burst). */
 	capacity: number;
@@ -80,7 +85,8 @@ export function createRateLimiter(options: {
 				result = { allowed: true };
 			} else {
 				const deficit = 1 - bucket.tokens;
-				result = { allowed: false, retryAfterSeconds: Math.ceil((deficit * 60) / refillPerMinute) };
+				const retryAfterSeconds = Math.min(MAX_RETRY_AFTER_SECONDS, Math.ceil((deficit * 60) / refillPerMinute));
+				result = { allowed: false, retryAfterSeconds };
 			}
 			buckets.set(mapKey, bucket);
 			return result;
