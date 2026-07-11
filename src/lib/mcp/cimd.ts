@@ -714,6 +714,11 @@ function validateCredentialsDocument(
 			`CIMD document: jwks.keys must hold between 1 and ${MAX_CREDENTIALS_JWKS_KEYS} keys`
 		);
 	}
+	// Beyond the security checks (public-only, Ed25519-only), enforce the shape
+	// `selectKey` needs at verify time: verification fails CLOSED on missing or
+	// duplicate kids anyway, but rejecting here surfaces a clear error when the
+	// document is resolved instead of a confusing one on every assertion.
+	const seenKids = new Set<string>();
 	for (const key of keys) {
 		if (!key || typeof key !== 'object' || Array.isArray(key)) {
 			throw new CimdClientError('invalid_client', 'CIMD document: every jwks key must be a JWK object');
@@ -725,11 +730,25 @@ function validateCredentialsDocument(
 				'CIMD document: jwks must contain only PUBLIC keys (found private key material)'
 			);
 		}
-		if (k.kty !== 'OKP' || k.crv !== 'Ed25519' || typeof k.x !== 'string' || k.x.length === 0) {
+		// Ed25519 public keys are exactly 32 bytes → 43 base64url chars; a precise
+		// shape check keeps malformed keys out of the cache.
+		if (k.kty !== 'OKP' || k.crv !== 'Ed25519' || typeof k.x !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(k.x)) {
 			throw new CimdClientError('invalid_client', 'CIMD document: jwks keys must be public OKP/Ed25519 JWKs');
 		}
-		if (k.kid !== undefined && (typeof k.kid !== 'string' || k.kid.length === 0)) {
-			throw new CimdClientError('invalid_client', 'CIMD document: jwks key kid must be a non-empty string');
+		if (keys.length > 1 && k.kid === undefined) {
+			throw new CimdClientError(
+				'invalid_client',
+				'CIMD document: jwks keys must each have a kid when multiple keys are present'
+			);
+		}
+		if (k.kid !== undefined) {
+			if (typeof k.kid !== 'string' || k.kid.length === 0) {
+				throw new CimdClientError('invalid_client', 'CIMD document: jwks key kid must be a non-empty string');
+			}
+			if (seenKids.has(k.kid)) {
+				throw new CimdClientError('invalid_client', 'CIMD document: jwks keys must have unique kid values');
+			}
+			seenKids.add(k.kid);
 		}
 	}
 

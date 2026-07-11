@@ -714,7 +714,8 @@ describe('resolveCimdClient — client_credentials documents (#161)', () => {
 
 	it('rejects any auth method other than private_key_jwt', async () => {
 		await rejects({ ...CREDENTIALS_DOC, token_endpoint_auth_method: 'none' }, /private_key_jwt/);
-		const { token_endpoint_auth_method: _omit, ...withoutMethod } = CREDENTIALS_DOC;
+		const withoutMethod = { ...CREDENTIALS_DOC };
+		delete withoutMethod.token_endpoint_auth_method;
 		await rejects(withoutMethod, /private_key_jwt/);
 	});
 
@@ -726,7 +727,8 @@ describe('resolveCimdClient — client_credentials documents (#161)', () => {
 	});
 
 	it('rejects a missing or malformed jwks', async () => {
-		const { jwks: _omit, ...withoutJwks } = CREDENTIALS_DOC;
+		const withoutJwks = { ...CREDENTIALS_DOC };
+		delete withoutJwks.jwks;
 		await rejects(withoutJwks, /require a jwks JWK Set/);
 		await rejects({ ...CREDENTIALS_DOC, jwks: 'not-an-object' }, /require a jwks JWK Set/);
 		await rejects({ ...CREDENTIALS_DOC, jwks: { keys: 'nope' } }, /require a jwks JWK Set/);
@@ -745,6 +747,23 @@ describe('resolveCimdClient — client_credentials documents (#161)', () => {
 			/OKP\/Ed25519/
 		);
 		await rejects({ ...CREDENTIALS_DOC, jwks: { keys: [null] } }, /must be a JWK object/);
+	});
+
+	it('enforces kid presence + uniqueness on multi-key sets and precise x shape', async () => {
+		const secondKey = { kty: 'OKP', crv: 'Ed25519', x: 'B'.repeat(43), kid: 'agent-key-2' };
+		const kidless = { kty: 'OKP', crv: 'Ed25519', x: 'C'.repeat(43) };
+		await rejects({ ...CREDENTIALS_DOC, jwks: { keys: [AGENT_JWK, kidless] } }, /must each have a kid/);
+		await rejects(
+			{ ...CREDENTIALS_DOC, jwks: { keys: [AGENT_JWK, { ...secondKey, kid: 'agent-key-1' }] } },
+			/unique kid/
+		);
+		await rejects({ ...CREDENTIALS_DOC, jwks: { keys: [{ ...AGENT_JWK, x: 'A'.repeat(42) }] } }, /OKP\/Ed25519/);
+		await rejects({ ...CREDENTIALS_DOC, jwks: { keys: [{ ...AGENT_JWK, x: '!'.repeat(43) }] } }, /OKP\/Ed25519/);
+		// A well-formed rotation set (distinct kids) still resolves.
+		_clearCimdCache();
+		setup({ ...CREDENTIALS_DOC, jwks: { keys: [AGENT_JWK, secondKey] } });
+		const record = await resolveCimdClient(VALID_URL, GATED);
+		assert.equal(record.jwks.keys.length, 2);
 	});
 });
 
