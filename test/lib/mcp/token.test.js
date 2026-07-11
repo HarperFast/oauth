@@ -928,6 +928,14 @@ describe('handleToken — client_credentials grant (#162)', () => {
 		assert.ok(Number(blocked.headers['Retry-After']) >= 1, 'Retry-After carries seconds until a token refills');
 	});
 
+	it('rejects an over-length client_id before it becomes a rate-limiter key', async () => {
+		const longId = 'https://agents.example.com/' + 'a'.repeat(2100) + '.json';
+		const res = await handleToken({ headers: {} }, grantBody({ client_id: longId }), ccConfig);
+		assert.equal(res.status, 400);
+		assert.equal(res.body.error, 'invalid_request');
+		assert.match(res.body.error_description, /client_id exceeds the maximum length/);
+	});
+
 	it('rateLimit: false disables the issuance limiter', async () => {
 		const unlimited = { ...ccConfig, clientCredentials: { ...ccConfig.clientCredentials, rateLimit: false } };
 		for (let i = 0; i < 5; i++) {

@@ -71,6 +71,19 @@ describe('createRateLimiter', () => {
 		assert.equal(blocked.retryAfterSeconds, 30); // 2/min = one token per 30 s
 	});
 
+	it('clamps a sub-1 capacity up to 1 so a slow rate still admits the first request', () => {
+		const clock = makeClock();
+		// rate 0.5/min → capacity would be 0.5, below the 1 token a take needs;
+		// without the clamp this bucket could never admit anyone.
+		const limiter = createRateLimiter({ capacity: 0.5, refillPerMinute: 0.5, now: clock.now });
+		assert.equal(limiter.tryTake('k').allowed, true, 'first request admitted despite sub-1 rate');
+		const blocked = limiter.tryTake('k');
+		assert.equal(blocked.allowed, false);
+		assert.equal(blocked.retryAfterSeconds, 120); // 0.5/min = one token per 120 s
+		clock.advance(120_000);
+		assert.equal(limiter.tryTake('k').allowed, true, 'refills at the configured slow rate');
+	});
+
 	it('_reset drops all bucket state', () => {
 		const limiter = createRateLimiter({ capacity: 1, refillPerMinute: 1 });
 		limiter.tryTake('k');

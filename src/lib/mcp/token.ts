@@ -77,6 +77,11 @@ function coerceTtl(value: unknown, fallback: number): number {
 
 const RATE_LIMIT_DEFAULT_PER_MINUTE = 30;
 
+// Upper bound on an accepted client_id, applied before it becomes a
+// rate-limiter map key. Same defense-in-depth family as the repo's 2048-char
+// request-path cap and the assertion/jti length caps in clientAssertion.ts.
+const MAX_CLIENT_ID_LENGTH = 2048;
+
 /**
  * Resolve `mcp.clientCredentials.rateLimit` to requests/minute or `false`
  * (disabled). `false`/`0` (and their env-expanded string forms) disable the
@@ -495,6 +500,13 @@ async function handleClientCredentialsGrant(
 
 	if (!clientId) {
 		return errorResponse(400, 'invalid_request', 'client_id is required');
+	}
+	// Cap the client_id length before it becomes a rate-limiter map key
+	// (attacker-chosen, retained up to maxKeys entries) — same defense-in-depth
+	// family as the repo's request-path and assertion-length caps. 2048 covers
+	// any legitimate CIMD URL or DCR id.
+	if (clientId.length > MAX_CLIENT_ID_LENGTH) {
+		return errorResponse(400, 'invalid_request', 'client_id exceeds the maximum length');
 	}
 	if (assertionType !== CLIENT_ASSERTION_TYPE_JWT_BEARER) {
 		return errorResponse(400, 'invalid_request', `client_assertion_type must be ${CLIENT_ASSERTION_TYPE_JWT_BEARER}`);

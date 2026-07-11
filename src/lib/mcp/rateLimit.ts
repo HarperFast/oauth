@@ -39,7 +39,11 @@ export function createRateLimiter(options: {
 	/** Clock override (for testing). Default Date.now. */
 	now?: () => number;
 }): RateLimiter {
-	const { capacity, refillPerMinute } = options;
+	// A token bucket takes 1 token per request, so a burst ceiling below 1 could
+	// never admit anyone — clamp it up. The refill rate is left untouched, so a
+	// sub-1/min limit still means "one request, then one per 60/rate seconds".
+	const capacity = Math.max(1, options.capacity);
+	const { refillPerMinute } = options;
 	const maxKeys = options.maxKeys ?? DEFAULT_MAX_KEYS;
 	const now = options.now ?? Date.now;
 	const buckets = new Map<string, BucketState>();
