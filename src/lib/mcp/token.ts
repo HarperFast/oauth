@@ -488,7 +488,14 @@ async function handleClientCredentialsGrant(
 	if (!client) {
 		return errorResponse(401, 'invalid_client', 'Unknown client');
 	}
+	// Pinned to CIMD-resolved clients: the allowedHosts allowlist — the gate
+	// that stands between "hosts a reachable document" and "mints tokens" —
+	// is enforced on the CIMD resolution path. A stored (DCR) record must
+	// never mint here, even if a future DCR surface could register this
+	// shape; lifting this requires its own registration gate (#161's
+	// optional initialAccessToken leg).
 	if (
+		client._cimd !== true ||
 		client.token_endpoint_auth_method !== 'private_key_jwt' ||
 		client.grant_types?.length !== 1 ||
 		client.grant_types[0] !== 'client_credentials'

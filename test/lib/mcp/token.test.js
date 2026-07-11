@@ -730,6 +730,14 @@ describe('handleToken — client_credentials grant (#162)', () => {
 			redirect_uris: JSON.stringify([REDIRECT]),
 			client_id_issued_at: 1700000000,
 		});
+		// A stored record wearing the full credentials shape — must still be
+		// rejected by the grant's CIMD pin (no allowlist gate on the DCR path).
+		clients.set('agent-dcr-1', {
+			client_id: 'agent-dcr-1',
+			token_endpoint_auth_method: 'private_key_jwt',
+			grant_types: JSON.stringify(['client_credentials']),
+			client_id_issued_at: 1700000000,
+		});
 
 		global.databases = {
 			oauth: {
@@ -899,6 +907,12 @@ describe('handleToken — client_credentials grant (#162)', () => {
 
 	it('rejects a stored (DCR) client on this grant', async () => {
 		const res = await handleToken({ headers: {} }, grantBody({ client_id: 'public-1' }), ccConfig);
+		assert.equal(res.status, 400);
+		assert.equal(res.body.error, 'unauthorized_client');
+	});
+
+	it('rejects a stored client even when it wears the full credentials shape (CIMD pin)', async () => {
+		const res = await handleToken({ headers: {} }, grantBody({ client_id: 'agent-dcr-1' }), ccConfig);
 		assert.equal(res.status, 400);
 		assert.equal(res.body.error, 'unauthorized_client');
 	});
