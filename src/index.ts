@@ -227,6 +227,22 @@ export async function handleApplication(scope: Scope): Promise<void> {
 						'(mcp.clientIdMetadataDocuments.enabled must not be false).'
 				);
 			}
+			// The token endpoint carries signed assertions in and bearer tokens
+			// out — RFC 6749 §3.2 requires TLS. An http: issuer is tolerated for
+			// the interactive flows (the __Host- consent cookie fails safe there),
+			// but this grant has no such self-protection, so a cleartext remote
+			// AS is a startup error. Loopback stays allowed for local development.
+			// (mcp.issuer is guaranteed present and origin-validated by the
+			// mcp.enabled checks above, which throw before this block runs.)
+			const issuerUrl = new URL(mcpConfig.issuer!);
+			const loopback =
+				issuerUrl.hostname === 'localhost' || issuerUrl.hostname === '127.0.0.1' || issuerUrl.hostname === '[::1]';
+			if (issuerUrl.protocol !== 'https:' && !loopback) {
+				throw new Error(
+					'mcp.clientCredentials.enabled requires an https: mcp.issuer (the token endpoint must be TLS ' +
+						'per RFC 6749 §3.2); http: is only permitted for loopback development issuers.'
+				);
+			}
 		}
 		// Warn when the operator sets both a pinned key and a rotation interval —
 		// pin wins and rotation is silently skipped, which could surprise them.

@@ -142,6 +142,26 @@ describe('OAuth Plugin Options Watcher', () => {
 		assert.ok(resources.oauth, 'OAuth resource should be registered');
 	});
 
+	it('should fail to start when clientCredentials is enabled on a cleartext remote issuer', async () => {
+		scope.options._config.mcp = {
+			enabled: true,
+			issuer: 'http://app.example.com',
+			clientCredentials: { enabled: true },
+			clientIdMetadataDocuments: { allowedHosts: ['agents.example.com'] },
+		};
+		await assert.rejects(handleApplication(scope), /requires an https: mcp\.issuer/);
+	});
+
+	it('should start when clientCredentials is enabled on an http loopback issuer (development)', async () => {
+		scope.options._config.mcp = {
+			enabled: true,
+			issuer: 'http://localhost:9926',
+			clientCredentials: { enabled: true },
+			clientIdMetadataDocuments: { allowedHosts: ['agents.example.com'] },
+		};
+		await handleApplication(scope);
+	});
+
 	it('should fail to start when mcp.issuer is schemeless', async () => {
 		scope.options._config.mcp = { enabled: true, issuer: 'as.example.com' };
 		await assert.rejects(handleApplication(scope), /mcp\.issuer must be an absolute http\(s\) origin/);
