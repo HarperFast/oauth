@@ -40,7 +40,8 @@
 		"schema/",
 		"config.yaml",
 		"LICENSE",
-		"README.md"
+		"README.md",
+		"CHANGELOG.md"
 	],
 	"scripts": {
 		"build": "tsc || true",
