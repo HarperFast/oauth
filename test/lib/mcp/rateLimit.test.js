@@ -107,6 +107,19 @@ describe('createRateLimiter', () => {
 		assert.equal(blocked.retryAfterSeconds, 2_147_483);
 	});
 
+	it('stays well-defined when constructed with a non-positive refill rate', () => {
+		const clock = makeClock();
+		// A 0 rate would divide-by-zero the retry-after math; the guard falls back
+		// to capacity so the limiter still admits the burst and yields a finite wait.
+		const limiter = createRateLimiter({ capacity: 3, refillPerMinute: 0, now: clock.now });
+		assert.equal(limiter.tryTake('k').allowed, true);
+		assert.equal(limiter.tryTake('k').allowed, true);
+		assert.equal(limiter.tryTake('k').allowed, true);
+		const blocked = limiter.tryTake('k');
+		assert.equal(blocked.allowed, false);
+		assert.ok(Number.isFinite(blocked.retryAfterSeconds) && blocked.retryAfterSeconds >= 1);
+	});
+
 	it('_reset drops all bucket state', () => {
 		const limiter = createRateLimiter({ capacity: 1, refillPerMinute: 1 });
 		limiter.tryTake('k');

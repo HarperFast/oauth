@@ -34,8 +34,9 @@ export type RateLimiter = {
 const DEFAULT_MAX_KEYS = 10_000;
 
 // Cap the advertised Retry-After. A tiny configured rate (e.g. 0.001/min)
-// would otherwise yield an absurd multi-year value; ~2.1e9 s (≈24.8 days) is
-// the largest that stays within an int32 of seconds for any client parsing it.
+// would otherwise yield an absurd multi-year value; 2,147,483 s (≈24.8 days,
+// int32-max milliseconds expressed as whole seconds) is a sane ceiling for any
+// client parsing the header.
 const MAX_RETRY_AFTER_SECONDS = 2_147_483;
 
 export function createRateLimiter(options: {
@@ -49,10 +50,14 @@ export function createRateLimiter(options: {
 	now?: () => number;
 }): RateLimiter {
 	// A token bucket takes 1 token per request, so a burst ceiling below 1 could
-	// never admit anyone — clamp it up. The refill rate is left untouched, so a
-	// sub-1/min limit still means "one request, then one per 60/rate seconds".
+	// never admit anyone — clamp it up. The refill rate is left untouched (a
+	// sub-1/min limit still means "one request, then one per 60/rate seconds"),
+	// except that a non-finite or non-positive rate — which would make the
+	// bucket never refill and the retry-after math divide by zero/negative —
+	// falls back to the (already ≥1) capacity so the limiter stays well-defined.
 	const capacity = Math.max(1, options.capacity);
-	const { refillPerMinute } = options;
+	const refillPerMinute =
+		Number.isFinite(options.refillPerMinute) && options.refillPerMinute > 0 ? options.refillPerMinute : capacity;
 	const maxKeys = options.maxKeys ?? DEFAULT_MAX_KEYS;
 	const now = options.now ?? Date.now;
 	const buckets = new Map<string, BucketState>();
