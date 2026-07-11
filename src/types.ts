@@ -125,6 +125,13 @@ export interface MCPClientCredentialsConfig {
 	 * agents re-mint on 401; no refresh token is ever issued.
 	 */
 	accessTokenTtl?: number;
+	/**
+	 * Issuance rate limit in requests/minute per client_id (per node — see
+	 * rateLimit.ts). Default: 30. `false` or `0` disables the limiter;
+	 * non-finite/non-positive values fall back to the default. Over-limit
+	 * requests get 429 + `error: "slow_down"` + `Retry-After`.
+	 */
+	rateLimit?: number | false;
 }
 
 /**

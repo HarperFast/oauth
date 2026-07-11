@@ -616,6 +616,24 @@ describe('handleAuthorize — CIMD interstitial', () => {
 		resource: 'https://app.example.com/mcp',
 	};
 
+	it('surfaces 429 + Retry-After when the CIMD fetch rate limit trips', async () => {
+		// A doc whose client_id doesn't match the URL fails validation and is not
+		// cached, so each attempt re-fetches and spends a fetch-limiter token
+		// (fixed 10/min per URL). The 11th is throttled and must reach the client
+		// as a 429 slow_down with a Retry-After header, not a 400/401.
+		_setFetch(makeCimdFetch(makeCimdDoc('https://mcp-client.example.com/mismatch.json')));
+		const { entries } = makeProviderRegistry('github');
+		const target = makeTarget(CIMD_QUERY);
+		for (let i = 0; i < 10; i++) {
+			const r = await handleAuthorize(makeRequest(), target, { enabled: true }, entries);
+			assert.equal(r.status, 400, `attempt ${i + 1} fails validation (token consumed)`);
+		}
+		const limited = await handleAuthorize(makeRequest(), target, { enabled: true }, entries);
+		assert.equal(limited.status, 429);
+		assert.equal(limited.body.error, 'slow_down');
+		assert.ok(limited.headers?.['Retry-After'], 'carries a Retry-After header');
+	});
+
 	it('returns 200 HTML interstitial page for a CIMD client (not 302)', async () => {
 		_setFetch(makeCimdFetch(makeCimdDoc(CIMD_CLIENT_ID)));
 		const { entries } = makeProviderRegistry('github');

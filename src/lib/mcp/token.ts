@@ -16,9 +16,10 @@ import type { Logger, MCPClientRecord, MCPConfig, Request } from '../../types.ts
 import { emitMCPAuditEvent } from './audit.ts';
 import { MCPAssertionJtiStore } from './assertionJtiStore.ts';
 import { MCPAuthCodeStore } from './authCodeStore.ts';
-import { CimdClientError, resolveClient } from './cimd.ts';
+import { CimdClientError, MAX_CLIENT_ID_LENGTH, resolveClient } from './cimd.ts';
 import { CLIENT_ASSERTION_TYPE_JWT_BEARER, verifyClientAssertion } from './clientAssertion.ts';
 import { MCPKeyStore } from './keyStore.ts';
+import { createRateLimiter, type RateLimiter } from './rateLimit.ts';
 import {
 	hashRefreshToken,
 	makeRefreshToken,
@@ -57,6 +58,20 @@ function errorResponse(status: number, error: string, description?: string): Tok
 	};
 }
 
+/**
+ * Map a CimdClientError to a token-endpoint response. A throttle rejection
+ * carries `statusCode` (429) and, for the fetch rate limit, `retryAfterSeconds`
+ * — surface those (with a `Retry-After` header) instead of the default 401, so
+ * a rate-limited client backs off rather than treating it as an auth failure.
+ */
+function cimdErrorResponse(err: CimdClientError): TokenResponse {
+	const response = errorResponse(err.statusCode ?? 401, err.oauthError, err.message);
+	if (err.retryAfterSeconds !== undefined) {
+		response.headers = { ...response.headers, 'Retry-After': String(err.retryAfterSeconds) };
+	}
+	return response;
+}
+
 function nowSeconds(): number {
 	return Math.floor(Date.now() / 1000);
 }
@@ -70,6 +85,44 @@ function nowSeconds(): number {
 function coerceTtl(value: unknown, fallback: number): number {
 	const n = typeof value === 'number' ? value : Number(value);
 	return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+// --- client_credentials issuance rate limiting (#163) ---
+
+const RATE_LIMIT_DEFAULT_PER_MINUTE = 30;
+
+/**
+ * Resolve `mcp.clientCredentials.rateLimit` to requests/minute or `false`
+ * (disabled). `false`/`0` (and their env-expanded string forms) disable the
+ * limiter explicitly; anything non-finite/non-positive falls back to the
+ * default rather than failing open — mirrors `coerceTtl`.
+ */
+function resolveRateLimit(value: unknown): number | false {
+	if (value === false || value === 0 || value === 'false' || value === '0') return false;
+	if (value === undefined || value === null) return RATE_LIMIT_DEFAULT_PER_MINUTE;
+	const n = typeof value === 'number' ? value : Number(value);
+	return Number.isFinite(n) && n > 0 ? n : RATE_LIMIT_DEFAULT_PER_MINUTE;
+}
+
+// Per-node bucket keyed by client_id; memoized on the configured rate so a
+// live config change rebuilds it (dropping state — acceptable, the limiter is
+// defense-in-depth, not an accounting ledger). Per-node rationale: see
+// rateLimit.ts module header.
+let grantLimiter: RateLimiter | undefined;
+let grantLimiterRate: number | undefined;
+
+function getGrantLimiter(ratePerMinute: number): RateLimiter {
+	if (!grantLimiter || grantLimiterRate !== ratePerMinute) {
+		grantLimiter = createRateLimiter({ capacity: ratePerMinute, refillPerMinute: ratePerMinute });
+		grantLimiterRate = ratePerMinute;
+	}
+	return grantLimiter;
+}
+
+/** Drop grant-limiter state (for testing). @internal */
+export function _resetGrantRateLimiter(): void {
+	grantLimiter = undefined;
+	grantLimiterRate = undefined;
 }
 
 /** Does the client's registered grant_types permit refresh tokens? Defaults to true when unspecified (DCR default includes refresh_token). */
@@ -132,7 +185,7 @@ async function authenticateClient(
 		client = await resolveClient(clientId, mcpConfig, logger);
 	} catch (err) {
 		if (err instanceof CimdClientError) {
-			return { error: errorResponse(401, err.oauthError, err.message) };
+			return { error: cimdErrorResponse(err) };
 		}
 		logger?.error?.('MCP token: client lookup failed:', err instanceof Error ? err.message : String(err));
 		return { error: errorResponse(500, 'server_error', 'Client lookup failed') };
@@ -457,6 +510,13 @@ async function handleClientCredentialsGrant(
 	if (!clientId) {
 		return errorResponse(400, 'invalid_request', 'client_id is required');
 	}
+	// Cap the client_id length before it becomes a rate-limiter map key
+	// (attacker-chosen, retained up to maxKeys entries) — same defense-in-depth
+	// family as the repo's request-path and assertion-length caps. 2048 covers
+	// any legitimate CIMD URL or DCR id.
+	if (clientId.length > MAX_CLIENT_ID_LENGTH) {
+		return errorResponse(400, 'invalid_request', 'client_id exceeds the maximum length');
+	}
 	if (assertionType !== CLIENT_ASSERTION_TYPE_JWT_BEARER) {
 		return errorResponse(400, 'invalid_request', `client_assertion_type must be ${CLIENT_ASSERTION_TYPE_JWT_BEARER}`);
 	}
@@ -480,7 +540,7 @@ async function handleClientCredentialsGrant(
 		client = await resolveClient(clientId, mcpConfig, logger);
 	} catch (err) {
 		if (err instanceof CimdClientError) {
-			return errorResponse(401, err.oauthError, err.message);
+			return cimdErrorResponse(err);
 		}
 		logger?.error?.('MCP token: client lookup failed:', err instanceof Error ? err.message : String(err));
 		return errorResponse(500, 'server_error', 'Client lookup failed');
@@ -514,6 +574,23 @@ async function handleClientCredentialsGrant(
 	if (!result.valid) {
 		logger?.warn?.(`MCP token: client_assertion rejected for ${clientId}: ${result.reason}`);
 		return errorResponse(401, 'invalid_client', `client_assertion verification failed: ${result.reason}`);
+	}
+
+	// Issuance rate limit (#163, #159 req 5): applied AFTER proof-of-possession,
+	// keyed by the now-verified client_id. Running it pre-auth would let any
+	// caller drain a real agent's quota by replaying the agent's PUBLIC CIMD
+	// client_id URL with a bogus assertion (429 the victim before its valid
+	// assertion is even checked). Pre-auth work is bounded elsewhere: CIMD
+	// fetches by the per-URL fetch limiter + resolution/DNS concurrency caps,
+	// signature verification by Node's request concurrency (no I/O, no jti burn).
+	const ratePerMinute = resolveRateLimit(mcpConfig.clientCredentials?.rateLimit);
+	if (ratePerMinute !== false) {
+		const limit = getGrantLimiter(ratePerMinute).tryTake(clientId);
+		if (!limit.allowed) {
+			const response = errorResponse(429, 'slow_down', 'Token issuance rate limit reached for this client');
+			response.headers = { ...response.headers, 'Retry-After': String(limit.retryAfterSeconds) };
+			return response;
+		}
 	}
 
 	// RFC 8707 resource binding: exact match against the canonical MCP

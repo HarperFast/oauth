@@ -54,8 +54,10 @@
  *   protection (an attacker's document must not be able to force a fetch
  *   per authorize request).
  * - Failures are NOT cached (the CIMD draft forbids caching error responses
- *   and invalid documents); repeated fetches of bad documents are left to
- *   rate limiting (#163).
+ *   and invalid documents); repeated fetch attempts are instead rate-limited
+ *   per client_id URL (fixed 10/min token bucket, #163) — legit clients hit
+ *   the cache after their first success, so only failures repeat. Issuance
+ *   itself is separately rate-limited at the client_credentials grant.
  * - Cached records are revalidated against the live redirect-host policy on
  *   every hit, so tightening `allowedRedirectUriHosts` takes effect
  *   immediately instead of after cache expiry (up to 24 h).
@@ -76,6 +78,7 @@ import { request as httpsRequest } from 'node:https';
 import { Readable } from 'node:stream';
 import type { Logger, MCPClientIdMetadataDocumentsConfig, MCPClientRecord, MCPConfig } from '../../types.ts';
 import { MCPClientStore } from './clientStore.ts';
+import { createRateLimiter } from './rateLimit.ts';
 import {
 	validateGrantTypes,
 	validateRedirectUri,
@@ -117,19 +120,46 @@ const cimdCache = new Map<string, CacheEntry>();
 // requests for one uncached URL trigger a single fetch (thundering-herd guard).
 const inFlightResolutions = new Map<string, Promise<MCPClientRecord | null>>();
 
+// Per-URL fetch-attempt rate limit (#163) — fixed policy, no config knob:
+// legit clients hit the cache after their first success (only failures
+// repeat, and failures are never cached per the CIMD draft). Per-node
+// semantics: see rateLimit.ts module header.
+const CIMD_FETCH_ATTEMPTS_PER_MINUTE = 10;
+const cimdFetchLimiter = createRateLimiter({
+	capacity: CIMD_FETCH_ATTEMPTS_PER_MINUTE,
+	refillPerMinute: CIMD_FETCH_ATTEMPTS_PER_MINUTE,
+});
+
+/**
+ * Upper bound on a client_id length, shared by every entry point that uses a
+ * caller-supplied client_id as a lookup or rate-limiter map key. Same
+ * defense-in-depth family as the repo's 2048-char request-path cap.
+ */
+export const MAX_CLIENT_ID_LENGTH = 2048;
+
 /**
  * Thrown when CIMD resolution fails due to a client-side issue (bad URL,
  * invalid document, unsupported auth method, allowedHosts policy).
  * Callers should surface this as the given `oauthError` with the `message`
- * as the `error_description`.
+ * as the `error_description`. Throttle rejections additionally carry a
+ * `statusCode` (429) and `retryAfterSeconds` so callers can emit a proper
+ * `Retry-After` instead of a misleading auth error.
  */
 export class CimdClientError extends Error {
 	readonly oauthError: string;
+	readonly statusCode?: number;
+	readonly retryAfterSeconds?: number;
 
-	constructor(oauthError: string, message: string, options?: { cause?: unknown }) {
+	constructor(
+		oauthError: string,
+		message: string,
+		options?: { cause?: unknown; statusCode?: number; retryAfterSeconds?: number }
+	) {
 		super(message, options);
 		this.name = 'CimdClientError';
 		this.oauthError = oauthError;
+		this.statusCode = options?.statusCode;
+		this.retryAfterSeconds = options?.retryAfterSeconds;
 	}
 }
 
@@ -210,9 +240,12 @@ export function _setFetch(fn: CimdFetch | null): void {
 	_fetch = fn ?? pinnedHttpsFetch;
 }
 
-/** Clear the CIMD cache (for testing). @internal */
+/** Clear the CIMD cache AND the per-URL fetch limiter (for testing) — tests
+ * that loop many resolution attempts against one URL rely on the limiter
+ * resetting alongside the cache. @internal */
 export function _clearCimdCache(): void {
 	cimdCache.clear();
+	cimdFetchLimiter._reset();
 }
 
 // --- SSRF guard helpers ---
@@ -846,8 +879,25 @@ export async function resolveCimdClient(
 	if (existing) return existing;
 	// Total-concurrency bound: the in-flight map IS the counter (no await sits
 	// between this check and the set below, so the cap cannot be raced past).
+	// Checked BEFORE the rate-limit take so a capacity reject doesn't spend a
+	// token without a fetch (keeps "only actual fetch attempts consume" true).
 	if (inFlightResolutions.size >= MAX_CONCURRENT_RESOLUTIONS) {
-		throw new CimdClientError('temporarily_unavailable', 'CIMD resolution capacity reached; retry shortly');
+		throw new CimdClientError('temporarily_unavailable', 'CIMD resolution capacity reached; retry shortly', {
+			statusCode: 429,
+		});
+	}
+	// Per-URL fetch rate limit (#163): only actual fetch attempts consume —
+	// cache hits returned above, dedup'd joiners, and capacity rejects never
+	// reach this. Fixed policy (no knob): legit clients are served from the
+	// cache after their first success; repeated attempts are the bad-document
+	// amplification vector this closes.
+	const rateLimit = cimdFetchLimiter.tryTake(clientId);
+	if (!rateLimit.allowed) {
+		logger?.warn?.(`CIMD: fetch rate limit reached for ${clientId}`);
+		throw new CimdClientError('slow_down', 'CIMD resolution rate limit reached; retry shortly', {
+			statusCode: 429,
+			retryAfterSeconds: rateLimit.retryAfterSeconds,
+		});
 	}
 	const pending = fetchAndValidateCimd(clientId, cimdConfig, allowedRedirectUriHosts, logger).finally(() =>
 		inFlightResolutions.delete(clientId)
@@ -977,8 +1027,9 @@ async function fetchAndValidateCimd(
 		return record;
 	} catch (err) {
 		// Failures are never cached — the CIMD draft forbids caching error
-		// responses and invalid documents. Fetch amplification from repeated
-		// bad requests is rate limiting's job (#163).
+		// responses and invalid documents. Amplification from repeated bad
+		// requests is bounded by the per-URL fetch rate limit in
+		// `resolveCimdClient` (#163) instead.
 		if (err instanceof CimdClientError) {
 			logger?.warn?.(`CIMD: rejected client ${clientId}: ${err.message}`);
 			throw err;
@@ -1002,6 +1053,9 @@ export async function resolveClient(
 	mcpConfig: MCPConfig | undefined,
 	logger?: Logger
 ): Promise<MCPClientRecord | null> {
+	// An over-length client_id is never a real client — reject before it becomes
+	// a CIMD fetch-limiter key or a store lookup (unknown-client null, no leak).
+	if (clientId.length > MAX_CLIENT_ID_LENGTH) return null;
 	const cimdConfig = mcpConfig?.clientIdMetadataDocuments;
 	// CIMD is enabled by default when mcp.enabled; disabled only by explicit `enabled: false`.
 	const cimdEnabled = cimdConfig?.enabled !== false;

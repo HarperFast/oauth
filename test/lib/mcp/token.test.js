@@ -7,7 +7,7 @@
 import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, generateKeyPairSync, randomBytes, sign } from 'node:crypto';
-import { handleToken } from '../../../dist/lib/mcp/token.js';
+import { handleToken, _resetGrantRateLimiter } from '../../../dist/lib/mcp/token.js';
 import { resetMCPAssertionJtisTableCache } from '../../../dist/lib/mcp/assertionJtiStore.js';
 import { resetMCPAuthCodesTableCache } from '../../../dist/lib/mcp/authCodeStore.js';
 import { _clearCimdCache, _setDnsLookup, _setFetch } from '../../../dist/lib/mcp/cimd.js';
@@ -711,6 +711,7 @@ describe('handleToken — client_credentials grant (#162)', () => {
 		resetMCPKeysTableCache();
 		resetMCPAssertionJtisTableCache();
 		_clearCimdCache();
+		_resetGrantRateLimiter();
 		hookEvents = [];
 
 		clients = new Map();
@@ -915,5 +916,50 @@ describe('handleToken — client_credentials grant (#162)', () => {
 		const res = await handleToken({ headers: {} }, grantBody({ client_id: 'agent-dcr-1' }), ccConfig);
 		assert.equal(res.status, 400);
 		assert.equal(res.body.error, 'unauthorized_client');
+	});
+
+	it('rate-limits issuance per client — 429 + slow_down + Retry-After (#163)', async () => {
+		const limited = { ...ccConfig, clientCredentials: { ...ccConfig.clientCredentials, rateLimit: 2 } };
+		assert.equal((await handleToken({ headers: {} }, grantBody(), limited)).status, 200);
+		assert.equal((await handleToken({ headers: {} }, grantBody(), limited)).status, 200);
+		const blocked = await handleToken({ headers: {} }, grantBody(), limited);
+		assert.equal(blocked.status, 429);
+		assert.equal(blocked.body.error, 'slow_down');
+		assert.ok(Number(blocked.headers['Retry-After']) >= 1, 'Retry-After carries seconds until a token refills');
+	});
+
+	it('rejects an over-length client_id before it becomes a rate-limiter key', async () => {
+		const longId = 'https://agents.example.com/' + 'a'.repeat(2100) + '.json';
+		const res = await handleToken({ headers: {} }, grantBody({ client_id: longId }), ccConfig);
+		assert.equal(res.status, 400);
+		assert.equal(res.body.error, 'invalid_request');
+		assert.match(res.body.error_description, /client_id exceeds the maximum length/);
+	});
+
+	it('rateLimit: false disables the issuance limiter', async () => {
+		const unlimited = { ...ccConfig, clientCredentials: { ...ccConfig.clientCredentials, rateLimit: false } };
+		for (let i = 0; i < 5; i++) {
+			assert.equal((await handleToken({ headers: {} }, grantBody(), unlimited)).status, 200);
+		}
+	});
+
+	it('bogus assertions cannot drain a real client’s issuance quota (limiter is post-auth)', async () => {
+		// The limiter is keyed by the client_id but debited only AFTER
+		// proof-of-possession. An attacker who knows the victim’s public CIMD
+		// client_id but not its key can flood the endpoint; every request fails
+		// verification (401) and none touches the victim’s bucket.
+		const limited = { ...ccConfig, clientCredentials: { ...ccConfig.clientCredentials, rateLimit: 2 } };
+		const rogue = generateKeyPairSync('ed25519');
+		for (let i = 0; i < 5; i++) {
+			const forged = await handleToken(
+				{ headers: {} },
+				grantBody({ client_assertion: signAssertion({ key: rogue.privateKey }) }),
+				limited
+			);
+			assert.equal(forged.status, 401, 'forged assertion rejected');
+		}
+		// The genuine agent’s quota is untouched: two valid mints still succeed.
+		assert.equal((await handleToken({ headers: {} }, grantBody(), limited)).status, 200);
+		assert.equal((await handleToken({ headers: {} }, grantBody(), limited)).status, 200);
 	});
 });
