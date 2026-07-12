@@ -147,6 +147,7 @@ Complete documentation is available in the [docs](./docs) directory:
 - **[Token Refresh and Sessions](./docs/token-refresh-and-sessions.md)** - How OAuth tokens and Harper sessions interact
 - **[MCP OAuth](./docs/mcp-oauth.md)** - Authorization server for Model Context Protocol clients (experimental)
 - **[API Reference](./docs/api-reference.md)** - Endpoints and programmatic API
+- **[Changelog](./CHANGELOG.md)** - Release history
 
 ## Development
 
@@ -174,22 +175,14 @@ npm run format:write
 
 ## Database Schema
 
-The plugin creates a `csrf_tokens` table for CSRF protection:
+The plugin manages its own tables in the `oauth` database — see [`schema/oauth.graphql`](./schema/oauth.graphql) for the definitions:
 
-```graphql
-type CSRFToken @table {
-	token: string @key
-	sessionId: string
-	provider: string
-	originalUrl: string
-	createdAt: number
-	expiresAt: number @index
-}
-```
-
-Tokens automatically expire after 10 minutes.
-
-When MCP OAuth is enabled (see [issue #86](https://github.com/HarperFast/oauth/issues/86)), the plugin also creates a `harper_oauth_mcp_clients` table for RFC 7591 Dynamic Client Registration. Registrations persist indefinitely so `client_id`s cached by MCP clients (Claude Desktop, Cursor, `mcp-remote`) survive Harper restarts.
+- `csrf_tokens` — CSRF protection for the human OAuth flow (10-minute expiration)
+- `harper_oauth_mcp_clients` — RFC 7591 Dynamic Client Registration; no expiration, so `client_id`s cached by MCP clients (Claude Desktop, Cursor, `mcp-remote`) survive Harper restarts
+- `harper_oauth_mcp_keys` — MCP JWT signing keys, stored in the database so replicated nodes share one rotation-aware key set
+- `mcp_auth_codes` — single-use PKCE authorization codes (5-minute expiration)
+- `mcp_refresh_families` — OAuth 2.1 single-use refresh-token rotation state
+- `mcp_assertion_jtis` — RFC 7523 client-assertion replay guard (120-second expiration)
 
 ## MCP OAuth (experimental)
 
@@ -224,7 +217,9 @@ server.http(
 
 The plugin serves discovery (`/.well-known/*`), Dynamic Client Registration, the authorize/token endpoints, and JWKS; `withMCPAuth` verifies the audience-bound JWT on every call and fails closed. There's an [`onMCPTokenIssued`](./docs/lifecycle-hooks.md#onmcptokenissued) hook to react when a client gains access (client→user mapping, monitoring, rate-limiting) and a built-in audit log.
 
-**Status: experimental, opt-in.** See **[MCP OAuth](./docs/mcp-oauth.md)** for the full flow, the `withMCPAuth` registration models and options, the hook, configuration, the production checklist, and troubleshooting — and [issue #86](https://github.com/HarperFast/oauth/issues/86) for what's still v1.1.
+**Headless agents (machine-to-machine).** An agent with no browser and no human authenticates as itself: `grant_type=client_credentials` with an RFC 7523 `private_key_jwt` client assertion (EdDSA), rate-limited per verified client. Client identity resolves CIMD-first — a URL-shaped `client_id` is fetched as a [Client ID Metadata Document](./docs/mcp-oauth.md#client-id-metadata-documents-cimd) through an SSRF-guarded, rate-limited fetch. See [Headless agents](./docs/mcp-oauth.md#headless-agents-client_credentials).
+
+**Status: experimental, opt-in.** See **[MCP OAuth](./docs/mcp-oauth.md)** for the full flow, the `withMCPAuth` registration models and options, the hook, configuration, the production checklist, and troubleshooting — and [what's not yet supported](./docs/mcp-oauth.md#not-yet-supported-v11) ([#156](https://github.com/HarperFast/oauth/issues/156)) for v1.1 forward-work.
 
 ## Security Considerations
 
@@ -234,6 +229,7 @@ The plugin serves discovery (`/.well-known/*`), Dynamic Client Registration, the
 - **Secure sessions** - Use Harper's secure session configuration
 - **Token storage** - Tokens stored in session (configure secure cookies)
 - **MCP client registration (when `mcp.enabled` is true)** - The `/oauth/mcp/register` endpoint defaults to **open registration** per RFC 7591. Set `mcp.dynamicClientRegistration.initialAccessToken` to require a bearer token on registration, or `mcp.dynamicClientRegistration.allowedRedirectUriHosts` to restrict which hosts may register `redirect_uri`s. See [`docs/configuration.md`](./docs/configuration.md).
+- **CIMD resolution (when `mcp.enabled` is true)** - URL-shaped `client_id`s are resolved as Client ID Metadata Documents **by default**. Disable with `mcp.clientIdMetadataDocuments.enabled: false`, or restrict which hosts are fetched with `mcp.clientIdMetadataDocuments.allowedHosts`.
 
 ## Debug Mode
 
