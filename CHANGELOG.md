@@ -2,6 +2,14 @@
 
 All notable changes to `@harperfast/oauth` are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Entries prior to 2.2.0 were backfilled from the [GitHub release notes](https://github.com/HarperFast/oauth/releases).
 
+## [2.2.1] - 2026-07-11
+
+Docs-only patch — refreshes the README (and therefore the npm package page), which predated 2.2.0's MCP features.
+
+### Changed
+
+- README: documented headless-agent (`client_credentials`) authentication and CIMD in the MCP section, added the CIMD default-on security caveat, corrected the Database Schema section to the actual table set (`schema/oauth.graphql`), retired the closed #86 pointer in favor of #156, and linked this changelog.
+
 ## [2.2.0] - 2026-07-11
 
 Minor release — headless-agent (machine-to-machine) MCP authentication, plus signing-key rotation.
@@ -94,6 +102,7 @@ First **GA** of the Harper v5 line.
 
 Initial published release, as `@harperdb/oauth` — multi-provider human OAuth for Harper: provider configuration, session management, live config reload, and minimal lifecycle hooks (e.g. adding/modifying user records on authentication).
 
+[2.2.1]: https://github.com/HarperFast/oauth/compare/v2.2.0...v2.2.1
 [2.2.0]: https://github.com/HarperFast/oauth/compare/v2.1.2...v2.2.0
 [2.1.2]: https://github.com/HarperFast/oauth/compare/v2.1.1...v2.1.2
 [2.1.1]: https://github.com/HarperFast/oauth/compare/v2.1.0...v2.1.1
