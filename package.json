@@ -1,6 +1,6 @@
 {
 	"name": "@harperfast/oauth",
-	"version": "2.1.2",
+	"version": "2.2.0",
 	"description": "OAuth 2.0 authentication plugin for Harper",
 	"license": "Apache-2.0",
 	"author": {
@@ -40,7 +40,8 @@
 		"schema/",
 		"config.yaml",
 		"LICENSE",
-		"README.md"
+		"README.md",
+		"CHANGELOG.md"
 	],
 	"scripts": {
 		"build": "tsc || true",
