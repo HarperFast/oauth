@@ -114,7 +114,7 @@ describe('HookManager', () => {
 		it('should not throw and still logs when hook throws a non-Error string', async () => {
 			hookManager.register({
 				onLogin: async () => {
-					throw 'string-error'; // eslint-disable-line no-throw-literal
+					throw 'string-error';
 				},
 			});
 			// Must resolve without throwing even though the hook threw a non-Error.
@@ -126,7 +126,7 @@ describe('HookManager', () => {
 		it('should not throw and still logs when hook throws null', async () => {
 			hookManager.register({
 				onLogin: async () => {
-					throw null; // eslint-disable-line no-throw-literal
+					throw null;
 				},
 			});
 			const result = await hookManager.callOnLogin({}, {}, {}, {}, 'github');

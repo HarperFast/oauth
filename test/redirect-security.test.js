@@ -231,7 +231,7 @@ describe('Hook Redirect Resolution (#174)', () => {
 
 	it('should block dangerous protocols', () => {
 		const testCases = [
-			'javascript:alert(1)', // eslint-disable-line no-script-url
+			'javascript:alert(1)',
 			'data:text/html,<script>alert(1)</script>',
 			'vbscript:msgbox(1)',
 			'file:///etc/passwd',
