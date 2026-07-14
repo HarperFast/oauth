@@ -219,7 +219,7 @@ The return value decides whether a session is created (since v2.3.0, [#174](http
 - **`needs_confirmation`** — the browser is sent to `redirect` (e.g. a "finish setup" page). Use when a first-time user must complete onboarding or confirmation before their first session.
 - `redirect` may be a relative path or an absolute `http(s)` URL (the hook is trusted app code; other schemes are rejected).
 - Backward compatible: returning a plain object or nothing behaves exactly as before. Only the `denied` and `needs_confirmation` status values change behavior — these two values are **newly reserved**: an enrichment object that previously happened to use `status` with exactly one of them would now gate the login instead of merging into the session. Any other `status` value is still treated as plain session data (a warning is logged, since it may be a typo'd gating attempt).
-- During an [MCP OAuth flow](./mcp-oauth.md), both gating outcomes fail the authorization cleanly with `access_denied` to the MCP client (an MCP client can't follow an interactive redirect).
+- During an [MCP OAuth flow](./mcp-oauth.md), both gating outcomes fail the authorization cleanly with `access_denied` to the MCP client (an MCP client can't follow an interactive redirect). The `error` string is echoed to the MCP client verbatim as `error_description` — keep it a terse reason code, never internal details.
 
 ```javascript
 async function handleLogin(oauthUser, tokenResponse, session, request, provider) {

@@ -378,7 +378,12 @@ export interface OnLoginResultOk {
  */
 export interface OnLoginResultDenied {
 	status: 'denied';
-	/** Short machine-readable reason, surfaced as the `reason` query param on the error redirect */
+	/**
+	 * Short machine-readable reason, surfaced as the `reason` query param on
+	 * the error redirect — and, in MCP flows, echoed verbatim to the MCP
+	 * client as `error_description`. Use a terse code (e.g. 'not_provisioned'),
+	 * never internal details.
+	 */
 	error?: string;
 	/** Where to send the browser instead of the standard error redirect. May be an absolute http(s) URL. */
 	redirect?: string;
