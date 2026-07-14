@@ -77,6 +77,10 @@ export const GitHubProvider: OAuthProviderConfig = {
 						userInfo.email_verified = primaryEmail.verified;
 					}
 				}
+			} else {
+				// Drain the unread body so undici returns the socket to the pool
+				// (same pattern as OAuthProvider's fetch error paths)
+				await emailResponse.body?.cancel();
 			}
 		} catch (error) {
 			// Email fetch failed, continue without it
