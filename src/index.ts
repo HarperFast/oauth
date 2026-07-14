@@ -24,7 +24,15 @@ import type { Scope, OAuthPluginConfig, ProviderRegistry, OAuthHooks } from './t
 // Export HookManager class, OAuthResource class, and types
 export { HookManager } from './lib/hookManager.ts';
 export { OAuthResource } from './lib/resource.ts';
-export type { OAuthHooks, OAuthUser, TokenResponse } from './types.ts';
+export type {
+	OAuthHooks,
+	OAuthUser,
+	TokenResponse,
+	OnLoginResult,
+	OnLoginResultOk,
+	OnLoginResultDenied,
+	OnLoginResultNeedsConfirmation,
+} from './types.ts';
 
 // Export multi-tenant SSO support
 export { TenantManager } from './lib/tenantManager.ts';

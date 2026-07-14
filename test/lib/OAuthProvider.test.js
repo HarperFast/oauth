@@ -164,6 +164,21 @@ describe('OAuthProvider', () => {
 			assert.equal(harperUser.provider, 'test');
 		});
 
+		it('should normalize email_verified into emailVerified (#174 follow-up)', () => {
+			const base = { sub: '1', email: 'user@example.com' };
+
+			assert.equal(provider.mapUserToHarper({ ...base, email_verified: true }).emailVerified, true);
+			assert.equal(provider.mapUserToHarper({ ...base, email_verified: false }).emailVerified, false);
+			// Absent or non-boolean claims must stay undefined — consumers gate on === true
+			assert.equal(provider.mapUserToHarper(base).emailVerified, undefined);
+			assert.equal(provider.mapUserToHarper({ ...base, email_verified: 'true' }).emailVerified, undefined);
+			// Raw claim still reachable for consumers that need the provider's exact value
+			assert.equal(
+				provider.mapUserToHarper({ ...base, email_verified: 'true' }).metadata.oauthClaims.email_verified,
+				'true'
+			);
+		});
+
 		it('should use custom username claim', () => {
 			const customConfig = {
 				...mockConfig,

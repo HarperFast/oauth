@@ -2,6 +2,19 @@
 
 All notable changes to `@harperfast/oauth` are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Entries prior to 2.2.0 were backfilled from the [GitHub release notes](https://github.com/HarperFast/oauth/releases).
 
+## [Unreleased]
+
+### Added
+
+- **`onLogin` controls the login outcome** (#174): the hook may return `{ status: 'denied', error?, redirect? }` or `{ status: 'needs_confirmation', redirect }` to stop a session from being created (deny the login, or defer it to an onboarding/confirmation step). Plain-object and `undefined` returns behave exactly as before; `{ status: 'ok', ... }` is the explicit equivalent. In MCP flows a gated login fails the authorization cleanly with `access_denied` to the MCP client. New exported types: `OnLoginResult`, `OnLoginResultOk`, `OnLoginResultDenied`, `OnLoginResultNeedsConfirmation`.
+  - ⚠️ **Compatibility edge:** the status values `denied` and `needs_confirmation` are newly reserved. A hook that previously returned `status` with exactly one of those values as ordinary session-enrichment data now gates the login instead. Any other `status` value keeps the legacy merge-into-session behavior (with a warning logged, since it may be a typo'd gating attempt).
+  - ⚠️ **Migration note — throw-to-deny never worked:** earlier docs suggested throwing from `onLogin` to prevent a login (e.g. suspended accounts). Thrown errors have **always** been caught and logged with the login proceeding — that pattern was fail-open in every release, and it still is. If your hook throws to deny, it is not denying anything: migrate to `return { status: 'denied', ... }`, which is the first mechanism that actually gates.
+- **`oauthUser.emailVerified`** (#174 follow-up): normalized boolean on the mapped user (from the provider's `email_verified` claim); `undefined` when the provider didn't attest. Replaces digging through `metadata.oauthClaims.email_verified`.
+
+### Fixed
+
+- **GitHub provider: `email_verified` is now dependable** (#174): `/user/emails` is always consulted, so the claim is populated for users with a public profile email too (previously it was only set when the email had to be fetched). Hook consumers can gate provisioning on `email_verified` consistently across providers. The request is bounded by a 5s timeout, and a non-OK response (e.g. missing `user:email` scope) logs a warning while degrading gracefully.
+
 ## [2.2.1] - 2026-07-11
 
 Docs-only patch — refreshes the README (and therefore the npm package page), which predated 2.2.0's MCP features.
