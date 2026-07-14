@@ -711,7 +711,6 @@ describe('OAuth Handlers', () => {
 		it('hook-provided javascript: redirect is neutralized', async () => {
 			mockHookManager.callOnLogin = createMockFn(async () => ({
 				status: 'denied',
-				// eslint-disable-next-line no-script-url
 				redirect: 'javascript:alert(1)',
 			}));
 
