@@ -2,7 +2,7 @@
 
 Notable changes to the `@harperfast/oauth` **1.x maintenance line** are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). History prior to 1.6.0 lives in the [GitHub release notes](https://github.com/HarperFast/oauth/releases); the 2.x line has its own changelog on `main`.
 
-## [Unreleased]
+## [1.6.0] - 2026-07-14
 
 ### Added
 

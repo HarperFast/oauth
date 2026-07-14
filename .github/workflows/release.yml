@@ -37,6 +37,9 @@ jobs:
         run: npm test
 
       - name: Publish to npm
-        run: npm publish --provenance --access public
+        # --tag v1: the 1.x maintenance line must never take npm's `latest`
+        # dist-tag — 2.x (main) owns latest. Consumers install via
+        # `@harperfast/oauth@1` / `@harperfast/oauth@v1`.
+        run: npm publish --provenance --access public --tag v1
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_ACCESS_KEY }}
