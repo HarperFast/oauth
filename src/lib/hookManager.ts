@@ -54,7 +54,9 @@ export class HookManager {
 			const result = await this.hooks.onLogin(oauthUser, tokenResponse, session, request, provider);
 			return result;
 		} catch (error) {
-			this.logger?.error?.('onLogin hook failed:', (error as Error).message);
+			// instanceof (not a cast): a hook may throw a non-Error (string, null)
+			// and reading `.message` off it would throw from this catch itself
+			this.logger?.error?.('onLogin hook failed:', error instanceof Error ? error.message : String(error));
 			// Don't throw - hooks should not break the OAuth flow
 			return;
 		}

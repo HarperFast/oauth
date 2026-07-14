@@ -197,7 +197,7 @@ async function onLogin(
 
 **Parameters:**
 
-- `oauthUser` - OAuth user profile (username, email, name, role)
+- `oauthUser` - OAuth user profile (username, email, name, role). `oauthUser.emailVerified` is `true`/`false` when the provider attested the email's verified status, `undefined` when it didn't — gate provisioning on `emailVerified === true`, never on "not false". (Raw provider claims remain available at `oauthUser.metadata.oauthClaims`.)
 - `tokenResponse` - Complete OAuth token response from provider
 - `session` - Current session object
 - `request` - HTTP request object
@@ -218,7 +218,7 @@ The return value decides whether a session is created (since v1.6.0 on the 1.x l
 - **`denied`** — the browser is sent to `redirect` when given, otherwise to the standard error redirect (`postLoginRedirect` with `error=access_denied`, plus `reason` from `error`). Use for unprovisioned, deactivated, or otherwise unapproved users.
 - **`needs_confirmation`** — the browser is sent to `redirect` (e.g. a "finish setup" page). Use when a first-time user must complete onboarding or confirmation before their first session.
 - `redirect` may be a relative path or an absolute `http(s)` URL (the hook is trusted app code; other schemes are rejected).
-- Backward compatible: returning a plain object or nothing behaves exactly as before. Only the `denied` and `needs_confirmation` status values change behavior.
+- Backward compatible: returning a plain object or nothing behaves exactly as before. Only the `denied` and `needs_confirmation` status values change behavior — these two values are **newly reserved**: an enrichment object that previously happened to use `status` with exactly one of them would now gate the login instead of merging into the session. Any other `status` value is still treated as plain session data (a warning is logged, since it may be a typo'd gating attempt).
 
 ```javascript
 async function handleLogin(oauthUser, tokenResponse, session, request, provider) {
@@ -247,9 +247,10 @@ async function handleLogin(oauthUser, tokenResponse, session, request, provider)
 	const { User } = tables;
 	const context = request.context || {};
 
-	// Validate email
+	// Validate email — return a denied outcome (a throw would be logged and
+	// the login would proceed; see "Controlling the login outcome")
 	if (!oauthUser?.email) {
-		throw new Error('OAuth provider did not provide email');
+		return { status: 'denied', error: 'missing_email' };
 	}
 
 	// Find existing user by email
@@ -399,7 +400,7 @@ async function handleLogin(oauthUser, tokenResponse, session, request, provider)
 	const context = request.context || {};
 
 	if (!oauthUser?.email) {
-		throw new Error('OAuth provider did not provide email');
+		return { status: 'denied', error: 'missing_email' };
 	}
 
 	// Find existing user by email
@@ -580,9 +581,9 @@ async function handleLogin(oauthUser, tokenResponse, session, request, provider)
 
 ```javascript
 async function handleLogin(oauthUser, tokenResponse, session, request, provider) {
-	// Validate email format
+	// Validate email format — deny rather than throw (throws don't gate)
 	if (!isValidEmail(oauthUser.email)) {
-		throw new Error('Invalid email address');
+		return { status: 'denied', error: 'invalid_email' };
 	}
 
 	// Don't store raw OAuth tokens in logs

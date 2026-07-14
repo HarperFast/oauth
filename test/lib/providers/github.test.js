@@ -378,9 +378,47 @@ describe('GitHub Provider', () => {
 		}
 	});
 
+	it('should bound the emails fetch with an abort signal and degrade gracefully on timeout', async () => {
+		const github = getProvider('github');
+
+		let warned = false;
+		const mockHelpers = {
+			getUserInfo: async () => ({
+				login: 'testuser',
+				name: 'Test User',
+				email: 'public@example.com',
+			}),
+			logger: {
+				warn: () => {
+					warned = true;
+				},
+			},
+		};
+
+		let sawSignal = false;
+		const originalFetch = global.fetch;
+		global.fetch = async (url, options) => {
+			sawSignal = options.signal instanceof AbortSignal;
+			const error = new Error('The operation was aborted due to timeout');
+			error.name = 'TimeoutError';
+			throw error;
+		};
+
+		try {
+			const userInfo = await github.getUserInfo.call({ config: github }, 'test-token', mockHelpers);
+			assert.ok(sawSignal, 'emails fetch must carry an AbortSignal');
+			assert.equal(userInfo.email, 'public@example.com', 'timeout must not break the login');
+			assert.equal(userInfo.email_verified, undefined);
+			assert.ok(warned, 'timeout should be logged');
+		} finally {
+			global.fetch = originalFetch;
+		}
+	});
+
 	it('should handle when email API returns non-OK status', async () => {
 		const github = getProvider('github');
 
+		let warned = false;
 		const mockHelpers = {
 			getUserInfo: async () => ({
 				login: 'testuser',
@@ -390,7 +428,9 @@ describe('GitHub Provider', () => {
 			logger: {
 				info: () => {},
 				debug: () => {},
-				warn: () => {},
+				warn: (msg) => {
+					if (msg.includes('/user/emails returned 403')) warned = true;
+				},
 			},
 		};
 
@@ -412,6 +452,7 @@ describe('GitHub Provider', () => {
 			// Should return user info without email when API fails
 			assert.equal(userInfo.login, 'testuser');
 			assert.equal(userInfo.email, null);
+			assert.ok(warned, 'non-OK response (e.g. missing user:email scope) should warn');
 		} finally {
 			global.fetch = originalFetch;
 		}

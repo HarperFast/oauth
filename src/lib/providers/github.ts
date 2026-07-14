@@ -57,6 +57,8 @@ export const GitHubProvider: OAuthProviderConfig = {
 					Authorization: `Bearer ${accessToken}`,
 					Accept: 'application/json',
 				},
+				// Bounded so a stalled response can't hold the login callback open
+				signal: AbortSignal.timeout(5000),
 			});
 
 			if (emailResponse.ok) {
@@ -78,6 +80,10 @@ export const GitHubProvider: OAuthProviderConfig = {
 					}
 				}
 			} else {
+				// The case operators actually hit when the user:email scope is missing
+				helpers.logger?.warn?.(
+					`GitHub /user/emails returned ${emailResponse.status} — email/email_verified unavailable (is the user:email scope granted?)`
+				);
 				// Drain the unread body so undici returns the socket to the pool
 				// (same pattern as OAuthProvider's fetch error paths)
 				await emailResponse.body?.cancel();

@@ -249,4 +249,20 @@ describe('Hook Redirect Resolution (#174)', () => {
 		assert.strictEqual(resolveHookRedirect('finish/setup'), '/finish/setup');
 		assert.strictEqual(resolveHookRedirect('http://'), '/');
 	});
+
+	it('should strip embedded CR/LF via WHATWG normalization (no header injection)', () => {
+		assert.strictEqual(
+			resolveHookRedirect('https://accounts.example.com/a\r\nSet-Cookie: x=y'),
+			'https://accounts.example.com/aSet-Cookie:%20x=y'
+		);
+		assert.ok(!resolveHookRedirect('https://x.example.com/a\r\nb').includes('\r'));
+		assert.ok(!resolveHookRedirect('https://x.example.com/a\r\nb').includes('\n'));
+	});
+
+	it('should neutralize scheme/host obfuscations (pinning WHATWG parser behavior)', () => {
+		// Backslash treated as slash by the parser → protocol-relative → path-only
+		assert.strictEqual(resolveHookRedirect('/\\evil.com/phish'), '/phish');
+		// Leading whitespace is stripped before scheme detection
+		assert.strictEqual(resolveHookRedirect(' javascript:alert(1)'), '/');
+	});
 });

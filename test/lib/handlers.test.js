@@ -779,7 +779,7 @@ describe('OAuth Handlers', () => {
 			assert.equal(sessionData.status, undefined, "flow-control 'ok' must not leak into the session");
 		});
 
-		it('unknown status value keeps legacy enrich behavior (merged, login proceeds)', async () => {
+		it('unknown status value keeps legacy enrich behavior (merged, login proceeds) and warns', async () => {
 			mockHookManager.callOnLogin = createMockFn(async () => ({ status: 'active', user: 'internal-42' }));
 
 			const result = await callback();
@@ -789,6 +789,21 @@ describe('OAuth Handlers', () => {
 			const sessionData = mockRequest.session.update.mock.calls[0].arguments[0];
 			assert.equal(sessionData.user, 'internal-42');
 			assert.equal(sessionData.status, 'active', 'non-outcome status values are session data as before');
+			assert.ok(
+				mockLogger.warn.mock.calls.some((call) => call.arguments[0].includes("unrecognized status 'active'")),
+				'a typo-guard warning must be logged'
+			);
+		});
+
+		it('status ok does not warn', async () => {
+			mockHookManager.callOnLogin = createMockFn(async () => ({ status: 'ok', user: 'internal-42' }));
+
+			await callback();
+
+			assert.ok(
+				!mockLogger.warn.mock.calls.some((call) => String(call.arguments[0]).includes('unrecognized status')),
+				'recognized statuses must not warn'
+			);
 		});
 	});
 

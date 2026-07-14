@@ -285,6 +285,9 @@ export class OAuthProvider implements IOAuthProvider {
 			provider: this.config.provider,
 			providerUserId: userInfo.sub || userInfo.id || userInfo.user_id,
 			email: userInfo.email,
+			// Strictly boolean — some IdPs omit the claim entirely; the raw value
+			// (whatever its type) stays available in metadata.oauthClaims
+			emailVerified: typeof userInfo.email_verified === 'boolean' ? userInfo.email_verified : undefined,
 			name: userInfo.name || userInfo.display_name || userInfo.full_name,
 			metadata: {
 				oauthProvider: this.config.provider,

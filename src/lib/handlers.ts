@@ -88,7 +88,10 @@ function buildErrorRedirect(rawUrl: string, params: Record<string, string>): str
 export function resolveHookRedirect(redirect: string): string {
 	try {
 		const url = new URL(redirect);
-		return url.protocol === 'http:' || url.protocol === 'https:' ? redirect : '/';
+		// Return the parsed href, not the raw input: WHATWG normalization
+		// strips embedded control characters (e.g. CR/LF) before the value
+		// reaches a Location header.
+		return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : '/';
 	} catch {
 		return sanitizeRedirect(redirect);
 	}
@@ -264,6 +267,14 @@ export async function handleCallback(
 				reason: reason || (denied ? 'denied' : 'confirmation_required'),
 			});
 			return { status: 302, headers: { Location: errorUrl } };
+		}
+
+		// Legacy behavior treats any other status value as session data, which
+		// silently un-gates a typo'd 'denied' — surface it (#175 review).
+		if (typeof hookData?.status === 'string' && hookData.status !== 'ok') {
+			logger?.warn?.(
+				`onLogin returned unrecognized status '${hookData.status}' — treated as session data (legacy behavior); use 'denied' or 'needs_confirmation' to gate the login`
+			);
 		}
 
 		// Store in session if available

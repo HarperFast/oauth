@@ -246,6 +246,13 @@ export interface OAuthUser {
 	/** User ID from the OAuth provider */
 	providerUserId?: string;
 	email?: string;
+	/**
+	 * Whether the provider attests that `email` is verified. Normalized from
+	 * the provider's boolean `email_verified` claim (OIDC providers; GitHub's
+	 * /user/emails `verified` flag). `undefined` when the provider didn't say —
+	 * gate on `emailVerified === true`, never on "not false".
+	 */
+	emailVerified?: boolean;
 	name?: string;
 	/** Additional provider-specific data */
 	metadata?: Record<string, any>;

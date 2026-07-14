@@ -110,6 +110,29 @@ describe('HookManager', () => {
 			const result = await hookManager.callOnLogin({}, {}, {}, {}, 'github');
 			assert.equal(result, outcome);
 		});
+
+		it('should not throw and still logs when hook throws a non-Error string', async () => {
+			hookManager.register({
+				onLogin: async () => {
+					throw 'string-error'; // eslint-disable-line no-throw-literal
+				},
+			});
+			// Must resolve without throwing even though the hook threw a non-Error.
+			const result = await hookManager.callOnLogin({}, {}, {}, {}, 'github');
+			assert.equal(result, undefined);
+			assert.equal(mockLogger.error.mock.calls.length, 1, 'error still logged');
+		});
+
+		it('should not throw and still logs when hook throws null', async () => {
+			hookManager.register({
+				onLogin: async () => {
+					throw null; // eslint-disable-line no-throw-literal
+				},
+			});
+			const result = await hookManager.callOnLogin({}, {}, {}, {}, 'github');
+			assert.equal(result, undefined);
+			assert.equal(mockLogger.error.mock.calls.length, 1, 'error still logged');
+		});
 	});
 
 	describe('callOnLogout', () => {
