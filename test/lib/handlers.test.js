@@ -659,6 +659,117 @@ describe('OAuth Handlers', () => {
 		});
 	});
 
+	describe('handleCallback — onLogin outcome gating (#174)', () => {
+		const callback = () =>
+			handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockHookManager, 'test-provider', {
+				logger: mockLogger,
+			});
+
+		it('denied without redirect → standard error redirect, no session', async () => {
+			mockHookManager.callOnLogin = createMockFn(async () => ({ status: 'denied' }));
+
+			const result = await callback();
+
+			assert.equal(result.status, 302);
+			assert.equal(result.headers.Location, '/dashboard?error=access_denied&reason=denied');
+			assert.equal(mockRequest.session.update.mock.calls.length, 0, 'no session must be created');
+		});
+
+		it('denied with error → error string surfaced as reason', async () => {
+			mockHookManager.callOnLogin = createMockFn(async () => ({ status: 'denied', error: 'not_provisioned' }));
+
+			const result = await callback();
+
+			assert.equal(result.status, 302);
+			assert.equal(result.headers.Location, '/dashboard?error=access_denied&reason=not_provisioned');
+			assert.equal(mockRequest.session.update.mock.calls.length, 0);
+		});
+
+		it('denied with relative redirect → 302 to it, no session', async () => {
+			mockHookManager.callOnLogin = createMockFn(async () => ({ status: 'denied', redirect: '/access-denied' }));
+
+			const result = await callback();
+
+			assert.equal(result.status, 302);
+			assert.equal(result.headers.Location, '/access-denied');
+			assert.equal(mockRequest.session.update.mock.calls.length, 0);
+		});
+
+		it('hook-provided absolute http(s) redirect passes through (trusted app code)', async () => {
+			mockHookManager.callOnLogin = createMockFn(async () => ({
+				status: 'needs_confirmation',
+				redirect: 'https://accounts.example.com/finish-setup',
+			}));
+
+			const result = await callback();
+
+			assert.equal(result.status, 302);
+			assert.equal(result.headers.Location, 'https://accounts.example.com/finish-setup');
+			assert.equal(mockRequest.session.update.mock.calls.length, 0);
+		});
+
+		it('hook-provided javascript: redirect is neutralized', async () => {
+			mockHookManager.callOnLogin = createMockFn(async () => ({
+				status: 'denied',
+				// eslint-disable-next-line no-script-url
+				redirect: 'javascript:alert(1)',
+			}));
+
+			const result = await callback();
+
+			assert.equal(result.status, 302);
+			assert.equal(result.headers.Location, '/');
+		});
+
+		it('needs_confirmation with redirect → 302 to it, no session', async () => {
+			mockHookManager.callOnLogin = createMockFn(async () => ({
+				status: 'needs_confirmation',
+				redirect: '/onboarding',
+			}));
+
+			const result = await callback();
+
+			assert.equal(result.status, 302);
+			assert.equal(result.headers.Location, '/onboarding');
+			assert.equal(mockRequest.session.update.mock.calls.length, 0);
+		});
+
+		it('needs_confirmation missing redirect (JS hook bug) → error redirect fallback', async () => {
+			mockHookManager.callOnLogin = createMockFn(async () => ({ status: 'needs_confirmation' }));
+
+			const result = await callback();
+
+			assert.equal(result.status, 302);
+			assert.equal(result.headers.Location, '/dashboard?error=access_denied&reason=confirmation_required');
+			assert.equal(mockRequest.session.update.mock.calls.length, 0);
+		});
+
+		it('status ok is stripped from session data, user honored', async () => {
+			mockHookManager.callOnLogin = createMockFn(async () => ({ status: 'ok', user: 'internal-42', extra: 'kept' }));
+
+			const result = await callback();
+
+			assert.equal(result.status, 302);
+			assert.equal(result.headers.Location, '/dashboard');
+			const sessionData = mockRequest.session.update.mock.calls[0].arguments[0];
+			assert.equal(sessionData.user, 'internal-42');
+			assert.equal(sessionData.extra, 'kept');
+			assert.equal(sessionData.status, undefined, "flow-control 'ok' must not leak into the session");
+		});
+
+		it('unknown status value keeps legacy enrich behavior (merged, login proceeds)', async () => {
+			mockHookManager.callOnLogin = createMockFn(async () => ({ status: 'active', user: 'internal-42' }));
+
+			const result = await callback();
+
+			assert.equal(result.status, 302);
+			assert.equal(result.headers.Location, '/dashboard');
+			const sessionData = mockRequest.session.update.mock.calls[0].arguments[0];
+			assert.equal(sessionData.user, 'internal-42');
+			assert.equal(sessionData.status, 'active', 'non-outcome status values are session data as before');
+		});
+	});
+
 	describe('handleCallback — MCP branch', () => {
 		let originalDatabases;
 		let storedAuthCodes;
@@ -778,6 +889,52 @@ describe('OAuth Handlers', () => {
 			assert.equal(result.status, 302);
 			const [record] = storedAuthCodes.values();
 			assert.equal(record.user, 'internal-user-id-42');
+		});
+
+		it('onLogin denied → access_denied to MCP client, no auth code minted (#174)', async () => {
+			mockHookManager.callOnLogin = createMockFn(async () => ({ status: 'denied', error: 'not_provisioned' }));
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				{ mcpConfig: MCP_CONFIG, logger: mockLogger }
+			);
+			assert.equal(result.status, 302);
+			const url = new URL(result.headers.Location);
+			assert.equal(url.origin + url.pathname, MCP_STATE.redirectUri);
+			assert.equal(url.searchParams.get('error'), 'access_denied');
+			assert.equal(url.searchParams.get('error_description'), 'not_provisioned');
+			assert.equal(url.searchParams.get('state'), MCP_STATE.clientState);
+			assert.ok(url.searchParams.get('iss'), 'iss required on MCP error redirects (RFC 9207)');
+			assert.equal(storedAuthCodes.size, 0, 'no auth code must be minted');
+		});
+
+		it('onLogin needs_confirmation → access_denied to MCP client (interactive step not possible) (#174)', async () => {
+			mockHookManager.callOnLogin = createMockFn(async () => ({
+				status: 'needs_confirmation',
+				redirect: '/onboarding',
+			}));
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				{ mcpConfig: MCP_CONFIG, logger: mockLogger }
+			);
+			assert.equal(result.status, 302);
+			const url = new URL(result.headers.Location);
+			assert.equal(
+				url.origin + url.pathname,
+				MCP_STATE.redirectUri,
+				'must fail cleanly to the MCP client, not follow the interactive redirect'
+			);
+			assert.equal(url.searchParams.get('error'), 'access_denied');
+			assert.equal(storedAuthCodes.size, 0);
 		});
 
 		it('routes upstream IdP error to MCP client redirect_uri (not Harper postLoginRedirect)', async () => {

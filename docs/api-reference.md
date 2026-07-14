@@ -212,6 +212,9 @@ function registerHooks(hooks: { onLogin?: Function; onLogout?: Function; onToken
 ```javascript
 registerHooks({
 	onLogin: async (oauthUser, tokenResponse, session, request, provider) => {
+		// Merge data into the session — or gate the login by returning
+		// { status: 'denied' } / { status: 'needs_confirmation', redirect }
+		// (see docs/lifecycle-hooks.md#onlogin)
 		return { userId: user.id };
 	},
 	onLogout: async (session, request) => {

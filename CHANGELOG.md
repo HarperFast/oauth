@@ -2,6 +2,16 @@
 
 All notable changes to `@harperfast/oauth` are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Entries prior to 2.2.0 were backfilled from the [GitHub release notes](https://github.com/HarperFast/oauth/releases).
 
+## [Unreleased]
+
+### Added
+
+- **`onLogin` controls the login outcome** (#174): the hook may return `{ status: 'denied', error?, redirect? }` or `{ status: 'needs_confirmation', redirect }` to stop a session from being created (deny the login, or defer it to an onboarding/confirmation step). Plain-object and `undefined` returns behave exactly as before; `{ status: 'ok', ... }` is the explicit equivalent. In MCP flows a gated login fails the authorization cleanly with `access_denied` to the MCP client. New exported types: `OnLoginResult`, `OnLoginResultOk`, `OnLoginResultDenied`, `OnLoginResultNeedsConfirmation`.
+
+### Fixed
+
+- **GitHub provider: `email_verified` is now dependable** (#174): `/user/emails` is always consulted, so the claim is populated for users with a public profile email too (previously it was only set when the email had to be fetched). Hook consumers can gate provisioning on `email_verified` consistently across providers.
+
 ## [2.2.1] - 2026-07-11
 
 Docs-only patch — refreshes the README (and therefore the npm package page), which predated 2.2.0's MCP features.

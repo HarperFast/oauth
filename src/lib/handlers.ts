@@ -8,7 +8,17 @@ import { readFile } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { RequestTarget } from 'harper';
-import type { Request, Logger, IOAuthProvider, MCPAuthorizeState, MCPConfig, OAuthProviderConfig } from '../types.ts';
+import type {
+	Request,
+	Logger,
+	IOAuthProvider,
+	MCPAuthorizeState,
+	MCPConfig,
+	OAuthProviderConfig,
+	OnLoginResult,
+	OnLoginResultDenied,
+	OnLoginResultNeedsConfirmation,
+} from '../types.ts';
 import { consentNonceMatches, readConsentNonce } from './mcp/consentBinding.ts';
 import { handleMCPCallback } from './mcp/index.ts';
 import { resolveIssuer } from './mcp/wellKnown.ts';
@@ -71,6 +81,31 @@ function buildErrorRedirect(rawUrl: string, params: Record<string, string>): str
 		url.searchParams.set(key, value);
 	}
 	return url.pathname + url.search + url.hash;
+}
+
+/**
+ * Resolve a redirect provided by the onLogin hook (trusted app code, not user
+ * input). Unlike sanitizeRedirect, absolute http(s) URLs pass through — an app
+ * may legitimately send the user to another host (e.g. a central onboarding
+ * page). Anything else falls back to sanitizeRedirect's path-only handling,
+ * which also neutralizes javascript:/data: schemes and protocol-relative URLs.
+ */
+export function resolveHookRedirect(redirect: string): string {
+	try {
+		const url = new URL(redirect);
+		return url.protocol === 'http:' || url.protocol === 'https:' ? redirect : '/';
+	} catch {
+		return sanitizeRedirect(redirect);
+	}
+}
+
+/**
+ * onLogin outcomes that gate the login (#174): no session, no MCP auth code.
+ */
+function isGatedLoginOutcome(
+	hookData: OnLoginResult | void
+): hookData is OnLoginResultDenied | OnLoginResultNeedsConfirmation {
+	return !!hookData && (hookData.status === 'denied' || hookData.status === 'needs_confirmation');
 }
 
 /**
@@ -281,6 +316,34 @@ export async function handleCallback(
 		// Pass providerName (registry key) not config.provider (provider type) for multi-tenant support
 		const hookData = await hookManager.callOnLogin(user, tokenResponse, request.session, request, providerName);
 
+		// Structured outcome (#174): the hook can deny the login outright or
+		// defer it pending a confirmation step. Either way no session is
+		// created (and no MCP auth code is minted). Plain objects and
+		// undefined keep the legacy enrich-only behavior.
+		if (isGatedLoginOutcome(hookData)) {
+			const denied = hookData.status === 'denied';
+			const reason = denied ? hookData.error : undefined;
+			logger?.info?.(`OAuth login ${denied ? 'denied' : 'deferred'} by onLogin hook for user: ${user.username}`);
+			if (mcpState) {
+				// An MCP client can't follow an interactive confirmation step —
+				// fail the authorization cleanly; the user completes the step in
+				// the app and the client retries.
+				return mcpErrorRedirect(
+					mcpState,
+					'access_denied',
+					reason || (denied ? 'login denied by application' : 'confirmation required')
+				);
+			}
+			if (hookData.redirect) {
+				return { status: 302, headers: { Location: resolveHookRedirect(hookData.redirect) } };
+			}
+			const errorUrl = buildErrorRedirect(tokenData.originalUrl || config.postLoginRedirect || '/', {
+				error: 'access_denied',
+				reason: reason || (denied ? 'denied' : 'confirmation_required'),
+			});
+			return { status: 302, headers: { Location: errorUrl } };
+		}
+
 		// MCP branch: if the CSRF state was minted by /oauth/mcp/authorize, the
 		// upstream callback's job is to mint an MCP authorization code, NOT to
 		// create a Harper session. Independent lifecycle per #86 resolved
@@ -333,6 +396,9 @@ export async function handleCallback(
 			if (hookData) {
 				// eslint-disable-next-line @typescript-eslint/no-unused-vars, sonarjs/no-unused-vars
 				const { user, ...remainingHookData } = hookData;
+				// `status: 'ok'` is flow control (#174), not session data; any
+				// other status value is passed through as before.
+				if (remainingHookData.status === 'ok') delete remainingHookData.status;
 				Object.assign(sessionData, remainingHookData);
 			}
 

@@ -4,7 +4,7 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { sanitizeRedirect } from '../dist/lib/handlers.js';
+import { sanitizeRedirect, resolveHookRedirect } from '../dist/lib/handlers.js';
 
 describe('Redirect Parameter Security', () => {
 	it('should sanitize absolute URLs to relative paths', () => {
@@ -212,5 +212,41 @@ describe('Redirect Parameter Security', () => {
 
 			assert.strictEqual(sanitized, expected, description);
 		}
+	});
+});
+
+describe('Hook Redirect Resolution (#174)', () => {
+	it('should pass through absolute http(s) URLs (hook is trusted app code)', () => {
+		assert.strictEqual(
+			resolveHookRedirect('https://accounts.example.com/onboard?step=1'),
+			'https://accounts.example.com/onboard?step=1'
+		);
+		assert.strictEqual(resolveHookRedirect('http://localhost:9926/finish'), 'http://localhost:9926/finish');
+	});
+
+	it('should keep relative paths', () => {
+		assert.strictEqual(resolveHookRedirect('/denied'), '/denied');
+		assert.strictEqual(resolveHookRedirect('/onboard?step=1#top'), '/onboard?step=1#top');
+	});
+
+	it('should block dangerous protocols', () => {
+		const testCases = [
+			'javascript:alert(1)', // eslint-disable-line no-script-url
+			'data:text/html,<script>alert(1)</script>',
+			'vbscript:msgbox(1)',
+			'file:///etc/passwd',
+		];
+		for (const input of testCases) {
+			assert.strictEqual(resolveHookRedirect(input), '/', input);
+		}
+	});
+
+	it('should reduce protocol-relative URLs to their path', () => {
+		assert.strictEqual(resolveHookRedirect('//evil.com/phish'), '/phish');
+	});
+
+	it('should root bare relative paths and fall back to / for unparseable input', () => {
+		assert.strictEqual(resolveHookRedirect('finish/setup'), '/finish/setup');
+		assert.strictEqual(resolveHookRedirect('http://'), '/');
 	});
 });

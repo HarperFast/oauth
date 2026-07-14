@@ -192,7 +192,7 @@ async function onLogin(
 	session: Session,
 	request: Request,
 	provider: string
-): Promise<object | void>;
+): Promise<OnLoginResult | void>;
 ```
 
 **Parameters:**
@@ -203,7 +203,43 @@ async function onLogin(
 - `request` - HTTP request object
 - `provider` - Provider name (e.g., 'github', 'google')
 
-**Returns:** Object to merge into session. **Important:** Return `{ user: userId }` to set the Harper system username for authentication.
+**Returns:** Object to merge into session, or a structured outcome that controls the login (see below). **Important:** Return `{ user: userId }` to set the Harper system username for authentication.
+
+#### Controlling the login outcome
+
+The return value decides whether a session is created (since v2.3.0, [#174](https://github.com/HarperFast/oauth/issues/174)):
+
+```javascript
+{ status: 'ok', user, ...data }               // establish the session (same as a plain object or no return)
+{ status: 'denied', error?, redirect? }       // do NOT establish a session
+{ status: 'needs_confirmation', redirect }    // do NOT establish a session yet — send the user to finish a step
+```
+
+- **`denied`** — the browser is sent to `redirect` when given, otherwise to the standard error redirect (`postLoginRedirect` with `error=access_denied`, plus `reason` from `error`). Use for unprovisioned, deactivated, or otherwise unapproved users.
+- **`needs_confirmation`** — the browser is sent to `redirect` (e.g. a "finish setup" page). Use when a first-time user must complete onboarding or confirmation before their first session.
+- `redirect` may be a relative path or an absolute `http(s)` URL (the hook is trusted app code; other schemes are rejected).
+- Backward compatible: returning a plain object or nothing behaves exactly as before. Only the `denied` and `needs_confirmation` status values change behavior.
+- During an [MCP OAuth flow](./mcp-oauth.md), both gating outcomes fail the authorization cleanly with `access_denied` to the MCP client (an MCP client can't follow an interactive redirect).
+
+```javascript
+async function handleLogin(oauthUser, tokenResponse, session, request, provider) {
+	const account = await findAccount(oauthUser.email);
+
+	if (!account) {
+		// Not provisioned — reject the login, no session is created
+		return { status: 'denied', error: 'not_provisioned' };
+	}
+
+	if (!account.onboardingComplete) {
+		// Defer the login until onboarding is done
+		return { status: 'needs_confirmation', redirect: `/onboarding?account=${account.id}` };
+	}
+
+	return { status: 'ok', user: String(account.id) };
+}
+```
+
+**A thrown error does not gate the login.** Unexpected hook errors are caught and logged, and the flow proceeds as if the hook returned nothing — deliberate gating must be expressed via the return value.
 
 **Example:**
 
@@ -544,7 +580,7 @@ export class MyResource extends tables.Resource {
 
 ### Error Handling
 
-- **onLogin:** Throw errors to prevent login (e.g., suspended accounts)
+- **onLogin:** Return `{ status: 'denied' }` to prevent login (e.g., suspended accounts) — thrown errors are caught and logged and the login proceeds
 - **onLogout/onTokenRefresh:** Catch and log errors, don't throw (non-critical)
 
 ```javascript

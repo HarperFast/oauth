@@ -125,6 +125,14 @@ describe('HookManager', () => {
 			assert.equal(result, undefined);
 			assert.equal(mockLogger.error.mock.calls.length, 1, 'error still logged');
 		});
+
+		it('should pass a structured outcome through verbatim (#174)', async () => {
+			const outcome = { status: 'denied', error: 'not_provisioned', redirect: '/denied' };
+			hookManager.register({ onLogin: async () => outcome });
+
+			const result = await hookManager.callOnLogin({}, {}, {}, {}, 'github');
+			assert.equal(result, outcome);
+		});
 	});
 
 	describe('callOnLogout', () => {
