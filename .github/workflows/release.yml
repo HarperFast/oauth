@@ -24,6 +24,11 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
           cache: 'npm'
 
+      # Trusted publishing (OIDC) requires npm >= 11.5.1; the Node 22 runner
+      # ships npm 10.x, so upgrade before publishing. (Same as main.)
+      - name: Upgrade npm for trusted publishing
+        run: npm install -g npm@^11.5.1
+
       - name: Install dependencies
         run: npm ci
 
@@ -36,11 +41,13 @@ jobs:
       - name: Run tests
         run: npm test
 
+      # Auth is via npm trusted publishing (OIDC) using the id-token, same as
+      # main — no NODE_AUTH_TOKEN (the legacy NPM_ACCESS_KEY secret no longer
+      # exists; it fails ENEEDAUTH). The npmjs.com Trusted Publisher config
+      # (this repo, release.yml, Release environment) matches this workflow.
       - name: Publish to npm
         # --tag v1-lts: this is a maintenance branch — its releases must never
         # take npm's `latest` dist-tag (latest always tracks main). Consumers
         # install via `@harperfast/oauth@1`. (`v1` itself is rejected by npm:
         # tag names must not be valid semver ranges.)
         run: npm publish --provenance --access public --tag v1-lts
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_ACCESS_KEY }}
