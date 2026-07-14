@@ -37,9 +37,10 @@ jobs:
         run: npm test
 
       - name: Publish to npm
-        # --tag v1: this is a maintenance branch — its releases must never
+        # --tag v1-lts: this is a maintenance branch — its releases must never
         # take npm's `latest` dist-tag (latest always tracks main). Consumers
-        # install via `@harperfast/oauth@1`.
-        run: npm publish --provenance --access public --tag v1
+        # install via `@harperfast/oauth@1`. (`v1` itself is rejected by npm:
+        # tag names must not be valid semver ranges.)
+        run: npm publish --provenance --access public --tag v1-lts
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_ACCESS_KEY }}
