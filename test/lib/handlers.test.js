@@ -683,6 +683,129 @@ describe('OAuth Handlers', () => {
 		});
 	});
 
+	describe('handleCallback — onLogin outcome gating (#174)', () => {
+		const callback = () =>
+			handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockHookManager, 'test-provider', mockLogger);
+
+		it('denied without redirect → standard error redirect, no session', async () => {
+			mockHookManager.callOnLogin = createMockFn(async () => ({ status: 'denied' }));
+
+			const result = await callback();
+
+			assert.equal(result.status, 302);
+			assert.equal(result.headers.Location, '/dashboard?error=access_denied&reason=denied');
+			assert.equal(mockRequest.session.update.mock.calls.length, 0, 'no session must be created');
+		});
+
+		it('denied with error → error string surfaced as reason', async () => {
+			mockHookManager.callOnLogin = createMockFn(async () => ({ status: 'denied', error: 'not_provisioned' }));
+
+			const result = await callback();
+
+			assert.equal(result.status, 302);
+			assert.equal(result.headers.Location, '/dashboard?error=access_denied&reason=not_provisioned');
+			assert.equal(mockRequest.session.update.mock.calls.length, 0);
+		});
+
+		it('denied with relative redirect → 302 to it, no session', async () => {
+			mockHookManager.callOnLogin = createMockFn(async () => ({ status: 'denied', redirect: '/access-denied' }));
+
+			const result = await callback();
+
+			assert.equal(result.status, 302);
+			assert.equal(result.headers.Location, '/access-denied');
+			assert.equal(mockRequest.session.update.mock.calls.length, 0);
+		});
+
+		it('hook-provided absolute http(s) redirect passes through (trusted app code)', async () => {
+			mockHookManager.callOnLogin = createMockFn(async () => ({
+				status: 'needs_confirmation',
+				redirect: 'https://accounts.example.com/finish-setup',
+			}));
+
+			const result = await callback();
+
+			assert.equal(result.status, 302);
+			assert.equal(result.headers.Location, 'https://accounts.example.com/finish-setup');
+			assert.equal(mockRequest.session.update.mock.calls.length, 0);
+		});
+
+		it('hook-provided javascript: redirect is neutralized', async () => {
+			mockHookManager.callOnLogin = createMockFn(async () => ({
+				status: 'denied',
+				redirect: 'javascript:alert(1)',
+			}));
+
+			const result = await callback();
+
+			assert.equal(result.status, 302);
+			assert.equal(result.headers.Location, '/');
+		});
+
+		it('needs_confirmation with redirect → 302 to it, no session', async () => {
+			mockHookManager.callOnLogin = createMockFn(async () => ({
+				status: 'needs_confirmation',
+				redirect: '/onboarding',
+			}));
+
+			const result = await callback();
+
+			assert.equal(result.status, 302);
+			assert.equal(result.headers.Location, '/onboarding');
+			assert.equal(mockRequest.session.update.mock.calls.length, 0);
+		});
+
+		it('needs_confirmation missing redirect (JS hook bug) → error redirect fallback', async () => {
+			mockHookManager.callOnLogin = createMockFn(async () => ({ status: 'needs_confirmation' }));
+
+			const result = await callback();
+
+			assert.equal(result.status, 302);
+			assert.equal(result.headers.Location, '/dashboard?error=access_denied&reason=confirmation_required');
+			assert.equal(mockRequest.session.update.mock.calls.length, 0);
+		});
+
+		it('status ok is stripped from session data, user honored', async () => {
+			mockHookManager.callOnLogin = createMockFn(async () => ({ status: 'ok', user: 'internal-42', extra: 'kept' }));
+
+			const result = await callback();
+
+			assert.equal(result.status, 302);
+			assert.equal(result.headers.Location, '/dashboard');
+			const sessionData = mockRequest.session.update.mock.calls[0].arguments[0];
+			assert.equal(sessionData.user, 'internal-42');
+			assert.equal(sessionData.extra, 'kept');
+			assert.equal(sessionData.status, undefined, "flow-control 'ok' must not leak into the session");
+		});
+
+		it('unknown status value keeps legacy enrich behavior (merged, login proceeds) and warns', async () => {
+			mockHookManager.callOnLogin = createMockFn(async () => ({ status: 'active', user: 'internal-42' }));
+
+			const result = await callback();
+
+			assert.equal(result.status, 302);
+			assert.equal(result.headers.Location, '/dashboard');
+			const sessionData = mockRequest.session.update.mock.calls[0].arguments[0];
+			assert.equal(sessionData.user, 'internal-42');
+			assert.equal(sessionData.status, 'active', 'non-outcome status values are session data as before');
+			assert.ok(
+				mockLogger.warn.mock.calls.some((call) => call.arguments[0].includes("unrecognized status 'active'")),
+				'a typo-guard warning must be logged'
+			);
+		});
+
+		it('status ok does not warn', async () => {
+			mockHookManager.callOnLogin = createMockFn(async () => ({ status: 'ok', user: 'internal-42' }));
+
+			await callback();
+
+			assert.ok(
+				!mockLogger.warn.mock.calls.some((call) => String(call.arguments[0]).includes('unrecognized status')),
+				'recognized statuses must not warn'
+			);
+		});
+	});
+
 	describe('handleLogout', () => {
 		it('should clear session data', async () => {
 			// Add delete method mock to session

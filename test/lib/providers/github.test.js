@@ -246,9 +246,179 @@ describe('GitHub Provider', () => {
 		}
 	});
 
+	it('should surface email_verified for a public profile email (#174)', async () => {
+		const github = getProvider('github');
+
+		const mockHelpers = {
+			getUserInfo: async () => ({
+				login: 'testuser',
+				name: 'Test User',
+				email: 'public@example.com', // public profile email — previously skipped /user/emails
+			}),
+			logger: { warn: () => {} },
+		};
+
+		const originalFetch = global.fetch;
+		global.fetch = async (url) => {
+			if (url === 'https://api.github.com/user/emails') {
+				return {
+					ok: true,
+					json: async () => [
+						{ email: 'other@example.com', primary: true, verified: false },
+						{ email: 'public@example.com', primary: false, verified: true },
+					],
+				};
+			}
+			throw new Error('Unexpected URL: ' + url);
+		};
+
+		try {
+			const userInfo = await github.getUserInfo.call({ config: github }, 'test-token', mockHelpers);
+			// The reported email must keep its own verified status (not the primary's)
+			assert.equal(userInfo.email, 'public@example.com');
+			assert.equal(userInfo.email_verified, true);
+		} finally {
+			global.fetch = originalFetch;
+		}
+	});
+
+	it('should leave email_verified unset when the public email is not in /user/emails', async () => {
+		const github = getProvider('github');
+
+		const mockHelpers = {
+			getUserInfo: async () => ({
+				login: 'testuser',
+				name: 'Test User',
+				email: 'public@example.com',
+			}),
+			logger: { warn: () => {} },
+		};
+
+		const originalFetch = global.fetch;
+		global.fetch = async (url) => {
+			if (url === 'https://api.github.com/user/emails') {
+				return {
+					ok: true,
+					json: async () => [{ email: 'other@example.com', primary: true, verified: true }],
+				};
+			}
+			throw new Error('Unexpected URL: ' + url);
+		};
+
+		try {
+			const userInfo = await github.getUserInfo.call({ config: github }, 'test-token', mockHelpers);
+			assert.equal(userInfo.email, 'public@example.com', 'public email must be preserved');
+			assert.equal(userInfo.email_verified, undefined, 'unknown status must not be guessed');
+		} finally {
+			global.fetch = originalFetch;
+		}
+	});
+
+	it('should preserve public email when the emails endpoint fails', async () => {
+		const github = getProvider('github');
+
+		let warned = false;
+		const mockHelpers = {
+			getUserInfo: async () => ({
+				login: 'testuser',
+				name: 'Test User',
+				email: 'public@example.com',
+			}),
+			logger: {
+				warn: () => {
+					warned = true;
+				},
+			},
+		};
+
+		const originalFetch = global.fetch;
+		global.fetch = async () => {
+			throw new Error('Network error');
+		};
+
+		try {
+			const userInfo = await github.getUserInfo.call({ config: github }, 'test-token', mockHelpers);
+			assert.equal(userInfo.email, 'public@example.com');
+			assert.equal(userInfo.email_verified, undefined);
+			assert.ok(warned, 'failure should be logged');
+		} finally {
+			global.fetch = originalFetch;
+		}
+	});
+
+	it('should set email_verified when filling a non-public email from primary', async () => {
+		const github = getProvider('github');
+
+		const mockHelpers = {
+			getUserInfo: async () => ({
+				login: 'testuser',
+				name: 'Test User',
+				email: null,
+			}),
+			logger: { warn: () => {} },
+		};
+
+		const originalFetch = global.fetch;
+		global.fetch = async (url) => {
+			if (url === 'https://api.github.com/user/emails') {
+				return {
+					ok: true,
+					json: async () => [{ email: 'primary@example.com', primary: true, verified: true }],
+				};
+			}
+			throw new Error('Unexpected URL: ' + url);
+		};
+
+		try {
+			const userInfo = await github.getUserInfo.call({ config: github }, 'test-token', mockHelpers);
+			assert.equal(userInfo.email, 'primary@example.com');
+			assert.equal(userInfo.email_verified, true);
+		} finally {
+			global.fetch = originalFetch;
+		}
+	});
+
+	it('should bound the emails fetch with an abort signal and degrade gracefully on timeout', async () => {
+		const github = getProvider('github');
+
+		let warned = false;
+		const mockHelpers = {
+			getUserInfo: async () => ({
+				login: 'testuser',
+				name: 'Test User',
+				email: 'public@example.com',
+			}),
+			logger: {
+				warn: () => {
+					warned = true;
+				},
+			},
+		};
+
+		let sawSignal = false;
+		const originalFetch = global.fetch;
+		global.fetch = async (url, options) => {
+			sawSignal = options.signal instanceof AbortSignal;
+			const error = new Error('The operation was aborted due to timeout');
+			error.name = 'TimeoutError';
+			throw error;
+		};
+
+		try {
+			const userInfo = await github.getUserInfo.call({ config: github }, 'test-token', mockHelpers);
+			assert.ok(sawSignal, 'emails fetch must carry an AbortSignal');
+			assert.equal(userInfo.email, 'public@example.com', 'timeout must not break the login');
+			assert.equal(userInfo.email_verified, undefined);
+			assert.ok(warned, 'timeout should be logged');
+		} finally {
+			global.fetch = originalFetch;
+		}
+	});
+
 	it('should handle when email API returns non-OK status', async () => {
 		const github = getProvider('github');
 
+		let warned = false;
 		const mockHelpers = {
 			getUserInfo: async () => ({
 				login: 'testuser',
@@ -258,7 +428,9 @@ describe('GitHub Provider', () => {
 			logger: {
 				info: () => {},
 				debug: () => {},
-				warn: () => {},
+				warn: (msg) => {
+					if (msg.includes('/user/emails returned 403')) warned = true;
+				},
 			},
 		};
 
@@ -280,6 +452,7 @@ describe('GitHub Provider', () => {
 			// Should return user info without email when API fails
 			assert.equal(userInfo.login, 'testuser');
 			assert.equal(userInfo.email, null);
+			assert.ok(warned, 'non-OK response (e.g. missing user:email scope) should warn');
 		} finally {
 			global.fetch = originalFetch;
 		}

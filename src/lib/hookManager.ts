@@ -4,7 +4,7 @@
  * Manages loading and calling lifecycle hooks for the OAuth plugin
  */
 
-import type { OAuthHooks, OAuthUser, TokenResponse, Logger, OAuthProviderConfig } from '../types.ts';
+import type { OAuthHooks, OAuthUser, OnLoginResult, TokenResponse, Logger, OAuthProviderConfig } from '../types.ts';
 
 /**
  * Hook Manager
@@ -33,6 +33,12 @@ export class HookManager {
 
 	/**
 	 * Call onLogin hook
+	 *
+	 * Returns the hook's result verbatim — including a structured outcome
+	 * (`{ status: 'denied' | 'needs_confirmation', ... }`, #174) that the
+	 * callback handler interprets. A thrown error is caught and logged and
+	 * behaves like no return value (login proceeds): deliberate gating is
+	 * expressed via the return value, not by throwing.
 	 */
 	async callOnLogin(
 		oauthUser: OAuthUser,
@@ -40,7 +46,7 @@ export class HookManager {
 		session: any,
 		request: any,
 		provider: string
-	): Promise<Record<string, any> | void> {
+	): Promise<OnLoginResult | void> {
 		if (!this.hooks.onLogin) return;
 
 		try {
@@ -48,7 +54,9 @@ export class HookManager {
 			const result = await this.hooks.onLogin(oauthUser, tokenResponse, session, request, provider);
 			return result;
 		} catch (error) {
-			this.logger?.error?.('onLogin hook failed:', (error as Error).message);
+			// instanceof (not a cast): a hook may throw a non-Error (string, null)
+			// and reading `.message` off it would throw from this catch itself
+			this.logger?.error?.('onLogin hook failed:', error instanceof Error ? error.message : String(error));
 			// Don't throw - hooks should not break the OAuth flow
 			return;
 		}
