@@ -102,6 +102,14 @@ describe('HookManager', () => {
 
 			assert.ok(mockLogger.debug.mock.calls.some((call) => call.arguments[0].includes('Calling onLogin hook')));
 		});
+
+		it('should pass a structured outcome through verbatim (#174)', async () => {
+			const outcome = { status: 'denied', error: 'not_provisioned', redirect: '/denied' };
+			hookManager.register({ onLogin: async () => outcome });
+
+			const result = await hookManager.callOnLogin({}, {}, {}, {}, 'github');
+			assert.equal(result, outcome);
+		});
 	});
 
 	describe('callOnLogout', () => {

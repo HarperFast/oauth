@@ -44,37 +44,46 @@ export const GitHubProvider: OAuthProviderConfig = {
 		}
 	},
 
-	// GitHub-specific: need to fetch email separately if not public
+	// GitHub-specific: the /user payload omits the email unless it's public and
+	// never carries verified status — always consult /user/emails so both
+	// `email` and `email_verified` are dependable for hook consumers (#174)
 	async getUserInfo(accessToken: string, helpers: GetUserInfoHelpers): Promise<any> {
 		// Get basic user info using the base getUserInfo method
 		const userInfo = await helpers.getUserInfo(accessToken);
 
-		// If email is not public, fetch from emails endpoint
-		if (!userInfo.email) {
-			try {
-				const emailResponse = await fetch('https://api.github.com/user/emails', {
-					headers: {
-						Authorization: `Bearer ${accessToken}`,
-						Accept: 'application/json',
-					},
-				});
+		try {
+			const emailResponse = await fetch('https://api.github.com/user/emails', {
+				headers: {
+					Authorization: `Bearer ${accessToken}`,
+					Accept: 'application/json',
+				},
+			});
 
-				if (emailResponse.ok) {
-					const emails = (await emailResponse.json()) as Array<{
-						email: string;
-						primary: boolean;
-						verified: boolean;
-					}>;
+			if (emailResponse.ok) {
+				const emails = (await emailResponse.json()) as Array<{
+					email: string;
+					primary: boolean;
+					verified: boolean;
+				}>;
+				if (userInfo.email) {
+					// Public profile email: surface its verified status. No match →
+					// leave email_verified unset (unknown), never guess.
+					const match = emails.find((e) => e.email === userInfo.email);
+					if (match) userInfo.email_verified = match.verified;
+				} else {
 					const primaryEmail = emails.find((e) => e.primary);
 					if (primaryEmail) {
 						userInfo.email = primaryEmail.email;
 						userInfo.email_verified = primaryEmail.verified;
 					}
 				}
-			} catch (error) {
-				// Email fetch failed, continue without it
-				helpers.logger?.warn?.('Failed to fetch GitHub user emails:', (error as Error).message);
 			}
+		} catch (error) {
+			// Email fetch failed, continue without it
+			helpers.logger?.warn?.(
+				'Failed to fetch GitHub user emails:',
+				error instanceof Error ? error.message : String(error)
+			);
 		}
 
 		return userInfo;

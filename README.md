@@ -81,6 +81,8 @@ registerHooks({
 // Export your resources...
 ```
 
+The hook can also gate the login: return `{ status: 'denied' }` or `{ status: 'needs_confirmation', redirect }` and no session is created — see [Lifecycle Hooks](docs/lifecycle-hooks.md#onlogin).
+
 ### 5. Test Authentication
 
 Navigate to:

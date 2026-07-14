@@ -35,6 +35,50 @@ export interface OAuthPluginConfig {
 }
 
 /**
+ * Structured `onLogin` result — lets the hook control the login outcome (#174).
+ *
+ * Backward compatible: a hook may still return a plain object (session
+ * enrichment, `user` override) or nothing at all — both behave as `ok`.
+ * Only `status: 'denied'` and `status: 'needs_confirmation'` change behavior.
+ */
+export interface OnLoginResultOk {
+	/**
+	 * 'ok' (stripped before the session merge) — but typed as string because
+	 * any value other than 'denied'/'needs_confirmation' keeps the legacy
+	 * behavior: it is plain session data and the login proceeds.
+	 */
+	status?: string;
+	/** Harper system username to bind the session to */
+	user?: string;
+	/** Additional keys are merged into the session (legacy enrich behavior) */
+	[key: string]: any;
+}
+
+/**
+ * Do NOT establish a session. The browser is sent to `redirect` when given,
+ * otherwise to the standard error redirect with `error=access_denied`.
+ */
+export interface OnLoginResultDenied {
+	status: 'denied';
+	/** Short machine-readable reason, surfaced as the `reason` query param on the error redirect */
+	error?: string;
+	/** Where to send the browser instead of the standard error redirect. May be an absolute http(s) URL. */
+	redirect?: string;
+}
+
+/**
+ * Do NOT establish a session yet — the user must complete a step first
+ * (e.g. onboarding or confirmation). The browser is sent to `redirect`.
+ */
+export interface OnLoginResultNeedsConfirmation {
+	status: 'needs_confirmation';
+	/** Where to send the browser to complete the pending step. May be an absolute http(s) URL. */
+	redirect: string;
+}
+
+export type OnLoginResult = OnLoginResultOk | OnLoginResultDenied | OnLoginResultNeedsConfirmation;
+
+/**
  * OAuth Lifecycle Hooks
  * Callbacks invoked at key points in the OAuth flow
  */
@@ -87,12 +131,26 @@ export interface OAuthHooks {
 	/**
 	 * Called after successful OAuth login, before session is finalized
 	 * Use this to provision users, assign roles, etc.
+	 *
+	 * The return value controls the login outcome (#174):
+	 * - `{ status: 'ok', user, ...data }`, a plain object, or nothing —
+	 *   establish the session (extra keys are merged into it)
+	 * - `{ status: 'denied', error?, redirect? }` — do NOT establish a session;
+	 *   the browser is sent to `redirect`, or to the standard error redirect
+	 *   with `error=access_denied` (and `reason` from `error`)
+	 * - `{ status: 'needs_confirmation', redirect }` — do NOT establish a
+	 *   session yet; the browser is sent to `redirect` to finish a step first
+	 *
+	 * A THROWN error does not gate the login — it is caught and logged and the
+	 * flow proceeds as if the hook returned nothing (hooks must not break the
+	 * OAuth flow). Deliberate gating is expressed via the return value.
+	 *
 	 * @param oauthUser - The OAuth user information
 	 * @param tokenResponse - The token response from the provider
 	 * @param session - The current session object
 	 * @param request - The HTTP request object
 	 * @param provider - The provider name (e.g., 'github', 'google')
-	 * @returns Optional data to merge into the session
+	 * @returns Login outcome, or data to merge into the session
 	 */
 	onLogin?: (
 		oauthUser: OAuthUser,
@@ -100,7 +158,7 @@ export interface OAuthHooks {
 		session: any,
 		request: any,
 		provider: string
-	) => Promise<Record<string, any> | void>;
+	) => Promise<OnLoginResult | void>;
 
 	/**
 	 * Called before logout, before session is cleared

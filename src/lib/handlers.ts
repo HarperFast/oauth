@@ -8,7 +8,15 @@ import { readFile } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { RequestTarget } from 'harperdb';
-import type { Request, Logger, IOAuthProvider, OAuthProviderConfig } from '../types.ts';
+import type {
+	Request,
+	Logger,
+	IOAuthProvider,
+	OAuthProviderConfig,
+	OnLoginResult,
+	OnLoginResultDenied,
+	OnLoginResultNeedsConfirmation,
+} from '../types.ts';
 import type { HookManager } from './hookManager.ts';
 
 /**
@@ -68,6 +76,31 @@ function buildErrorRedirect(rawUrl: string, params: Record<string, string>): str
 		url.searchParams.set(key, value);
 	}
 	return url.pathname + url.search + url.hash;
+}
+
+/**
+ * Resolve a redirect provided by the onLogin hook (trusted app code, not user
+ * input). Unlike sanitizeRedirect, absolute http(s) URLs pass through — an app
+ * may legitimately send the user to another host (e.g. a central onboarding
+ * page). Anything else falls back to sanitizeRedirect's path-only handling,
+ * which also neutralizes javascript:/data: schemes and protocol-relative URLs.
+ */
+export function resolveHookRedirect(redirect: string): string {
+	try {
+		const url = new URL(redirect);
+		return url.protocol === 'http:' || url.protocol === 'https:' ? redirect : '/';
+	} catch {
+		return sanitizeRedirect(redirect);
+	}
+}
+
+/**
+ * onLogin outcomes that gate the login (#174): no session, no MCP auth code.
+ */
+function isGatedLoginOutcome(
+	hookData: OnLoginResult | void
+): hookData is OnLoginResultDenied | OnLoginResultNeedsConfirmation {
+	return !!hookData && (hookData.status === 'denied' || hookData.status === 'needs_confirmation');
 }
 
 /**
@@ -215,6 +248,24 @@ export async function handleCallback(
 		// Pass providerName (registry key) not config.provider (provider type) for multi-tenant support
 		const hookData = await hookManager.callOnLogin(user, tokenResponse, request.session, request, providerName);
 
+		// Structured outcome (#174): the hook can deny the login outright or
+		// defer it pending a confirmation step. Either way no session is
+		// created. Plain objects and undefined keep the legacy enrich-only
+		// behavior.
+		if (isGatedLoginOutcome(hookData)) {
+			const denied = hookData.status === 'denied';
+			const reason = denied ? hookData.error : undefined;
+			logger?.info?.(`OAuth login ${denied ? 'denied' : 'deferred'} by onLogin hook for user: ${user.username}`);
+			if (hookData.redirect) {
+				return { status: 302, headers: { Location: resolveHookRedirect(hookData.redirect) } };
+			}
+			const errorUrl = buildErrorRedirect(tokenData.originalUrl || config.postLoginRedirect || '/', {
+				error: 'access_denied',
+				reason: reason || (denied ? 'denied' : 'confirmation_required'),
+			});
+			return { status: 302, headers: { Location: errorUrl } };
+		}
+
 		// Store in session if available
 		if (request.session) {
 			// Calculate token expiration and refresh thresholds
@@ -255,6 +306,9 @@ export async function handleCallback(
 			if (hookData) {
 				// eslint-disable-next-line @typescript-eslint/no-unused-vars, sonarjs/no-unused-vars
 				const { user, ...remainingHookData } = hookData;
+				// `status: 'ok'` is flow control (#174), not session data; any
+				// other status value is passed through as before.
+				if (remainingHookData.status === 'ok') delete remainingHookData.status;
 				Object.assign(sessionData, remainingHookData);
 			}
 
