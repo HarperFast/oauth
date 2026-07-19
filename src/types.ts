@@ -67,7 +67,12 @@ export interface MCPConfig {
 	 * chooser UI is v1.1.
 	 */
 	providers?: string[];
-	/** Dynamic Client Registration settings (RFC 7591) */
+	/**
+	 * Dynamic Client Registration settings (RFC 7591). PRESENCE of this block
+	 * enables the /oauth/mcp/register endpoint; omitting it entirely leaves DCR
+	 * disabled (the endpoint 404s and metadata omits `registration_endpoint`).
+	 * Before #182 an absent block meant open, ungated registration.
+	 */
 	dynamicClientRegistration?: MCPDynamicClientRegistrationConfig;
 	/**
 	 * JWT signing algorithm for issued access tokens. Only "RS256" is supported
@@ -142,11 +147,17 @@ export interface MCPClientCredentialsConfig {
  * is opt-in via initialAccessToken or allowedRedirectUriHosts.
  */
 export interface MCPDynamicClientRegistrationConfig {
-	/** Enable the /register endpoint. Default: true. */
+	/**
+	 * Enable the /register endpoint. Default when this block is present: true.
+	 * (DCR as a whole is enabled by the presence of the block — see
+	 * `MCPConfig.dynamicClientRegistration`; `enabled: false` disables it while
+	 * keeping the block around.)
+	 */
 	enabled?: boolean;
 	/**
 	 * If set, registration requests must present `Authorization: Bearer <token>`
-	 * matching this value. Default: open registration per RFC 7591.
+	 * matching this value. Default: open registration per RFC 7591 — a
+	 * once-per-process warning is logged when DCR runs ungated.
 	 */
 	initialAccessToken?: string;
 	/**

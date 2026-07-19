@@ -164,11 +164,11 @@ form the `WWW-Authenticate` challenge advertises.
 
 ### Authorization server
 
-| Endpoint               | Method | Notes                                                                                                                                     |
-| ---------------------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| `/oauth/mcp/register`  | POST   | RFC 7591 Dynamic Client Registration. Open by default; gate with `initialAccessToken`. Returns `201`.                                     |
-| `/oauth/mcp/authorize` | GET    | OAuth 2.1 + PKCE. Requires `client_id`, `redirect_uri`, `response_type=code`, `code_challenge`, `code_challenge_method=S256`, `resource`. |
-| `/oauth/mcp/token`     | POST   | Grants: `authorization_code`, `refresh_token`, and (opt-in) `client_credentials`. Returns the token pair with `Cache-Control: no-store`.  |
+| Endpoint               | Method | Notes                                                                                                                                                                     |
+| ---------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/oauth/mcp/register`  | POST   | RFC 7591 Dynamic Client Registration. Exists only when `mcp.dynamicClientRegistration` is configured (absent block ⇒ 404); gate with `initialAccessToken`. Returns `201`. |
+| `/oauth/mcp/authorize` | GET    | OAuth 2.1 + PKCE. Requires `client_id`, `redirect_uri`, `response_type=code`, `code_challenge`, `code_challenge_method=S256`, `resource`.                                 |
+| `/oauth/mcp/token`     | POST   | Grants: `authorization_code`, `refresh_token`, and (opt-in) `client_credentials`. Returns the token pair with `Cache-Control: no-store`.                                  |
 
 > `mcp` is a reserved provider name — the plugin refuses to start if you configure
 > a provider called `mcp`, because it would collide with `/oauth/mcp/*`.
@@ -373,9 +373,13 @@ A checklist before you expose MCP OAuth publicly:
       because otherwise `iss` (and `aud`, which derives from it) would float with
       the client-controlled `Host` header, an audience-confusion risk. Pinning
       `resource` alone is not enough; `iss` still floats.
-- [ ] **Gate Dynamic Client Registration.** `/register` is open by default per
-      RFC 7591. Set `mcp.dynamicClientRegistration.initialAccessToken` to require
-      a bearer token, or accept open registration deliberately.
+- [ ] **Gate Dynamic Client Registration (if you enable it).** DCR is disabled
+      until a `mcp.dynamicClientRegistration` block is present (#182) — the
+      endpoint 404s and metadata omits `registration_endpoint`. When you do
+      enable it, set `mcp.dynamicClientRegistration.initialAccessToken` to
+      require a bearer token, or accept open registration deliberately (a
+      once-per-process warning is logged when DCR runs ungated). CIMD-based
+      client identity needs no DCR at all.
 - [ ] **Restrict redirect URI hosts** with
       `mcp.dynamicClientRegistration.allowedRedirectUriHosts`. Loopback is always
       allowed for native clients (RFC 8252).

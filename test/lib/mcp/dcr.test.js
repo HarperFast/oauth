@@ -56,8 +56,17 @@ describe('handleRegister (RFC 7591 DCR)', () => {
 			assert.equal(storedRecords.size, 0);
 		});
 
-		it('proceeds when DCR config is absent (defaults to enabled)', async () => {
+		it('returns 404 when the DCR config block is absent (default disabled, #182)', async () => {
 			const response = await handleRegister(makeRequest(), VALID_BODY, { enabled: true });
+			assert.equal(response.status, 404);
+			assert.equal(storedRecords.size, 0);
+		});
+
+		it('proceeds when the DCR block is present without an explicit enabled flag', async () => {
+			const response = await handleRegister(makeRequest(), VALID_BODY, {
+				enabled: true,
+				dynamicClientRegistration: {},
+			});
 			assert.equal(response.status, 201);
 		});
 
@@ -108,7 +117,7 @@ describe('handleRegister (RFC 7591 DCR)', () => {
 	});
 
 	describe('scalar metadata validation', () => {
-		const config = { enabled: true };
+		const config = { enabled: true, dynamicClientRegistration: {} };
 
 		it('rejects non-string client_name', async () => {
 			const response = await handleRegister(
@@ -140,7 +149,7 @@ describe('handleRegister (RFC 7591 DCR)', () => {
 	});
 
 	describe('redirect_uris validation', () => {
-		const config = { enabled: true };
+		const config = { enabled: true, dynamicClientRegistration: {} };
 
 		it('rejects missing redirect_uris', async () => {
 			const response = await handleRegister(makeRequest(), { client_name: 'X' }, config);
@@ -239,7 +248,10 @@ describe('handleRegister (RFC 7591 DCR)', () => {
 
 	describe('defaults and metadata', () => {
 		it('applies MCP-context defaults (public client, code flow)', async () => {
-			const response = await handleRegister(makeRequest(), VALID_BODY, { enabled: true });
+			const response = await handleRegister(makeRequest(), VALID_BODY, {
+				enabled: true,
+				dynamicClientRegistration: {},
+			});
 			assert.equal(response.status, 201);
 			assert.equal(response.body.token_endpoint_auth_method, 'none');
 			assert.deepEqual(response.body.grant_types, ['authorization_code', 'refresh_token']);
@@ -255,7 +267,7 @@ describe('handleRegister (RFC 7591 DCR)', () => {
 					grant_types: ['authorization_code'],
 					application_type: 'native',
 				},
-				{ enabled: true }
+				{ enabled: true, dynamicClientRegistration: {} }
 			);
 			assert.equal(response.status, 201);
 			assert.deepEqual(response.body.grant_types, ['authorization_code']);
@@ -266,7 +278,7 @@ describe('handleRegister (RFC 7591 DCR)', () => {
 			const response = await handleRegister(
 				makeRequest(),
 				{ redirect_uris: ['https://app.example.com/cb'], grant_types: ['client_credentials'] },
-				{ enabled: true }
+				{ enabled: true, dynamicClientRegistration: {} }
 			);
 			assert.equal(response.status, 400);
 			assert.equal(response.body.error, 'invalid_client_metadata');
@@ -276,7 +288,7 @@ describe('handleRegister (RFC 7591 DCR)', () => {
 			const response = await handleRegister(
 				makeRequest(),
 				{ redirect_uris: ['https://app.example.com/cb'], response_types: ['token'] },
-				{ enabled: true }
+				{ enabled: true, dynamicClientRegistration: {} }
 			);
 			assert.equal(response.status, 400);
 		});
@@ -285,7 +297,7 @@ describe('handleRegister (RFC 7591 DCR)', () => {
 			const response = await handleRegister(
 				makeRequest(),
 				{ redirect_uris: ['https://app.example.com/cb'], token_endpoint_auth_method: 'private_key_jwt' },
-				{ enabled: true }
+				{ enabled: true, dynamicClientRegistration: {} }
 			);
 			assert.equal(response.status, 400);
 		});
@@ -294,7 +306,7 @@ describe('handleRegister (RFC 7591 DCR)', () => {
 			const response = await handleRegister(
 				makeRequest(),
 				{ redirect_uris: ['https://app.example.com/cb'], application_type: 'service' },
-				{ enabled: true }
+				{ enabled: true, dynamicClientRegistration: {} }
 			);
 			assert.equal(response.status, 400);
 		});
@@ -303,7 +315,7 @@ describe('handleRegister (RFC 7591 DCR)', () => {
 			const response = await handleRegister(
 				makeRequest(),
 				{ redirect_uris: ['https://app.example.com/cb'], contacts: ['nathan@example.com', 42] },
-				{ enabled: true }
+				{ enabled: true, dynamicClientRegistration: {} }
 			);
 			assert.equal(response.status, 400);
 		});
@@ -311,7 +323,10 @@ describe('handleRegister (RFC 7591 DCR)', () => {
 
 	describe('issued credentials', () => {
 		it('issues a client_id and persists the record (public client, no secret)', async () => {
-			const response = await handleRegister(makeRequest(), VALID_BODY, { enabled: true });
+			const response = await handleRegister(makeRequest(), VALID_BODY, {
+				enabled: true,
+				dynamicClientRegistration: {},
+			});
 			assert.equal(response.status, 201);
 			assert.ok(response.body.client_id, 'client_id was issued');
 			assert.equal(response.body.client_secret, undefined, 'public clients receive no secret');
@@ -328,7 +343,7 @@ describe('handleRegister (RFC 7591 DCR)', () => {
 					redirect_uris: ['https://app.example.com/cb'],
 					token_endpoint_auth_method: 'client_secret_basic',
 				},
-				{ enabled: true }
+				{ enabled: true, dynamicClientRegistration: {} }
 			);
 			assert.equal(response.status, 201);
 			assert.ok(response.body.client_secret, 'confidential client received a secret');
@@ -336,8 +351,8 @@ describe('handleRegister (RFC 7591 DCR)', () => {
 		});
 
 		it('issues unique client_ids for repeated registrations of the same metadata', async () => {
-			const a = await handleRegister(makeRequest(), VALID_BODY, { enabled: true });
-			const b = await handleRegister(makeRequest(), VALID_BODY, { enabled: true });
+			const a = await handleRegister(makeRequest(), VALID_BODY, { enabled: true, dynamicClientRegistration: {} });
+			const b = await handleRegister(makeRequest(), VALID_BODY, { enabled: true, dynamicClientRegistration: {} });
 			assert.notEqual(a.body.client_id, b.body.client_id);
 			assert.equal(storedRecords.size, 2);
 		});
@@ -345,7 +360,7 @@ describe('handleRegister (RFC 7591 DCR)', () => {
 
 	describe('error handling', () => {
 		it('rejects non-object bodies', async () => {
-			const response = await handleRegister(makeRequest(), null, { enabled: true });
+			const response = await handleRegister(makeRequest(), null, { enabled: true, dynamicClientRegistration: {} });
 			assert.equal(response.status, 400);
 			assert.equal(response.body.error, 'invalid_client_metadata');
 		});
@@ -354,7 +369,10 @@ describe('handleRegister (RFC 7591 DCR)', () => {
 			global.databases.oauth.harper_oauth_mcp_clients.put = async () => {
 				throw new Error('storage failure');
 			};
-			const response = await handleRegister(makeRequest(), VALID_BODY, { enabled: true });
+			const response = await handleRegister(makeRequest(), VALID_BODY, {
+				enabled: true,
+				dynamicClientRegistration: {},
+			});
 			assert.equal(response.status, 500);
 			assert.equal(response.body.error, 'server_error');
 		});
