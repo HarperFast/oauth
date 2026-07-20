@@ -1382,4 +1382,3 @@ describe('OAuth Handlers', () => {
 		});
 	});
 });
-

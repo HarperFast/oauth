@@ -262,7 +262,11 @@ export async function handleCallback(
 	if (tokenData.sessionId && tokenData.sessionId !== request.session?.id) {
 		logger?.warn?.(`State token session mismatch: flow initiated in a different session (provider '${providerName}')`);
 		if (mcpState) {
-			return mcpErrorRedirect(mcpState, 'access_denied', 'Authorization must complete in the session that initiated it');
+			return mcpErrorRedirect(
+				mcpState,
+				'access_denied',
+				'Authorization must complete in the session that initiated it'
+			);
 		}
 		const errorUrl = buildErrorRedirect(tokenData.originalUrl || config.postLoginRedirect || '/', {
 			error: 'auth_failed',

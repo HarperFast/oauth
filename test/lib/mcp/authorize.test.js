@@ -420,6 +420,31 @@ describe('handleAuthorize', () => {
 			assert.equal(metadata.mcp.clientState, BASE_QUERY.state);
 		});
 
+		it('binds the upstream state to the initiating browser session (#181)', async () => {
+			const { entries, harnesses } = newRegistry();
+			const target = makeTarget(BASE_QUERY);
+			const response = await handleAuthorize(
+				makeRequest({ session: { id: 'browser-session-42' } }),
+				target,
+				validConfig,
+				entries
+			);
+
+			assert.equal(response.status, 302);
+			// handleCallback enforces state↔session binding when sessionId is
+			// present — the MCP path must actually mint it or the check never runs.
+			assert.equal(harnesses.github.generatedTokens[0].sessionId, 'browser-session-42');
+		});
+
+		it('mints no sessionId when the request has no session (binding enforce-when-present)', async () => {
+			const { entries, harnesses } = newRegistry();
+			const target = makeTarget(BASE_QUERY);
+			const response = await handleAuthorize(makeRequest(), target, validConfig, entries);
+
+			assert.equal(response.status, 302);
+			assert.equal(harnesses.github.generatedTokens[0].sessionId, undefined);
+		});
+
 		it('accepts a redirect_uri that matches the registered loopback URI', async () => {
 			const { entries } = newRegistry();
 			const target = makeTarget({ ...BASE_QUERY, redirect_uri: 'http://localhost:6274/cb' });
