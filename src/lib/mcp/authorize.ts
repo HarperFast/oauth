@@ -337,6 +337,11 @@ async function performUpstreamRedirect(
 	try {
 		csrfToken = await providerEntry.provider.generateCSRFToken({
 			providerName: selection.providerName,
+			// Bind the upstream state to the initiating browser session — the
+			// callback rejects a state processed in a different session (#181).
+			// Both MCP entries (direct authorize and post-CIMD confirm) mint
+			// their upstream state here, so this is the single binding site.
+			sessionId: request.session?.id,
 			mcp: mcpState,
 		});
 	} catch (error) {

@@ -251,6 +251,30 @@ export async function handleCallback(
 		return { status: 302, headers: { Location: errorUrl } };
 	}
 
+	// State↔session binding (RFC 6749 §10.12 / OAuth Security BCP): the state
+	// token records the session that initiated the flow; a callback arriving in
+	// a different session is CSRF-shaped — an attacker-minted state delivered
+	// into a victim's browser (e.g. to bind the attacker's provider identity to
+	// the victim's account in a linking flow). Rejected before the code
+	// exchange: no upstream calls, no session write. Enforced whenever the
+	// initiating session id is present; sessions are updated in place (never
+	// id-rotated), so the id is stable across initiate → IdP → callback.
+	if (tokenData.sessionId && tokenData.sessionId !== request.session?.id) {
+		logger?.warn?.(`State token session mismatch: flow initiated in a different session (provider '${providerName}')`);
+		if (mcpState) {
+			return mcpErrorRedirect(
+				mcpState,
+				'access_denied',
+				'Authorization must complete in the session that initiated it'
+			);
+		}
+		const errorUrl = buildErrorRedirect(tokenData.originalUrl || config.postLoginRedirect || '/', {
+			error: 'auth_failed',
+			reason: 'csrf',
+		});
+		return { status: 302, headers: { Location: errorUrl } };
+	}
+
 	// CIMD browser binding — checked BEFORE the upstream code exchange and the
 	// onLogin hook, so a mismatched (self-approved) flow triggers no upstream
 	// exchange, no userinfo fetch, and no provisioning side-effects; it only
