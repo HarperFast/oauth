@@ -23,6 +23,7 @@
  */
 
 import type { Logger, MCPConfig } from '../../types.ts';
+import { dcrEnabled } from './dcr.ts';
 import { MCPKeyStore } from './keyStore.ts';
 import { publicKeyToJwk } from './tokenIssuer.ts';
 
@@ -159,7 +160,9 @@ export function buildAuthorizationServerMetadata(
 		issuer,
 		authorization_endpoint: `${issuer}/oauth/mcp/authorize`,
 		token_endpoint: `${issuer}/oauth/mcp/token`,
-		registration_endpoint: `${issuer}/oauth/mcp/register`,
+		// Advertised under the same predicate the handler enforces (#182):
+		// metadata must not point clients at an endpoint that 404s.
+		...(dcrEnabled(mcpConfig) ? { registration_endpoint: `${issuer}/oauth/mcp/register` } : {}),
 		jwks_uri: `${issuer}${JWKS_PATH}`,
 		response_types_supported: ['code'],
 		grant_types_supported: [

@@ -187,6 +187,28 @@ function buildClientFromRequest(
  * @param mcpConfig - Plugin MCP configuration
  * @param logger - Optional logger
  */
+/**
+ * DCR is enabled by the PRESENCE of the `dynamicClientRegistration` config
+ * block (and not switched off by `enabled: false`). An absent block means the
+ * endpoint does not exist — "I never configured registration" must mean there
+ * IS no registration. The pre-#182 default (absent block ⇒ open, ungated
+ * registration) silently exposed unauthenticated client creation on every
+ * deployment that had no reason to touch this block; CIMD is the forward path
+ * for client identity and needs no DCR at all. Exported so the well-known
+ * metadata advertises `registration_endpoint` under exactly this predicate.
+ */
+export function dcrEnabled(mcpConfig: MCPConfig | undefined): boolean {
+	const dcrConfig = mcpConfig?.dynamicClientRegistration;
+	// `!= null` (not `!== undefined`): a bare `dynamicClientRegistration:` key
+	// in YAML parses as null — treat it like an absent block (fail-closed)
+	// rather than throwing on `.enabled`. Enabling takes a real block (`{}`).
+	return dcrConfig != null && dcrConfig.enabled !== false;
+}
+
+// Once-per-process: ungated DCR is legitimate (open registration per RFC
+// 7591) but should never be running silently.
+let ungatedWarningLogged = false;
+
 export async function handleRegister(
 	request: { headers?: { authorization?: string } } | undefined,
 	body: any,
@@ -195,10 +217,17 @@ export async function handleRegister(
 ): Promise<any> {
 	const dcrConfig = mcpConfig?.dynamicClientRegistration;
 
-	// DCR defaults to enabled when MCP is enabled. Explicit `enabled: false`
-	// turns it off and the endpoint returns 404 (existence-hiding).
-	if (dcrConfig?.enabled === false) {
+	// Absent block or explicit `enabled: false` ⇒ 404 (existence-hiding). See
+	// dcrEnabled above for the default-disabled rationale (#182).
+	if (!dcrEnabled(mcpConfig)) {
 		return { status: 404, body: { error: 'Not found' } };
+	}
+
+	if (!dcrConfig?.initialAccessToken && !ungatedWarningLogged) {
+		ungatedWarningLogged = true;
+		harperLogger?.warn?.(
+			'MCP DCR is enabled WITHOUT an initialAccessToken: /oauth/mcp/register accepts unauthenticated client registrations (open registration per RFC 7591). Set dynamicClientRegistration.initialAccessToken to gate it, or remove the dynamicClientRegistration block to disable the endpoint.'
+		);
 	}
 
 	// Observability: log every registration attempt. Rejections were previously

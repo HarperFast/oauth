@@ -93,8 +93,34 @@ describe('MCP well-known: AS metadata document (RFC 8414)', () => {
 		assert.equal(doc.issuer, 'https://app.example.com');
 		assert.equal(doc.authorization_endpoint, 'https://app.example.com/oauth/mcp/authorize');
 		assert.equal(doc.token_endpoint, 'https://app.example.com/oauth/mcp/token');
-		assert.equal(doc.registration_endpoint, 'https://app.example.com/oauth/mcp/register');
 		assert.equal(doc.jwks_uri, 'https://app.example.com/.well-known/jwks.json');
+	});
+
+	it('omits registration_endpoint when the DCR block is absent (default disabled, #182)', () => {
+		const doc = buildAuthorizationServerMetadata(makeRequest(), { enabled: true });
+		assert.equal(doc.registration_endpoint, undefined);
+	});
+
+	it('advertises registration_endpoint under the same predicate the handler enforces', () => {
+		const withBlock = buildAuthorizationServerMetadata(makeRequest(), {
+			enabled: true,
+			dynamicClientRegistration: {},
+		});
+		assert.equal(withBlock.registration_endpoint, 'https://app.example.com/oauth/mcp/register');
+
+		const explicitlyDisabled = buildAuthorizationServerMetadata(makeRequest(), {
+			enabled: true,
+			dynamicClientRegistration: { enabled: false },
+		});
+		assert.equal(explicitlyDisabled.registration_endpoint, undefined);
+	});
+
+	it('omits registration_endpoint for a bare null DCR block (YAML empty key)', () => {
+		const doc = buildAuthorizationServerMetadata(makeRequest(), {
+			enabled: true,
+			dynamicClientRegistration: null,
+		});
+		assert.equal(doc.registration_endpoint, undefined);
 	});
 
 	it('advertises PKCE S256 only (no plain)', () => {

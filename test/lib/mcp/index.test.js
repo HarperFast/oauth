@@ -70,7 +70,10 @@ describe('handleMCPPost (dispatcher)', () => {
 		});
 
 		it('proceeds when mcpConfig.enabled is true', async () => {
-			const response = await handleMCPPost('register', makeRequest(), VALID_BODY, { enabled: true });
+			const response = await handleMCPPost('register', makeRequest(), VALID_BODY, {
+				enabled: true,
+				dynamicClientRegistration: {},
+			});
 			assert.equal(response.status, 201);
 			assert.equal(storedRecords.size, 1);
 		});
@@ -78,7 +81,10 @@ describe('handleMCPPost (dispatcher)', () => {
 
 	describe('action routing', () => {
 		it('dispatches `register` to handleRegister', async () => {
-			const response = await handleMCPPost('register', makeRequest(), VALID_BODY, { enabled: true });
+			const response = await handleMCPPost('register', makeRequest(), VALID_BODY, {
+				enabled: true,
+				dynamicClientRegistration: {},
+			});
 			assert.equal(response.status, 201);
 			assert.ok(response.body.client_id, 'register response carries an issued client_id');
 		});
