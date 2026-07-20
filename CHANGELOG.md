@@ -2,6 +2,13 @@
 
 All notable changes to `@harperfast/oauth` are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Entries prior to 2.2.0 were backfilled from the [GitHub release notes](https://github.com/HarperFast/oauth/releases).
 
+## [2.4.0] - 2026-07-20
+
+### Security
+
+- **OAuth callbacks are bound to the initiating session** (#181, #183): `handleCallback` rejects a state token minted in a different browser session — the RFC 6749 §10.12 login-CSRF class, and the load-bearing prerequisite for authenticated account-linking flows (an attacker-initiated state delivered into a victim's session could otherwise bind the attacker's provider identity to the victim's account). Enforced whenever the state carries the initiating session id — all states minted from this version do, including MCP flows: the MCP authorize path now records the session at the single upstream-state mint site, covering both direct authorize and post-CIMD confirm. Pre-upgrade tokens pass through, so in-flight logins survive the deploy. Rejection happens before the code exchange: no upstream calls, no session write; MCP flows get an `access_denied` error redirect to the client.
+- **⚠️ MCP Dynamic Client Registration is now disabled unless configured** (#182, #184): an absent — or bare-null (`dynamicClientRegistration:` with no children) — `mcp.dynamicClientRegistration` block means `/oauth/mcp/register` returns 404 and the RFC 8414 metadata omits `registration_endpoint` (both driven by the same predicate, so discovery never points at an endpoint that 404s). Previously an absent block meant **open, ungated registration**: unauthenticated client creation on every deployment that never touched the block. **Migration for deployments that relied on the implicit default:** add `dynamicClientRegistration: {}` (open registration, now with a once-per-process ungated warning) or `dynamicClientRegistration: { initialAccessToken: '…' }` (gated) to the `mcp` config. Deployments that already wrote the block — any shape — are unchanged. CIMD-based client identity needs no DCR at all.
+
 ## [2.3.0] - 2026-07-14
 
 ### Added
@@ -115,6 +122,8 @@ First **GA** of the Harper v5 line.
 
 Initial published release, as `@harperdb/oauth` — multi-provider human OAuth for Harper: provider configuration, session management, live config reload, and minimal lifecycle hooks (e.g. adding/modifying user records on authentication).
 
+[2.4.0]: https://github.com/HarperFast/oauth/compare/v2.3.0...v2.4.0
+[2.3.0]: https://github.com/HarperFast/oauth/compare/v2.2.1...v2.3.0
 [2.2.1]: https://github.com/HarperFast/oauth/compare/v2.2.0...v2.2.1
 [2.2.0]: https://github.com/HarperFast/oauth/compare/v2.1.2...v2.2.0
 [2.1.2]: https://github.com/HarperFast/oauth/compare/v2.1.1...v2.1.2
