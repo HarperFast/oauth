@@ -115,6 +115,14 @@ describe('MCP well-known: AS metadata document (RFC 8414)', () => {
 		assert.equal(explicitlyDisabled.registration_endpoint, undefined);
 	});
 
+	it('omits registration_endpoint for a bare null DCR block (YAML empty key)', () => {
+		const doc = buildAuthorizationServerMetadata(makeRequest(), {
+			enabled: true,
+			dynamicClientRegistration: null,
+		});
+		assert.equal(doc.registration_endpoint, undefined);
+	});
+
 	it('advertises PKCE S256 only (no plain)', () => {
 		const doc = buildAuthorizationServerMetadata(makeRequest(), { enabled: true });
 		assert.deepEqual(doc.code_challenge_methods_supported, ['S256']);

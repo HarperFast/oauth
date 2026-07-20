@@ -62,6 +62,15 @@ describe('handleRegister (RFC 7591 DCR)', () => {
 			assert.equal(storedRecords.size, 0);
 		});
 
+		it('returns 404 when the DCR block is a bare null (YAML `dynamicClientRegistration:` with no children)', async () => {
+			const response = await handleRegister(makeRequest(), VALID_BODY, {
+				enabled: true,
+				dynamicClientRegistration: null,
+			});
+			assert.equal(response.status, 404);
+			assert.equal(storedRecords.size, 0);
+		});
+
 		it('proceeds when the DCR block is present without an explicit enabled flag', async () => {
 			const response = await handleRegister(makeRequest(), VALID_BODY, {
 				enabled: true,
