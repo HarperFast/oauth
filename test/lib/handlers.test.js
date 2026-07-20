@@ -930,4 +930,71 @@ describe('OAuth Handlers', () => {
 			}
 		});
 	});
+	describe('handleCallback — state↔session binding (#183 backport)', () => {
+		it('rejects a callback processed in a different session than the one that initiated', async () => {
+			mockProvider.verifyCSRFToken = createMockFn(async () => ({
+				originalUrl: '/dashboard',
+				timestamp: Date.now(),
+				providerName: 'test-provider',
+				sessionId: 'attacker-session-999',
+			}));
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				mockLogger
+			);
+
+			assert.equal(result.status, 302);
+			assert.equal(result.headers.Location, '/dashboard?error=auth_failed&reason=csrf');
+			// Rejected before any upstream call or session write.
+			assert.equal(mockProvider.exchangeCodeForToken.mock.calls.length, 0);
+			assert.equal(mockRequest.session.update.mock.calls.length, 0);
+		});
+
+		it('allows a callback in the same session that initiated the flow', async () => {
+			mockProvider.verifyCSRFToken = createMockFn(async () => ({
+				originalUrl: '/dashboard',
+				timestamp: Date.now(),
+				providerName: 'test-provider',
+				sessionId: 'session-123',
+			}));
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				mockLogger
+			);
+
+			assert.equal(result.status, 302);
+			assert.equal(result.headers.Location, '/dashboard');
+			assert.equal(mockProvider.exchangeCodeForToken.mock.calls.length, 1);
+		});
+
+		it('tolerates state tokens without a sessionId (pre-binding tokens)', async () => {
+			// The default mock tokenData carries no sessionId — enforcement is
+			// conditional on presence so in-flight logins across a deploy survive.
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				mockLogger
+			);
+
+			assert.equal(result.status, 302);
+			assert.equal(result.headers.Location, '/dashboard');
+		});
+	});
 });
+

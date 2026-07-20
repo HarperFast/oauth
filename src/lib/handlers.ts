@@ -224,6 +224,29 @@ export async function handleCallback(
 		};
 	}
 
+	// State↔session binding (RFC 6749 §10.12 / OAuth Security BCP): the state
+	// token records the session that initiated the flow (handleLogin); a
+	// callback arriving in a different session is CSRF-shaped — an
+	// attacker-minted state delivered into a victim's browser (e.g. to bind the
+	// attacker's provider identity to the victim's account in a linking flow).
+	// Rejected before the code exchange: no upstream calls, no session write.
+	// Enforced whenever the initiating session id is present; sessions are
+	// updated in place (never id-rotated), so the id is stable across
+	// initiate → IdP → callback. Backport of #183.
+	if (tokenData.sessionId && tokenData.sessionId !== request.session?.id) {
+		logger?.warn?.(`State token session mismatch: flow initiated in a different session (provider '${providerName}')`);
+		const errorUrl = buildErrorRedirect(tokenData.originalUrl || config.postLoginRedirect || '/', {
+			error: 'auth_failed',
+			reason: 'csrf',
+		});
+		return {
+			status: 302,
+			headers: {
+				Location: errorUrl,
+			},
+		};
+	}
+
 	try {
 		// Exchange code for tokens
 		const tokenResponse = await provider.exchangeCodeForToken(code, config.redirectUri || '');
