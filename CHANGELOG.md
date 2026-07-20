@@ -2,6 +2,16 @@
 
 Notable changes to the `@harperfast/oauth` **1.x maintenance line** are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). History prior to 1.6.0 lives in the [GitHub release notes](https://github.com/HarperFast/oauth/releases); the 2.x line has its own changelog on `main`.
 
+## [1.6.1] - 2026-07-20
+
+### Security
+
+- **OAuth callbacks are bound to the initiating session** (#181; #185, backport of 2.x/#183): `handleCallback` rejects a state token minted in a different browser session — the RFC 6749 §10.12 login-CSRF class, and the load-bearing prerequisite for authenticated account-linking flows (an attacker-initiated state delivered into a victim's session could otherwise bind the attacker's provider identity to the victim's account). Enforced whenever the state carries the initiating session id (`handleLogin` has always minted it on this line); pre-upgrade tokens pass through, so in-flight logins survive the deploy. Rejection happens before the code exchange: no upstream calls, no session write. Consumers gating on this fix should require `>=1.6.1`.
+
+### Fixed
+
+- Release infrastructure: publishing uses npm trusted publishing (OIDC) with the `v1-lts` dist-tag (#179, #180), and the Claude review lane works on `v1.x`-targeted PRs again (#187 — the caller workflow must stay byte-identical to main's).
+
 ## [1.6.0] - 2026-07-14
 
 ### Added
