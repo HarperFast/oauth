@@ -32,6 +32,10 @@ rest: true
     enabled: true
     issuer: 'https://mcp.test'
     resource: 'https://mcp.test/mcp'
+    # DCR is presence-enabled as of #182 — an absent (or bare-null) block 404s
+    # the register endpoint. The e2e flow registers its client via DCR, so the
+    # fixture opts in explicitly with an empty block (open registration).
+    dynamicClientRegistration: {}
 
 jsResource:
   files: 'mcp-app.js'
