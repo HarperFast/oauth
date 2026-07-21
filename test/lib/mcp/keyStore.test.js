@@ -6,7 +6,14 @@
 import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createPublicKey, generateKeyPairSync } from 'node:crypto';
-import { MCPKeyStore, resetMCPKeysTableCache, SIGNING_KEY_ID, _setCacheNowMs } from '../../../dist/lib/mcp/keyStore.js';
+import {
+	MCPKeyStore,
+	resetMCPKeysTableCache,
+	SIGNING_KEY_ID,
+	_setCacheNowMs,
+	algFromPrivateKeyPem,
+	resolveEffectiveAlg,
+} from '../../../dist/lib/mcp/keyStore.js';
 import { verifyAccessTokenWithKeySet, signAccessToken } from '../../../dist/lib/mcp/tokenIssuer.js';
 
 // ---- Helpers ----
@@ -871,5 +878,146 @@ describe('MCPKeyStore', () => {
 		} finally {
 			_setCacheNowMs(null); // Restore default clock.
 		}
+	});
+});
+
+// ---- ES256 (#127) ----
+
+describe('MCPKeyStore ES256', () => {
+	let store;
+	let originalDatabases;
+	let stored;
+
+	before(() => {
+		originalDatabases = global.databases;
+	});
+	after(() => {
+		global.databases = originalDatabases;
+	});
+
+	beforeEach(() => {
+		resetMCPKeysTableCache();
+		store = new MCPKeyStore();
+		stored = new Map();
+		global.databases = {
+			oauth: {
+				harper_oauth_mcp_keys: makeKeysTable(stored),
+			},
+		};
+	});
+
+	function makeEcPems() {
+		return generateKeyPairSync('ec', {
+			namedCurve: 'P-256',
+			publicKeyEncoding: { type: 'spki', format: 'pem' },
+			privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+		});
+	}
+
+	it('generates an ES256 (EC P-256) keypair on first boot when configured', async () => {
+		const key = await store.getSigningKey({ signingAlgorithm: 'ES256' });
+		assert.equal(key.alg, 'ES256');
+		const pub = createPublicKey(key.public_key_pem);
+		assert.equal(pub.asymmetricKeyType, 'ec');
+		assert.equal(pub.asymmetricKeyDetails.namedCurve, 'prime256v1');
+		assert.equal(stored.size, 1);
+	});
+
+	it('rotates to an ES256 key when config switches from RS256, keeping the old key live', async () => {
+		// Old enough to clear the alg-switch age floor (rolling-deploy damper).
+		const rsaKey = seedKey(stored, { kid: 'rsa-old', created_at: Math.floor(Date.now() / 1000) - 600 });
+		const key = await store.getSigningKey({ signingAlgorithm: 'ES256' });
+		assert.equal(key.alg, 'ES256');
+		assert.notEqual(key.kid, rsaKey.kid);
+		assert.equal(stored.size, 2, 'old RS256 key is not deleted by the switch');
+		const publicKeys = await store.getAllPublicKeys();
+		const algs = publicKeys.map((k) => k.alg).sort();
+		assert.deepEqual(algs, ['ES256', 'RS256'], 'both keys stay in the JWKS during the transition');
+	});
+
+	it('defers the alg switch while the newest key is younger than the age floor (rolling-deploy damper)', async () => {
+		const rsaKey = seedKey(stored, { kid: 'rsa-fresh' }); // created_at: now
+		const key = await store.getSigningKey({ signingAlgorithm: 'ES256' });
+		assert.equal(key.kid, rsaKey.kid, 'young RS256 key keeps signing for now');
+		assert.equal(stored.size, 1, 'no new key generated yet');
+	});
+
+	it('does not rotate when the newest key already matches the configured alg', async () => {
+		const first = await store.getSigningKey({ signingAlgorithm: 'ES256' });
+		resetMCPKeysTableCache();
+		const second = await new MCPKeyStore().getSigningKey({ signingAlgorithm: 'ES256' });
+		assert.equal(second.kid, first.kid, 'same ES256 key reused');
+		assert.equal(stored.size, 1);
+	});
+
+	it('treats a legacy record without alg as RS256 (no spurious rotation under default config)', async () => {
+		seedKey(stored, { kid: 'legacy', alg: undefined });
+		const key = await store.getSigningKey();
+		assert.equal(key.kid, 'legacy', 'legacy no-alg key keeps signing under the RS256 default');
+		assert.equal(stored.size, 1);
+	});
+
+	it('derives ES256 from a pinned EC key and never claims the legacy rs256-default kid', async () => {
+		const { privateKey } = makeEcPems();
+		const key = await store.getSigningKey({ signingKeyPem: privateKey });
+		assert.equal(key.alg, 'ES256');
+		assert.notEqual(key.kid, SIGNING_KEY_ID, 'EC pin gets a fingerprint kid, not rs256-default');
+		assert.match(key.kid, /^pinned-[0-9a-f]{16}$/);
+	});
+
+	it('signs and verifies end-to-end with a generated ES256 key', async () => {
+		const key = await store.getSigningKey({ signingAlgorithm: 'ES256' });
+		const { token } = signAccessToken(
+			{
+				issuer: 'https://as.example.com',
+				subject: 'alice@example.com',
+				audience: 'https://app.example.com/mcp',
+				clientId: 'client-123',
+				ttlSeconds: 3600,
+			},
+			key
+		);
+		const publicKeys = await store.getAllPublicKeys();
+		const claims = verifyAccessTokenWithKeySet(token, publicKeys, {
+			audience: 'https://app.example.com/mcp',
+			issuer: 'https://as.example.com',
+		});
+		assert.equal(claims.sub, 'alice@example.com');
+	});
+});
+
+describe('signing-alg helpers', () => {
+	function makePems(type, options) {
+		return generateKeyPairSync(type, {
+			...options,
+			publicKeyEncoding: { type: 'spki', format: 'pem' },
+			privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+		});
+	}
+
+	it('algFromPrivateKeyPem: RSA → RS256, EC P-256 → ES256', () => {
+		assert.equal(algFromPrivateKeyPem(makePems('rsa', { modulusLength: 2048 }).privateKey), 'RS256');
+		assert.equal(algFromPrivateKeyPem(makePems('ec', { namedCurve: 'P-256' }).privateKey), 'ES256');
+	});
+
+	it('algFromPrivateKeyPem: rejects unsupported curves and key types', () => {
+		assert.throws(
+			() => algFromPrivateKeyPem(makePems('ec', { namedCurve: 'secp384r1' }).privateKey),
+			/unsupported EC curve/
+		);
+		assert.throws(() => algFromPrivateKeyPem(makePems('ed25519', {}).privateKey), /unsupported signingKeyPem key type/);
+	});
+
+	it('resolveEffectiveAlg: configured alg without a pin, pin-derived alg with one', () => {
+		assert.equal(resolveEffectiveAlg(), 'RS256');
+		assert.equal(resolveEffectiveAlg({ signingAlgorithm: 'ES256' }), 'ES256');
+		const ecPin = makePems('ec', { namedCurve: 'P-256' }).privateKey;
+		assert.equal(resolveEffectiveAlg({ signingKeyPem: ecPin }), 'ES256');
+		const rsaPin = makePems('rsa', { modulusLength: 2048 }).privateKey;
+		assert.equal(
+			resolveEffectiveAlg({ signingKeyPem: rsaPin, signingAlgorithm: 'ES256' }),
+			'RS256',
+			'pin wins over config'
+		);
 	});
 });

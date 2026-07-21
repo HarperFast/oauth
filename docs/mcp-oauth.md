@@ -455,7 +455,7 @@ Point your MCP clients at the same route; they rediscover the endpoints via the
 
 ## Signing-key rotation
 
-By default, the plugin generates one RS256 keypair per node on first mint and
+By default, the plugin generates one keypair per node (RS256 by default; `mcp.signingAlgorithm: ES256` for EC P-256) on first mint and
 keeps it indefinitely. The JWKS endpoint publishes **all** persisted keys, so
 tokens signed by any node's key are always verifiable — the cluster first-boot
 race is resolved without any manual coordination.
@@ -747,5 +747,5 @@ These are **not** available and no config or code sample here implies them:
 
 - Per-tool / fine-grained scopes (the `scope` claim is passed through, not enforced per tool)
 - Transitive revocation (revoking the upstream IdP session does not invalidate already-issued MCP tokens)
-- Signing algorithms other than RS256
+- Signing algorithms other than RS256 and ES256 (e.g. EdDSA)
 - A native, composed MCP server (this plugin is the authorization server, not the MCP transport)

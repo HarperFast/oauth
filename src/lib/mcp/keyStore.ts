@@ -1,7 +1,8 @@
 /**
  * MCP JWT Signing Key Store
  *
- * Persists RS256 signing keypairs in the `harper_oauth_mcp_keys` Harper table,
+ * Persists signing keypairs (RS256 or ES256, per `mcp.signingAlgorithm` /
+ * pinned key material) in the `harper_oauth_mcp_keys` Harper table,
  * keyed by random UUID `kid` (the legacy `rs256-default` row stays valid — no
  * migration). Every node's key is published at the JWKS endpoint so cross-node
  * tokens verify regardless of which node signed them — eliminating the
@@ -55,17 +56,67 @@
  * (`{ ...raw }`). Always use explicit field access (decodeRecord).
  */
 
-import { createHash, createPublicKey, generateKeyPair, randomUUID } from 'node:crypto';
+import { createHash, createPrivateKey, createPublicKey, generateKeyPair, randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
 import type { Logger, MCPConfig, MCPPublicKeyRecord, MCPSigningKeyRecord, Table } from '../../types.ts';
+import type { SupportedSigningAlg } from './tokenIssuer.ts';
 
 const generateKeyPairAsync = promisify(generateKeyPair);
 
 /** Fixed primary key for the legacy v1 singleton signing key. */
 export const SIGNING_KEY_ID = 'rs256-default';
 
+/**
+ * The algorithm generated keys should use, from `mcp.signingAlgorithm`.
+ * Anything other than an explicit 'ES256' resolves to the RS256 default.
+ */
+export function resolveConfiguredAlg(mcpConfig?: MCPConfig): SupportedSigningAlg {
+	return mcpConfig?.signingAlgorithm === 'ES256' ? 'ES256' : 'RS256';
+}
+
+/**
+ * Derive the signing algorithm from pinned private-key material: RSA → RS256,
+ * EC P-256 → ES256. Throws on any other key type/curve — a pin the issuer
+ * cannot sign with must fail loudly at mint time, not emit broken tokens.
+ */
+export function algFromPrivateKeyPem(privateKeyPem: string): SupportedSigningAlg {
+	const key = createPrivateKey(privateKeyPem);
+	if (key.asymmetricKeyType === 'rsa') return 'RS256';
+	if (key.asymmetricKeyType === 'ec') {
+		const curve = key.asymmetricKeyDetails?.namedCurve;
+		if (curve === 'prime256v1') return 'ES256';
+		throw new Error(`MCP: unsupported EC curve for signingKeyPem: ${curve} (only P-256/prime256v1 is supported)`);
+	}
+	throw new Error(`MCP: unsupported signingKeyPem key type: ${key.asymmetricKeyType} (only RSA and EC P-256)`);
+}
+
+/**
+ * The algorithm access tokens are (or will be) signed with, for metadata
+ * advertisement: the pinned key's derived alg when a pin is configured
+ * (falling back to the configured alg if the PEM is unparseable — the mint
+ * path will surface that error), otherwise the configured alg.
+ */
+export function resolveEffectiveAlg(mcpConfig?: MCPConfig): SupportedSigningAlg {
+	if (mcpConfig?.signingKeyPem) {
+		try {
+			return algFromPrivateKeyPem(mcpConfig.signingKeyPem);
+		} catch {
+			return resolveConfiguredAlg(mcpConfig);
+		}
+	}
+	return resolveConfiguredAlg(mcpConfig);
+}
+
 const DEFAULT_ACCESS_TOKEN_TTL = 3600;
 const ENUM_CACHE_TTL_MS = 5_000;
+
+// Minimum age of the newest key before an alg-switch rotation may replace it.
+// During a rolling config rollout, nodes briefly disagree on signingAlgorithm;
+// without this floor each side would rotate the other's key away on every
+// token mint (key generation proportional to mint rate). With it, a mixed
+// window costs at most one rotation per direction per interval, and a
+// converged config still switches within this bound.
+const ALG_SWITCH_MIN_KEY_AGE_SECONDS = 300;
 
 declare const databases: any;
 
@@ -142,12 +193,17 @@ function decodeRecord(raw: Record<string, any>): MCPSigningKeyRecord {
 	};
 }
 
-async function generateRsaKeyPair(): Promise<{ publicKeyPem: string; privateKeyPem: string }> {
-	const { publicKey, privateKey } = await generateKeyPairAsync('rsa', {
-		modulusLength: 2048,
+async function generateSigningKeyPair(
+	alg: SupportedSigningAlg
+): Promise<{ publicKeyPem: string; privateKeyPem: string }> {
+	const encoding = {
 		publicKeyEncoding: { type: 'spki', format: 'pem' },
 		privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
-	});
+	} as const;
+	const { publicKey, privateKey } =
+		alg === 'ES256'
+			? await generateKeyPairAsync('ec', { namedCurve: 'P-256', ...encoding })
+			: await generateKeyPairAsync('rsa', { modulusLength: 2048, ...encoding });
 	return { publicKeyPem: publicKey as string, privateKeyPem: privateKey as string };
 }
 
@@ -353,6 +409,7 @@ export class MCPKeyStore {
 			return this.getOrPersistPinnedKey(mcpConfig.signingKeyPem, accessTtl);
 		}
 
+		const configuredAlg = resolveConfiguredAlg(mcpConfig);
 		const rotationInterval = coerceInterval(mcpConfig?.keyRotationInterval);
 		let allKeys = await this.enumerateKeys();
 
@@ -360,11 +417,28 @@ export class MCPKeyStore {
 		if (allKeys.length === 0) {
 			allKeys = await this.runSingleFlight(
 				(keys) => keys.length > 0,
-				(_freshKeys) => this.generateAndPersistFirstKey()
+				(_freshKeys) => this.generateAndPersistFirstKey(configuredAlg)
 			);
 		}
 
 		let signerKey = selectNewestKey(allKeys);
+
+		// Algorithm switch: when `signingAlgorithm` no longer matches the newest
+		// key, rotate to a fresh key under the configured alg so the config takes
+		// effect on a running deployment. Old keys stay in the JWKS until retired,
+		// so outstanding tokens keep verifying — additive, no migration (#127).
+		// The age floor bounds churn while a rolling rollout leaves nodes with
+		// disagreeing configs (see ALG_SWITCH_MIN_KEY_AGE_SECONDS).
+		if ((signerKey.alg ?? 'RS256') !== configuredAlg) {
+			const nowSeconds = Math.floor(Date.now() / 1000);
+			if (nowSeconds - signerKey.created_at > ALG_SWITCH_MIN_KEY_AGE_SECONDS) {
+				allKeys = await this.runSingleFlight(
+					(keys) => keys.length > 0 && (selectNewestKey(keys).alg ?? 'RS256') === configuredAlg,
+					(freshKeys) => this.rotateTo(freshKeys, configuredAlg)
+				);
+				signerKey = selectNewestKey(allKeys);
+			}
+		}
 
 		// Rotation when interval > 0 and newest key is stale.
 		if (rotationInterval > 0) {
@@ -372,7 +446,7 @@ export class MCPKeyStore {
 			if (nowSeconds - signerKey.created_at > rotationInterval) {
 				allKeys = await this.runSingleFlight(
 					(keys) => nowSeconds - selectNewestKey(keys).created_at <= rotationInterval,
-					(freshKeys) => this.rotateTo(freshKeys)
+					(freshKeys) => this.rotateTo(freshKeys, configuredAlg)
 				);
 				signerKey = selectNewestKey(allKeys);
 			}
@@ -436,10 +510,11 @@ export class MCPKeyStore {
 	 * it. The bump is idempotent across nodes (same kid, same condition).
 	 *
 	 * Kid assignment when persisting:
-	 * - `rs256-default` when absent (legacy compat; deterministic across nodes).
+	 * - `rs256-default` for an RSA pin when absent (legacy compat; deterministic
+	 *   across nodes).
 	 * - `pinned-<sha256 fingerprint>` when `rs256-default` holds different
-	 *   material — also deterministic, so concurrent puts from clustered nodes are
-	 *   idempotent.
+	 *   material, or for a non-RSA pin — also deterministic, so concurrent puts
+	 *   from clustered nodes are idempotent.
 	 *
 	 * Old keys are NOT removed — they stay for JWKS overlap so tokens they signed
 	 * keep verifying until the retirement window closes.
@@ -501,12 +576,16 @@ export class MCPKeyStore {
 				return afterBump;
 			}
 
-			// Pin not in table — choose kid and persist.
+			// Pin not in table — choose kid and persist. The alg comes from the key
+			// material itself (throws on unsupported types). Only an RSA pin may
+			// claim the legacy `rs256-default` kid; EC pins always get the
+			// deterministic fingerprint kid.
+			const alg = algFromPrivateKeyPem(signingKeyPem);
 			const existingDefault = freshKeys.find((k) => k.kid === SIGNING_KEY_ID);
-			const kid = existingDefault ? pinnedKidFromPem(pinnedPublicKeyPem) : SIGNING_KEY_ID;
+			const kid = existingDefault || alg !== 'RS256' ? pinnedKidFromPem(pinnedPublicKeyPem) : SIGNING_KEY_ID;
 			const record: MCPSigningKeyRecord = {
 				kid,
-				alg: 'RS256',
+				alg,
 				public_key_pem: pinnedPublicKeyPem,
 				private_key_pem: signingKeyPem,
 				created_at: Math.floor(Date.now() / 1000),
@@ -515,7 +594,7 @@ export class MCPKeyStore {
 			try {
 				await table.put(encodeRecord(record));
 				invalidateEnumCache();
-				this.logger?.info?.('MCP: persisted pinned RS256 signing key as signer, kid:', kid);
+				this.logger?.info?.(`MCP: persisted pinned ${alg} signing key as signer, kid:`, kid);
 			} catch (error) {
 				this.logger?.error?.('Failed to persist pinned MCP signing key:', error);
 				throw error;
@@ -554,15 +633,15 @@ export class MCPKeyStore {
 	 * first-boot path). Re-enumerates after persisting to adopt the converged
 	 * winner under concurrent first-boot races from other processes.
 	 */
-	private async generateAndPersistFirstKey(): Promise<MCPSigningKeyRecord[]> {
-		const { publicKeyPem, privateKeyPem } = await generateRsaKeyPair();
+	private async generateAndPersistFirstKey(alg: SupportedSigningAlg): Promise<MCPSigningKeyRecord[]> {
+		const { publicKeyPem, privateKeyPem } = await generateSigningKeyPair(alg);
 
 		// UUID kid: two nodes racing first boot generate different keypairs; a
 		// shared kid would let one overwrite the other, stranding the loser's
 		// already-signed tokens with a kid whose JWKS entry is a different key.
 		const record: MCPSigningKeyRecord = {
 			kid: randomUUID(),
-			alg: 'RS256',
+			alg,
 			public_key_pem: publicKeyPem,
 			private_key_pem: privateKeyPem,
 			created_at: Math.floor(Date.now() / 1000),
@@ -576,7 +655,7 @@ export class MCPKeyStore {
 			this.logger?.error?.('Failed to persist MCP signing key:', error);
 			throw error;
 		}
-		this.logger?.info?.('MCP: generated and persisted RS256 signing key, kid:', record.kid);
+		this.logger?.info?.(`MCP: generated and persisted ${alg} signing key, kid:`, record.kid);
 
 		// Re-enumerate to adopt the persisted state (convergence under cross-process races).
 		let afterWrite: MCPSigningKeyRecord[] = [];
@@ -602,11 +681,11 @@ export class MCPKeyStore {
 	 * Generate a new keypair under a UUID kid, persist, and re-enumerate.
 	 * Returns the updated key set.
 	 */
-	private async rotateTo(currentKeys: MCPSigningKeyRecord[]): Promise<MCPSigningKeyRecord[]> {
-		const { publicKeyPem, privateKeyPem } = await generateRsaKeyPair();
+	private async rotateTo(currentKeys: MCPSigningKeyRecord[], alg: SupportedSigningAlg): Promise<MCPSigningKeyRecord[]> {
+		const { publicKeyPem, privateKeyPem } = await generateSigningKeyPair(alg);
 		const newKey: MCPSigningKeyRecord = {
 			kid: randomUUID(),
-			alg: 'RS256',
+			alg,
 			public_key_pem: publicKeyPem,
 			private_key_pem: privateKeyPem,
 			created_at: Math.floor(Date.now() / 1000),

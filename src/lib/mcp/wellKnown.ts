@@ -24,7 +24,7 @@
 
 import type { Logger, MCPConfig } from '../../types.ts';
 import { dcrEnabled } from './dcr.ts';
-import { MCPKeyStore } from './keyStore.ts';
+import { MCPKeyStore, resolveEffectiveAlg } from './keyStore.ts';
 import { publicKeyToJwk } from './tokenIssuer.ts';
 
 interface HarperRequest {
@@ -179,9 +179,10 @@ export function buildAuthorizationServerMetadata(
 		],
 		// EdDSA is the only assertion alg the client_credentials grant verifies.
 		...(clientCredentialsEnabled ? { token_endpoint_auth_signing_alg_values_supported: ['EdDSA'] } : {}),
-		// RS256 only in v1 — jsonwebtoken cannot emit EdDSA. Matches the key
-		// served at the JWKS endpoint; EdDSA is deferred (would need a JOSE lib).
-		id_token_signing_alg_values_supported: ['RS256'],
+		// The alg new access tokens are signed with — from `mcp.signingAlgorithm`,
+		// or derived from the pinned key material when `signingKeyPem` is set.
+		// Per-key algs are published in the JWKS; EdDSA is deferred (#127).
+		id_token_signing_alg_values_supported: [resolveEffectiveAlg(mcpConfig)],
 		// RFC 8707 §2: server understands the `resource` parameter.
 		resource_parameter_supported: true,
 		// RFC 9207: server emits `iss` on every authorization response redirect.

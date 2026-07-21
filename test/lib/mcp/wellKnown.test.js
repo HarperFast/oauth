@@ -13,6 +13,7 @@ import {
 	resolveResource,
 } from '../../../dist/lib/mcp/wellKnown.js';
 import { resetMCPKeysTableCache } from '../../../dist/lib/mcp/keyStore.js';
+import { generateKeyPairSync } from 'node:crypto';
 
 // Bun runs every test file in ONE shared process (Node isolates per file). The
 // JWKS tests below assert an EMPTY key set, which relies on the MCPKeyStore
@@ -165,9 +166,24 @@ describe('MCP well-known: AS metadata document (RFC 8414)', () => {
 		assert.ok(methods.includes('client_secret_post'));
 	});
 
-	it('advertises RS256 as the only signing algorithm (EdDSA deferred)', () => {
+	it('advertises RS256 as the signing algorithm by default (EdDSA deferred)', () => {
 		const doc = buildAuthorizationServerMetadata(makeRequest(), { enabled: true });
 		assert.deepEqual(doc.id_token_signing_alg_values_supported, ['RS256']);
+	});
+
+	it('advertises ES256 when mcp.signingAlgorithm is ES256 (#127)', () => {
+		const doc = buildAuthorizationServerMetadata(makeRequest(), { enabled: true, signingAlgorithm: 'ES256' });
+		assert.deepEqual(doc.id_token_signing_alg_values_supported, ['ES256']);
+	});
+
+	it("advertises the pinned key's algorithm over mcp.signingAlgorithm (pin wins)", () => {
+		const { privateKey } = generateKeyPairSync('ec', {
+			namedCurve: 'P-256',
+			publicKeyEncoding: { type: 'spki', format: 'pem' },
+			privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+		});
+		const doc = buildAuthorizationServerMetadata(makeRequest(), { enabled: true, signingKeyPem: privateKey });
+		assert.deepEqual(doc.id_token_signing_alg_values_supported, ['ES256']);
 	});
 
 	it('signals RFC 8707 resource-parameter support', () => {
