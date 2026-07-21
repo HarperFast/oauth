@@ -69,6 +69,14 @@ describe('OAuth Configuration', () => {
 			assert.equal(cfg.enabled, false);
 			assert.equal(cfg.clientIdMetadataDocuments.enabled, false);
 		});
+		it('coerces refreshTokenRequiresOfflineAccess (string "false" must not activate the gate)', () => {
+			const cfg = { refreshTokenRequiresOfflineAccess: 'false' };
+			normalizeMcpSecurityConfig(cfg);
+			assert.equal(cfg.refreshTokenRequiresOfflineAccess, false);
+			const cfgTrue = { refreshTokenRequiresOfflineAccess: 'true' };
+			normalizeMcpSecurityConfig(cfgTrue);
+			assert.equal(cfgTrue.refreshTokenRequiresOfflineAccess, true);
+		});
 		it('coerces clientCredentials.enabled the same way (token-minting switch must not be string-truthy)', () => {
 			const cfg = { clientCredentials: { enabled: 'false' } };
 			normalizeMcpSecurityConfig(cfg);

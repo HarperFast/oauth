@@ -191,6 +191,15 @@ Refresh tokens rotate on use: presenting an already-used token from a family
 revokes the whole family (replay defense). Refresh families live for
 `refreshTokenTtl` (default 30 days).
 
+By default any client whose registered `grant_types` include `refresh_token`
+receives a refresh token on the code exchange. The AS metadata advertises
+`offline_access` in `scopes_supported` (SEP-2207), so clients that want refresh
+tokens may request that scope explicitly; setting
+`mcp.refreshTokenRequiresOfflineAccess: true` makes that opt-in mandatory —
+refresh tokens are then withheld unless the granted scope carries
+`offline_access`. The PRM document never lists `offline_access` (refresh tokens
+are not a resource requirement).
+
 ---
 
 ## The `withMCPAuth` wrapper

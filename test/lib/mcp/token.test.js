@@ -251,6 +251,70 @@ describe('handleToken', () => {
 		assert.equal(families.size, 0, 'no refresh family persisted');
 	});
 
+	// ---- offline_access opt-in (SEP-2207) ----
+
+	it('withholds the refresh token when refreshTokenRequiresOfflineAccess is set and the scope lacks offline_access', async () => {
+		seedCode('code-1'); // scope: 'mcp:read'
+		const res = await handleToken(
+			{ headers: {} },
+			{
+				grant_type: 'authorization_code',
+				code: 'code-1',
+				code_verifier: CODE_VERIFIER,
+				redirect_uri: REDIRECT,
+				client_id: 'public-1',
+			},
+			{ ...mcpConfig, refreshTokenRequiresOfflineAccess: true }
+		);
+		assert.equal(res.status, 200);
+		assert.ok(res.body.access_token);
+		assert.equal(res.body.refresh_token, undefined, 'no refresh token without the offline_access opt-in');
+		assert.equal(families.size, 0, 'no refresh family persisted');
+	});
+
+	it('issues the refresh token when refreshTokenRequiresOfflineAccess is set and the scope carries offline_access', async () => {
+		seedCode('code-1', { scope: 'mcp:read offline_access' });
+		const res = await handleToken(
+			{ headers: {} },
+			{
+				grant_type: 'authorization_code',
+				code: 'code-1',
+				code_verifier: CODE_VERIFIER,
+				redirect_uri: REDIRECT,
+				client_id: 'public-1',
+			},
+			{ ...mcpConfig, refreshTokenRequiresOfflineAccess: true }
+		);
+		assert.equal(res.status, 200);
+		assert.ok(res.body.refresh_token, 'offline_access opt-in honored');
+		assert.equal(res.body.scope, 'mcp:read offline_access', 'granted scope echoed back');
+		assert.equal(families.size, 1, 'refresh family persisted');
+	});
+
+	it('still gates on grant_types even when offline_access is requested', async () => {
+		clients.set('noref-1', {
+			client_id: 'noref-1',
+			token_endpoint_auth_method: 'none',
+			grant_types: JSON.stringify(['authorization_code']),
+			redirect_uris: JSON.stringify([REDIRECT]),
+			client_id_issued_at: 1700000000,
+		});
+		seedCode('code-1', { client_id: 'noref-1', scope: 'offline_access' });
+		const res = await handleToken(
+			{ headers: {} },
+			{
+				grant_type: 'authorization_code',
+				code: 'code-1',
+				code_verifier: CODE_VERIFIER,
+				redirect_uri: REDIRECT,
+				client_id: 'noref-1',
+			},
+			{ ...mcpConfig, refreshTokenRequiresOfflineAccess: true }
+		);
+		assert.equal(res.status, 200);
+		assert.equal(res.body.refresh_token, undefined, 'grant_types gate still applies');
+	});
+
 	// ---- authorization_code rejection branches ----
 
 	it('rejects when code, code_verifier, or redirect_uri is missing', async () => {

@@ -85,6 +85,11 @@ describe('MCP well-known: PRM document (RFC 9728)', () => {
 		});
 		assert.equal(doc.resource, 'https://my-app.example.com/mcp');
 	});
+
+	it('does not advertise scopes_supported — offline_access must stay out of PRM (SEP-2207)', () => {
+		const doc = buildProtectedResourceMetadata(makeRequest(), { enabled: true });
+		assert.ok(!('scopes_supported' in doc), 'PRM must not carry scopes_supported');
+	});
 });
 
 describe('MCP well-known: AS metadata document (RFC 8414)', () => {
@@ -168,6 +173,11 @@ describe('MCP well-known: AS metadata document (RFC 8414)', () => {
 	it('advertises RS256 as the only signing algorithm (EdDSA deferred)', () => {
 		const doc = buildAuthorizationServerMetadata(makeRequest(), { enabled: true });
 		assert.deepEqual(doc.id_token_signing_alg_values_supported, ['RS256']);
+	});
+
+	it('advertises offline_access in scopes_supported (SEP-2207 refresh-token opt-in)', () => {
+		const doc = buildAuthorizationServerMetadata(makeRequest(), { enabled: true });
+		assert.deepEqual(doc.scopes_supported, ['offline_access']);
 	});
 
 	it('signals RFC 8707 resource-parameter support', () => {

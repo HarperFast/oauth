@@ -86,10 +86,19 @@ export function coerceConfigBoolean(value: unknown): boolean | undefined {
  * - `mcp.clientCredentials.enabled` is coerced the same way — this flag mints
  *   tokens for headless agents, so a stray truthy string must not enable it
  *   (it is explicit opt-in, default OFF).
+ * - `mcp.refreshTokenRequiresOfflineAccess` is coerced the same way — a stray
+ *   truthy string would withhold refresh tokens from clients that never
+ *   request `offline_access` (SEP-2207 opt-in, default OFF).
  */
 export function normalizeMcpSecurityConfig(mcpConfig: Record<string, any>): void {
 	const enabled = coerceConfigBoolean(mcpConfig.enabled);
 	if (enabled !== undefined) mcpConfig.enabled = enabled;
+
+	// An env-expanded "false" is truthy and would activate the offline_access
+	// gate the operator disabled — withholding refresh tokens from every client
+	// that didn't request the scope.
+	const requiresOfflineAccess = coerceConfigBoolean(mcpConfig.refreshTokenRequiresOfflineAccess);
+	if (requiresOfflineAccess !== undefined) mcpConfig.refreshTokenRequiresOfflineAccess = requiresOfflineAccess;
 
 	const clientCredentials = mcpConfig.clientCredentials;
 	if (clientCredentials && typeof clientCredentials === 'object') {
