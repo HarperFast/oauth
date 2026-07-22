@@ -163,10 +163,11 @@ export async function handleApplication(scope: Scope): Promise<void> {
 		// sensitive leaves (mcp.dynamicClientRegistration.initialAccessToken) and
 		// a pinned issuer/resource support ${ENV_VAR}.
 		const mcpConfig = options.mcp ? expandEnvVarsDeep(options.mcp) : undefined;
-		// Coerce documented boolean strings and normalize allowedHosts BEFORE any
-		// `enabled` check, so an env-expanded "false" can't leave a security switch
-		// truthy or turn a scalar allowedHosts into substring matching.
-		if (mcpConfig) normalizeMcpSecurityConfig(mcpConfig);
+		// Normalize documented booleans (totally — coerce or drop-with-warning)
+		// and allowedHosts BEFORE any `enabled` check, so an env-expanded "false"
+		// or an unresolved "${FLAG}" placeholder can't leave a gate string-truthy,
+		// and a scalar allowedHosts can't become substring matching.
+		if (mcpConfig) normalizeMcpSecurityConfig(mcpConfig, logger);
 		if (mcpConfig?.enabled && !mcpConfig.issuer) {
 			// Without a pinned issuer, resolveIssuer() (wellKnown.ts) derives it from
 			// the client-controlled Host header — and resolveResource() defaults to

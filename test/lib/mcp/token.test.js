@@ -15,6 +15,7 @@ import { resetMCPClientsTableCache } from '../../../dist/lib/mcp/clientStore.js'
 import { resetMCPKeysTableCache, SIGNING_KEY_ID } from '../../../dist/lib/mcp/keyStore.js';
 import { resetMCPRefreshFamiliesTableCache, makeRefreshToken } from '../../../dist/lib/mcp/refreshTokenStore.js';
 import { verifyAccessToken } from '../../../dist/lib/mcp/tokenIssuer.js';
+import { normalizeMcpSecurityConfig } from '../../../dist/lib/config.js';
 
 function asTrackedObject(plain) {
 	return new Proxy(plain, {
@@ -289,6 +290,28 @@ describe('handleToken', () => {
 		assert.ok(res.body.refresh_token, 'offline_access opt-in honored');
 		assert.equal(res.body.scope, 'mcp:read offline_access', 'granted scope echoed back');
 		assert.equal(families.size, 1, 'refresh family persisted');
+	});
+
+	it('an unresolved "${FLAG}" placeholder does not activate the gate once config is normalized (PR #192 review)', async () => {
+		// The startup path always runs normalizeMcpSecurityConfig before any
+		// handler sees the config; this pins the composed behavior — the truthy
+		// placeholder string is dropped, so the default (issue refresh) applies.
+		const cfg = { ...mcpConfig, refreshTokenRequiresOfflineAccess: '${FLAG}' };
+		normalizeMcpSecurityConfig(cfg);
+		seedCode('code-1'); // scope: 'mcp:read' — no offline_access
+		const res = await handleToken(
+			{ headers: {} },
+			{
+				grant_type: 'authorization_code',
+				code: 'code-1',
+				code_verifier: CODE_VERIFIER,
+				redirect_uri: REDIRECT,
+				client_id: 'public-1',
+			},
+			cfg
+		);
+		assert.equal(res.status, 200);
+		assert.ok(res.body.refresh_token, 'refresh token issued — documented default-off gate stayed off');
 	});
 
 	it('still gates on grant_types even when offline_access is requested', async () => {

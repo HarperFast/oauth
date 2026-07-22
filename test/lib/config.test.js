@@ -77,6 +77,41 @@ describe('OAuth Configuration', () => {
 			normalizeMcpSecurityConfig(cfgTrue);
 			assert.equal(cfgTrue.refreshTokenRequiresOfflineAccess, true);
 		});
+		it('drops an unresolved "${FLAG}" placeholder so a documented-off gate stays off, and warns', () => {
+			// expandEnvVarsDeep leaves "${FLAG}" intact when FLAG is unset; that
+			// string is truthy and must not activate the gate (PR #192 review).
+			const warnings = [];
+			const logger = { warn: (...args) => warnings.push(args.join(' ')) };
+			const cfg = { refreshTokenRequiresOfflineAccess: '${FLAG}' };
+			normalizeMcpSecurityConfig(cfg, logger);
+			assert.equal(cfg.refreshTokenRequiresOfflineAccess, undefined, 'placeholder dropped — default applies');
+			assert.equal(warnings.length, 1);
+			assert.match(warnings[0], /unresolved env placeholder/);
+		});
+		it('drops any other non-boolean value with a warning (total normalization)', () => {
+			const warnings = [];
+			const logger = { warn: (...args) => warnings.push(args.join(' ')) };
+			const cfg = {
+				enabled: 'yes',
+				refreshTokenRequiresOfflineAccess: 1,
+				clientCredentials: { enabled: {} },
+				dynamicClientRegistration: { enabled: 'on' },
+				clientIdMetadataDocuments: { enabled: 'nope' },
+			};
+			normalizeMcpSecurityConfig(cfg, logger);
+			assert.equal(cfg.enabled, undefined);
+			assert.equal(cfg.refreshTokenRequiresOfflineAccess, undefined);
+			assert.equal(cfg.clientCredentials.enabled, undefined);
+			assert.equal(cfg.dynamicClientRegistration.enabled, undefined);
+			assert.equal(cfg.clientIdMetadataDocuments.enabled, undefined);
+			assert.equal(warnings.length, 5, 'one warning per dropped field');
+			assert.ok(warnings.every((w) => /must be a boolean/.test(w)));
+		});
+		it('normalizes dynamicClientRegistration.enabled ("false" string must actually disable DCR)', () => {
+			const cfg = { dynamicClientRegistration: { enabled: 'false' } };
+			normalizeMcpSecurityConfig(cfg);
+			assert.equal(cfg.dynamicClientRegistration.enabled, false);
+		});
 		it('coerces clientCredentials.enabled the same way (token-minting switch must not be string-truthy)', () => {
 			const cfg = { clientCredentials: { enabled: 'false' } };
 			normalizeMcpSecurityConfig(cfg);

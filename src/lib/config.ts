@@ -73,43 +73,73 @@ export function coerceConfigBoolean(value: unknown): boolean | undefined {
 }
 
 /**
+ * Normalize one documented-boolean config field in place, TOTALLY: after this
+ * call the field is either a real boolean or absent. Coercible values
+ * (booleans, "true"/"false" strings) are coerced; anything else present —
+ * including an unresolved `${ENV_VAR}` placeholder left by expandEnvVarsDeep
+ * when the variable is unset — is DELETED with a warning, so the field's
+ * documented default applies. Without this, a truthy junk value silently
+ * flips whichever direction the consuming gate happens to test (e.g.
+ * `refreshTokenRequiresOfflineAccess: ${FLAG}` with FLAG unset would activate
+ * a documented default-off gate).
+ */
+function normalizeBooleanField(obj: Record<string, any>, field: string, path: string, logger?: Logger): void {
+	const value = obj[field];
+	if (value === undefined || value === null) return; // Absent (or bare YAML key) — default applies already.
+	const coerced = coerceConfigBoolean(value);
+	if (coerced !== undefined) {
+		obj[field] = coerced;
+		return;
+	}
+	const isUnresolvedPlaceholder = typeof value === 'string' && /^\$\{[^}]*\}$/.test(value.trim());
+	logger?.warn?.(
+		isUnresolvedPlaceholder
+			? `MCP: ${path} is the unresolved env placeholder ${JSON.stringify(value)} (variable unset). ` +
+					'Treating the option as absent — its documented default applies.'
+			: `MCP: ${path} must be a boolean; got ${JSON.stringify(value)}. ` +
+					'Treating the option as absent — its documented default applies.'
+	);
+	delete obj[field];
+}
+
+/**
  * Normalize the security-relevant fields of the `mcp` config block in place,
- * so a mis-typed value can never silently fail open:
- * - `mcp.enabled` and `mcp.clientIdMetadataDocuments.enabled` are coerced from
- *   documented boolean strings to real booleans (an env-expanded `"false"`
- *   would otherwise be truthy and enable the feature the operator disabled).
+ * so a mis-typed value can never silently flip a gate:
+ * - Every documented boolean (`mcp.enabled`,
+ *   `mcp.refreshTokenRequiresOfflineAccess`, `mcp.clientCredentials.enabled`,
+ *   `mcp.clientIdMetadataDocuments.enabled`,
+ *   `mcp.dynamicClientRegistration.enabled`) is normalized totally via
+ *   {@link normalizeBooleanField}: coerced to a real boolean, or removed with
+ *   a warning so the documented default applies. Consumers may therefore gate
+ *   on plain truthiness / `!== false` without re-validating types.
  * - `mcp.clientIdMetadataDocuments.allowedHosts` is normalized to an array of
  *   exact, lowercased hostnames. A scalar string (which `Array.includes` /
  *   `String.includes` would turn into substring matching) is wrapped into a
  *   single-element array; anything that isn't a string or array of strings is
  *   rejected rather than treated as "no restriction".
- * - `mcp.clientCredentials.enabled` is coerced the same way — this flag mints
- *   tokens for headless agents, so a stray truthy string must not enable it
- *   (it is explicit opt-in, default OFF).
- * - `mcp.refreshTokenRequiresOfflineAccess` is coerced the same way — a stray
- *   truthy string would withhold refresh tokens from clients that never
- *   request `offline_access` (SEP-2207 opt-in, default OFF).
  */
-export function normalizeMcpSecurityConfig(mcpConfig: Record<string, any>): void {
-	const enabled = coerceConfigBoolean(mcpConfig.enabled);
-	if (enabled !== undefined) mcpConfig.enabled = enabled;
-
-	// An env-expanded "false" is truthy and would activate the offline_access
-	// gate the operator disabled — withholding refresh tokens from every client
-	// that didn't request the scope.
-	const requiresOfflineAccess = coerceConfigBoolean(mcpConfig.refreshTokenRequiresOfflineAccess);
-	if (requiresOfflineAccess !== undefined) mcpConfig.refreshTokenRequiresOfflineAccess = requiresOfflineAccess;
+export function normalizeMcpSecurityConfig(mcpConfig: Record<string, any>, logger?: Logger): void {
+	normalizeBooleanField(mcpConfig, 'enabled', 'mcp.enabled', logger);
+	normalizeBooleanField(
+		mcpConfig,
+		'refreshTokenRequiresOfflineAccess',
+		'mcp.refreshTokenRequiresOfflineAccess',
+		logger
+	);
 
 	const clientCredentials = mcpConfig.clientCredentials;
 	if (clientCredentials && typeof clientCredentials === 'object') {
-		const ccEnabled = coerceConfigBoolean(clientCredentials.enabled);
-		if (ccEnabled !== undefined) clientCredentials.enabled = ccEnabled;
+		normalizeBooleanField(clientCredentials, 'enabled', 'mcp.clientCredentials.enabled', logger);
+	}
+
+	const dcr = mcpConfig.dynamicClientRegistration;
+	if (dcr && typeof dcr === 'object') {
+		normalizeBooleanField(dcr, 'enabled', 'mcp.dynamicClientRegistration.enabled', logger);
 	}
 
 	const cimd = mcpConfig.clientIdMetadataDocuments;
 	if (cimd && typeof cimd === 'object') {
-		const cimdEnabled = coerceConfigBoolean(cimd.enabled);
-		if (cimdEnabled !== undefined) cimd.enabled = cimdEnabled;
+		normalizeBooleanField(cimd, 'enabled', 'mcp.clientIdMetadataDocuments.enabled', logger);
 
 		if (cimd.allowedHosts !== undefined) {
 			const raw = Array.isArray(cimd.allowedHosts) ? cimd.allowedHosts : [cimd.allowedHosts];
