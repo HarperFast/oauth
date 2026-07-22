@@ -196,14 +196,21 @@ function decodeRecord(raw: Record<string, any>): MCPSigningKeyRecord {
 async function generateSigningKeyPair(
 	alg: SupportedSigningAlg
 ): Promise<{ publicKeyPem: string; privateKeyPem: string }> {
-	const encoding = {
+	// Inline literal options per call: promisify's generateKeyPair overloads
+	// only resolve to string-returning variants when the encodings are literal.
+	if (alg === 'ES256') {
+		const { publicKey, privateKey } = await generateKeyPairAsync('ec', {
+			namedCurve: 'P-256',
+			publicKeyEncoding: { type: 'spki', format: 'pem' },
+			privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+		});
+		return { publicKeyPem: publicKey as string, privateKeyPem: privateKey as string };
+	}
+	const { publicKey, privateKey } = await generateKeyPairAsync('rsa', {
+		modulusLength: 2048,
 		publicKeyEncoding: { type: 'spki', format: 'pem' },
 		privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
-	} as const;
-	const { publicKey, privateKey } =
-		alg === 'ES256'
-			? await generateKeyPairAsync('ec', { namedCurve: 'P-256', ...encoding })
-			: await generateKeyPairAsync('rsa', { modulusLength: 2048, ...encoding });
+	});
 	return { publicKeyPem: publicKey as string, privateKeyPem: privateKey as string };
 }
 
