@@ -107,7 +107,7 @@ GitHub login, and presents a bearer token on every subsequent call — which
      │ ◀─────────────────────────────│                              │
      │                                │                              │
      │  6. POST /oauth/mcp/token  (code + code_verifier)             │
-     │ ─────────────────────────────▶│  → access_token (RS256 JWT)  │
+     │ ─────────────────────────────▶│  → access_token (signed JWT) │
      │                                │     + refresh_token          │
      │                                │                              │
      │  7. GET /mcp  Authorization: Bearer <access_token>            │
@@ -130,8 +130,8 @@ GitHub login, and presents a bearer token on every subsequent call — which
    user to the upstream IdP; on return it mints a single-use authorization code
    and redirects back to the client's `redirect_uri`.
 6. **Token exchange.** The client posts the code plus its PKCE `code_verifier` to
-   `/oauth/mcp/token` and receives an RS256-signed access token (and a refresh
-   token) bound to the `resource` as its `aud`.
+   `/oauth/mcp/token` and receives a signed access token (RS256 or ES256, per `mcp.signingAlgorithm`)
+   and a refresh token, bound to the `resource` as its `aud`.
 7. **Authenticated requests.** The client calls your MCP route with
    `Authorization: Bearer <access_token>`. `withMCPAuth` verifies the signature,
    audience, and issuer, attaches the claims as `request.mcp`, and runs your
@@ -149,11 +149,11 @@ discovery handlers fall through).
 
 ### Discovery (`/.well-known/*`)
 
-| Path                                          | Spec     | Returns                                                                              |
-| --------------------------------------------- | -------- | ------------------------------------------------------------------------------------ |
-| `GET /.well-known/oauth-protected-resource`   | RFC 9728 | `resource`, `authorization_servers`, `bearer_methods_supported`                      |
-| `GET /.well-known/oauth-authorization-server` | RFC 8414 | `issuer`, the endpoint URLs, and supported response/grant/PKCE/auth methods          |
-| `GET /.well-known/jwks.json`                  | —        | The RS256 public keys for verifying issued tokens (empty until the first token mint) |
+| Path                                          | Spec     | Returns                                                                                                               |
+| --------------------------------------------- | -------- | --------------------------------------------------------------------------------------------------------------------- |
+| `GET /.well-known/oauth-protected-resource`   | RFC 9728 | `resource`, `authorization_servers`, `bearer_methods_supported`                                                       |
+| `GET /.well-known/oauth-authorization-server` | RFC 8414 | `issuer`, the endpoint URLs, and supported response/grant/PKCE/auth methods                                           |
+| `GET /.well-known/jwks.json`                  | —        | The signing public keys (RSA and/or EC, per-key `alg`) for verifying issued tokens (empty until the first token mint) |
 
 All three send `Access-Control-Allow-Origin: *` so browser-based clients and
 discovery tools can fetch them cross-origin. When `mcp.resource` carries a path
@@ -175,7 +175,9 @@ form the `WWW-Authenticate` challenge advertises.
 
 ### Issued access tokens
 
-RS256 JWT, signed with key id `rs256-default`, carrying:
+A signed JWT — RS256 by default, ES256 when configured (`mcp.signingAlgorithm`).
+The `kid` header identifies the signing key; resolve it against the published
+JWKS rather than assuming a fixed key id. Claims:
 
 | Claim       | Value                                                                 |
 | ----------- | --------------------------------------------------------------------- |
@@ -703,7 +705,7 @@ of key possession is the only accepted authentication for this grant.
 > implies a vantage point (TLS interception, host access) from which the
 > minted bearer token itself is equally exposed.
 
-The issued token is the same RS256 Bearer JWT as the interactive flow, with two
+The issued token is the same signed Bearer JWT as the interactive flow, with two
 differences: **`sub` is the client identity** (`sub` = `client_id`, RFC 9068
 §2.2 — there is no end user in this grant) and **no refresh token is ever
 issued** — the default TTL is 5 minutes and agents simply re-mint on 401.

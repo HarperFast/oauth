@@ -2,7 +2,7 @@
  * MCP Token Endpoint (POST /oauth/mcp/token)
  *
  * Exchanges an authorization code (PKCE-verified) or a refresh token for an
- * audience-bound RS256 JWT access token. Mirrors DCR's JSON request/response
+ * audience-bound signed JWT access token. Mirrors DCR's JSON request/response
  * shape (`{ status, body }` with OAuth 2.0 error objects).
  *
  * Access tokens are stateless (no token-table round trip); refresh tokens use

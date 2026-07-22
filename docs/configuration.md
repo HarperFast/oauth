@@ -57,7 +57,7 @@ Each provider requires:
 
 ### MCP OAuth
 
-Opt-in support for the Model Context Protocol authorization flow ([issue #86](https://github.com/HarperFast/oauth/issues/86)). The plugin serves Dynamic Client Registration at `POST /oauth/mcp/register` (RFC 7591), the discovery documents under `/.well-known/*` (RFCs 8414, 9728) so MCP clients (Claude Desktop, Cursor, `mcp-remote`) can find and register themselves, the authorization endpoint `GET /oauth/mcp/authorize` (OAuth 2.1 + PKCE-S256), the `POST /oauth/mcp/token` exchange (audience-bound RS256 JWTs), and the `withMCPAuth` route guard that verifies those tokens on your MCP endpoint.
+Opt-in support for the Model Context Protocol authorization flow ([issue #86](https://github.com/HarperFast/oauth/issues/86)). The plugin serves Dynamic Client Registration at `POST /oauth/mcp/register` (RFC 7591), the discovery documents under `/.well-known/*` (RFCs 8414, 9728) so MCP clients (Claude Desktop, Cursor, `mcp-remote`) can find and register themselves, the authorization endpoint `GET /oauth/mcp/authorize` (OAuth 2.1 + PKCE-S256), the `POST /oauth/mcp/token` exchange (audience-bound signed JWTs — RS256 by default, ES256 opt-in), and the `withMCPAuth` route guard that verifies those tokens on your MCP endpoint.
 
 > This section is the configuration reference. For the end-to-end flow, the `withMCPAuth` wrapper (registration models + options), the `onMCPTokenIssued` hook, the production checklist, and troubleshooting, see **[MCP OAuth](./mcp-oauth.md)**. The feature is **experimental and opt-in** (`mcp.enabled`).
 
