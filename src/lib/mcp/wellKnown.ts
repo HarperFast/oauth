@@ -147,11 +147,23 @@ export function buildProtectedResourceMetadata(request: HarperRequest, mcpConfig
  * RFC 8414 Authorization Server Metadata document.
  * Advertises the spec-required fields for the MCP authorization spec 2025-06-18.
  */
-export function buildAuthorizationServerMetadata(
+export async function buildAuthorizationServerMetadata(
 	request: HarperRequest,
 	mcpConfig: MCPConfig
-): Record<string, unknown> {
+): Promise<Record<string, unknown>> {
 	const issuer = resolveIssuer(request, mcpConfig);
+	// Advertised signing algs: what will sign next (config/pin-derived) UNIONED
+	// with the algs of keys still live in the JWKS. During an alg switch — and
+	// especially its rolling-deploy damper window, where an old-alg key keeps
+	// signing for up to ALG_SWITCH_MIN_KEY_AGE_SECONDS — tokens of both algs are
+	// in circulation, and advertising only the config-derived value would
+	// misdescribe the tokens actually being minted. Read-only (5s-cached
+	// enumeration); [] before the first mint leaves just the effective alg.
+	const effectiveAlg = resolveEffectiveAlg(mcpConfig);
+	const liveKeys = await new MCPKeyStore().getAllPublicKeys(mcpConfig);
+	const advertisedAlgs = [effectiveAlg, ...liveKeys.map((k) => k.alg ?? 'RS256')].filter(
+		(alg, index, all) => all.indexOf(alg) === index
+	);
 	// CIMD is enabled by default when mcp.enabled; disabled by explicit enabled: false.
 	const cimdEnabled = mcpConfig.clientIdMetadataDocuments?.enabled !== false;
 	// client_credentials is explicit opt-in (#162); advertised only when enabled.
@@ -179,10 +191,10 @@ export function buildAuthorizationServerMetadata(
 		],
 		// EdDSA is the only assertion alg the client_credentials grant verifies.
 		...(clientCredentialsEnabled ? { token_endpoint_auth_signing_alg_values_supported: ['EdDSA'] } : {}),
-		// The alg new access tokens are signed with — from `mcp.signingAlgorithm`,
-		// or derived from the pinned key material when `signingKeyPem` is set.
-		// Per-key algs are published in the JWKS; EdDSA is deferred (#127).
-		id_token_signing_alg_values_supported: [resolveEffectiveAlg(mcpConfig)],
+		// Effective alg first, then any other alg still live in the key set (see
+		// advertisedAlgs above). Per-key algs are published in the JWKS; EdDSA is
+		// deferred (#127).
+		id_token_signing_alg_values_supported: advertisedAlgs,
 		// RFC 8707 §2: server understands the `resource` parameter.
 		resource_parameter_supported: true,
 		// RFC 9207: server emits `iss` on every authorization response redirect.

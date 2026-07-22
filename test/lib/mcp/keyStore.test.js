@@ -942,6 +942,49 @@ describe('MCPKeyStore ES256', () => {
 		assert.equal(stored.size, 1, 'no new key generated yet');
 	});
 
+	it('interval rotation does not bypass the alg-switch age floor (P2, #191 review)', async () => {
+		// 120s-old RS256 key, ES256 config, 60s rotation interval: the switch
+		// block defers (age <= floor) and interval rotation must not rotate to
+		// ES256 in its place — that would re-open mixed-rollout churn at the
+		// interval cadence.
+		const rsaKey = seedKey(stored, { kid: 'rsa-mid', created_at: Math.floor(Date.now() / 1000) - 120 });
+		const key = await store.getSigningKey({ signingAlgorithm: 'ES256', keyRotationInterval: 60 });
+		assert.equal(key.kid, rsaKey.kid, 'deferred switch is not bypassed by interval rotation');
+		assert.equal(stored.size, 1, 'no key generated');
+	});
+
+	it('repairs a legacy EC pin row persisted as RS256 by pre-ES256 code (P3, #191 review)', async () => {
+		// Old getOrPersistPinnedKey accepted any PEM and hardcoded alg RS256 —
+		// an EC pin left a durable rs256-default row that could never sign.
+		const { publicKey, privateKey } = makeEcPems();
+		stored.set(SIGNING_KEY_ID, {
+			kid: SIGNING_KEY_ID,
+			alg: 'RS256',
+			public_key_pem: publicKey,
+			private_key_pem: privateKey,
+			created_at: Math.floor(Date.now() / 1000) - 1000,
+		});
+		const key = await store.getSigningKey({ signingKeyPem: privateKey });
+		assert.equal(key.alg, 'ES256', 'alg re-derived from key material');
+		assert.equal(key.kid, SIGNING_KEY_ID, 'legacy row repaired in place, kid preserved');
+		assert.equal(stored.get(SIGNING_KEY_ID).alg, 'ES256', 'repair persisted');
+		const { token } = signAccessToken(
+			{
+				issuer: 'https://as.example.com',
+				subject: 'alice@example.com',
+				audience: 'https://app.example.com/mcp',
+				clientId: 'client-123',
+				ttlSeconds: 3600,
+			},
+			key
+		);
+		const claims = verifyAccessTokenWithKeySet(token, await store.getAllPublicKeys(), {
+			audience: 'https://app.example.com/mcp',
+			issuer: 'https://as.example.com',
+		});
+		assert.equal(claims.sub, 'alice@example.com', 'previously-broken pin now signs end-to-end');
+	});
+
 	it('does not rotate when the newest key already matches the configured alg', async () => {
 		const first = await store.getSigningKey({ signingAlgorithm: 'ES256' });
 		resetMCPKeysTableCache();

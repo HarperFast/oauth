@@ -447,8 +447,14 @@ export class MCPKeyStore {
 			}
 		}
 
-		// Rotation when interval > 0 and newest key is stale.
-		if (rotationInterval > 0) {
+		// Rotation when interval > 0 and newest key is stale. Skipped while the
+		// newest key's alg disagrees with config: that state means the alg-switch
+		// block above deliberately deferred (age floor), and rotating here to
+		// `configuredAlg` would bypass the floor whenever the interval is shorter
+		// — re-introducing mixed-rollout churn at the interval cadence. Once the
+		// key clears the floor the switch block rotates it; interval rotation
+		// resumes on the new key.
+		if (rotationInterval > 0 && (signerKey.alg ?? 'RS256') === configuredAlg) {
 			const nowSeconds = Math.floor(Date.now() / 1000);
 			if (nowSeconds - signerKey.created_at > rotationInterval) {
 				allKeys = await this.runSingleFlight(
@@ -508,6 +514,10 @@ export class MCPKeyStore {
 	 * Match by `public_key_pem` string equality (both sides exported via the same
 	 * Node.js canonical SPKI path — stable).
 	 *
+	 * When the pin is found but carries a wrong `alg` (legacy rows: pre-ES256
+	 * code persisted every pin as 'RS256', even EC material): re-persist with
+	 * the material-derived alg so the row becomes usable after upgrade.
+	 *
 	 * When the pin is found but is NOT the newest key: re-persist with
 	 * `created_at = now` (same kid, same material, nothing stranding). This makes
 	 * the pin `sorted[0]` in `garbageCollect`, giving the previously-newer key a
@@ -535,12 +545,18 @@ export class MCPKeyStore {
 			};
 		}
 		const pinnedPublicKeyPem = pinnedPublicKeyMemo.publicPem;
+		// The pin's true algorithm, from its key material (throws on unsupported
+		// types). Derived up front so a matching row persisted with a wrong alg —
+		// pre-ES256 code stored EVERY pin as 'RS256', even EC ones — is repaired
+		// rather than returned as-is (it would fail at jwt.sign forever).
+		const pinnedAlg = algFromPrivateKeyPem(signingKeyPem);
 
 		let allKeys = await this.enumerateKeys();
 		const existing = allKeys.find((k) => k.public_key_pem === pinnedPublicKeyPem);
 
-		// Fast path: pin is already in the table AND is already the newest key.
-		if (existing && existing.kid === selectNewestKey(allKeys).kid) {
+		// Fast path: pin is in the table with the correct alg AND is already the
+		// newest key. A wrong-alg legacy row falls through for repair.
+		if (existing && existing.alg === pinnedAlg && existing.kid === selectNewestKey(allKeys).kid) {
 			setImmediate(() => {
 				this.garbageCollect(allKeys, existing, accessTtl).catch((err) => {
 					this.logger?.error?.('MCP key GC failed (non-fatal):', err instanceof Error ? err.message : String(err));
@@ -549,23 +565,35 @@ export class MCPKeyStore {
 			return existing;
 		}
 
-		// Write path — single-flight (handles both pin-persist and created_at bump).
+		// Write path — single-flight (pin-persist, created_at bump, or alg repair).
 		const pinnedIsNewest = (keys: MCPSigningKeyRecord[]) => {
 			const ex = keys.find((k) => k.public_key_pem === pinnedPublicKeyPem);
-			return ex != null && ex.kid === selectNewestKey(keys).kid;
+			return ex != null && ex.alg === pinnedAlg && ex.kid === selectNewestKey(keys).kid;
 		};
 
 		allKeys = await this.runSingleFlight(pinnedIsNewest, async (freshKeys) => {
 			const freshExisting = freshKeys.find((k) => k.public_key_pem === pinnedPublicKeyPem);
 
 			if (freshExisting) {
-				// Pin is in the table but not the newest — bump created_at.
-				const bumped: MCPSigningKeyRecord = { ...freshExisting, created_at: Math.floor(Date.now() / 1000) };
+				// Pin is in the table but not the newest (bump created_at) and/or
+				// carries a wrong legacy alg (repair from key material).
+				const bumped: MCPSigningKeyRecord = {
+					...freshExisting,
+					alg: pinnedAlg,
+					created_at: Math.floor(Date.now() / 1000),
+				};
 				const table = getKeysTable();
 				try {
 					await table.put(encodeRecord(bumped));
 					invalidateEnumCache();
-					this.logger?.info?.('MCP: bumped pinned key created_at so it leads GC order, kid:', bumped.kid);
+					if (freshExisting.alg !== pinnedAlg) {
+						this.logger?.info?.(
+							`MCP: repaired pinned key alg ${freshExisting.alg} -> ${pinnedAlg} (legacy row), kid:`,
+							bumped.kid
+						);
+					} else {
+						this.logger?.info?.('MCP: bumped pinned key created_at so it leads GC order, kid:', bumped.kid);
+					}
 				} catch (error) {
 					this.logger?.error?.('Failed to bump pinned MCP signing key created_at:', error);
 					return freshKeys; // Non-fatal: return without bump.
@@ -583,11 +611,10 @@ export class MCPKeyStore {
 				return afterBump;
 			}
 
-			// Pin not in table — choose kid and persist. The alg comes from the key
-			// material itself (throws on unsupported types). Only an RSA pin may
+			// Pin not in table — choose kid and persist. Only an RSA pin may
 			// claim the legacy `rs256-default` kid; EC pins always get the
 			// deterministic fingerprint kid.
-			const alg = algFromPrivateKeyPem(signingKeyPem);
+			const alg = pinnedAlg;
 			const existingDefault = freshKeys.find((k) => k.kid === SIGNING_KEY_ID);
 			const kid = existingDefault || alg !== 'RS256' ? pinnedKidFromPem(pinnedPublicKeyPem) : SIGNING_KEY_ID;
 			const record: MCPSigningKeyRecord = {
