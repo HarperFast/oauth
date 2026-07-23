@@ -1,19 +1,36 @@
 /**
  * MCP Access-Token Issuer
  *
- * Mints and verifies RS256 JWT access tokens, and serializes public keys to
- * JWK form for the JWKS endpoint. Tokens are stateless and audience-bound
- * (RFC 8707 / RFC 9068-aligned): the `aud` claim carries the canonical MCP
- * resource URI, so Stage 5's `withMCPAuth` can reject tokens minted for a
- * different resource. No upstream IdP token is ever embedded.
+ * Mints and verifies JWT access tokens (RS256 or ES256, per the signing key's
+ * `alg`), and serializes public keys to JWK form for the JWKS endpoint. Tokens
+ * are stateless and audience-bound (RFC 8707 / RFC 9068-aligned): the `aud`
+ * claim carries the canonical MCP resource URI, so Stage 5's `withMCPAuth` can
+ * reject tokens minted for a different resource. No upstream IdP token is ever
+ * embedded.
  *
- * RS256 only in v1 — `jsonwebtoken` cannot emit EdDSA. EdDSA would require a
- * JOSE implementation and is deferred (see #86 follow-up).
+ * EdDSA is not supported — `jsonwebtoken` cannot emit it; it would require a
+ * JOSE implementation and is deferred (see #127).
  */
 
 import { createPublicKey, randomUUID } from 'node:crypto';
 import jwt from 'jsonwebtoken';
 import type { MCPPublicKeyRecord, MCPSigningKeyRecord } from '../../types.ts';
+
+/** Signing algorithms the issuer can mint and verify. */
+export const SUPPORTED_SIGNING_ALGS = ['RS256', 'ES256'] as const;
+export type SupportedSigningAlg = (typeof SUPPORTED_SIGNING_ALGS)[number];
+
+/**
+ * The signing key's declared algorithm, validated against the supported set.
+ * Absent `alg` (pre-`alg`-column legacy rows) defaults to RS256.
+ */
+function keyAlg(key: { alg?: string }): SupportedSigningAlg {
+	const alg = key.alg ?? 'RS256';
+	if (!SUPPORTED_SIGNING_ALGS.includes(alg as SupportedSigningAlg)) {
+		throw new Error(`unsupported signing algorithm: ${alg}`);
+	}
+	return alg as SupportedSigningAlg;
+}
 
 export interface MintAccessTokenParams {
 	issuer: string;
@@ -49,7 +66,7 @@ export function signAccessToken(
 	const payload: Record<string, unknown> = { client_id: params.clientId };
 	if (params.scope) payload.scope = params.scope;
 	const token = jwt.sign(payload, key.private_key_pem, {
-		algorithm: 'RS256',
+		algorithm: keyAlg(key),
 		keyid: key.kid,
 		issuer: params.issuer,
 		audience: params.audience,
@@ -72,7 +89,7 @@ export interface VerifyOptions {
  */
 export function verifyAccessToken(token: string, publicKeyPem: string, options?: VerifyOptions): jwt.JwtPayload {
 	return jwt.verify(token, publicKeyPem, {
-		algorithms: ['RS256'],
+		algorithms: [...SUPPORTED_SIGNING_ALGS],
 		audience: options?.audience,
 		issuer: options?.issuer,
 	}) as jwt.JwtPayload;
@@ -95,8 +112,9 @@ export interface VerifyWithKeySetOptions {
  * - `kid` absent → the sole key is used. Ambiguous (the set has >1 key) or an
  *   empty set throws.
  *
- * Signature is verified RS256-only (pinning `algorithms` blocks `alg: none`
- * and RS/HS confusion), and `audience` + `issuer` are enforced. Throws on any
+ * Signature verification pins `algorithms` to the selected key's declared
+ * `alg` (blocking `alg: none`, RS/HS confusion, and cross-alg substitution),
+ * and `audience` + `issuer` are enforced. Throws on any
  * failure so callers (withMCPAuth) can fail closed. This is the production
  * counterpart to {@link verifyAccessToken} and keeps all `jsonwebtoken` usage
  * inside this module.
@@ -128,24 +146,22 @@ export function verifyAccessTokenWithKeySet(
 	}
 
 	return jwt.verify(token, key.public_key_pem, {
-		algorithms: ['RS256'],
+		algorithms: [keyAlg(key)],
 		audience: options.audience,
 		issuer: options.issuer,
 	}) as jwt.JwtPayload;
 }
 
 /**
- * Serialize an RSA public key (PEM) to a JWK for publication at the JWKS
- * endpoint. Includes `use`, `alg`, and `kid` so verifiers can select the key.
+ * Serialize a public key (PEM) to a JWK for publication at the JWKS endpoint.
+ * Branches on the key type Node exports: RSA → `n`/`e`, EC → `crv`/`x`/`y`.
+ * Includes `use`, `alg`, and `kid` so verifiers can select the key.
  */
 export function publicKeyToJwk(publicKeyPem: string, kid: string, alg = 'RS256'): Record<string, string> {
-	const jwk = createPublicKey(publicKeyPem).export({ format: 'jwk' }) as { n: string; e: string };
-	return {
-		kty: 'RSA',
-		n: jwk.n,
-		e: jwk.e,
-		alg,
-		use: 'sig',
-		kid,
-	};
+	const jwk = createPublicKey(publicKeyPem).export({ format: 'jwk' }) as Record<string, string>;
+	const base = { alg, use: 'sig', kid };
+	if (jwk.kty === 'EC') {
+		return { kty: 'EC', crv: jwk.crv, x: jwk.x, y: jwk.y, ...base };
+	}
+	return { kty: 'RSA', n: jwk.n, e: jwk.e, ...base };
 }

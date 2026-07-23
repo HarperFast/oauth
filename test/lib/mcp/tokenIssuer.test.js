@@ -179,3 +179,72 @@ describe('verifyAccessTokenWithKeySet', () => {
 		);
 	});
 });
+
+function makeEcKey(kid) {
+	const { publicKey, privateKey } = generateKeyPairSync('ec', {
+		namedCurve: 'P-256',
+		publicKeyEncoding: { type: 'spki', format: 'pem' },
+		privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+	});
+	return { kid, alg: 'ES256', public_key_pem: publicKey, private_key_pem: privateKey, created_at: 1700000000 };
+}
+
+describe('tokenIssuer ES256', () => {
+	const ecKey = makeEcKey('ec-key-1');
+
+	it('signs and verifies an ES256 access token with the expected claims', () => {
+		const { token, jti } = signAccessToken(baseParams, ecKey);
+		const claims = verifyAccessToken(token, ecKey.public_key_pem, {
+			audience: baseParams.audience,
+			issuer: baseParams.issuer,
+		});
+		assert.equal(claims.sub, baseParams.subject);
+		assert.equal(claims.client_id, baseParams.clientId);
+		assert.equal(claims.jti, jti);
+	});
+
+	it('puts the kid and ES256 alg in the JWT header', () => {
+		const { token } = signAccessToken(baseParams, ecKey);
+		const header = JSON.parse(Buffer.from(token.split('.')[0], 'base64url').toString('utf8'));
+		assert.equal(header.kid, 'ec-key-1');
+		assert.equal(header.alg, 'ES256');
+	});
+
+	it('throws on a key record with an unsupported alg', () => {
+		assert.throws(() => signAccessToken(baseParams, { ...ecKey, alg: 'EdDSA' }), /unsupported signing algorithm/);
+	});
+
+	it('serializes an EC public key to a JWK with crv/x/y and no private material', () => {
+		const jwk = publicKeyToJwk(ecKey.public_key_pem, ecKey.kid, ecKey.alg);
+		assert.equal(jwk.kty, 'EC');
+		assert.equal(jwk.crv, 'P-256');
+		assert.ok(jwk.x, 'x coordinate present');
+		assert.ok(jwk.y, 'y coordinate present');
+		assert.equal(jwk.n, undefined, 'no RSA modulus on an EC JWK');
+		assert.equal(jwk.alg, 'ES256');
+		assert.equal(jwk.use, 'sig');
+		assert.equal(jwk.kid, 'ec-key-1');
+		assert.equal(jwk.d, undefined, 'private scalar must NOT be present');
+	});
+
+	it('verifies against a mixed RS256/ES256 key set by kid', () => {
+		const { token } = signAccessToken(baseParams, ecKey);
+		const claims = verifyAccessTokenWithKeySet(token, [key, makeRsaKey('other-rsa'), ecKey], {
+			audience: baseParams.audience,
+			issuer: baseParams.issuer,
+		});
+		assert.equal(claims.sub, baseParams.subject);
+	});
+
+	it("rejects a token whose header alg does not match the selected key's declared alg", () => {
+		// Signed ES256, but the key record in the set (same kid) claims RS256 —
+		// verification must pin to the declared alg and fail.
+		const { token } = signAccessToken(baseParams, ecKey);
+		assert.throws(() =>
+			verifyAccessTokenWithKeySet(token, [{ ...ecKey, alg: 'RS256' }], {
+				audience: baseParams.audience,
+				issuer: baseParams.issuer,
+			})
+		);
+	});
+});

@@ -75,13 +75,21 @@ export interface MCPConfig {
 	 */
 	dynamicClientRegistration?: MCPDynamicClientRegistrationConfig;
 	/**
-	 * JWT signing algorithm for issued access tokens. Only "RS256" is supported
-	 * in v1 — jsonwebtoken cannot emit EdDSA. Reserved for a future EdDSA option.
-	 * Default: "RS256".
+	 * JWT signing algorithm for generated access-token signing keys: "RS256"
+	 * (default, universally interoperable) or "ES256" (EC P-256). Changing this
+	 * on a running deployment rotates in a new key under the new algorithm
+	 * (once the current key is at least 5 minutes old — an age floor that
+	 * keeps nodes with briefly-disagreeing configs during a rolling rollout
+	 * from rotating against each other; prefer updating all nodes together);
+	 * previous keys stay in the JWKS until retired, so outstanding tokens keep
+	 * verifying. Ignored when `signingKeyPem` is set — a pinned key's algorithm
+	 * is derived from its key material. EdDSA is not supported (jsonwebtoken
+	 * cannot emit it; see #127). Default: "RS256".
 	 */
-	signingAlgorithm?: 'RS256';
+	signingAlgorithm?: 'RS256' | 'ES256';
 	/**
-	 * PEM-encoded RS256 private key (PKCS#8) to sign access tokens with. When
+	 * PEM-encoded private key (PKCS#8; RSA or EC P-256) to sign access tokens
+	 * with — the signing algorithm is derived from the key type. When
 	 * set, it is persisted to the keys table on first use instead of generating
 	 * one — operators provide the same key on every node for deterministic,
 	 * race-free key material. When unset, a keypair is generated on first boot.
@@ -91,7 +99,7 @@ export interface MCPConfig {
 	 */
 	signingKeyPem?: string;
 	/**
-	 * Signing-key rotation interval in seconds. When set and > 0, a new RS256
+	 * Signing-key rotation interval in seconds. When set and > 0, a new
 	 * keypair is lazily generated (at token mint time) whenever the newest key's
 	 * age exceeds this value. All public keys remain in the JWKS until their
 	 * access tokens can no longer be valid (2× accessTokenTtl after a newer key

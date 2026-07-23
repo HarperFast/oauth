@@ -2,7 +2,7 @@
  * MCP Bearer-Token Guard (`withMCPAuth`)
  *
  * Wraps an app-owned MCP route handler so every request must present a valid
- * RS256 access token minted by this plugin's Stage 4 issuer before the handler
+ * signed access token minted by this plugin's Stage 4 issuer before the handler
  * runs. On any failure it returns the spec-mandated
  * `401 + WWW-Authenticate: Bearer resource_metadata="..."` (RFC 9728 §5.1) that
  * closes the MCP discovery loop, pointing clients at the Protected Resource
