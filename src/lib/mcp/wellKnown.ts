@@ -136,6 +136,10 @@ export function protectedResourceMetadataUrl(request: HarperRequest, mcpConfig: 
 export function buildProtectedResourceMetadata(request: HarperRequest, mcpConfig: MCPConfig): Record<string, unknown> {
 	const resource = resolveResource(request, mcpConfig);
 	const issuer = resolveIssuer(request, mcpConfig);
+	// No scopes_supported here by design: SEP-2207 — the protected resource
+	// must not advertise `offline_access` (refresh tokens are not a resource
+	// requirement), and MCP token scoping is role-level with no fixed resource
+	// scope vocabulary to publish.
 	return {
 		resource,
 		authorization_servers: [issuer],
@@ -183,6 +187,12 @@ export async function buildAuthorizationServerMetadata(
 			...(clientCredentialsEnabled ? ['client_credentials'] : []),
 		],
 		code_challenge_methods_supported: ['S256'],
+		// SEP-2207: advertising `offline_access` here signals that clients
+		// wanting refresh tokens MAY add it to their authorization/token scope
+		// (the MCP spec conditions that MAY on AS metadata listing it). RFC 8414
+		// permits a partial list; upstream-provider scopes are opaque
+		// pass-through and are deliberately not enumerated.
+		scopes_supported: ['offline_access'],
 		token_endpoint_auth_methods_supported: [
 			'none',
 			'client_secret_basic',

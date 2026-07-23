@@ -114,6 +114,16 @@ export interface MCPConfig {
 	/** Refresh-token (family) lifetime in seconds. Default: 2592000 (30d). */
 	refreshTokenTtl?: number;
 	/**
+	 * When true, the authorization_code exchange only issues a refresh token
+	 * when the granted scope includes `offline_access` (the SEP-2207
+	 * OIDC-flavored opt-in). Default: false — any client whose registered
+	 * grant_types include refresh_token receives one, since most MCP clients
+	 * never request offline_access and withholding refresh tokens would force
+	 * re-auth every accessTokenTtl. Flipping this on does not revoke existing
+	 * refresh-token families.
+	 */
+	refreshTokenRequiresOfflineAccess?: boolean;
+	/**
 	 * Client ID Metadata Document (CIMD) resolution settings.
 	 * CIMD is enabled by default when `mcp.enabled: true`. Override here
 	 * to opt out or restrict which hosts may be used as CIMD client_ids.

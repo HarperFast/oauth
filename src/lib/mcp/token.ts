@@ -130,6 +130,26 @@ function allowsRefresh(client: MCPClientRecord): boolean {
 	return !client.grant_types || client.grant_types.includes('refresh_token');
 }
 
+/** Does a space-delimited scope string include `offline_access` (SEP-2207)? */
+function scopeIncludesOfflineAccess(scope: string | undefined): boolean {
+	return !!scope && scope.split(/\s+/).includes('offline_access');
+}
+
+/**
+ * Should the authorization_code exchange issue a refresh token? Always gated
+ * on the client's registered grant_types; when
+ * `mcp.refreshTokenRequiresOfflineAccess` is set, additionally requires the
+ * granted scope to carry the explicit `offline_access` opt-in (SEP-2207).
+ * Default policy is grant_types-only — most MCP clients never request
+ * offline_access, and withholding refresh tokens from them would force
+ * hourly re-auth.
+ */
+function shouldIssueRefresh(client: MCPClientRecord, scope: string | undefined, mcpConfig: MCPConfig): boolean {
+	if (!allowsRefresh(client)) return false;
+	if (mcpConfig.refreshTokenRequiresOfflineAccess) return scopeIncludesOfflineAccess(scope);
+	return true;
+}
+
 /** Constant-time string compare; length-checks first (timingSafeEqual needs equal length). */
 function safeEqual(a: string, b: string): boolean {
 	const ab = Buffer.from(a);
@@ -272,7 +292,8 @@ async function mintTokenPair(
 	};
 	if (grant.scope) responseBody.scope = grant.scope;
 
-	// Only issue a refresh token if the client registered the refresh_token grant.
+	// Refresh issuance is decided by the caller (shouldIssueRefresh: client
+	// grant_types, plus the offline_access scope opt-in when configured).
 	if (grant.issueRefresh) {
 		const familyId = newFamilyId();
 		const { token: refreshToken, hash } = makeRefreshToken(familyId);
@@ -376,7 +397,7 @@ async function handleAuthorizationCodeGrant(
 			resource: record.resource,
 			scope: record.scope,
 			clientId: client.client_id,
-			issueRefresh: allowsRefresh(client),
+			issueRefresh: shouldIssueRefresh(client, record.scope, mcpConfig),
 		},
 		hookManager,
 		logger
