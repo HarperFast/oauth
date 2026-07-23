@@ -54,12 +54,12 @@ type mcp_auth_codes @table(database: "oauth", expiration: 300) {
 ## MCP JWT signing keys (Stage 4)
 ## Persisted here (not on disk) so all replicated Harper nodes share one key
 ## set — file storage would diverge across nodes. No expiration: keys are
-## retained for verification until explicitly rotated. RS256 only in v1
-## (jsonwebtoken cannot emit EdDSA); the public half is published at
+## retained for verification until explicitly rotated. Per-row `alg` (RS256 or
+## ES256; EdDSA unsupported — jsonwebtoken cannot emit it); the public half is published at
 ## /.well-known/jwks.json, the private half never leaves the server.
 type harper_oauth_mcp_keys @table(database: "oauth") {
 	kid: ID @primaryKey
-	alg: String # "RS256"
+	alg: String # "RS256" | "ES256"
 	public_key_pem: String
 	private_key_pem: String
 	# Hand-managed (NOT @createdTime): keyStore deliberately mutates created_at

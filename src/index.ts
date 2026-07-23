@@ -18,6 +18,7 @@ import { clearOAuthSession } from './lib/handlers.ts';
 import { HookManager } from './lib/hookManager.ts';
 import { DynamicProviderCache, DEFAULT_DYNAMIC_PROVIDER_CACHE_TTL_SECONDS } from './lib/dynamicProviderCache.ts';
 import { registerWellKnownHandlers } from './lib/mcp/wellKnown.ts';
+import { algFromPrivateKeyPem } from './lib/mcp/keyStore.ts';
 import { redactSecrets } from './lib/redact.ts';
 import type { Scope, OAuthPluginConfig, ProviderRegistry, OAuthHooks } from './types.ts';
 
@@ -260,6 +261,39 @@ export async function handleApplication(scope: Scope): Promise<void> {
 					'The pinned key takes precedence — key rotation is disabled. ' +
 					'Remove mcp.keyRotationInterval if you intend to use a fixed key.'
 			);
+		}
+		// An unrecognized signingAlgorithm silently resolves to the RS256 default
+		// (resolveConfiguredAlg) — warn so a typo ("es256") isn't a mystery.
+		if (
+			mcpConfig?.signingAlgorithm &&
+			mcpConfig.signingAlgorithm !== 'RS256' &&
+			mcpConfig.signingAlgorithm !== 'ES256'
+		) {
+			logger?.warn?.(
+				`MCP: mcp.signingAlgorithm "${mcpConfig.signingAlgorithm}" is not supported (use "RS256" or "ES256"); ` +
+					'falling back to RS256 for generated keys.'
+			);
+		}
+		// A pinned key's algorithm comes from its key material; warn when
+		// mcp.signingAlgorithm disagrees so the operator isn't surprised the
+		// config value is ignored. An unparseable/unsupported pin only warns
+		// here — startup stays up for the human-OAuth flows; the mint path
+		// throws when the pin is actually used.
+		if (mcpConfig?.signingKeyPem) {
+			try {
+				const pinnedAlg = algFromPrivateKeyPem(mcpConfig.signingKeyPem);
+				if (mcpConfig.signingAlgorithm && pinnedAlg !== mcpConfig.signingAlgorithm) {
+					logger?.warn?.(
+						`MCP: mcp.signingAlgorithm is "${mcpConfig.signingAlgorithm}" but the pinned mcp.signingKeyPem ` +
+							`is a ${pinnedAlg} key. The pinned key's algorithm (${pinnedAlg}) is used.`
+					);
+				}
+			} catch (error) {
+				logger?.warn?.(
+					'MCP: mcp.signingKeyPem is not a supported signing key (RSA or EC P-256):',
+					error instanceof Error ? error.message : String(error)
+				);
+			}
 		}
 
 		// Re-initialize providers from new configuration
