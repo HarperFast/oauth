@@ -17,11 +17,14 @@ Add the plugin to your Harper application's `config.yaml`:
 ```yaml
 '@harperfast/oauth':
   package: '@harperfast/oauth'
+  redirectUri: ${OAUTH_REDIRECT_URI}
   providers:
     github:
       clientId: ${OAUTH_GITHUB_CLIENT_ID}
       clientSecret: ${OAUTH_GITHUB_CLIENT_SECRET}
 ```
+
+`redirectUri` is your app's public origin plus `/oauth/callback` — the plugin appends the provider name (`/oauth/github/callback`) when it talks to the provider. It defaults to `http://localhost:9926/oauth/callback`, which is fine for the local walkthrough below but **must be set on any deployed app** — otherwise the provider redirects your users to `localhost` and login silently never completes. See [Understanding Redirects](./configuration.md#understanding-redirects).
 
 ### 2. Set Environment Variables
 
@@ -30,6 +33,7 @@ For **local development**, export variables in your terminal session:
 ```bash
 export OAUTH_GITHUB_CLIENT_ID="your_github_client_id"
 export OAUTH_GITHUB_CLIENT_SECRET="your_github_client_secret"
+export OAUTH_REDIRECT_URI="http://localhost:9926/oauth/callback" # your public origin once deployed
 ```
 
 > **Note:** These `export` commands are for local development only. You can also use a `.env` file with `dotenv-cli` for local dev — just don't commit it to source control.
@@ -74,6 +78,16 @@ Navigate to:
 ```
 http://localhost:9926/oauth/github/login
 ```
+
+### 6. Verify After Deploying
+
+The login route is a redirect, so you can confirm what the plugin actually sends the provider without completing a login:
+
+```bash
+curl -sS -D - -o /dev/null https://your-domain/oauth/github/login | grep -i '^location'
+```
+
+In the `Location` header, check that `redirect_uri` is your public origin (not `localhost`) and that `client_id` is a real value (not an unexpanded `%24%7BOAUTH_...%7D`, which means the environment variable never reached the deployment). See [Common Issues](./providers.md#common-issues).
 
 ## Supported Providers
 

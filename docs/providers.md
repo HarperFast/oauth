@@ -18,6 +18,23 @@ Detailed setup instructions for each supported OAuth provider.
 
 **Example:** The OAuth plugin includes Okta code, but Okta authentication is **not available** unless you configure an Okta provider with credentials. Built-in providers are templates, not active endpoints.
 
+## Callback URLs: Both Sides Are Required
+
+Every provider setup below has you register a callback URL with the provider. That is only half of it — you must **also** tell the plugin to send that URL, via the plugin-level `redirectUri` option:
+
+```yaml
+'@harperfast/oauth':
+  redirectUri: ${OAUTH_REDIRECT_URI} # e.g. https://yourdomain.com/oauth/callback
+  providers:
+    # ...
+```
+
+- Set it **once**, at the plugin level (a sibling of `providers`, not inside a provider). The plugin appends the provider name per request: `https://yourdomain.com/oauth/callback` → `https://yourdomain.com/oauth/github/callback`, `.../oauth/google/callback`, and so on. That's why the value you configure has no provider name in it but the URL you register with the provider does.
+- If you omit it, it defaults to `http://localhost:9926/oauth/callback`. On a deployed app that default is a trap: the provider accepts the request and redirects your users to `localhost` — their own machine — so login never completes and no configuration error is raised anywhere. Set it explicitly on every deployed app.
+- After deploying, [verify what the plugin actually sends](#verifying-the-authorization-request).
+
+See [Understanding Redirects](./configuration.md#understanding-redirects) for how this differs from `postLoginRedirect`.
+
 ## GitHub OAuth
 
 ### 1. Create OAuth App
@@ -35,6 +52,7 @@ Detailed setup instructions for each supported OAuth provider.
 
 ```yaml
 '@harperfast/oauth':
+  redirectUri: ${OAUTH_REDIRECT_URI} # required on any deployed app — see Callback URLs above
   providers:
     github:
       clientId: ${OAUTH_GITHUB_CLIENT_ID}
@@ -47,6 +65,7 @@ Detailed setup instructions for each supported OAuth provider.
 ```bash
 export OAUTH_GITHUB_CLIENT_ID="your_client_id"
 export OAUTH_GITHUB_CLIENT_SECRET="your_client_secret"
+export OAUTH_REDIRECT_URI="https://yourdomain.com/oauth/callback"
 ```
 
 ### Available Scopes
@@ -76,6 +95,7 @@ export OAUTH_GITHUB_CLIENT_SECRET="your_client_secret"
 
 ```yaml
 '@harperfast/oauth':
+  redirectUri: ${OAUTH_REDIRECT_URI} # required on any deployed app — see Callback URLs above
   providers:
     google:
       clientId: ${OAUTH_GOOGLE_CLIENT_ID}
@@ -88,6 +108,7 @@ export OAUTH_GITHUB_CLIENT_SECRET="your_client_secret"
 ```bash
 export OAUTH_GOOGLE_CLIENT_ID="your_client_id"
 export OAUTH_GOOGLE_CLIENT_SECRET="your_client_secret"
+export OAUTH_REDIRECT_URI="https://yourdomain.com/oauth/callback"
 ```
 
 ### Available Scopes
@@ -120,6 +141,7 @@ export OAUTH_GOOGLE_CLIENT_SECRET="your_client_secret"
 
 ```yaml
 '@harperfast/oauth':
+  redirectUri: ${OAUTH_REDIRECT_URI} # required on any deployed app — see Callback URLs above
   providers:
     azure:
       clientId: ${OAUTH_AZURE_CLIENT_ID}
@@ -134,6 +156,7 @@ export OAUTH_GOOGLE_CLIENT_SECRET="your_client_secret"
 export OAUTH_AZURE_CLIENT_ID="your_client_id"
 export OAUTH_AZURE_CLIENT_SECRET="your_client_secret"
 export OAUTH_AZURE_TENANT_ID="your_tenant_id"
+export OAUTH_REDIRECT_URI="https://yourdomain.com/oauth/callback"
 ```
 
 ### Available Scopes
@@ -165,6 +188,7 @@ export OAUTH_AZURE_TENANT_ID="your_tenant_id"
 
 ```yaml
 '@harperfast/oauth':
+  redirectUri: ${OAUTH_REDIRECT_URI} # required on any deployed app — see Callback URLs above
   providers:
     auth0:
       domain: ${OAUTH_AUTH0_DOMAIN}
@@ -179,6 +203,7 @@ export OAUTH_AZURE_TENANT_ID="your_tenant_id"
 export OAUTH_AUTH0_DOMAIN="yourapp.auth0.com"
 export OAUTH_AUTH0_CLIENT_ID="your_client_id"
 export OAUTH_AUTH0_CLIENT_SECRET="your_client_secret"
+export OAUTH_REDIRECT_URI="https://yourdomain.com/oauth/callback"
 ```
 
 ### Available Scopes
@@ -212,6 +237,7 @@ export OAUTH_AUTH0_CLIENT_SECRET="your_client_secret"
 
 ```yaml
 '@harperfast/oauth':
+  redirectUri: ${OAUTH_REDIRECT_URI} # required on any deployed app — see Callback URLs above
   providers:
     okta:
       domain: ${OAUTH_OKTA_DOMAIN}
@@ -226,6 +252,7 @@ export OAUTH_AUTH0_CLIENT_SECRET="your_client_secret"
 export OAUTH_OKTA_DOMAIN="dev-12345.okta.com"
 export OAUTH_OKTA_CLIENT_ID="your_client_id"
 export OAUTH_OKTA_CLIENT_SECRET="your_client_secret"
+export OAUTH_REDIRECT_URI="https://yourdomain.com/oauth/callback"
 ```
 
 ### Available Scopes
@@ -274,6 +301,7 @@ For other OpenID Connect compatible providers:
 
 ```yaml
 '@harperfast/oauth':
+  redirectUri: ${OAUTH_REDIRECT_URI} # required on any deployed app — see Callback URLs above
   providers:
     custom:
       clientId: ${OAUTH_CUSTOM_CLIENT_ID}
@@ -288,6 +316,7 @@ For other OpenID Connect compatible providers:
 ### Environment Variables
 
 ```bash
+export OAUTH_REDIRECT_URI="https://yourdomain.com/oauth/callback"
 export OAUTH_CUSTOM_CLIENT_ID="your_client_id"
 export OAUTH_CUSTOM_CLIENT_SECRET="your_client_secret"
 export OAUTH_CUSTOM_AUTHORIZATION_URL="https://provider.com/oauth/authorize"
@@ -305,17 +334,53 @@ export OAUTH_CUSTOM_JWKS_URL="https://provider.com/.well-known/jwks.json"
 3. Complete the OAuth flow
 4. Check your session for OAuth data
 
+### Verifying the Authorization Request
+
+The login route is a `302`, so you can inspect exactly what the plugin sends the provider without completing a login. Do this after every deployment:
+
+```bash
+curl -sS -D - -o /dev/null https://yourdomain.com/oauth/github/login | grep -i '^location'
+```
+
+In the returned `Location` header, confirm:
+
+- **`redirect_uri`** is your public origin — `https%3A%2F%2Fyourdomain.com%2Foauth%2Fgithub%2Fcallback`, not `localhost`
+- **`client_id`** is a real credential — not `%24%7BOAUTH_..._CLIENT_ID%7D`, which is a URL-encoded `${OAUTH_..._CLIENT_ID}` and means the environment variable never reached the running app
+
+Both failures happen before the provider is involved, so neither shows up in your provider's logs.
+
 ## Common Issues
+
+### Deployed App Redirects Users to `localhost`
+
+**Symptom:** login appears to work — the provider's consent screen shows, you approve — and then the browser lands on `http://localhost:9926/oauth/{provider}/callback` and stalls or loops. No error appears in the app log.
+
+**Cause:** `redirectUri` isn't set, so the plugin fell back to its `http://localhost:9926/oauth/callback` default and sent that to the provider. It reaches the consent screen (rather than failing with `redirect_uri_mismatch`) whenever `localhost` is also registered with the provider — a very common leftover from local development.
+
+**Solution:** set the plugin-level `redirectUri` to your public origin, as described in [Callback URLs](#callback-urls-both-sides-are-required). Registering the URL with your provider does not affect what the plugin sends.
+
+### Provider Rejects an Unexpanded `${OAUTH_...}` Value
+
+**Symptom:** the provider errors immediately with `invalid_client` / "OAuth client was not found", and the authorization URL contains `client_id=%24%7BOAUTH_GITHUB_CLIENT_ID%7D`.
+
+**Cause:** `${VAR}` placeholders in `config.yaml` are substituted from the environment of the running app. When a variable is undefined, the placeholder is passed through **as a literal string** rather than raising a configuration error — so the plugin starts up looking healthy and ships `${OAUTH_GITHUB_CLIENT_ID}` to the provider verbatim.
+
+**Solution:** make the variable available to the deployed app, not just your shell — for **Harper Fabric**, see [managing runtime environment variables](https://docs.harperdb.io/docs/fabric/managing-applications). Then re-check with the `curl` above.
 
 ### Redirect URI Mismatch
 
 **Error:** `redirect_uri_mismatch` or similar
 
-**Solution:** Ensure the redirect URI in your provider settings exactly matches:
+**Solution:** the URL the plugin sends and the URL registered with the provider must match exactly. Check **both** sides:
+
+- **Plugin:** `redirectUri` is set to your public origin plus `/oauth/callback` (the plugin appends the provider name itself)
+- **Provider:** the registered callback is the provider-specific form:
 
 ```
 https://yourdomain.com/oauth/{provider}/callback
 ```
+
+Watch for a trailing slash, `http` vs `https`, and `www.` differences — providers compare byte-for-byte.
 
 ### Invalid Client Credentials
 
@@ -324,7 +389,7 @@ https://yourdomain.com/oauth/{provider}/callback
 **Solution:**
 
 - Verify client ID and secret are correct
-- Check environment variables are set
+- Check environment variables are set **in the deployed app's environment**, and that they expanded (see [above](#provider-rejects-an-unexpanded-oauth_-value))
 - Ensure client secret hasn't expired
 
 ### Missing Email Address
