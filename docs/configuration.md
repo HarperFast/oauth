@@ -7,6 +7,7 @@ Complete configuration options for the `@harperfast/oauth` plugin.
 ```yaml
 '@harperfast/oauth':
   package: '@harperfast/oauth'
+  redirectUri: ${OAUTH_REDIRECT_URI} # your public origin + /oauth/callback — required on any deployed app
   providers:
     github:
       clientId: ${OAUTH_GITHUB_CLIENT_ID}
@@ -20,13 +21,13 @@ Complete configuration options for the `@harperfast/oauth` plugin.
 
 ### Global Options
 
-| Option                  | Type              | Default    | Description                                                                                                                                                                                                                                                |
-| ----------------------- | ----------------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `debug`                 | boolean           | `false`    | Enable debug endpoints and logging                                                                                                                                                                                                                         |
-| `redirectUri`           | string            | (auto-gen) | OAuth callback URL where providers redirect back to                                                                                                                                                                                                        |
-| `postLoginRedirect`     | string            | `/`        | Default URL to redirect users after successful OAuth login                                                                                                                                                                                                 |
-| `cacheDynamicProviders` | boolean \| number | `300`      | TTL (seconds) for providers resolved via the `onResolveProvider` hook. Number = seconds; `false` = never cache (call the hook every request); `true` = cache forever. Default 300s; freshness is controlled by this TTL (there is no manual invalidation). |
-| `mcp`                   | object            | (off)      | MCP OAuth flow configuration. See [MCP OAuth](#mcp-oauth) below                                                                                                                                                                                            |
+| Option                  | Type              | Default                                | Description                                                                                                                                                                                                                                                                                                                                 |
+| ----------------------- | ----------------- | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `debug`                 | boolean           | `false`                                | Enable debug endpoints and logging                                                                                                                                                                                                                                                                                                          |
+| `redirectUri`           | string            | `http://localhost:9926/oauth/callback` | **Set this on any deployed app.** Base OAuth callback URL providers redirect back to; the plugin appends the provider name. The default is a local-dev convenience — an app that omits it sends providers a `localhost` callback, which silently breaks login for everyone but you. See [Understanding Redirects](#understanding-redirects) |
+| `postLoginRedirect`     | string            | `/`                                    | Default URL to redirect users after successful OAuth login                                                                                                                                                                                                                                                                                  |
+| `cacheDynamicProviders` | boolean \| number | `300`                                  | TTL (seconds) for providers resolved via the `onResolveProvider` hook. Number = seconds; `false` = never cache (call the hook every request); `true` = cache forever. Default 300s; freshness is controlled by this TTL (there is no manual invalidation).                                                                                  |
+| `mcp`                   | object            | (off)                                  | MCP OAuth flow configuration. See [MCP OAuth](#mcp-oauth) below                                                                                                                                                                                                                                                                             |
 
 ### Provider Configuration
 
@@ -53,7 +54,7 @@ Each provider requires:
 - `authorizationUrl` - Authorization endpoint URL (required)
 - `tokenUrl` - Token endpoint URL (required)
 - `userInfoUrl` - User info endpoint URL (required)
-- `jwksUrl` - JWKS endpoint URL (required for ID token verification)
+- `jwksUri` - JWKS endpoint URL (required for ID token verification). Note the spelling: `jwksUri`, not `jwksUrl` — a misspelled key is ignored, leaving ID tokens unverifiable
 
 ### MCP OAuth
 
@@ -207,6 +208,8 @@ The OAuth plugin uses two different redirect configurations that serve distinct 
 - Must be a fully-qualified URL (protocol + domain + path)
 - Must match exactly what's registered with the OAuth provider
 - Used only during the OAuth handshake - users briefly visit this URL but don't stay there
+
+**If you don't set it:** the plugin falls back to `http://localhost:9926/oauth/callback`. That is a local-dev convenience, and it fails in a way that doesn't look like a configuration error — the provider happily redirects your users to `localhost` (their own machine) instead of your app, so login just never completes. Registering the callback URL with your provider is **not** sufficient; the plugin only sends what `redirectUri` is set to. Set it explicitly on every deployed app, and [verify it](./providers.md#verifying-the-authorization-request) after deploying.
 
 ### 2. Post-Login Redirect (`postLoginRedirect`)
 

@@ -277,7 +277,7 @@ custom:
   authorizationUrl: 'https://provider.com/oauth/authorize'
   tokenUrl: 'https://provider.com/oauth/token'
   userInfoUrl: 'https://provider.com/oauth/userinfo'
-  jwksUrl: 'https://provider.com/.well-known/jwks.json'
+  jwksUri: 'https://provider.com/.well-known/jwks.json'
   scope: 'openid profile email'
 ```
 

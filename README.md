@@ -28,6 +28,7 @@ Add to your `config.yaml`:
 ```yaml
 '@harperfast/oauth':
   package: '@harperfast/oauth'
+  redirectUri: ${OAUTH_REDIRECT_URI} # your app's public origin — required for any deployed app
   providers:
     github:
       clientId: ${OAUTH_GITHUB_CLIENT_ID}
@@ -39,17 +40,23 @@ Add to your `config.yaml`:
 ```bash
 export OAUTH_GITHUB_CLIENT_ID="your-client-id"
 export OAUTH_GITHUB_CLIENT_SECRET="your-client-secret"
+export OAUTH_REDIRECT_URI="http://localhost:9926/oauth/callback" # local dev value — must become your public origin when you deploy (step 3)
 ```
 
 > **Note:** The `export` commands above are for local development and quick testing only. You can also use a `.env` file with `dotenv-cli` for local dev — just don't commit it. For **Harper Fabric** deployments, see the [Harper Fabric documentation](https://docs.harperdb.io/docs/fabric/managing-applications) for managing runtime environment variables.
 
 ### 3. Configure OAuth Callback
 
-Set your OAuth callback URL in your provider settings:
+This has **two sides** — both are required:
+
+1. **In your app config** — set `redirectUri` to your app's public origin plus `/oauth/callback` (step 1 above). The plugin appends the provider name for you, so one setting covers every provider.
+2. **In your provider settings** — register the provider-specific URL the plugin will send:
 
 ```
 https://your-domain/oauth/github/callback
 ```
+
+> **Note:** `redirectUri` defaults to `http://localhost:9926/oauth/callback`. If you skip side 1 on a deployed app, the provider will send your users to `localhost` and login will never complete — with no configuration error to tell you why. See [Understanding Redirects](docs/configuration.md#understanding-redirects).
 
 ### 4. (Optional) Register Lifecycle Hooks
 
