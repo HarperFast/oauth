@@ -40,7 +40,7 @@ Add to your `config.yaml`:
 ```bash
 export OAUTH_GITHUB_CLIENT_ID="your-client-id"
 export OAUTH_GITHUB_CLIENT_SECRET="your-client-secret"
-export OAUTH_REDIRECT_URI="https://your-domain/oauth/callback"
+export OAUTH_REDIRECT_URI="http://localhost:9926/oauth/callback" # local dev value — must become your public origin when you deploy (step 3)
 ```
 
 > **Note:** The `export` commands above are for local development and quick testing only. You can also use a `.env` file with `dotenv-cli` for local dev — just don't commit it. For **Harper Fabric** deployments, see the [Harper Fabric documentation](https://docs.harperdb.io/docs/fabric/managing-applications) for managing runtime environment variables.

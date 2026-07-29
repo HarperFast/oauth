@@ -33,7 +33,7 @@ For **local development**, export variables in your terminal session:
 ```bash
 export OAUTH_GITHUB_CLIENT_ID="your_github_client_id"
 export OAUTH_GITHUB_CLIENT_SECRET="your_github_client_secret"
-export OAUTH_REDIRECT_URI="http://localhost:9926/oauth/callback" # your public origin once deployed
+export OAUTH_REDIRECT_URI="http://localhost:9926/oauth/callback" # local dev value — change to your public origin once deployed
 ```
 
 > **Note:** These `export` commands are for local development only. You can also use a `.env` file with `dotenv-cli` for local dev — just don't commit it to source control.
