@@ -54,7 +54,7 @@ Each provider requires:
 - `authorizationUrl` - Authorization endpoint URL (required)
 - `tokenUrl` - Token endpoint URL (required)
 - `userInfoUrl` - User info endpoint URL (required)
-- `jwksUrl` - JWKS endpoint URL (required for ID token verification)
+- `jwksUri` - JWKS endpoint URL (required for ID token verification). Note the spelling: `jwksUri`, not `jwksUrl` — a misspelled key is ignored, leaving ID tokens unverifiable
 
 ### MCP OAuth
 

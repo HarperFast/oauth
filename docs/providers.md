@@ -306,10 +306,10 @@ For other OpenID Connect compatible providers:
     custom:
       clientId: ${OAUTH_CUSTOM_CLIENT_ID}
       clientSecret: ${OAUTH_CUSTOM_CLIENT_SECRET}
-      authorizationUrl: 'https://provider.com/oauth/authorize'
-      tokenUrl: 'https://provider.com/oauth/token'
-      userInfoUrl: 'https://provider.com/oauth/userinfo'
-      jwksUrl: 'https://provider.com/.well-known/jwks.json'
+      authorizationUrl: ${OAUTH_CUSTOM_AUTHORIZATION_URL}
+      tokenUrl: ${OAUTH_CUSTOM_TOKEN_URL}
+      userInfoUrl: ${OAUTH_CUSTOM_USERINFO_URL}
+      jwksUri: ${OAUTH_CUSTOM_JWKS_URL} # note: jwksUri, not jwksUrl
       scope: 'openid profile email'
 ```
 
