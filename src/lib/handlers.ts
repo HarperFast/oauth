@@ -319,16 +319,30 @@ export async function handleCallback(
 		}
 	}
 
-	// CIMD browser binding — checked BEFORE the upstream code exchange and the
-	// onLogin hook, so a mismatched (self-approved) flow triggers no upstream
-	// exchange, no userinfo fetch, and no provisioning side-effects; it only
-	// applies when the state carries a binding (CIMD), so DCR/human flows are
-	// unaffected. SameSite=Lax sends the per-flow nonce cookie on the top-level
-	// redirect back from the IdP.
-	if (mcpState?.browserNonceHash) {
-		if (!consentNonceMatches(readConsentNonce(request, mcpState.consentFlowId), mcpState.browserNonceHash)) {
-			logger?.warn?.(`MCP callback: consent browser binding mismatch for client=${mcpState.clientId}`);
-			return mcpErrorRedirect(mcpState, 'access_denied', 'Authorization must complete in the browser that approved it');
+	// MCP browser binding — every /oauth/mcp/authorize flow (the CIMD interstitial
+	// AND the direct DCR/stored path) mints a per-flow __Host- nonce cookie and
+	// carries its hash in the upstream state, so the callback can prove the flow
+	// completes in the browser that initiated it. Checked BEFORE the upstream code
+	// exchange and the onLogin hook, so a mismatched (or unbound) flow triggers no
+	// upstream exchange, no userinfo fetch, and no provisioning side-effects. Fail
+	// closed: an MCP state reaching here without a binding is a forged or
+	// pre-upgrade in-flight state — reject it rather than mint an auth code for an
+	// unbound flow (authorization-code injection). Unlike the human flow above —
+	// whose pre-upgrade tolerance stays scoped to `!mcpState` and is deliberately
+	// NOT widened to MCP — an MCP flow's anonymous initiator has no session-id
+	// fallback, so the cookie is its only browser proof. SameSite=Lax sends the
+	// per-flow nonce cookie on the top-level redirect back from the IdP.
+	if (mcpState) {
+		if (
+			!mcpState.browserNonceHash ||
+			!consentNonceMatches(readConsentNonce(request, mcpState.consentFlowId), mcpState.browserNonceHash)
+		) {
+			logger?.warn?.(`MCP callback: browser binding mismatch for client=${mcpState.clientId}`);
+			return mcpErrorRedirect(
+				mcpState,
+				'access_denied',
+				'Authorization must complete in the browser that initiated it'
+			);
 		}
 	}
 

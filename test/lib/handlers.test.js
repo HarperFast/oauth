@@ -811,6 +811,16 @@ describe('OAuth Handlers', () => {
 		let storedAuthCodes;
 		// Import lazily so the dist symbol load doesn't happen at file parse.
 		let resetMCPAuthCodesTableCache;
+		let hashConsentNonce, buildConsentCookie;
+
+		// Every /oauth/mcp/authorize flow (CIMD and stored/DCR) now mints a
+		// per-flow nonce cookie and binds its hash into the upstream state; the
+		// callback fails closed without a matching cookie. The default fixtures
+		// below therefore carry a valid binding so the happy-path assertions
+		// exercise the bound flow — tests that need an unbound/mismatched state
+		// override them locally.
+		const MCP_NONCE = 'mcp-branch-consent-nonce';
+		const MCP_FLOW_ID = 'mcpbranchflow';
 
 		const MCP_STATE = {
 			clientId: 'mcp-client-1',
@@ -829,6 +839,7 @@ describe('OAuth Handlers', () => {
 
 		beforeEach(async () => {
 			({ resetMCPAuthCodesTableCache } = await import('../../dist/lib/mcp/authCodeStore.js'));
+			({ hashConsentNonce, buildConsentCookie } = await import('../../dist/lib/mcp/consentBinding.js'));
 			resetMCPAuthCodesTableCache();
 			originalDatabases = global.databases;
 			storedAuthCodes = new Map();
@@ -843,12 +854,14 @@ describe('OAuth Handlers', () => {
 					},
 				},
 			};
-			// Replace verifyCSRFToken to return MCP state by default for this block.
+			// Replace verifyCSRFToken to return a browser-bound MCP state by default.
 			mockProvider.verifyCSRFToken = createMockFn(async () => ({
 				timestamp: Date.now(),
 				providerName: 'test-provider',
-				mcp: { ...MCP_STATE },
+				mcp: { ...MCP_STATE, browserNonceHash: hashConsentNonce(MCP_NONCE), consentFlowId: MCP_FLOW_ID },
 			}));
+			// The initiating browser's per-flow consent cookie accompanies the callback.
+			mockRequest.headers.cookie = buildConsentCookie(MCP_FLOW_ID, MCP_NONCE).split(';')[0];
 		});
 
 		// Restore global.databases in afterEach so a failing assertion mid-test
@@ -1163,11 +1176,17 @@ describe('OAuth Handlers', () => {
 				assert.equal(storedAuthCodes.size, 0);
 			});
 
-			it('DCR flows (no browserNonceHash) are unaffected', async () => {
+			it('fails closed on an MCP state with no browser binding (forged/pre-upgrade state)', async () => {
+				// After the DCR browser-binding fix (GHSA-login-csrf), EVERY MCP
+				// authorize flow mints a per-flow nonce cookie and binds its hash into
+				// the upstream state. An MCP state that reaches the callback with no
+				// binding is a forged or pre-upgrade in-flight state and must NOT mint
+				// an auth code — this is the authorization-code injection the fix
+				// closes (an attacker-supplied, unbound state fed to a victim).
 				mockProvider.verifyCSRFToken = createMockFn(async () => ({
 					timestamp: Date.now(),
 					providerName: 'test-provider',
-					mcp: { ...MCP_STATE },
+					mcp: { ...MCP_STATE }, // no browserNonceHash / consentFlowId
 				}));
 				delete mockRequest.headers.cookie;
 				const result = await handleCallback(
@@ -1180,7 +1199,11 @@ describe('OAuth Handlers', () => {
 					{ mcpConfig: MCP_CONFIG, logger: mockLogger }
 				);
 				const url = new URL(result.headers.Location);
-				assert.ok(url.searchParams.get('code'), 'DCR callback mints a code without a consent cookie');
+				assert.equal(url.origin + url.pathname, MCP_STATE.redirectUri, 'error routed to the client redirect_uri');
+				assert.equal(url.searchParams.get('error'), 'access_denied');
+				assert.equal(url.searchParams.get('code'), null, 'no auth code minted for an unbound MCP state');
+				assert.equal(storedAuthCodes.size, 0, 'no auth code persisted');
+				assert.equal(mockProvider.exchangeCodeForToken.mock.calls.length, 0, 'upstream code never exchanged');
 			});
 		});
 	});

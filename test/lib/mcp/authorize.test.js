@@ -445,6 +445,32 @@ describe('handleAuthorize', () => {
 			assert.equal(harnesses.github.generatedTokens[0].sessionId, undefined);
 		});
 
+		it('mints a per-flow consent cookie and binds its hash into the DCR upstream state (GHSA-login-csrf)', async () => {
+			// Stored/DCR clients skip the CIMD interstitial, so the browser binding
+			// must be minted here on the direct redirect. Without it an anonymous
+			// initiator (no sessionId) leaves the callback with nothing to prove the
+			// flow completes in the initiating browser — the authorization-code
+			// injection this closes.
+			const { entries, harnesses } = newRegistry();
+			const target = makeTarget(BASE_QUERY);
+			const response = await handleAuthorize(makeRequest(), target, validConfig, entries);
+
+			assert.equal(response.status, 302);
+			const setCookie = response.headers['Set-Cookie'];
+			assert.ok(setCookie, 'stored/DCR authorize sets the per-flow browser-binding cookie');
+			assert.match(setCookie, /^__Host-mcp_consent_[A-Za-z0-9_-]+=/, 'per-flow __Host- cookie');
+			assert.match(setCookie, /HttpOnly/);
+			assert.match(setCookie, /Secure/);
+			assert.match(setCookie, /SameSite=Lax/);
+			assert.doesNotMatch(setCookie, /Domain=/i, '__Host- forbids Domain (blocks sibling injection)');
+
+			const [cookieName, nonce] = setCookie.split(';')[0].split('=');
+			const flowId = cookieName.replace('__Host-mcp_consent_', '');
+			const minted = harnesses.github.generatedTokens[0];
+			assert.equal(minted.mcp.consentFlowId, flowId, 'upstream state carries the cookie flow id');
+			assert.equal(minted.mcp.browserNonceHash, hashConsentNonce(nonce), 'upstream state carries sha256(cookie nonce)');
+		});
+
 		it('accepts a redirect_uri that matches the registered loopback URI', async () => {
 			const { entries } = newRegistry();
 			const target = makeTarget({ ...BASE_QUERY, redirect_uri: 'http://localhost:6274/cb' });
