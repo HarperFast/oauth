@@ -151,6 +151,28 @@ describe('OAuth Handlers', () => {
 			const csrfCall = mockProvider.generateCSRFToken.mock.calls[0];
 			assert.equal(csrfCall.arguments[0].sessionId, 'session-123');
 		});
+
+		it('mints a browser-binding nonce: hash in the state token, nonce in a __Host- cookie (GHSA-xf67-jxfx-jf88)', async () => {
+			const { hashConsentNonce } = await import('../../dist/lib/mcp/consentBinding.js');
+			const result = await handleLogin(mockRequest, mockTarget, mockProvider, mockConfig, 'test-provider', mockLogger);
+
+			const meta = mockProvider.generateCSRFToken.mock.calls[0].arguments[0];
+			assert.ok(meta.loginFlowId, 'flow id stored in the state token');
+			assert.ok(meta.browserNonceHash, 'nonce hash stored in the state token');
+
+			const setCookie = result.headers['Set-Cookie'];
+			const [pair, ...attrs] = setCookie.split('; ');
+			const eq = pair.indexOf('=');
+			assert.equal(pair.slice(0, eq), `__Host-oauth_login_${meta.loginFlowId}`, 'cookie name embeds the flow id');
+			assert.equal(
+				hashConsentNonce(pair.slice(eq + 1)),
+				meta.browserNonceHash,
+				'cookie value hashes to the bound hash'
+			);
+			for (const attr of ['Path=/', 'Secure', 'HttpOnly', 'SameSite=Lax']) {
+				assert.ok(attrs.includes(attr), `cookie carries ${attr}`);
+			}
+		});
 	});
 
 	describe('handleCallback', () => {
@@ -1379,6 +1401,148 @@ describe('OAuth Handlers', () => {
 			assert.ok(result.headers.Location.startsWith('https://mcp-client.example.com/cb'));
 			assert.ok(result.headers.Location.includes('error=access_denied'));
 			assert.equal(mockProvider.exchangeCodeForToken.mock.calls.length, 0);
+		});
+	});
+
+	describe('handleCallback — login browser binding (GHSA-xf67-jxfx-jf88)', () => {
+		const NONCE = 'login-binding-nonce';
+		const FLOW_ID = 'loginflow';
+		let hashConsentNonce, buildLoginCookie;
+
+		beforeEach(async () => {
+			({ hashConsentNonce, buildLoginCookie } = await import('../../dist/lib/mcp/consentBinding.js'));
+			// A logged-out flow: no sessionId in the token (the session binding
+			// has nothing to check — the exact gap the nonce cookie closes).
+			mockProvider.verifyCSRFToken = createMockFn(async () => ({
+				originalUrl: '/dashboard',
+				timestamp: Date.now(),
+				providerName: 'test-provider',
+				loginFlowId: FLOW_ID,
+				browserNonceHash: hashConsentNonce(NONCE),
+			}));
+		});
+
+		it('completes when the callback arrives in the browser that initiated the login', async () => {
+			mockRequest.headers.cookie = buildLoginCookie(FLOW_ID, NONCE).split(';')[0];
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				{ logger: mockLogger }
+			);
+
+			assert.equal(result.status, 302);
+			assert.equal(result.headers.Location, '/dashboard');
+			assert.equal(mockProvider.exchangeCodeForToken.mock.calls.length, 1);
+		});
+
+		it('rejects when the binding cookie is missing — attacker-minted state in a victim browser', async () => {
+			// Attack: the attacker initiates a login (cookie set in THEIR browser),
+			// completes IdP auth as themselves, then feeds the callback URL to the
+			// victim. The victim's browser has no matching cookie — no login.
+			delete mockRequest.headers.cookie;
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				{ logger: mockLogger }
+			);
+
+			assert.equal(result.status, 302);
+			assert.equal(result.headers.Location, '/dashboard?error=auth_failed&reason=csrf');
+			// Rejected before any upstream call or session write.
+			assert.equal(mockProvider.exchangeCodeForToken.mock.calls.length, 0);
+			assert.equal(mockRequest.session.update.mock.calls.length, 0);
+		});
+
+		it('rejects when the binding cookie does not hash-match', async () => {
+			mockRequest.headers.cookie = buildLoginCookie(FLOW_ID, 'some-other-browser-nonce').split(';')[0];
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				{ logger: mockLogger }
+			);
+
+			assert.equal(result.headers.Location, '/dashboard?error=auth_failed&reason=csrf');
+			assert.equal(mockProvider.exchangeCodeForToken.mock.calls.length, 0);
+		});
+
+		it('tolerates state tokens without a nonce hash (pre-upgrade in-flight logins)', async () => {
+			mockProvider.verifyCSRFToken = createMockFn(async () => ({
+				originalUrl: '/dashboard',
+				timestamp: Date.now(),
+				providerName: 'test-provider',
+			}));
+			delete mockRequest.headers.cookie;
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				{ logger: mockLogger }
+			);
+
+			assert.equal(result.status, 302);
+			assert.equal(result.headers.Location, '/dashboard');
+		});
+	});
+
+	describe('handleCallback — CRLF-safe error logging (CWE-117)', () => {
+		const CRLF_ERROR = 'access_denied\r\nFORGED line';
+		const CRLF_DESC = 'desc\r\ninjected';
+
+		function targetWith(params) {
+			return { get: createMockFn((key) => params[key]) };
+		}
+
+		it('encodes CR/LF in upstream error params on the no-state path', async () => {
+			const result = await handleCallback(
+				mockRequest,
+				targetWith({ error: CRLF_ERROR, error_description: CRLF_DESC }),
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				{ logger: mockLogger }
+			);
+
+			assert.equal(result.status, 302);
+			const logged = mockLogger.error.mock.calls[0].arguments[0];
+			assert.ok(!logged.includes('\r') && !logged.includes('\n'), 'no raw CR/LF reaches the log line');
+			assert.ok(logged.includes('\\r\\n'), 'injected control chars are visibly encoded');
+		});
+
+		it('encodes CR/LF in upstream error params on the verified-state path', async () => {
+			const result = await handleCallback(
+				mockRequest,
+				targetWith({ state: 'csrf-token-123', error: CRLF_ERROR, error_description: CRLF_DESC }),
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				{ logger: mockLogger }
+			);
+
+			assert.equal(result.status, 302);
+			const logged = mockLogger.error.mock.calls[0].arguments[0];
+			assert.ok(!logged.includes('\r') && !logged.includes('\n'), 'no raw CR/LF reaches the log line');
+			assert.ok(logged.includes('\\r\\n'), 'injected control chars are visibly encoded');
 		});
 	});
 });

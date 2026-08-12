@@ -19,7 +19,15 @@ import type {
 	OnLoginResultDenied,
 	OnLoginResultNeedsConfirmation,
 } from '../types.ts';
-import { consentNonceMatches, readConsentNonce } from './mcp/consentBinding.ts';
+import {
+	buildLoginCookie,
+	consentNonceMatches,
+	generateConsentFlowId,
+	generateConsentNonce,
+	hashConsentNonce,
+	readConsentNonce,
+	readLoginNonce,
+} from './mcp/consentBinding.ts';
 import { handleMCPCallback } from './mcp/index.ts';
 import { resolveIssuer } from './mcp/wellKnown.ts';
 import type { HookManager } from './hookManager.ts';
@@ -133,12 +141,24 @@ export async function handleLogin(
 	const referer = request.headers?.referer ? sanitizeRedirect(request.headers.referer) : undefined;
 	const originalUrl = redirectParam || referer || config.postLoginRedirect || '/';
 
+	// Browser binding (GHSA-xf67-jxfx-jf88): session binding below only covers
+	// flows initiated while logged in — Harper mints no anonymous session id, so
+	// the primary logged-out login flow had nothing tying the callback to the
+	// browser that started it (login CSRF: an attacker-minted state+code fed to
+	// a victim's browser silently logs the victim in as the attacker). Same
+	// per-flow nonce-cookie mechanism as the CIMD consent binding — the cookie
+	// stays in this browser, only its hash travels in the state token.
+	const loginFlowId = generateConsentFlowId();
+	const loginNonce = generateConsentNonce();
+
 	// Generate CSRF token with metadata
 	// Bind token to provider to prevent cross-provider CSRF attacks
 	const csrfToken = await provider.generateCSRFToken({
 		originalUrl,
 		sessionId: request.session?.id,
 		providerName, // Bind state token to this provider
+		loginFlowId,
+		browserNonceHash: hashConsentNonce(loginNonce),
 	});
 
 	// Build authorization URL with CSRF token as state parameter
@@ -149,7 +169,8 @@ export async function handleLogin(
 	return {
 		status: 302,
 		headers: {
-			Location: authUrl,
+			'Location': authUrl,
+			'Set-Cookie': buildLoginCookie(loginFlowId, loginNonce),
 		},
 	};
 }
@@ -195,7 +216,10 @@ export async function handleCallback(
 		// echo it to postLoginRedirect with the original reason. Otherwise,
 		// generic invalid_request.
 		if (error) {
-			logger?.error?.(`OAuth error (no state): ${error} - ${errorDescription}`);
+			// JSON.stringify: error/error_description are attacker-controlled
+			// query params, reachable pre-auth — encode CR/LF so a crafted value
+			// can't forge log lines (CWE-117; same treatment as the DCR handler).
+			logger?.error?.(`OAuth error (no state): ${JSON.stringify(error)} - ${JSON.stringify(errorDescription)}`);
 			const errorUrl = buildErrorRedirect(config.postLoginRedirect || '/', {
 				error: 'oauth_failed',
 				reason: error,
@@ -275,6 +299,26 @@ export async function handleCallback(
 		return { status: 302, headers: { Location: errorUrl } };
 	}
 
+	// Login browser binding (GHSA-xf67-jxfx-jf88) — the human-flow counterpart
+	// of the CIMD check below. The state minted by handleLogin carries the hash
+	// of a per-flow nonce cookie set on the initiating browser; a callback
+	// arriving without the matching cookie is a state delivered into a
+	// different browser — the login-CSRF shape the session binding above can't
+	// catch when the flow starts logged out (no session id to record).
+	// Enforced whenever the token carries the hash, so pre-upgrade in-flight
+	// tokens still complete; MCP states never carry a top-level hash (their
+	// binding is the CIMD check below).
+	if (tokenData.browserNonceHash && !mcpState) {
+		if (!consentNonceMatches(readLoginNonce(request, tokenData.loginFlowId), tokenData.browserNonceHash)) {
+			logger?.warn?.(`OAuth callback: login browser binding mismatch (provider '${providerName}')`);
+			const errorUrl = buildErrorRedirect(tokenData.originalUrl || config.postLoginRedirect || '/', {
+				error: 'auth_failed',
+				reason: 'csrf',
+			});
+			return { status: 302, headers: { Location: errorUrl } };
+		}
+	}
+
 	// CIMD browser binding — checked BEFORE the upstream code exchange and the
 	// onLogin hook, so a mismatched (self-approved) flow triggers no upstream
 	// exchange, no userinfo fetch, and no provisioning side-effects; it only
@@ -290,7 +334,8 @@ export async function handleCallback(
 
 	// Now that we know the flow context, handle upstream IdP errors.
 	if (error) {
-		logger?.error?.(`OAuth error: ${error} - ${errorDescription}`);
+		// JSON.stringify: CRLF-safe logging of browser-controlled params (CWE-117).
+		logger?.error?.(`OAuth error: ${JSON.stringify(error)} - ${JSON.stringify(errorDescription)}`);
 		if (mcpState) {
 			return mcpErrorRedirect(mcpState, error, errorDescription || error);
 		}

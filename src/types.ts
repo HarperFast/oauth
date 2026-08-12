@@ -674,6 +674,10 @@ export interface CSRFTokenData {
 	originalUrl?: string;
 	/** Session ID to link OAuth flow with existing session */
 	sessionId?: string;
+	/** Per-flow id naming the login browser-binding cookie (GHSA-xf67-jxfx-jf88) */
+	loginFlowId?: string;
+	/** SHA-256 (base64url) of the login browser-binding nonce; the callback requires the cookie to hash-match */
+	browserNonceHash?: string;
 	[key: string]: any;
 }
 
