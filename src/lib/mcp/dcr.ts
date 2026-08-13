@@ -259,8 +259,12 @@ export async function handleRegister(
 	const built = buildClientFromRequest(body, dcrConfig?.allowedRedirectUriHosts);
 	if ('status' in built) {
 		const errBody = (built as { body?: { error?: string; error_description?: string } }).body;
+		// JSON.stringify: error_description echoes attacker-controlled metadata
+		// (e.g. an invalid grant_type value) and DCR is reachable pre-auth when
+		// open — encode CR/LF so it can't forge log lines (CWE-117; matches the
+		// request-received log above).
 		harperLogger?.warn?.(
-			`MCP DCR rejected: ${errBody?.error} — ${errBody?.error_description} (redirect_uris=${JSON.stringify(body?.redirect_uris)})`
+			`MCP DCR rejected: ${JSON.stringify(errBody?.error)} — ${JSON.stringify(errBody?.error_description)} (redirect_uris=${JSON.stringify(body?.redirect_uris)})`
 		);
 		return built;
 	}

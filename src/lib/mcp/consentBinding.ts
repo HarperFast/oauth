@@ -42,7 +42,6 @@
  */
 
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { getRequestHeader } from '../requestHeaders.ts';
 import type { Request } from '../../types.ts';
 
 /** `__Host-` prefix + a per-flow id suffix. See module header for why. */
@@ -51,8 +50,14 @@ const CONSENT_COOKIE_PREFIX = '__Host-mcp_consent_';
 /** Human-login binding cookie namespace. */
 const LOGIN_COOKIE_PREFIX = '__Host-oauth_login_';
 
-/** Must comfortably outlast the interstitial pause plus the upstream IdP login. */
-const CONSENT_COOKIE_MAX_AGE_S = 900;
+/**
+ * Must outlast TWO sequential CSRF-token lifetimes: the interstitial pause
+ * (bounded by the confirm token, ~10 min) THEN the upstream IdP login (bounded
+ * by the upstream state token, ~10 min). At 900 s the cookie could expire during
+ * a slow login/MFA while the upstream state is still valid, rejecting an
+ * otherwise-good callback. 30 min covers 2×10 min plus margin.
+ */
+const CONSENT_COOKIE_MAX_AGE_S = 1800;
 
 /** Random, cookie-name-safe id identifying one authorization flow. */
 export function generateConsentFlowId(): string {
@@ -122,13 +127,29 @@ function readBindingNonce(
 }
 
 /**
- * Read the raw `Cookie` header. Goes through `getRequestHeader` because reading
- * `request.headers.cookie` directly returns undefined against Harper's live
- * runtime headers wrapper, which would fail the binding check closed for every
- * browser flow.
+ * Read the raw `Cookie` header, wrapper-aware (`getRequestHeader`'s three shapes)
+ * — reading `request.headers.cookie` directly is undefined against Harper's live
+ * runtime wrapper, which would fail the binding check closed for every browser
+ * flow.
+ *
+ * Unlike `getRequestHeader` (first value only), repeated `Cookie` lines must ALL
+ * be parsed: HTTP/2 cookie crumbling — and transports that preserve repeated
+ * header fields as an array — can put the binding cookie in a non-first crumb.
+ * Join array crumbs with `"; "` so the parser sees every cookie; dropping the
+ * tail would reject valid callbacks with a binding mismatch.
  */
 function readCookieHeader(request: Request | undefined): string | undefined {
-	return getRequestHeader(request?.headers, 'cookie');
+	const headers = request?.headers as any;
+	if (!headers) return undefined;
+	let raw: unknown;
+	if (typeof headers.get === 'function') {
+		raw = headers.get('cookie');
+	} else {
+		const obj = headers.asObject ?? headers;
+		raw = obj?.cookie ?? obj?.Cookie;
+	}
+	if (raw == null) return undefined;
+	return Array.isArray(raw) ? raw.join('; ') : String(raw);
 }
 
 /** Constant-time check that `nonce` hashes to `expectedHash`. */

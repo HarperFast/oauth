@@ -4,6 +4,7 @@
 
 import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { logger as harperLogger } from 'harper';
 import { handleRegister } from '../../../dist/lib/mcp/dcr.js';
 import { resetMCPClientsTableCache } from '../../../dist/lib/mcp/clientStore.js';
 
@@ -139,6 +140,32 @@ describe('handleRegister (RFC 7591 DCR)', () => {
 			// treat it as "no token presented" — matching the production contract.
 			const response = await handleRegister(makeRequest({ Authorization: 'Bearer secret-token' }), VALID_BODY, config);
 			assert.equal(response.status, 401);
+		});
+	});
+
+	describe('rejection log safety (CWE-117)', () => {
+		const config = { enabled: true, dynamicClientRegistration: {} };
+
+		it('CRLF-encodes the attacker-controlled grant_type in the rejected-registration log', async () => {
+			// Open DCR is pre-auth; an invalid grant_type echoes into error_description
+			// which is logged. A CR/LF in it must not forge a new log line.
+			const original = harperLogger.warn;
+			const lines = [];
+			harperLogger.warn = (msg) => lines.push(String(msg));
+			try {
+				const res = await handleRegister(
+					makeRequest(),
+					{ redirect_uris: ['https://app.example.com/cb'], grant_types: ['authorization_code\r\nFORGED ENTRY'] },
+					config
+				);
+				assert.equal(res.status, 400);
+			} finally {
+				harperLogger.warn = original;
+			}
+			const rejected = lines.find((l) => l.includes('MCP DCR rejected'));
+			assert.ok(rejected, 'a rejection line was logged');
+			assert.ok(!rejected.includes('\r') && !rejected.includes('\n'), 'no raw CR/LF reaches the log line');
+			assert.ok(rejected.includes('\\r\\nFORGED'), 'the injected control chars are visibly encoded');
 		});
 	});
 

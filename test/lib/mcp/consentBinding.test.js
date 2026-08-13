@@ -11,6 +11,7 @@ import {
 	generateConsentNonce,
 	hashConsentNonce,
 	readConsentNonce,
+	readLoginNonce,
 } from '../../../dist/lib/mcp/consentBinding.js';
 
 describe('consentBinding', () => {
@@ -72,6 +73,19 @@ describe('consentBinding', () => {
 	it('readConsentNonce reads the cookie from a Web `Headers` object (.get)', () => {
 		const request = { headers: new Headers({ cookie: `__Host-mcp_consent_flowA=header-nonce` }) };
 		assert.equal(readConsentNonce(request, 'flowA'), 'header-nonce');
+	});
+
+	// Regression: repeated Cookie header lines (HTTP/2 crumbling, or a transport
+	// that keeps them as an array) must ALL be parsed — the binding cookie may not
+	// be the first element. Joining with "; " keeps the flow working.
+	it('finds the binding cookie when the Cookie header is an array (non-first crumb)', () => {
+		const request = { headers: { cookie: ['other=1', `__Host-mcp_consent_flowA=array-nonce`, 'z=2'] } };
+		assert.equal(readConsentNonce(request, 'flowA'), 'array-nonce');
+	});
+
+	it('finds the binding cookie in an array delivered via the `.asObject` wrapper', () => {
+		const request = { headers: { asObject: { cookie: ['a=1', `__Host-oauth_login_flowB=login-array-nonce`] } } };
+		assert.equal(readLoginNonce(request, 'flowB'), 'login-array-nonce');
 	});
 
 	it('consentNonceMatches round-trips and rejects mismatches', () => {
