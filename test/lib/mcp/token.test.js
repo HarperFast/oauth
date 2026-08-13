@@ -774,6 +774,76 @@ describe('handleToken', () => {
 		);
 		assert.equal(res.body.error, 'invalid_grant');
 	});
+
+	describe('grant_types enforcement at token endpoint (RFC 6749 §5.2)', () => {
+		it('rejects authorization_code exchange when client has grant_types: []', async () => {
+			clients.set('no-grants', {
+				client_id: 'no-grants',
+				token_endpoint_auth_method: 'none',
+				grant_types: JSON.stringify([]),
+				redirect_uris: JSON.stringify([REDIRECT]),
+				client_id_issued_at: 1700000000,
+			});
+			seedCode('code-ng', { client_id: 'no-grants' });
+			const res = await handleToken(
+				{ headers: {} },
+				{
+					grant_type: 'authorization_code',
+					code: 'code-ng',
+					code_verifier: CODE_VERIFIER,
+					redirect_uri: REDIRECT,
+					client_id: 'no-grants',
+				},
+				mcpConfig
+			);
+			assert.equal(res.status, 400);
+			assert.equal(res.body.error, 'unauthorized_client');
+			assert.equal(codes.has('code-ng'), true, 'code not consumed on rejected grant');
+		});
+
+		it('rejects authorization_code exchange when client has grant_types: ["refresh_token"]', async () => {
+			clients.set('refresh-only', {
+				client_id: 'refresh-only',
+				token_endpoint_auth_method: 'none',
+				grant_types: JSON.stringify(['refresh_token']),
+				redirect_uris: JSON.stringify([REDIRECT]),
+				client_id_issued_at: 1700000000,
+			});
+			seedCode('code-ro', { client_id: 'refresh-only' });
+			const res = await handleToken(
+				{ headers: {} },
+				{
+					grant_type: 'authorization_code',
+					code: 'code-ro',
+					code_verifier: CODE_VERIFIER,
+					redirect_uri: REDIRECT,
+					client_id: 'refresh-only',
+				},
+				mcpConfig
+			);
+			assert.equal(res.status, 400);
+			assert.equal(res.body.error, 'unauthorized_client');
+			assert.equal(codes.has('code-ro'), true, 'code not consumed on rejected grant');
+		});
+
+		it('allows authorization_code exchange when grant_types is absent (legacy default includes authorization_code)', async () => {
+			// public-1 has no grant_types field (legacy record) — must succeed.
+			seedCode('code-legacy');
+			const res = await handleToken(
+				{ headers: {} },
+				{
+					grant_type: 'authorization_code',
+					code: 'code-legacy',
+					code_verifier: CODE_VERIFIER,
+					redirect_uri: REDIRECT,
+					client_id: 'public-1',
+				},
+				mcpConfig
+			);
+			assert.equal(res.status, 200);
+			assert.ok(res.body.access_token, 'access token issued for legacy client');
+		});
+	});
 });
 
 describe('handleToken — client_credentials grant (#162)', () => {

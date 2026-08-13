@@ -253,6 +253,69 @@ describe('handleAuthorize', () => {
 			};
 		}
 
+		describe('grant_types enforcement (RFC 6749 §4.1.2.1)', () => {
+			it('redirects with unauthorized_client when client has grant_types: []', async () => {
+				const restrictedClient = encodeClientForStorage({
+					...VALID_CLIENT,
+					client_id: 'restricted-1',
+					grant_types: [],
+				});
+				storedClients.set('restricted-1', restrictedClient);
+				const { entries } = newRegistry();
+				const target = makeTarget({ ...BASE_QUERY, client_id: 'restricted-1' });
+				const response = await handleAuthorize(makeRequest(), target, validConfig, entries);
+				const { host, params } = parseRedirect(response);
+				assert.equal(host, 'mcp-client.example.com');
+				assert.equal(params.error, 'unauthorized_client');
+			});
+
+			it('redirects with unauthorized_client when client has grant_types: ["refresh_token"]', async () => {
+				const restrictedClient = encodeClientForStorage({
+					...VALID_CLIENT,
+					client_id: 'restricted-2',
+					grant_types: ['refresh_token'],
+				});
+				storedClients.set('restricted-2', restrictedClient);
+				const { entries } = newRegistry();
+				const target = makeTarget({ ...BASE_QUERY, client_id: 'restricted-2' });
+				const response = await handleAuthorize(makeRequest(), target, validConfig, entries);
+				const { host, params } = parseRedirect(response);
+				assert.equal(host, 'mcp-client.example.com');
+				assert.equal(params.error, 'unauthorized_client');
+			});
+
+			it('allows authorization_code when grant_types is absent (legacy default includes authorization_code)', async () => {
+				const legacyClient = encodeClientForStorage({ ...VALID_CLIENT, client_id: 'legacy-1' });
+				delete legacyClient.grant_types; // absent field → legacy default
+				storedClients.set('legacy-1', legacyClient);
+				const { entries } = newRegistry();
+				const target = makeTarget({ ...BASE_QUERY, client_id: 'legacy-1' });
+				const response = await handleAuthorize(makeRequest(), target, validConfig, entries);
+				assert.equal(response.status, 302);
+				const url = new URL(response.headers.Location);
+				assert.equal(url.host, 'upstream.example.com', 'absent grant_types allows the flow through');
+			});
+
+			it('a restricted client requesting response_type=token gets unsupported_response_type, not unauthorized_client', async () => {
+				const restrictedClient = encodeClientForStorage({
+					...VALID_CLIENT,
+					client_id: 'restricted-3',
+					grant_types: [],
+				});
+				storedClients.set('restricted-3', restrictedClient);
+				const { entries } = newRegistry();
+				const target = makeTarget({ ...BASE_QUERY, client_id: 'restricted-3', response_type: 'token' });
+				const response = await handleAuthorize(makeRequest(), target, validConfig, entries);
+				const { host, params } = parseRedirect(response);
+				assert.equal(host, 'mcp-client.example.com');
+				assert.equal(
+					params.error,
+					'unsupported_response_type',
+					'response_type guard fires before the grant check (RFC 6749 §3.1.1)'
+				);
+			});
+		});
+
 		it('redirects with unsupported_response_type when response_type is not "code"', async () => {
 			const { entries } = newRegistry();
 			const target = makeTarget({ ...BASE_QUERY, response_type: 'token' });

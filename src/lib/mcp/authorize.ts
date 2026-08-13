@@ -36,7 +36,7 @@ import type {
 	Request,
 } from '../../types.ts';
 import { CimdClientError, resolveClient } from './cimd.ts';
-import { LOCAL_HOSTS } from './clientValidator.ts';
+import { allowsGrant, LOCAL_HOSTS } from './clientValidator.ts';
 import {
 	buildConsentCookie,
 	consentNonceMatches,
@@ -450,8 +450,16 @@ export async function handleAuthorize(
 	const redirect = (error: string, description: string) =>
 		buildClientErrorRedirect(query.redirect_uri as string, error, description, clientState, issuer);
 
+	// response_type identifies the requested flow; an unsupported one is
+	// unsupported_response_type regardless of the client's grants (RFC 6749
+	// §3.1.1). Only then can §4.1.2.1's unauthorized_client apply to the
+	// authorization_code flow actually being requested.
 	if (query.response_type !== 'code') {
 		return redirect('unsupported_response_type', 'response_type must be "code"');
+	}
+
+	if (!allowsGrant(client, 'authorization_code')) {
+		return redirect('unauthorized_client', 'Client is not authorized for the authorization_code grant');
 	}
 
 	if (!query.code_challenge) {

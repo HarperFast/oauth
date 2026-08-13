@@ -327,7 +327,7 @@ describe('handleRegister (RFC 7591 DCR)', () => {
 			assert.equal(response.body.application_type, 'native');
 		});
 
-		it('rejects unsupported grant_types', async () => {
+		it('rejects when the declared grant_types produce no usable intersection (authorization_code absent)', async () => {
 			const response = await handleRegister(
 				makeRequest(),
 				{ redirect_uris: ['https://app.example.com/cb'], grant_types: ['client_credentials'] },
@@ -335,6 +335,24 @@ describe('handleRegister (RFC 7591 DCR)', () => {
 			);
 			assert.equal(response.status, 400);
 			assert.equal(response.body.error, 'invalid_client_metadata');
+			assert.match(response.body.error_description, /Missing required grant_type: authorization_code/);
+		});
+
+		it('registers with the supported intersection when a superset of grants is declared (RFC 7591 §3.2.1)', async () => {
+			const response = await handleRegister(
+				makeRequest(),
+				{
+					redirect_uris: ['https://app.example.com/cb'],
+					grant_types: ['authorization_code', 'refresh_token', 'urn:ietf:params:oauth:grant-type:jwt-bearer'],
+				},
+				{ enabled: true, dynamicClientRegistration: {} }
+			);
+			assert.equal(response.status, 201);
+			assert.deepEqual(
+				response.body.grant_types,
+				['authorization_code', 'refresh_token'],
+				'only the supported intersection is registered'
+			);
 		});
 
 		it('rejects unsupported response_types', async () => {
