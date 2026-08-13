@@ -159,7 +159,22 @@ function safeEqual(a: string, b: string): boolean {
 	return ab.length === bb.length && timingSafeEqual(ab, bb);
 }
 
-function parseBasicAuth(authHeader: string | undefined): { clientId: string; clientSecret: string } | null {
+/**
+ * application/x-www-form-urlencoded decode of one Basic credential field
+ * (RFC 6749 §2.3.1: `+` is a space, then percent-decode). Returns null on
+ * malformed percent-encoding so a corrupt credential is rejected, not
+ * looked up as-is.
+ */
+function formUrlDecode(field: string): string | null {
+	try {
+		return decodeURIComponent(field.replace(/\+/g, ' '));
+	} catch {
+		return null;
+	}
+}
+
+/** @internal — exported for tests. */
+export function parseBasicAuth(authHeader: string | undefined): { clientId: string; clientSecret: string } | null {
 	// Scheme name is case-insensitive (RFC 9110 §11.1) — matches the `/^basic\s/i`
 	// check on the client_credentials path.
 	if (!authHeader || !/^basic\s/i.test(authHeader)) return null;
@@ -169,9 +184,16 @@ function parseBasicAuth(authHeader: string | undefined): { clientId: string; cli
 	} catch {
 		return null;
 	}
+	// RFC 6749 §2.3.1: each field is form-urlencoded before base64, so the first
+	// literal `:` separates them (a `:` inside a field is `%3A`). Split there,
+	// then form-decode both — otherwise a URL-shaped CIMD client_id is looked up
+	// with its `%3A`/`%2F` literal, or an unencoded one splits at its scheme colon.
 	const sep = decoded.indexOf(':');
 	if (sep < 0) return null;
-	return { clientId: decoded.slice(0, sep), clientSecret: decoded.slice(sep + 1) };
+	const clientId = formUrlDecode(decoded.slice(0, sep));
+	const clientSecret = formUrlDecode(decoded.slice(sep + 1));
+	if (clientId === null || clientSecret === null) return null;
+	return { clientId, clientSecret };
 }
 
 type ClientAuthResult = { client: MCPClientRecord } | { error: TokenResponse };

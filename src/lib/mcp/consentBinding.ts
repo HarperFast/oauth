@@ -30,6 +30,7 @@
  */
 
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { readRawHeader } from '../requestHeaders.ts';
 import type { Request } from '../../types.ts';
 
 export const BROWSER_SECRET_COOKIE_NAME = '__Host-oauth_browser';
@@ -94,15 +95,7 @@ export function readBrowserSecret(request: Request | undefined): string | undefi
  * tail would reject valid callbacks with a binding mismatch.
  */
 function readCookieHeader(request: Request | undefined): string | undefined {
-	const headers = request?.headers as any;
-	if (!headers) return undefined;
-	let raw: unknown;
-	if (typeof headers.get === 'function') {
-		raw = headers.get('cookie');
-	} else {
-		const obj = headers.asObject ?? headers;
-		raw = obj?.cookie ?? obj?.Cookie;
-	}
+	const raw = readRawHeader(request?.headers, 'cookie');
 	if (raw == null) return undefined;
 	return Array.isArray(raw) ? raw.join('; ') : String(raw);
 }

@@ -7,7 +7,7 @@
 import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, generateKeyPairSync, randomBytes, sign } from 'node:crypto';
-import { handleToken, _resetGrantRateLimiter } from '../../../dist/lib/mcp/token.js';
+import { handleToken, parseBasicAuth, _resetGrantRateLimiter } from '../../../dist/lib/mcp/token.js';
 import { resetMCPAssertionJtisTableCache } from '../../../dist/lib/mcp/assertionJtiStore.js';
 import { resetMCPAuthCodesTableCache } from '../../../dist/lib/mcp/authCodeStore.js';
 import { _clearCimdCache, _setDnsLookup, _setFetch } from '../../../dist/lib/mcp/cimd.js';
@@ -73,6 +73,38 @@ const mcpConfig = {
 function basicHeader(clientId, secret) {
 	return { authorization: `Basic ${Buffer.from(`${clientId}:${secret}`).toString('base64')}` };
 }
+
+describe('parseBasicAuth (RFC 6749 §2.3.1 form-encoding)', () => {
+	const basic = (raw) => `Basic ${Buffer.from(raw).toString('base64')}`;
+
+	it('form-decodes a URL-shaped CIMD client_id presented with an empty secret', () => {
+		// A compliant CIMD client sends its HTTPS client_id form-urlencoded, empty
+		// secret. Must decode back to the real URL, not be looked up as `%3A%2F…`.
+		const r = parseBasicAuth(basic('https%3A%2F%2Fclient.example%2Fmetadata:'));
+		assert.deepEqual(r, { clientId: 'https://client.example/metadata', clientSecret: '' });
+	});
+
+	it('form-decodes both fields (percent + plus)', () => {
+		const r = parseBasicAuth(basic('a%2Bb:p%20q+r'));
+		assert.deepEqual(r, { clientId: 'a+b', clientSecret: 'p q r' });
+	});
+
+	it('leaves opaque ids/secrets (no %/+) unchanged', () => {
+		const r = parseBasicAuth(basic('conf-1:s3cret-value-xyz-0123456789'));
+		assert.deepEqual(r, { clientId: 'conf-1', clientSecret: 's3cret-value-xyz-0123456789' });
+	});
+
+	it('rejects malformed percent-encoding rather than looking up a corrupt id', () => {
+		assert.equal(parseBasicAuth(basic('bad%zz:secret')), null);
+		assert.equal(parseBasicAuth(basic('id:bad%')), null);
+	});
+
+	it('returns null for a non-Basic scheme or a missing separator', () => {
+		assert.equal(parseBasicAuth('Bearer x'), null);
+		assert.equal(parseBasicAuth(basic('no-colon-here')), null);
+		assert.equal(parseBasicAuth(undefined), null);
+	});
+});
 
 describe('handleToken', () => {
 	let originalDatabases;
