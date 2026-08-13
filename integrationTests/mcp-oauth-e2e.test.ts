@@ -306,15 +306,13 @@ suite('MCP OAuth Stage 7: full round-trip e2e', (ctx: ContextWithHarper) => {
 		const idpLocation = authorizeRes.headers.get('location');
 		ok(idpLocation, 'authorize must redirect to a location');
 
-		// Browser binding: every /oauth/mcp/authorize flow —
-		// including this DCR/stored path — now sets a per-flow __Host- consent
-		// nonce cookie whose hash is carried in the upstream state; the callback
-		// requires the cookie back before minting a code. A real browser stores
-		// this Secure/SameSite=Lax cookie over HTTPS and re-sends it on the
-		// top-level redirect from the IdP. The stub runs over plain HTTP, so we
-		// replay the cookie explicitly on the callback hop to model that.
-		const consentCookie = authorizeRes.headers.getSetCookie().find((c) => c.startsWith('__Host-mcp_consent_'));
-		ok(consentCookie, 'DCR authorize must set the per-flow browser-binding cookie');
+		// Browser binding: every /oauth/mcp/authorize flow — including this DCR/stored
+		// path — sets the stable __Host-oauth_browser secret cookie whose hash is carried
+		// in upstream state; the callback requires it back before minting a code. A real
+		// browser stores this Secure/SameSite=Lax cookie and re-sends it on the top-level
+		// redirect from the IdP. The stub runs over plain HTTP, so we replay it explicitly.
+		const consentCookie = authorizeRes.headers.getSetCookie().find((c) => c.startsWith('__Host-oauth_browser'));
+		ok(consentCookie, 'DCR authorize must set the stable browser-binding cookie');
 		const consentCookiePair = consentCookie!.split(';')[0];
 		await authorizeRes.body?.cancel();
 
@@ -337,7 +335,7 @@ suite('MCP OAuth Stage 7: full round-trip e2e', (ctx: ContextWithHarper) => {
 		// and 302s to the client redirect_uri with code + state).
 		const harperCallbackUrl = new URL(harperCallbackLocation!);
 		// The stub IdP redirect target is already an absolute URL to Harper's callback.
-		// Carry the per-flow consent cookie, as the browser would.
+		// Carry the stable browser-binding cookie, as the browser would.
 		const callbackRes = await fetch(harperCallbackUrl.toString(), {
 			redirect: 'manual',
 			headers: { cookie: consentCookiePair },
