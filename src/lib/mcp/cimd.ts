@@ -80,6 +80,7 @@ import type { Logger, MCPClientIdMetadataDocumentsConfig, MCPClientRecord, MCPCo
 import { MCPClientStore } from './clientStore.ts';
 import { createRateLimiter } from './rateLimit.ts';
 import {
+	filterGrantTypes,
 	validateGrantTypes,
 	validateRedirectUri,
 	validateResponseTypes,
@@ -636,12 +637,15 @@ function validateCimdDocument(
 		if (err) throw new CimdClientError('invalid_client', `CIMD document: ${err}`);
 	}
 
-	// Grant types.
-	const grantTypes: string[] = Array.isArray(d.grant_types)
+	// Grant types: require authorization_code; store only the supported
+	// intersection so grants declared for other servers (e.g. jwt-bearer) are
+	// never persisted or acted on by this AS.
+	const declaredGrantTypes: string[] = Array.isArray(d.grant_types)
 		? (d.grant_types as string[])
 		: ['authorization_code', 'refresh_token'];
-	const grantErr = validateGrantTypes(grantTypes);
+	const grantErr = validateGrantTypes(declaredGrantTypes);
 	if (grantErr) throw new CimdClientError('invalid_client', `CIMD document: ${grantErr}`);
+	const grantTypes = filterGrantTypes(declaredGrantTypes);
 
 	// Response types.
 	const responseTypes: string[] = Array.isArray(d.response_types) ? (d.response_types as string[]) : ['code'];

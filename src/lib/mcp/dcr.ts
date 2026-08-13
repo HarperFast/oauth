@@ -15,9 +15,9 @@ import { logger as harperLogger } from 'harper';
 import type { Logger, MCPClientMetadata, MCPClientRecord, MCPConfig } from '../../types.ts';
 import { MCPClientStore } from './clientStore.ts';
 import {
-	SUPPORTED_GRANT_TYPES,
 	SUPPORTED_RESPONSE_TYPES,
 	SUPPORTED_AUTH_METHODS,
+	filterGrantTypes,
 	validateOptionalString,
 	validateRedirectUri,
 	validateStringArray,
@@ -114,14 +114,15 @@ function buildClientFromRequest(
 		}
 	}
 
-	const grantTypes: string[] = body.grant_types ?? ['authorization_code', 'refresh_token'];
-	for (const grant of grantTypes) {
-		if (!SUPPORTED_GRANT_TYPES.has(grant)) {
-			return {
-				status: 400,
-				body: { error: 'invalid_client_metadata', error_description: `Unsupported grant_type: ${grant}` },
-			};
-		}
+	// RFC 7591 §3.2.2 permits the AS to register a subset of requested grants.
+	// Filter to the supported intersection; reject only when authorization_code
+	// is absent from the result (the flow cannot proceed without it).
+	const grantTypes: string[] = filterGrantTypes(body.grant_types ?? ['authorization_code', 'refresh_token']);
+	if (!grantTypes.includes('authorization_code')) {
+		return {
+			status: 400,
+			body: { error: 'invalid_client_metadata', error_description: 'Missing required grant_type: authorization_code' },
+		};
 	}
 
 	const responseTypes: string[] = body.response_types ?? ['code'];

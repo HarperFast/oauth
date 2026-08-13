@@ -624,6 +624,44 @@ describe('resolveCimdClient — document validation', () => {
 		assert.equal(record.jwks_uri, undefined);
 		assert.equal(record.jwks, undefined);
 	});
+
+	it('accepts the exact claude.ai metadata shape (authorization_code + refresh_token + jwt-bearer)', async () => {
+		// Repro for #199: claude.ai now declares a third grant type the AS does not
+		// implement. The CIMD validator must ignore it and store only the intersection.
+		setupOk({
+			...VALID_DOC,
+			grant_types: ['authorization_code', 'refresh_token', 'urn:ietf:params:oauth:grant-type:jwt-bearer'],
+		});
+		const record = await resolveCimdClient(VALID_URL, undefined);
+		assert.ok(record, 'expected resolution to succeed');
+		assert.deepEqual(
+			record.grant_types,
+			['authorization_code', 'refresh_token'],
+			'stored grants must be the supported intersection only'
+		);
+	});
+
+	it('rejects a document missing authorization_code, naming the absent grant', async () => {
+		setupOk({ ...VALID_DOC, grant_types: ['refresh_token'] });
+		await assert.rejects(
+			() => resolveCimdClient(VALID_URL, undefined),
+			(err) => {
+				assert.ok(err instanceof CimdClientError);
+				assert.equal(err.oauthError, 'invalid_client');
+				assert.match(err.message, /Missing required grant_type: authorization_code/);
+				return true;
+			}
+		);
+	});
+
+	it('ignores all additional non-supported grants (stores only the supported intersection)', async () => {
+		setupOk({
+			...VALID_DOC,
+			grant_types: ['authorization_code', 'urn:custom:grant-a', 'urn:custom:grant-b'],
+		});
+		const record = await resolveCimdClient(VALID_URL, undefined);
+		assert.deepEqual(record.grant_types, ['authorization_code']);
+	});
 });
 
 describe('resolveCimdClient — client_credentials documents (#161)', () => {

@@ -1,9 +1,10 @@
 /**
  * Shared client metadata validators
  *
- * Used by both DCR (dcr.ts) and CIMD (cimd.ts) so both registration paths
- * enforce identical rules. Keep dcr.ts behavior identical when importing
- * from here.
+ * Used by both DCR (dcr.ts) and CIMD (cimd.ts). Grant-type semantics differ
+ * by path: CIMD requires authorization_code to be declared and ignores
+ * unknown grants; DCR filters to the supported intersection and rejects when
+ * the result is unusable (authorization_code absent).
  */
 
 export const SUPPORTED_GRANT_TYPES = new Set(['authorization_code', 'refresh_token']);
@@ -55,13 +56,21 @@ export function validateStringArray(value: unknown, fieldName: string): string |
 	return null;
 }
 
+/**
+ * CIMD validation: authorization_code must be declared (the flow requires it);
+ * unknown grants are ignored — a CIMD document describes the client's
+ * capabilities across all servers, so extra grants are not an error.
+ */
 export function validateGrantTypes(grantTypes: string[]): string | null {
-	for (const grant of grantTypes) {
-		if (!SUPPORTED_GRANT_TYPES.has(grant)) {
-			return `Unsupported grant_type: ${grant}`;
-		}
+	if (!grantTypes.includes('authorization_code')) {
+		return 'Missing required grant_type: authorization_code';
 	}
 	return null;
+}
+
+/** Returns the subset of `grantTypes` that this AS supports. */
+export function filterGrantTypes(grantTypes: string[]): string[] {
+	return grantTypes.filter((g) => SUPPORTED_GRANT_TYPES.has(g));
 }
 
 export function validateResponseTypes(responseTypes: string[]): string | null {
