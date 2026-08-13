@@ -2,6 +2,25 @@
 
 All notable changes to `@harperfast/oauth` are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Entries prior to 2.2.0 were backfilled from the [GitHub release notes](https://github.com/HarperFast/oauth/releases).
 
+## [2.5.0] - 2026-08-13
+
+### Security
+
+- **All browser-initiated OAuth flows are bound to the initiating browser** (#203): human login and every MCP authorize path set a `__Host-` binding cookie — a **stable per-browser secret** (#205) — whose hash travels in the flow's server-side state; the callback requires the cookie back before any upstream code exchange or session write. This closes the login-CSRF / authorization-code-injection class where an attacker-initiated flow (or a state delivered into a victim's browser) could otherwise complete against the victim. Included in the same change: request headers are now read through a runtime-wrapper-safe helper — the live Harper runtime exposes headers only via `.asObject`, so the binding (and the pre-existing CIMD consent binding) would otherwise fail closed in production; `error`/`error_description` are CRLF-encoded before logging (CWE-117) on the callback and DCR paths; `Basic`/`Bearer` scheme matching is case-insensitive (RFC 9110 / RFC 6750); and `Basic` credentials are `application/x-www-form-urlencoded`-decoded (RFC 6749 §2.3.1) so URL-shaped CIMD client IDs authenticate. **⚠️ Requires HTTPS:** the `__Host-`/`Secure` binding cookie is dropped by browsers on plain-HTTP non-localhost origins, so OAuth must be served over TLS (already the recommended posture; most browsers still trust `http://localhost` for development).
+
+### Added
+
+- **ES256 signing for MCP access tokens** (#191): set `mcp.signingAlgorithm: ES256` for EC P-256; RS256 remains the default. The JWKS publishes each key's `alg` — verify by `kid`.
+- **`offline_access` refresh-token opt-in** (SEP-2207, #192): the authorization-server metadata advertises `offline_access` in `scopes_supported`; set `mcp.refreshTokenRequiresOfflineAccess: true` to withhold refresh tokens unless the granted scope carries it.
+
+### Fixed
+
+- **CIMD accepts unknown grant types; DCR filters to the supported intersection** (#199, #200): a Client ID Metadata Document that declares an unsupported `grant_type` (e.g. claude.ai's `urn:ietf:params:oauth:grant-type:jwt-bearer`) no longer fails the entire client resolution — unblocking claude.ai custom connectors. `authorization_code` is still required, and only supported grants are stored.
+
+### Docs
+
+- **MCP OAuth docs aligned to the 2026-07-28 authorization spec** (#193, #204): Client ID Metadata Documents reframed as the primary registration path (Dynamic Client Registration is deprecated in 2026-07-28), the flow diagram updated for the POST-based Streamable HTTP transport, and `iss` / scope step-up noted. Adds a requirement→code→test **conformance traceability matrix** (`docs/mcp-oauth-conformance.md`).
+
 ## [2.4.0] - 2026-07-20
 
 ### Security
