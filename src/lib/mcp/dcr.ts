@@ -22,6 +22,7 @@ import {
 	validateRedirectUri,
 	validateStringArray,
 } from './clientValidator.ts';
+import { getRequestHeader } from '../requestHeaders.ts';
 
 type ErrorResponse = {
 	status: number;
@@ -243,11 +244,11 @@ export async function handleRegister(
 	// — so these JSON.stringify calls run only when the message is actually
 	// emitted. Don't hoist a shared `JSON.stringify(...)` out to a const: that
 	// reintroduces eager work on every request even when the log is suppressed.
+	const authHeader = getRequestHeader(request?.headers, 'authorization');
 	harperLogger?.info?.(
-		`MCP DCR request received: redirect_uris=${JSON.stringify(body?.redirect_uris)} grant_types=${JSON.stringify(body?.grant_types)} response_types=${JSON.stringify(body?.response_types)} token_endpoint_auth_method=${JSON.stringify(body?.token_endpoint_auth_method)} auth_header=${!!request?.headers?.authorization}`
+		`MCP DCR request received: redirect_uris=${JSON.stringify(body?.redirect_uris)} grant_types=${JSON.stringify(body?.grant_types)} response_types=${JSON.stringify(body?.response_types)} token_endpoint_auth_method=${JSON.stringify(body?.token_endpoint_auth_method)} auth_header=${!!authHeader}`
 	);
 
-	const authHeader = request?.headers?.authorization;
 	const authError = checkInitialAccessToken(authHeader, dcrConfig?.initialAccessToken);
 	if (authError) {
 		harperLogger?.warn?.('MCP DCR rejected: initial access token required or invalid');

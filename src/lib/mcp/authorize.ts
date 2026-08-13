@@ -55,7 +55,7 @@ type ErrorJSON = {
 
 type Redirect = {
 	status: 302;
-	headers: { Location: string };
+	headers: { 'Location': string; 'Set-Cookie'?: string };
 };
 
 type HtmlResponse = {
@@ -333,6 +333,27 @@ async function performUpstreamRedirect(
 	const providerEntry = providers[selection.providerName];
 	const providerConfig: OAuthProviderConfig = providerEntry.config;
 
+	// Browser binding for EVERY MCP authorize flow, not just the CIMD interstitial.
+	// CIMD clients arrive here from /oauth/mcp/confirm with the interstitial's
+	// per-flow nonce hash already bound into mcpState (its cookie already lives in
+	// the browser), so leave those untouched. Stored/DCR clients skip the
+	// interstitial and reach here directly with no binding — mint the same
+	// __Host- per-flow nonce cookie here and carry its hash in the upstream state
+	// so the callback can prove the flow completes in the initiating browser.
+	// Without this an anonymous initiator also mints no session id, so an
+	// attacker-minted, unbound state fed to a victim would produce an auth code
+	// for the victim at the attacker's redirect_uri (authorization-code
+	// injection). Only the hash leaves the server; the callback re-checks the
+	// cookie (see handlers.ts).
+	let boundState = mcpState;
+	let bindingCookie: string | undefined;
+	if (!boundState.browserNonceHash) {
+		const consentFlowId = generateConsentFlowId();
+		const consentNonce = generateConsentNonce();
+		boundState = { ...boundState, browserNonceHash: hashConsentNonce(consentNonce), consentFlowId };
+		bindingCookie = buildConsentCookie(consentFlowId, consentNonce);
+	}
+
 	let csrfToken: string;
 	try {
 		csrfToken = await providerEntry.provider.generateCSRFToken({
@@ -342,7 +363,7 @@ async function performUpstreamRedirect(
 			// Both MCP entries (direct authorize and post-CIMD confirm) mint
 			// their upstream state here, so this is the single binding site.
 			sessionId: request.session?.id,
-			mcp: mcpState,
+			mcp: boundState,
 		});
 	} catch (error) {
 		logger?.error?.(
@@ -358,7 +379,9 @@ async function performUpstreamRedirect(
 		`MCP authorize: client=${mcpState.clientId} -> upstream=${selection.providerName}; bound resource=${mcpState.resource}`
 	);
 
-	return { status: 302, headers: { Location: upstreamAuthUrl } };
+	const headers: Redirect['headers'] = { Location: upstreamAuthUrl };
+	if (bindingCookie) headers['Set-Cookie'] = bindingCookie;
+	return { status: 302, headers };
 }
 
 /**

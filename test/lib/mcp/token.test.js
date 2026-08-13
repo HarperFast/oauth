@@ -531,6 +531,45 @@ describe('handleToken', () => {
 		assert.equal(res.body.error, 'invalid_request');
 	});
 
+	it('authenticates client_secret_basic when headers use the Harper `.asObject` wrapper (runtime shape)', async () => {
+		// Regression: the live runtime wraps headers behind `.asObject`, so
+		// reading request.headers.authorization directly returns undefined and
+		// confidential-basic auth would fail closed in production.
+		seedCode('code-1', { client_id: 'conf-1' });
+		const res = await handleToken(
+			{ headers: { asObject: basicHeader('conf-1', CONF_SECRET) } },
+			{ grant_type: 'authorization_code', code: 'code-1', code_verifier: CODE_VERIFIER, redirect_uri: REDIRECT },
+			mcpConfig
+		);
+		assert.equal(res.status, 200);
+		assert.ok(res.body.access_token);
+	});
+
+	it('tolerates a public client presenting an empty Basic secret (client_id only)', async () => {
+		// `Authorization: Basic base64("<client_id>:")` carries only the client_id;
+		// some clients always send it. An empty secret is not "presenting a secret",
+		// so a public client must not be rejected for it.
+		seedCode('code-1'); // public-1
+		const res = await handleToken(
+			{ headers: basicHeader('public-1', '') },
+			{ grant_type: 'authorization_code', code: 'code-1', code_verifier: CODE_VERIFIER, redirect_uri: REDIRECT },
+			mcpConfig
+		);
+		assert.equal(res.status, 200, 'empty Basic secret tolerated as no-secret for a public client');
+		assert.ok(res.body.access_token);
+	});
+
+	it('still rejects a public client that presents a real (non-empty) Basic secret', async () => {
+		seedCode('code-1'); // public-1
+		const res = await handleToken(
+			{ headers: basicHeader('public-1', 'unexpected-secret') },
+			{ grant_type: 'authorization_code', code: 'code-1', code_verifier: CODE_VERIFIER, redirect_uri: REDIRECT },
+			mcpConfig
+		);
+		assert.equal(res.status, 401);
+		assert.equal(res.body.error, 'invalid_client');
+	});
+
 	it('authenticates a confidential client via client_secret_post (secret in body)', async () => {
 		clients.set('post-1', {
 			client_id: 'post-1',

@@ -23,6 +23,7 @@
  */
 
 import type { Logger, MCPConfig } from '../../types.ts';
+import { getRequestHeader } from '../requestHeaders.ts';
 import { dcrEnabled } from './dcr.ts';
 import { MCPKeyStore, resolveEffectiveAlg } from './keyStore.ts';
 import { publicKeyToJwk } from './tokenIssuer.ts';
@@ -82,8 +83,9 @@ export function resolveIssuer(request: HarperRequest, mcpConfig: MCPConfig): str
 		// endpoint URLs don't end up with a doubled slash.
 		return mcpConfig.issuer.replace(/\/+$/, '');
 	}
-	const rawHost = request.host ?? request.headers?.host;
-	const host = (Array.isArray(rawHost) ? rawHost[0] : rawHost) ?? 'localhost';
+	// getRequestHeader for the fallback: the live runtime wraps headers behind
+	// `.asObject`, so `request.headers.host` is undefined there.
+	const host = request.host ?? getRequestHeader(request.headers, 'host') ?? 'localhost';
 	const scheme = request.protocol ?? 'https';
 	return `${scheme}://${host}`;
 }

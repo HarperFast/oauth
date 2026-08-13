@@ -20,6 +20,7 @@ import { CimdClientError, MAX_CLIENT_ID_LENGTH, resolveClient } from './cimd.ts'
 import { CLIENT_ASSERTION_TYPE_JWT_BEARER, verifyClientAssertion } from './clientAssertion.ts';
 import { MCPKeyStore } from './keyStore.ts';
 import { createRateLimiter, type RateLimiter } from './rateLimit.ts';
+import { getRequestHeader } from '../requestHeaders.ts';
 import {
 	hashRefreshToken,
 	makeRefreshToken,
@@ -184,7 +185,7 @@ async function authenticateClient(
 	mcpConfig: MCPConfig | undefined,
 	logger?: Logger
 ): Promise<ClientAuthResult> {
-	const basic = parseBasicAuth(request?.headers?.authorization);
+	const basic = parseBasicAuth(getRequestHeader(request?.headers, 'authorization'));
 	const bodyClientId = typeof body?.client_id === 'string' ? body.client_id : undefined;
 	const bodyClientSecret = typeof body?.client_secret === 'string' ? body.client_secret : undefined;
 
@@ -217,8 +218,12 @@ async function authenticateClient(
 	const method = client.token_endpoint_auth_method ?? 'none';
 
 	if (method === 'none') {
-		// Public client: PKCE is the proof. A presented secret signals misuse.
-		if (basic || bodyClientSecret) {
+		// Public client: PKCE is the proof. A presented *non-empty* secret signals
+		// misuse and is rejected. An empty Basic secret — `Authorization: Basic
+		// base64("<client_id>:")` — carries only the client_id and is how some
+		// clients convey it; tolerate it as "no secret presented" so those public
+		// clients aren't rejected. (Empty values are falsy here.)
+		if (basic?.clientSecret || bodyClientSecret) {
 			return { error: errorResponse(401, 'invalid_client', 'Public client must not present a secret') };
 		}
 		return { client };
@@ -548,7 +553,10 @@ async function handleClientCredentialsGrant(
 	// grant — a Basic header or client_secret must not ride along (#159 req 6:
 	// no credential type may substitute for the private key). Scheme match is
 	// case-insensitive per RFC 9110 §11.1.
-	if (/^basic\s/i.test(request?.headers?.authorization ?? '') || typeof body?.client_secret === 'string') {
+	if (
+		/^basic\s/i.test(getRequestHeader(request?.headers, 'authorization') ?? '') ||
+		typeof body?.client_secret === 'string'
+	) {
 		return errorResponse(
 			400,
 			'invalid_request',

@@ -32,13 +32,24 @@
  * the CSRF store, so a party that observes or replays state tokens still cannot
  * reconstruct the cookie value. Cookies expire via `Max-Age`; per-flow naming
  * makes explicit clearing unnecessary for correctness.
+ *
+ * The human login flow uses the same binding under a distinct cookie namespace:
+ * session binding only protects flows initiated while logged in, so the
+ * logged-out login flow needs the nonce cookie to prove the
+ * callback arrived in the browser that initiated it. handleLogin mints it;
+ * handleCallback enforces it via the `buildLoginCookie`/`readLoginNonce`
+ * variants below.
  */
 
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { getRequestHeader } from '../requestHeaders.ts';
 import type { Request } from '../../types.ts';
 
 /** `__Host-` prefix + a per-flow id suffix. See module header for why. */
 const CONSENT_COOKIE_PREFIX = '__Host-mcp_consent_';
+
+/** Human-login binding cookie namespace. */
+const LOGIN_COOKIE_PREFIX = '__Host-oauth_login_';
 
 /** Must comfortably outlast the interstitial pause plus the upstream IdP login. */
 const CONSENT_COOKIE_MAX_AGE_S = 900;
@@ -56,8 +67,8 @@ export function hashConsentNonce(nonce: string): string {
 	return createHash('sha256').update(nonce).digest('base64url');
 }
 
-function cookieName(flowId: string): string {
-	return CONSENT_COOKIE_PREFIX + flowId;
+function buildBindingCookie(prefix: string, flowId: string, nonce: string): string {
+	return `${prefix}${flowId}=${nonce}; Max-Age=${CONSENT_COOKIE_MAX_AGE_S}; Path=/; Secure; HttpOnly; SameSite=Lax`;
 }
 
 /**
@@ -65,7 +76,12 @@ function cookieName(flowId: string): string {
  * `__Host-` requires exactly `Secure` + `Path=/` + no `Domain`.
  */
 export function buildConsentCookie(flowId: string, nonce: string): string {
-	return `${cookieName(flowId)}=${nonce}; Max-Age=${CONSENT_COOKIE_MAX_AGE_S}; Path=/; Secure; HttpOnly; SameSite=Lax`;
+	return buildBindingCookie(CONSENT_COOKIE_PREFIX, flowId, nonce);
+}
+
+/** Set-Cookie value pairing a human login initiation with its state token. */
+export function buildLoginCookie(flowId: string, nonce: string): string {
+	return buildBindingCookie(LOGIN_COOKIE_PREFIX, flowId, nonce);
 }
 
 /**
@@ -78,10 +94,23 @@ export function buildConsentCookie(flowId: string, nonce: string): string {
  * jar). Revisit the parser if the encoding ever changes.
  */
 export function readConsentNonce(request: Request | undefined, flowId: string | undefined): string | undefined {
+	return readBindingNonce(CONSENT_COOKIE_PREFIX, request, flowId);
+}
+
+/** Read this login flow's binding nonce from the request's Cookie header. */
+export function readLoginNonce(request: Request | undefined, flowId: string | undefined): string | undefined {
+	return readBindingNonce(LOGIN_COOKIE_PREFIX, request, flowId);
+}
+
+function readBindingNonce(
+	prefix: string,
+	request: Request | undefined,
+	flowId: string | undefined
+): string | undefined {
 	if (!flowId) return undefined;
-	const header = request?.headers?.cookie;
+	const header = readCookieHeader(request);
 	if (typeof header !== 'string' || !header) return undefined;
-	const name = cookieName(flowId);
+	const name = prefix + flowId;
 	for (const part of header.split(';')) {
 		const eq = part.indexOf('=');
 		if (eq === -1) continue;
@@ -90,6 +119,16 @@ export function readConsentNonce(request: Request | undefined, flowId: string | 
 		}
 	}
 	return undefined;
+}
+
+/**
+ * Read the raw `Cookie` header. Goes through `getRequestHeader` because reading
+ * `request.headers.cookie` directly returns undefined against Harper's live
+ * runtime headers wrapper, which would fail the binding check closed for every
+ * browser flow.
+ */
+function readCookieHeader(request: Request | undefined): string | undefined {
+	return getRequestHeader(request?.headers, 'cookie');
 }
 
 /** Constant-time check that `nonce` hashes to `expectedHash`. */

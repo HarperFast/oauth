@@ -116,6 +116,18 @@ describe('handleRegister (RFC 7591 DCR)', () => {
 			assert.equal(response.status, 201);
 		});
 
+		it('accepts a matching Bearer token via the Harper `.asObject` headers wrapper (runtime shape)', async () => {
+			// Regression: the live runtime wraps headers behind `.asObject`, so
+			// reading request.headers.authorization directly returns undefined and
+			// the token gate would reject every registration in production.
+			const response = await handleRegister(
+				makeRequest({ asObject: { authorization: 'Bearer secret-token' } }),
+				VALID_BODY,
+				config
+			);
+			assert.equal(response.status, 201);
+		});
+
 		it('rejects the capitalized Authorization header (Node HTTP parser lowercases)', async () => {
 			// Production: incoming headers are lowercased before reaching us.
 			// If a caller hands us a literal { Authorization: ... } object, we

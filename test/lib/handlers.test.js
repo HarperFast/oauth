@@ -137,6 +137,19 @@ describe('OAuth Handlers', () => {
 			assert.equal(csrfCall.arguments[0].originalUrl, '/steal');
 		});
 
+		it('reads referer from a Harper `.asObject` headers wrapper (runtime shape)', async () => {
+			// The live runtime wraps headers behind `.asObject`; direct
+			// `request.headers.referer` is undefined there. Regression guard.
+			const wrapped = {
+				session: mockRequest.session,
+				headers: { asObject: { referer: 'https://app.example.com/deep' } },
+			};
+			await handleLogin(wrapped, mockTarget, mockProvider, mockConfig, 'test-provider', mockLogger);
+
+			const csrfCall = mockProvider.generateCSRFToken.mock.calls[0];
+			assert.equal(csrfCall.arguments[0].originalUrl, '/deep');
+		});
+
 		it('should fall back to postLoginRedirect when no redirect param or referer', async () => {
 			delete mockRequest.headers.referer;
 			await handleLogin(mockRequest, mockTarget, mockProvider, mockConfig, 'test-provider', mockLogger);
@@ -150,6 +163,28 @@ describe('OAuth Handlers', () => {
 
 			const csrfCall = mockProvider.generateCSRFToken.mock.calls[0];
 			assert.equal(csrfCall.arguments[0].sessionId, 'session-123');
+		});
+
+		it('mints a browser-binding nonce: hash in the state token, nonce in a __Host- cookie', async () => {
+			const { hashConsentNonce } = await import('../../dist/lib/mcp/consentBinding.js');
+			const result = await handleLogin(mockRequest, mockTarget, mockProvider, mockConfig, 'test-provider', mockLogger);
+
+			const meta = mockProvider.generateCSRFToken.mock.calls[0].arguments[0];
+			assert.ok(meta.loginFlowId, 'flow id stored in the state token');
+			assert.ok(meta.browserNonceHash, 'nonce hash stored in the state token');
+
+			const setCookie = result.headers['Set-Cookie'];
+			const [pair, ...attrs] = setCookie.split('; ');
+			const eq = pair.indexOf('=');
+			assert.equal(pair.slice(0, eq), `__Host-oauth_login_${meta.loginFlowId}`, 'cookie name embeds the flow id');
+			assert.equal(
+				hashConsentNonce(pair.slice(eq + 1)),
+				meta.browserNonceHash,
+				'cookie value hashes to the bound hash'
+			);
+			for (const attr of ['Path=/', 'Secure', 'HttpOnly', 'SameSite=Lax']) {
+				assert.ok(attrs.includes(attr), `cookie carries ${attr}`);
+			}
 		});
 	});
 
@@ -789,6 +824,16 @@ describe('OAuth Handlers', () => {
 		let storedAuthCodes;
 		// Import lazily so the dist symbol load doesn't happen at file parse.
 		let resetMCPAuthCodesTableCache;
+		let hashConsentNonce, buildConsentCookie;
+
+		// Every /oauth/mcp/authorize flow (CIMD and stored/DCR) now mints a
+		// per-flow nonce cookie and binds its hash into the upstream state; the
+		// callback fails closed without a matching cookie. The default fixtures
+		// below therefore carry a valid binding so the happy-path assertions
+		// exercise the bound flow — tests that need an unbound/mismatched state
+		// override them locally.
+		const MCP_NONCE = 'mcp-branch-consent-nonce';
+		const MCP_FLOW_ID = 'mcpbranchflow';
 
 		const MCP_STATE = {
 			clientId: 'mcp-client-1',
@@ -807,6 +852,7 @@ describe('OAuth Handlers', () => {
 
 		beforeEach(async () => {
 			({ resetMCPAuthCodesTableCache } = await import('../../dist/lib/mcp/authCodeStore.js'));
+			({ hashConsentNonce, buildConsentCookie } = await import('../../dist/lib/mcp/consentBinding.js'));
 			resetMCPAuthCodesTableCache();
 			originalDatabases = global.databases;
 			storedAuthCodes = new Map();
@@ -821,12 +867,14 @@ describe('OAuth Handlers', () => {
 					},
 				},
 			};
-			// Replace verifyCSRFToken to return MCP state by default for this block.
+			// Replace verifyCSRFToken to return a browser-bound MCP state by default.
 			mockProvider.verifyCSRFToken = createMockFn(async () => ({
 				timestamp: Date.now(),
 				providerName: 'test-provider',
-				mcp: { ...MCP_STATE },
+				mcp: { ...MCP_STATE, browserNonceHash: hashConsentNonce(MCP_NONCE), consentFlowId: MCP_FLOW_ID },
 			}));
+			// The initiating browser's per-flow consent cookie accompanies the callback.
+			mockRequest.headers.cookie = buildConsentCookie(MCP_FLOW_ID, MCP_NONCE).split(';')[0];
 		});
 
 		// Restore global.databases in afterEach so a failing assertion mid-test
@@ -1141,11 +1189,17 @@ describe('OAuth Handlers', () => {
 				assert.equal(storedAuthCodes.size, 0);
 			});
 
-			it('DCR flows (no browserNonceHash) are unaffected', async () => {
+			it('fails closed on an MCP state with no browser binding (forged/pre-upgrade state)', async () => {
+				// After the DCR browser-binding fix, EVERY MCP
+				// authorize flow mints a per-flow nonce cookie and binds its hash into
+				// the upstream state. An MCP state that reaches the callback with no
+				// binding is a forged or pre-upgrade in-flight state and must NOT mint
+				// an auth code — this is the authorization-code injection the fix
+				// closes (an attacker-supplied, unbound state fed to a victim).
 				mockProvider.verifyCSRFToken = createMockFn(async () => ({
 					timestamp: Date.now(),
 					providerName: 'test-provider',
-					mcp: { ...MCP_STATE },
+					mcp: { ...MCP_STATE }, // no browserNonceHash / consentFlowId
 				}));
 				delete mockRequest.headers.cookie;
 				const result = await handleCallback(
@@ -1158,7 +1212,11 @@ describe('OAuth Handlers', () => {
 					{ mcpConfig: MCP_CONFIG, logger: mockLogger }
 				);
 				const url = new URL(result.headers.Location);
-				assert.ok(url.searchParams.get('code'), 'DCR callback mints a code without a consent cookie');
+				assert.equal(url.origin + url.pathname, MCP_STATE.redirectUri, 'error routed to the client redirect_uri');
+				assert.equal(url.searchParams.get('error'), 'access_denied');
+				assert.equal(url.searchParams.get('code'), null, 'no auth code minted for an unbound MCP state');
+				assert.equal(storedAuthCodes.size, 0, 'no auth code persisted');
+				assert.equal(mockProvider.exchangeCodeForToken.mock.calls.length, 0, 'upstream code never exchanged');
 			});
 		});
 	});
@@ -1379,6 +1437,148 @@ describe('OAuth Handlers', () => {
 			assert.ok(result.headers.Location.startsWith('https://mcp-client.example.com/cb'));
 			assert.ok(result.headers.Location.includes('error=access_denied'));
 			assert.equal(mockProvider.exchangeCodeForToken.mock.calls.length, 0);
+		});
+	});
+
+	describe('handleCallback — login browser binding', () => {
+		const NONCE = 'login-binding-nonce';
+		const FLOW_ID = 'loginflow';
+		let hashConsentNonce, buildLoginCookie;
+
+		beforeEach(async () => {
+			({ hashConsentNonce, buildLoginCookie } = await import('../../dist/lib/mcp/consentBinding.js'));
+			// A logged-out flow: no sessionId in the token (the session binding
+			// has nothing to check — the exact gap the nonce cookie closes).
+			mockProvider.verifyCSRFToken = createMockFn(async () => ({
+				originalUrl: '/dashboard',
+				timestamp: Date.now(),
+				providerName: 'test-provider',
+				loginFlowId: FLOW_ID,
+				browserNonceHash: hashConsentNonce(NONCE),
+			}));
+		});
+
+		it('completes when the callback arrives in the browser that initiated the login', async () => {
+			mockRequest.headers.cookie = buildLoginCookie(FLOW_ID, NONCE).split(';')[0];
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				{ logger: mockLogger }
+			);
+
+			assert.equal(result.status, 302);
+			assert.equal(result.headers.Location, '/dashboard');
+			assert.equal(mockProvider.exchangeCodeForToken.mock.calls.length, 1);
+		});
+
+		it('rejects when the binding cookie is missing — attacker-minted state in a victim browser', async () => {
+			// Attack: the attacker initiates a login (cookie set in THEIR browser),
+			// completes IdP auth as themselves, then feeds the callback URL to the
+			// victim. The victim's browser has no matching cookie — no login.
+			delete mockRequest.headers.cookie;
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				{ logger: mockLogger }
+			);
+
+			assert.equal(result.status, 302);
+			assert.equal(result.headers.Location, '/dashboard?error=auth_failed&reason=csrf');
+			// Rejected before any upstream call or session write.
+			assert.equal(mockProvider.exchangeCodeForToken.mock.calls.length, 0);
+			assert.equal(mockRequest.session.update.mock.calls.length, 0);
+		});
+
+		it('rejects when the binding cookie does not hash-match', async () => {
+			mockRequest.headers.cookie = buildLoginCookie(FLOW_ID, 'some-other-browser-nonce').split(';')[0];
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				{ logger: mockLogger }
+			);
+
+			assert.equal(result.headers.Location, '/dashboard?error=auth_failed&reason=csrf');
+			assert.equal(mockProvider.exchangeCodeForToken.mock.calls.length, 0);
+		});
+
+		it('tolerates state tokens without a nonce hash (pre-upgrade in-flight logins)', async () => {
+			mockProvider.verifyCSRFToken = createMockFn(async () => ({
+				originalUrl: '/dashboard',
+				timestamp: Date.now(),
+				providerName: 'test-provider',
+			}));
+			delete mockRequest.headers.cookie;
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				{ logger: mockLogger }
+			);
+
+			assert.equal(result.status, 302);
+			assert.equal(result.headers.Location, '/dashboard');
+		});
+	});
+
+	describe('handleCallback — CRLF-safe error logging (CWE-117)', () => {
+		const CRLF_ERROR = 'access_denied\r\nFORGED line';
+		const CRLF_DESC = 'desc\r\ninjected';
+
+		function targetWith(params) {
+			return { get: createMockFn((key) => params[key]) };
+		}
+
+		it('encodes CR/LF in upstream error params on the no-state path', async () => {
+			const result = await handleCallback(
+				mockRequest,
+				targetWith({ error: CRLF_ERROR, error_description: CRLF_DESC }),
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				{ logger: mockLogger }
+			);
+
+			assert.equal(result.status, 302);
+			const logged = mockLogger.error.mock.calls[0].arguments[0];
+			assert.ok(!logged.includes('\r') && !logged.includes('\n'), 'no raw CR/LF reaches the log line');
+			assert.ok(logged.includes('\\r\\n'), 'injected control chars are visibly encoded');
+		});
+
+		it('encodes CR/LF in upstream error params on the verified-state path', async () => {
+			const result = await handleCallback(
+				mockRequest,
+				targetWith({ state: 'csrf-token-123', error: CRLF_ERROR, error_description: CRLF_DESC }),
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				{ logger: mockLogger }
+			);
+
+			assert.equal(result.status, 302);
+			const logged = mockLogger.error.mock.calls[0].arguments[0];
+			assert.ok(!logged.includes('\r') && !logged.includes('\n'), 'no raw CR/LF reaches the log line');
+			assert.ok(logged.includes('\\r\\n'), 'injected control chars are visibly encoded');
 		});
 	});
 });
