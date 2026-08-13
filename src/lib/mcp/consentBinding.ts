@@ -42,6 +42,7 @@
  */
 
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { getRequestHeader } from '../requestHeaders.ts';
 import type { Request } from '../../types.ts';
 
 /** `__Host-` prefix + a per-flow id suffix. See module header for why. */
@@ -121,26 +122,13 @@ function readBindingNonce(
 }
 
 /**
- * Read the raw `Cookie` header across the shapes a Harper request can carry: a
- * Web `Headers` object (`.get()`), Harper's runtime headers wrapper (`.asObject`
- * — what the live server passes to component resources), or a plain Node
- * `IncomingMessage.headers` object (used in unit tests). Reading
- * `request.headers.cookie` directly returns undefined against the live wrapper,
- * which would fail the binding check closed for every browser flow — mirrors the
- * `getHeader` helper in withMCPAuth.ts.
+ * Read the raw `Cookie` header. Goes through `getRequestHeader` because reading
+ * `request.headers.cookie` directly returns undefined against Harper's live
+ * runtime headers wrapper, which would fail the binding check closed for every
+ * browser flow.
  */
 function readCookieHeader(request: Request | undefined): string | undefined {
-	const headers = request?.headers as any;
-	if (!headers) return undefined;
-	let raw: unknown;
-	if (typeof headers.get === 'function') {
-		raw = headers.get('cookie');
-	} else {
-		const obj = headers.asObject ?? headers;
-		raw = obj?.cookie ?? obj?.Cookie;
-	}
-	if (raw == null) return undefined;
-	return Array.isArray(raw) ? raw[0] : String(raw);
+	return getRequestHeader(request?.headers, 'cookie');
 }
 
 /** Constant-time check that `nonce` hashes to `expectedHash`. */

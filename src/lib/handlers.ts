@@ -30,6 +30,7 @@ import {
 } from './mcp/consentBinding.ts';
 import { handleMCPCallback } from './mcp/index.ts';
 import { resolveIssuer } from './mcp/wellKnown.ts';
+import { getRequestHeader } from './requestHeaders.ts';
 import type { HookManager } from './hookManager.ts';
 
 /**
@@ -138,7 +139,10 @@ export async function handleLogin(
 		redirectParam = sanitizeRedirect(redirectParam);
 	}
 
-	const referer = request.headers?.referer ? sanitizeRedirect(request.headers.referer) : undefined;
+	// getRequestHeader, not request.headers.referer: the live Harper runtime
+	// wraps headers behind `.asObject`, so direct property access is undefined.
+	const refererHeader = getRequestHeader(request.headers, 'referer');
+	const referer = refererHeader ? sanitizeRedirect(refererHeader) : undefined;
 	const originalUrl = redirectParam || referer || config.postLoginRedirect || '/';
 
 	// Browser binding (GHSA-xf67-jxfx-jf88): session binding below only covers

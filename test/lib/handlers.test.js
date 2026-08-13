@@ -137,6 +137,19 @@ describe('OAuth Handlers', () => {
 			assert.equal(csrfCall.arguments[0].originalUrl, '/steal');
 		});
 
+		it('reads referer from a Harper `.asObject` headers wrapper (runtime shape)', async () => {
+			// The live runtime wraps headers behind `.asObject`; direct
+			// `request.headers.referer` is undefined there. Regression guard.
+			const wrapped = {
+				session: mockRequest.session,
+				headers: { asObject: { referer: 'https://app.example.com/deep' } },
+			};
+			await handleLogin(wrapped, mockTarget, mockProvider, mockConfig, 'test-provider', mockLogger);
+
+			const csrfCall = mockProvider.generateCSRFToken.mock.calls[0];
+			assert.equal(csrfCall.arguments[0].originalUrl, '/deep');
+		});
+
 		it('should fall back to postLoginRedirect when no redirect param or referer', async () => {
 			delete mockRequest.headers.referer;
 			await handleLogin(mockRequest, mockTarget, mockProvider, mockConfig, 'test-provider', mockLogger);
