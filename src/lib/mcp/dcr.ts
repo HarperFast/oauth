@@ -15,6 +15,7 @@ import { logger as harperLogger } from 'harper';
 import type { Logger, MCPClientMetadata, MCPClientRecord, MCPConfig } from '../../types.ts';
 import { MCPClientStore } from './clientStore.ts';
 import {
+	LEGACY_DEFAULT_GRANT_TYPES,
 	SUPPORTED_RESPONSE_TYPES,
 	SUPPORTED_AUTH_METHODS,
 	filterGrantTypes,
@@ -116,7 +117,7 @@ function buildClientFromRequest(
 
 	// RFC 7591 §3.2.1 permits the AS to register a subset of requested grants.
 	// Reject only when authorization_code is absent from the supported intersection.
-	const grantTypes: string[] = filterGrantTypes(body.grant_types ?? ['authorization_code', 'refresh_token']);
+	const grantTypes: string[] = filterGrantTypes(body.grant_types ?? LEGACY_DEFAULT_GRANT_TYPES);
 	if (!grantTypes.includes('authorization_code')) {
 		return {
 			status: 400,

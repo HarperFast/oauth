@@ -7,6 +7,9 @@
  */
 
 export const SUPPORTED_GRANT_TYPES = new Set(['authorization_code', 'refresh_token']);
+
+/** Grants assumed for clients persisted before grant_types was required. */
+export const LEGACY_DEFAULT_GRANT_TYPES = ['authorization_code', 'refresh_token'];
 export const SUPPORTED_RESPONSE_TYPES = new Set(['code']);
 /** Auth methods supported for DCR clients. CIMD clients in v1 are restricted to 'none'. */
 export const SUPPORTED_AUTH_METHODS = new Set(['none', 'client_secret_basic', 'client_secret_post']);
@@ -61,7 +64,7 @@ export function validateStringArray(value: unknown, fieldName: string): string |
  * ['authorization_code', 'refresh_token'], matching the CIMD and DCR paths.
  */
 export function allowsGrant(client: { grant_types?: string[] }, grant: string): boolean {
-	return (client.grant_types ?? ['authorization_code', 'refresh_token']).includes(grant);
+	return (client.grant_types ?? LEGACY_DEFAULT_GRANT_TYPES).includes(grant);
 }
 
 /** Returns an error if authorization_code is absent from the declared grants. */

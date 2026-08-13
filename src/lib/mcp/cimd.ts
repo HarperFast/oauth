@@ -80,6 +80,7 @@ import type { Logger, MCPClientIdMetadataDocumentsConfig, MCPClientRecord, MCPCo
 import { MCPClientStore } from './clientStore.ts';
 import { createRateLimiter } from './rateLimit.ts';
 import {
+	LEGACY_DEFAULT_GRANT_TYPES,
 	filterGrantTypes,
 	validateGrantTypes,
 	validateRedirectUri,
@@ -639,7 +640,7 @@ function validateCimdDocument(
 
 	const declaredGrantTypes: string[] = Array.isArray(d.grant_types)
 		? (d.grant_types as string[])
-		: ['authorization_code', 'refresh_token'];
+		: [...LEGACY_DEFAULT_GRANT_TYPES];
 	const grantErr = validateGrantTypes(declaredGrantTypes);
 	if (grantErr) throw new CimdClientError('invalid_client', `CIMD document: ${grantErr}`);
 	const grantTypes = filterGrantTypes(declaredGrantTypes);
