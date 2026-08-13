@@ -123,9 +123,7 @@ tracked, neither is a security gap:
    has an asserting test. Same constant, so low risk; add an error-path assertion.
 
 Documented-not-yet (see [mcp-oauth.md → Not yet supported](./mcp-oauth.md#not-yet-supported-v11)):
-the 2026-07-28 **step-up authorization flow** (SEP-2350, `403 insufficient_scope`
-
-- `scope` challenge) and per-operation scope enforcement are v1.1 forward-work.
+the 2026-07-28 **step-up authorization flow** (SEP-2350, `403 insufficient_scope` / `scope` challenge) and per-operation scope enforcement are v1.1 forward-work.
 
 ---
 
