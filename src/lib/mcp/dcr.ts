@@ -39,7 +39,7 @@ function checkInitialAccessToken(authHeader: string | undefined, configured: str
 		return null;
 	}
 	// Scheme name is case-insensitive (RFC 7235 §2.1 / RFC 6750 §2.1).
-	if (!authHeader || !/^bearer /i.test(authHeader)) {
+	if (!authHeader || !/^bearer\s/i.test(authHeader)) {
 		return {
 			status: 401,
 			body: { error: 'invalid_token', error_description: 'Missing initial access token' },
