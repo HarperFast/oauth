@@ -351,7 +351,7 @@ describe('OAuthResource - Response Builders', () => {
 			const redirect = {
 				status: 302,
 				headers: {
-					Location: 'https://idp.example/authorize',
+					'Location': 'https://idp.example/authorize',
 					'Set-Cookie': '__Host-oauth_browser=abc123; Max-Age=604800; Path=/; Secure; HttpOnly; SameSite=Lax',
 				},
 			};
