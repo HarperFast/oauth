@@ -114,9 +114,8 @@ function buildClientFromRequest(
 		}
 	}
 
-	// RFC 7591 §3.2.2 permits the AS to register a subset of requested grants.
-	// Filter to the supported intersection; reject only when authorization_code
-	// is absent from the result (the flow cannot proceed without it).
+	// RFC 7591 §3.2.1 permits the AS to register a subset of requested grants.
+	// Reject only when authorization_code is absent from the supported intersection.
 	const grantTypes: string[] = filterGrantTypes(body.grant_types ?? ['authorization_code', 'refresh_token']);
 	if (!grantTypes.includes('authorization_code')) {
 		return {

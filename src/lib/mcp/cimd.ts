@@ -637,9 +637,6 @@ function validateCimdDocument(
 		if (err) throw new CimdClientError('invalid_client', `CIMD document: ${err}`);
 	}
 
-	// Grant types: require authorization_code; store only the supported
-	// intersection so grants declared for other servers (e.g. jwt-bearer) are
-	// never persisted or acted on by this AS.
 	const declaredGrantTypes: string[] = Array.isArray(d.grant_types)
 		? (d.grant_types as string[])
 		: ['authorization_code', 'refresh_token'];

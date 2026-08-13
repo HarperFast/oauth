@@ -294,7 +294,7 @@ describe('handleRegister (RFC 7591 DCR)', () => {
 			assert.match(response.body.error_description, /Missing required grant_type: authorization_code/);
 		});
 
-		it('registers with the supported intersection when a superset of grants is declared (RFC 7591 §3.2.2)', async () => {
+		it('registers with the supported intersection when a superset of grants is declared (RFC 7591 §3.2.1)', async () => {
 			const response = await handleRegister(
 				makeRequest(),
 				{
