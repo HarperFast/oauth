@@ -1,12 +1,15 @@
 /**
  * Shared client metadata validators
  *
- * Used by both DCR (dcr.ts) and CIMD (cimd.ts) so both registration paths
- * enforce identical rules. Keep dcr.ts behavior identical when importing
- * from here.
+ * Used by both DCR (dcr.ts) and CIMD (cimd.ts). Both paths require
+ * authorization_code in the supported-grant intersection; extra grants this AS
+ * doesn't implement are silently filtered rather than treated as errors.
  */
 
 export const SUPPORTED_GRANT_TYPES = new Set(['authorization_code', 'refresh_token']);
+
+/** Grants assumed for clients persisted before grant_types was required. */
+export const LEGACY_DEFAULT_GRANT_TYPES = ['authorization_code', 'refresh_token'];
 export const SUPPORTED_RESPONSE_TYPES = new Set(['code']);
 /** Auth methods supported for DCR clients. CIMD clients in v1 are restricted to 'none'. */
 export const SUPPORTED_AUTH_METHODS = new Set(['none', 'client_secret_basic', 'client_secret_post']);
@@ -55,13 +58,26 @@ export function validateStringArray(value: unknown, fieldName: string): string |
 	return null;
 }
 
+/**
+ * Whether the client's registered grant_types permit the requested grant.
+ * Absent/undefined grant_types is treated as the legacy default
+ * ['authorization_code', 'refresh_token'], matching the CIMD and DCR paths.
+ */
+export function allowsGrant(client: { grant_types?: string[] }, grant: string): boolean {
+	return (client.grant_types ?? LEGACY_DEFAULT_GRANT_TYPES).includes(grant);
+}
+
+/** Returns an error if authorization_code is absent from the declared grants. */
 export function validateGrantTypes(grantTypes: string[]): string | null {
-	for (const grant of grantTypes) {
-		if (!SUPPORTED_GRANT_TYPES.has(grant)) {
-			return `Unsupported grant_type: ${grant}`;
-		}
+	if (!grantTypes.includes('authorization_code')) {
+		return 'Missing required grant_type: authorization_code';
 	}
 	return null;
+}
+
+/** Returns the subset of `grantTypes` that this AS supports. */
+export function filterGrantTypes(grantTypes: string[]): string[] {
+	return grantTypes.filter((g) => SUPPORTED_GRANT_TYPES.has(g));
 }
 
 export function validateResponseTypes(responseTypes: string[]): string | null {

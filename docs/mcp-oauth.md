@@ -10,8 +10,8 @@ Protocol](https://modelcontextprotocol.io) clients (Claude Desktop, Cursor,
 same upstream providers you already configure for human login, then mints
 audience-bound JWT access tokens your MCP routes can verify with a single wrapper.
 
-It implements the [MCP authorization specification (2025-06-18)](https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization)
-and the OAuth RFCs it builds on:
+It implements the [MCP authorization specification (2026-07-28)](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization)
+and the OAuth RFCs it builds on. Note: the 2026-07-28 revision deprecates Dynamic Client Registration; our DCR support (`/register`) is retained for backwards compatibility with existing clients.
 
 | RFC                                                   | Role here                                                      |
 | ----------------------------------------------------- | -------------------------------------------------------------- |

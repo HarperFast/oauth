@@ -17,6 +17,7 @@ import { emitMCPAuditEvent } from './audit.ts';
 import { MCPAssertionJtiStore } from './assertionJtiStore.ts';
 import { MCPAuthCodeStore } from './authCodeStore.ts';
 import { CimdClientError, MAX_CLIENT_ID_LENGTH, resolveClient } from './cimd.ts';
+import { allowsGrant } from './clientValidator.ts';
 import { CLIENT_ASSERTION_TYPE_JWT_BEARER, verifyClientAssertion } from './clientAssertion.ts';
 import { MCPKeyStore } from './keyStore.ts';
 import { createRateLimiter, type RateLimiter } from './rateLimit.ts';
@@ -125,9 +126,9 @@ export function _resetGrantRateLimiter(): void {
 	grantLimiterRate = undefined;
 }
 
-/** Does the client's registered grant_types permit refresh tokens? Defaults to true when unspecified (DCR default includes refresh_token). */
+/** Does the client's registered grant_types permit refresh tokens? Defaults to true when unspecified (legacy default includes refresh_token). */
 function allowsRefresh(client: MCPClientRecord): boolean {
-	return !client.grant_types || client.grant_types.includes('refresh_token');
+	return allowsGrant(client, 'refresh_token');
 }
 
 /** Does a space-delimited scope string include `offline_access` (SEP-2207)? */
@@ -351,6 +352,12 @@ async function handleAuthorizationCodeGrant(
 	hookManager?: HookManager,
 	logger?: Logger
 ): Promise<TokenResponse> {
+	// RFC 6749 §5.2: reject if the client's registered grant_types do not
+	// include authorization_code.
+	if (!allowsGrant(client, 'authorization_code')) {
+		return errorResponse(400, 'unauthorized_client', 'Client is not authorized for the authorization_code grant');
+	}
+
 	const code = typeof body?.code === 'string' ? body.code : undefined;
 	const codeVerifier = typeof body?.code_verifier === 'string' ? body.code_verifier : undefined;
 	const redirectUri = typeof body?.redirect_uri === 'string' ? body.redirect_uri : undefined;
