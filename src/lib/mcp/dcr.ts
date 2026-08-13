@@ -23,6 +23,7 @@ import {
 	validateRedirectUri,
 	validateStringArray,
 } from './clientValidator.ts';
+import { getRequestHeader } from '../requestHeaders.ts';
 
 type ErrorResponse = {
 	status: number;
@@ -38,7 +39,8 @@ function checkInitialAccessToken(authHeader: string | undefined, configured: str
 	if (!configured) {
 		return null;
 	}
-	if (!authHeader || !authHeader.startsWith('Bearer ')) {
+	// Scheme name is case-insensitive (RFC 7235 §2.1 / RFC 6750 §2.1).
+	if (!authHeader || !/^bearer\s/i.test(authHeader)) {
 		return {
 			status: 401,
 			body: { error: 'invalid_token', error_description: 'Missing initial access token' },
@@ -244,11 +246,11 @@ export async function handleRegister(
 	// — so these JSON.stringify calls run only when the message is actually
 	// emitted. Don't hoist a shared `JSON.stringify(...)` out to a const: that
 	// reintroduces eager work on every request even when the log is suppressed.
+	const authHeader = getRequestHeader(request?.headers, 'authorization');
 	harperLogger?.info?.(
-		`MCP DCR request received: redirect_uris=${JSON.stringify(body?.redirect_uris)} grant_types=${JSON.stringify(body?.grant_types)} response_types=${JSON.stringify(body?.response_types)} token_endpoint_auth_method=${JSON.stringify(body?.token_endpoint_auth_method)} auth_header=${!!request?.headers?.authorization}`
+		`MCP DCR request received: redirect_uris=${JSON.stringify(body?.redirect_uris)} grant_types=${JSON.stringify(body?.grant_types)} response_types=${JSON.stringify(body?.response_types)} token_endpoint_auth_method=${JSON.stringify(body?.token_endpoint_auth_method)} auth_header=${!!authHeader}`
 	);
 
-	const authHeader = request?.headers?.authorization;
 	const authError = checkInitialAccessToken(authHeader, dcrConfig?.initialAccessToken);
 	if (authError) {
 		harperLogger?.warn?.('MCP DCR rejected: initial access token required or invalid');
@@ -258,8 +260,12 @@ export async function handleRegister(
 	const built = buildClientFromRequest(body, dcrConfig?.allowedRedirectUriHosts);
 	if ('status' in built) {
 		const errBody = (built as { body?: { error?: string; error_description?: string } }).body;
+		// JSON.stringify: error_description echoes attacker-controlled metadata
+		// (e.g. an invalid grant_type value) and DCR is reachable pre-auth when
+		// open — encode CR/LF so it can't forge log lines (CWE-117; matches the
+		// request-received log above).
 		harperLogger?.warn?.(
-			`MCP DCR rejected: ${errBody?.error} — ${errBody?.error_description} (redirect_uris=${JSON.stringify(body?.redirect_uris)})`
+			`MCP DCR rejected: ${JSON.stringify(errBody?.error)} — ${JSON.stringify(errBody?.error_description)} (redirect_uris=${JSON.stringify(body?.redirect_uris)})`
 		);
 		return built;
 	}

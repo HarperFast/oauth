@@ -38,12 +38,11 @@ import type {
 import { CimdClientError, resolveClient } from './cimd.ts';
 import { allowsGrant, LOCAL_HOSTS } from './clientValidator.ts';
 import {
-	buildConsentCookie,
-	consentNonceMatches,
-	generateConsentFlowId,
-	generateConsentNonce,
-	hashConsentNonce,
-	readConsentNonce,
+	browserSecretMatches,
+	buildBrowserSecretCookie,
+	generateBrowserSecret,
+	hashBrowserSecret,
+	readBrowserSecret,
 } from './consentBinding.ts';
 import { resolveIssuer, resolveResource } from './wellKnown.ts';
 
@@ -55,7 +54,7 @@ type ErrorJSON = {
 
 type Redirect = {
 	status: 302;
-	headers: { Location: string };
+	headers: { 'Location': string; 'Set-Cookie'?: string };
 };
 
 type HtmlResponse = {
@@ -333,6 +332,22 @@ async function performUpstreamRedirect(
 	const providerEntry = providers[selection.providerName];
 	const providerConfig: OAuthProviderConfig = providerEntry.config;
 
+	// Browser binding for EVERY MCP authorize flow. Read (or generate) the
+	// stable `__Host-oauth_browser` secret and carry its hash in the upstream
+	// CSRF state. The cookie Max-Age is always refreshed so active browsers
+	// never hit silent expiry. Without this binding an anonymous initiator has
+	// no session id, so an attacker-minted state fed to a victim's browser
+	// would produce an auth code for the victim at the attacker's redirect_uri
+	// (authorization-code injection). Only the hash leaves this server; the
+	// callback re-checks the cookie (see handlers.ts).
+	const existingSecret = readBrowserSecret(request);
+	const browserSecret = existingSecret ?? generateBrowserSecret();
+	const bindingCookie = buildBrowserSecretCookie(browserSecret);
+	let boundState = mcpState;
+	if (!boundState.browserNonceHash) {
+		boundState = { ...boundState, browserNonceHash: hashBrowserSecret(browserSecret) };
+	}
+
 	let csrfToken: string;
 	try {
 		csrfToken = await providerEntry.provider.generateCSRFToken({
@@ -342,7 +357,7 @@ async function performUpstreamRedirect(
 			// Both MCP entries (direct authorize and post-CIMD confirm) mint
 			// their upstream state here, so this is the single binding site.
 			sessionId: request.session?.id,
-			mcp: mcpState,
+			mcp: boundState,
 		});
 	} catch (error) {
 		logger?.error?.(
@@ -358,7 +373,7 @@ async function performUpstreamRedirect(
 		`MCP authorize: client=${mcpState.clientId} -> upstream=${selection.providerName}; bound resource=${mcpState.resource}`
 	);
 
-	return { status: 302, headers: { Location: upstreamAuthUrl } };
+	return { status: 302, headers: { 'Location': upstreamAuthUrl, 'Set-Cookie': bindingCookie } };
 }
 
 /**
@@ -479,18 +494,18 @@ export async function handleAuthorize(
 		}
 		const providerEntry = providers[selection.providerName];
 
-		// Browser binding: the per-flow nonce cookie set below must accompany both
-		// the /confirm POST and the eventual upstream callback; only its hash is
-		// stored server-side (see consentBinding.ts). The flow id names the cookie
-		// so parallel authorization flows in one browser don't collide.
-		const consentFlowId = generateConsentFlowId();
-		const consentNonce = generateConsentNonce();
+		// Browser binding: read (or generate) the stable browser secret cookie,
+		// carry its hash in the confirm token's mcp state. The same cookie must
+		// accompany both the /confirm POST and the eventual upstream callback.
+		// Max-Age refreshed here so active browsers never hit silent expiry.
+		const existingSecret = readBrowserSecret(request);
+		const browserSecret = existingSecret ?? generateBrowserSecret();
 
 		let confirmToken: string;
 		try {
 			confirmToken = await providerEntry.provider.generateCSRFToken({
 				providerName: selection.providerName,
-				mcp: { ...mcpState, browserNonceHash: hashConsentNonce(consentNonce), consentFlowId },
+				mcp: { ...mcpState, browserNonceHash: hashBrowserSecret(browserSecret) },
 				_confirm: true,
 			});
 		} catch (error) {
@@ -514,7 +529,7 @@ export async function handleAuthorize(
 				'X-Frame-Options': 'DENY',
 				'Content-Security-Policy': "frame-ancestors 'none'",
 				'Cache-Control': 'no-store',
-				'Set-Cookie': buildConsentCookie(consentFlowId, consentNonce),
+				'Set-Cookie': buildBrowserSecretCookie(browserSecret),
 			},
 			body: html,
 		};
@@ -591,13 +606,10 @@ export async function handleAuthorizeConfirm(
 	}
 
 	// Browser binding: the confirm POST must come from the browser that was
-	// served the interstitial (and its per-flow nonce cookie). Without this, the
-	// malicious client itself could fetch and "confirm" the interstitial, then
-	// hand the victim the resulting upstream URL — consent bypassed.
-	if (
-		!mcpState.browserNonceHash ||
-		!consentNonceMatches(readConsentNonce(request, mcpState.consentFlowId), mcpState.browserNonceHash)
-	) {
+	// served the interstitial (and its stable browser-secret cookie). Without
+	// this, the malicious client itself could fetch and "confirm" the
+	// interstitial, hand the victim the resulting upstream URL — consent bypassed.
+	if (!mcpState.browserNonceHash || !browserSecretMatches(readBrowserSecret(request), mcpState.browserNonceHash)) {
 		logger?.warn?.(`MCP confirm: consent browser binding mismatch for client=${mcpState.clientId}`);
 		return {
 			status: 400,

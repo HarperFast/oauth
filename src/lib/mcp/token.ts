@@ -21,6 +21,7 @@ import { allowsGrant } from './clientValidator.ts';
 import { CLIENT_ASSERTION_TYPE_JWT_BEARER, verifyClientAssertion } from './clientAssertion.ts';
 import { MCPKeyStore } from './keyStore.ts';
 import { createRateLimiter, type RateLimiter } from './rateLimit.ts';
+import { getRequestHeader } from '../requestHeaders.ts';
 import {
 	hashRefreshToken,
 	makeRefreshToken,
@@ -158,17 +159,41 @@ function safeEqual(a: string, b: string): boolean {
 	return ab.length === bb.length && timingSafeEqual(ab, bb);
 }
 
-function parseBasicAuth(authHeader: string | undefined): { clientId: string; clientSecret: string } | null {
-	if (!authHeader || !authHeader.startsWith('Basic ')) return null;
+/**
+ * application/x-www-form-urlencoded decode of one Basic credential field
+ * (RFC 6749 §2.3.1: `+` is a space, then percent-decode). Returns null on
+ * malformed percent-encoding so a corrupt credential is rejected, not
+ * looked up as-is.
+ */
+function formUrlDecode(field: string): string | null {
+	try {
+		return decodeURIComponent(field.replace(/\+/g, ' '));
+	} catch {
+		return null;
+	}
+}
+
+/** @internal — exported for tests. */
+export function parseBasicAuth(authHeader: string | undefined): { clientId: string; clientSecret: string } | null {
+	// Scheme name is case-insensitive (RFC 9110 §11.1) — matches the `/^basic\s/i`
+	// check on the client_credentials path.
+	if (!authHeader || !/^basic\s/i.test(authHeader)) return null;
 	let decoded: string;
 	try {
 		decoded = Buffer.from(authHeader.slice('Basic '.length).trim(), 'base64').toString('utf8');
 	} catch {
 		return null;
 	}
+	// RFC 6749 §2.3.1: each field is form-urlencoded before base64, so the first
+	// literal `:` separates them (a `:` inside a field is `%3A`). Split there,
+	// then form-decode both — otherwise a URL-shaped CIMD client_id is looked up
+	// with its `%3A`/`%2F` literal, or an unencoded one splits at its scheme colon.
 	const sep = decoded.indexOf(':');
 	if (sep < 0) return null;
-	return { clientId: decoded.slice(0, sep), clientSecret: decoded.slice(sep + 1) };
+	const clientId = formUrlDecode(decoded.slice(0, sep));
+	const clientSecret = formUrlDecode(decoded.slice(sep + 1));
+	if (clientId === null || clientSecret === null) return null;
+	return { clientId, clientSecret };
 }
 
 type ClientAuthResult = { client: MCPClientRecord } | { error: TokenResponse };
@@ -185,7 +210,7 @@ async function authenticateClient(
 	mcpConfig: MCPConfig | undefined,
 	logger?: Logger
 ): Promise<ClientAuthResult> {
-	const basic = parseBasicAuth(request?.headers?.authorization);
+	const basic = parseBasicAuth(getRequestHeader(request?.headers, 'authorization'));
 	const bodyClientId = typeof body?.client_id === 'string' ? body.client_id : undefined;
 	const bodyClientSecret = typeof body?.client_secret === 'string' ? body.client_secret : undefined;
 
@@ -218,8 +243,12 @@ async function authenticateClient(
 	const method = client.token_endpoint_auth_method ?? 'none';
 
 	if (method === 'none') {
-		// Public client: PKCE is the proof. A presented secret signals misuse.
-		if (basic || bodyClientSecret) {
+		// Public client: PKCE is the proof. A presented *non-empty* secret signals
+		// misuse and is rejected. An empty Basic secret — `Authorization: Basic
+		// base64("<client_id>:")` — carries only the client_id and is how some
+		// clients convey it; tolerate it as "no secret presented" so those public
+		// clients aren't rejected. (Empty values are falsy here.)
+		if (basic?.clientSecret || bodyClientSecret) {
 			return { error: errorResponse(401, 'invalid_client', 'Public client must not present a secret') };
 		}
 		return { client };
@@ -555,7 +584,10 @@ async function handleClientCredentialsGrant(
 	// grant — a Basic header or client_secret must not ride along (#159 req 6:
 	// no credential type may substitute for the private key). Scheme match is
 	// case-insensitive per RFC 9110 §11.1.
-	if (/^basic\s/i.test(request?.headers?.authorization ?? '') || typeof body?.client_secret === 'string') {
+	if (
+		/^basic\s/i.test(getRequestHeader(request?.headers, 'authorization') ?? '') ||
+		typeof body?.client_secret === 'string'
+	) {
 		return errorResponse(
 			400,
 			'invalid_request',

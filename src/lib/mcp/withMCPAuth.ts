@@ -46,6 +46,7 @@ import { MCPKeyStore } from './keyStore.ts';
 import { verifyAccessTokenWithKeySet } from './tokenIssuer.ts';
 import { protectedResourceMetadataUrl, resolveIssuer, resolveResource } from './wellKnown.ts';
 import { emitMCPAuditEvent, type MCPTokenRejectedAuditPayload } from './audit.ts';
+import { getRequestHeader } from '../requestHeaders.ts';
 
 /** Minimal surface withMCPAuth needs from a key source (lets tests inject one). */
 interface KeySource {
@@ -93,32 +94,13 @@ export interface WithMCPAuthOptions {
 type HttpListener = (request: Request, next: (req: Request) => any) => any;
 
 /**
- * Read a header value across the shapes a Harper request can carry: a Web
- * `Headers` object (`.get()`), Harper's headers wrapper (`.asObject`), or a
- * plain Node `IncomingMessage.headers` object (used in tests). Returns the
- * first value when a header is multi-valued.
- */
-function getHeader(headers: any, name: string): string | undefined {
-	if (!headers) return undefined;
-	let raw: unknown;
-	if (typeof headers.get === 'function') {
-		raw = headers.get(name);
-	} else {
-		const obj = headers.asObject ?? headers;
-		raw = obj?.[name.toLowerCase()] ?? obj?.[name];
-	}
-	if (raw == null) return undefined;
-	return Array.isArray(raw) ? raw[0] : String(raw);
-}
-
-/**
  * Extract a bearer token from the `Authorization` header. Header-only by design
  * (RFC 6750 §2.1): query-string and body tokens are never read, so they are
  * treated as "no token presented". Returns undefined for a missing or malformed
  * header (anything that isn't `Bearer <non-empty-token>`).
  */
 function extractBearerToken(headers: any): string | undefined {
-	const authz = getHeader(headers, 'authorization');
+	const authz = getRequestHeader(headers, 'authorization');
 	if (!authz) return undefined;
 	// Scheme is case-insensitive (RFC 7235); the token must be non-empty.
 	const match = /^Bearer[ \t]+(\S.*)$/i.exec(authz.trim());

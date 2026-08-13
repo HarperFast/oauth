@@ -19,9 +19,16 @@ import type {
 	OnLoginResultDenied,
 	OnLoginResultNeedsConfirmation,
 } from '../types.ts';
-import { consentNonceMatches, readConsentNonce } from './mcp/consentBinding.ts';
+import {
+	browserSecretMatches,
+	buildBrowserSecretCookie,
+	generateBrowserSecret,
+	hashBrowserSecret,
+	readBrowserSecret,
+} from './mcp/consentBinding.ts';
 import { handleMCPCallback } from './mcp/index.ts';
 import { resolveIssuer } from './mcp/wellKnown.ts';
+import { getRequestHeader } from './requestHeaders.ts';
 import type { HookManager } from './hookManager.ts';
 
 /**
@@ -130,8 +137,21 @@ export async function handleLogin(
 		redirectParam = sanitizeRedirect(redirectParam);
 	}
 
-	const referer = request.headers?.referer ? sanitizeRedirect(request.headers.referer) : undefined;
+	// getRequestHeader, not request.headers.referer: the live Harper runtime
+	// wraps headers behind `.asObject`, so direct property access is undefined.
+	const refererHeader = getRequestHeader(request.headers, 'referer');
+	const referer = refererHeader ? sanitizeRedirect(refererHeader) : undefined;
 	const originalUrl = redirectParam || referer || config.postLoginRedirect || '/';
+
+	// Browser binding: session binding only covers flows initiated while logged
+	// in — Harper mints no anonymous session id, so the logged-out login flow
+	// needs the browser secret cookie to prove the callback arrived in the
+	// initiating browser (login-CSRF: attacker-minted state+code fed to a
+	// victim silently logs them in as the attacker).
+	// One stable `__Host-oauth_browser` cookie per browser; reused across flows;
+	// Max-Age refreshed here so active browsers never hit silent expiry.
+	const existingSecret = readBrowserSecret(request);
+	const browserSecret = existingSecret ?? generateBrowserSecret();
 
 	// Generate CSRF token with metadata
 	// Bind token to provider to prevent cross-provider CSRF attacks
@@ -139,6 +159,7 @@ export async function handleLogin(
 		originalUrl,
 		sessionId: request.session?.id,
 		providerName, // Bind state token to this provider
+		browserNonceHash: hashBrowserSecret(browserSecret),
 	});
 
 	// Build authorization URL with CSRF token as state parameter
@@ -149,7 +170,8 @@ export async function handleLogin(
 	return {
 		status: 302,
 		headers: {
-			Location: authUrl,
+			'Location': authUrl,
+			'Set-Cookie': buildBrowserSecretCookie(browserSecret),
 		},
 	};
 }
@@ -195,7 +217,10 @@ export async function handleCallback(
 		// echo it to postLoginRedirect with the original reason. Otherwise,
 		// generic invalid_request.
 		if (error) {
-			logger?.error?.(`OAuth error (no state): ${error} - ${errorDescription}`);
+			// JSON.stringify: error/error_description are attacker-controlled
+			// query params, reachable pre-auth — encode CR/LF so a crafted value
+			// can't forge log lines (CWE-117; same treatment as the DCR handler).
+			logger?.error?.(`OAuth error (no state): ${JSON.stringify(error)} - ${JSON.stringify(errorDescription)}`);
 			const errorUrl = buildErrorRedirect(config.postLoginRedirect || '/', {
 				error: 'oauth_failed',
 				reason: error,
@@ -275,22 +300,50 @@ export async function handleCallback(
 		return { status: 302, headers: { Location: errorUrl } };
 	}
 
-	// CIMD browser binding — checked BEFORE the upstream code exchange and the
-	// onLogin hook, so a mismatched (self-approved) flow triggers no upstream
-	// exchange, no userinfo fetch, and no provisioning side-effects; it only
-	// applies when the state carries a binding (CIMD), so DCR/human flows are
-	// unaffected. SameSite=Lax sends the per-flow nonce cookie on the top-level
-	// redirect back from the IdP.
-	if (mcpState?.browserNonceHash) {
-		if (!consentNonceMatches(readConsentNonce(request, mcpState.consentFlowId), mcpState.browserNonceHash)) {
-			logger?.warn?.(`MCP callback: consent browser binding mismatch for client=${mcpState.clientId}`);
-			return mcpErrorRedirect(mcpState, 'access_denied', 'Authorization must complete in the browser that approved it');
+	// Login browser binding — the human-flow counterpart of the MCP check below.
+	// handleLogin stores hash(browser_secret) in the state; a callback arriving
+	// without the matching stable cookie is a state delivered into a different
+	// browser — the login-CSRF shape that session binding can't catch when the
+	// flow starts logged out (no session id to record).
+	// Enforced whenever the token carries the hash, so pre-upgrade in-flight
+	// tokens (without browserNonceHash) still complete; MCP states never carry a
+	// top-level hash (their binding is checked below).
+	if (tokenData.browserNonceHash && !mcpState) {
+		if (!browserSecretMatches(readBrowserSecret(request), tokenData.browserNonceHash)) {
+			logger?.warn?.(`OAuth callback: login browser binding mismatch (provider '${providerName}')`);
+			const errorUrl = buildErrorRedirect(tokenData.originalUrl || config.postLoginRedirect || '/', {
+				error: 'auth_failed',
+				reason: 'csrf',
+			});
+			return { status: 302, headers: { Location: errorUrl } };
+		}
+	}
+
+	// MCP browser binding — every /oauth/mcp/authorize flow (the CIMD interstitial
+	// AND the direct DCR/stored path) reads or generates a stable per-browser
+	// secret cookie and carries its hash in the upstream state, so the callback
+	// can prove the flow completes in the browser that initiated it. Checked
+	// BEFORE the upstream code exchange and the onLogin hook so a mismatched (or
+	// unbound) flow triggers no upstream exchange, no userinfo fetch, and no
+	// provisioning side-effects. Fail closed: an MCP state without a binding is
+	// a forged or pre-upgrade state — reject rather than mint an auth code for an
+	// unbound flow (authorization-code injection). SameSite=Lax sends the stable
+	// cookie on the top-level redirect back from the upstream IdP.
+	if (mcpState) {
+		if (!mcpState.browserNonceHash || !browserSecretMatches(readBrowserSecret(request), mcpState.browserNonceHash)) {
+			logger?.warn?.(`MCP callback: browser binding mismatch for client=${mcpState.clientId}`);
+			return mcpErrorRedirect(
+				mcpState,
+				'access_denied',
+				'Authorization must complete in the browser that initiated it'
+			);
 		}
 	}
 
 	// Now that we know the flow context, handle upstream IdP errors.
 	if (error) {
-		logger?.error?.(`OAuth error: ${error} - ${errorDescription}`);
+		// JSON.stringify: CRLF-safe logging of browser-controlled params (CWE-117).
+		logger?.error?.(`OAuth error: ${JSON.stringify(error)} - ${JSON.stringify(errorDescription)}`);
 		if (mcpState) {
 			return mcpErrorRedirect(mcpState, error, errorDescription || error);
 		}

@@ -305,6 +305,15 @@ suite('MCP OAuth Stage 7: full round-trip e2e', (ctx: ContextWithHarper) => {
 		strictEqual(authorizeRes.status, 302, 'authorize must 302 to stub IdP');
 		const idpLocation = authorizeRes.headers.get('location');
 		ok(idpLocation, 'authorize must redirect to a location');
+
+		// Browser binding: every /oauth/mcp/authorize flow — including this DCR/stored
+		// path — sets the stable __Host-oauth_browser secret cookie whose hash is carried
+		// in upstream state; the callback requires it back before minting a code. A real
+		// browser stores this Secure/SameSite=Lax cookie and re-sends it on the top-level
+		// redirect from the IdP. The stub runs over plain HTTP, so we replay it explicitly.
+		const consentCookie = authorizeRes.headers.getSetCookie().find((c) => c.startsWith('__Host-oauth_browser'));
+		ok(consentCookie, 'DCR authorize must set the stable browser-binding cookie');
+		const consentCookiePair = consentCookie!.split(';')[0];
 		await authorizeRes.body?.cancel();
 
 		// The Location should point at the stub IdP /authorize endpoint.
@@ -326,7 +335,11 @@ suite('MCP OAuth Stage 7: full round-trip e2e', (ctx: ContextWithHarper) => {
 		// and 302s to the client redirect_uri with code + state).
 		const harperCallbackUrl = new URL(harperCallbackLocation!);
 		// The stub IdP redirect target is already an absolute URL to Harper's callback.
-		const callbackRes = await fetch(harperCallbackUrl.toString(), { redirect: 'manual' });
+		// Carry the stable browser-binding cookie, as the browser would.
+		const callbackRes = await fetch(harperCallbackUrl.toString(), {
+			redirect: 'manual',
+			headers: { cookie: consentCookiePair },
+		});
 		strictEqual(callbackRes.status, 302, 'Harper callback must 302 to client redirect_uri');
 		const finalLocation = callbackRes.headers.get('location');
 		ok(finalLocation, 'Harper callback must redirect to a location');

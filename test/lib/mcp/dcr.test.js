@@ -4,6 +4,7 @@
 
 import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { logger as harperLogger } from 'harper';
 import { handleRegister } from '../../../dist/lib/mcp/dcr.js';
 import { resetMCPClientsTableCache } from '../../../dist/lib/mcp/clientStore.js';
 
@@ -116,12 +117,61 @@ describe('handleRegister (RFC 7591 DCR)', () => {
 			assert.equal(response.status, 201);
 		});
 
+		it('accepts a matching token with a lowercase `bearer` scheme (RFC 6750 case-insensitive)', async () => {
+			const response = await handleRegister(makeRequest({ authorization: 'bearer secret-token' }), VALID_BODY, config);
+			assert.equal(response.status, 201);
+		});
+
+		it('accepts a matching Bearer token via the Harper `.asObject` headers wrapper (runtime shape)', async () => {
+			// Regression: the live runtime wraps headers behind `.asObject`, so
+			// reading request.headers.authorization directly returns undefined and
+			// the token gate would reject every registration in production.
+			const response = await handleRegister(
+				makeRequest({ asObject: { authorization: 'Bearer secret-token' } }),
+				VALID_BODY,
+				config
+			);
+			assert.equal(response.status, 201);
+		});
+
 		it('rejects the capitalized Authorization header (Node HTTP parser lowercases)', async () => {
 			// Production: incoming headers are lowercased before reaching us.
 			// If a caller hands us a literal { Authorization: ... } object, we
 			// treat it as "no token presented" — matching the production contract.
 			const response = await handleRegister(makeRequest({ Authorization: 'Bearer secret-token' }), VALID_BODY, config);
 			assert.equal(response.status, 401);
+		});
+	});
+
+	describe('rejection log safety (CWE-117)', () => {
+		const config = { enabled: true, dynamicClientRegistration: {} };
+
+		it('CRLF-encodes attacker-controlled token_endpoint_auth_method in the rejected-registration log', async () => {
+			// Open DCR is pre-auth; an unsupported auth method echoes into error_description
+			// which is logged. A CR/LF in it must not forge a new log line.
+			// (grant_types with CRLF are silently filtered by filterGrantTypes per #200
+			// and never appear in the rejection log; token_endpoint_auth_method is still
+			// echoed verbatim in the validateAuthMethod error string.)
+			const original = harperLogger.warn;
+			const lines = [];
+			harperLogger.warn = (msg) => lines.push(String(msg));
+			try {
+				const res = await handleRegister(
+					makeRequest(),
+					{
+						redirect_uris: ['https://app.example.com/cb'],
+						token_endpoint_auth_method: 'none\r\nFORGED ENTRY',
+					},
+					config
+				);
+				assert.equal(res.status, 400);
+			} finally {
+				harperLogger.warn = original;
+			}
+			const rejected = lines.find((l) => l.includes('MCP DCR rejected'));
+			assert.ok(rejected, 'a rejection line was logged');
+			assert.ok(!rejected.includes('\r') && !rejected.includes('\n'), 'no raw CR/LF reaches the log line');
+			assert.ok(rejected.includes('\\r\\nFORGED'), 'the injected control chars are visibly encoded');
 		});
 	});
 

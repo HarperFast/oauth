@@ -14,7 +14,11 @@ import {
 } from '../../../dist/lib/mcp/authorize.js';
 import { resetMCPClientsTableCache } from '../../../dist/lib/mcp/clientStore.js';
 import { _setDnsLookup, _setFetch, _clearCimdCache } from '../../../dist/lib/mcp/cimd.js';
-import { buildConsentCookie, hashConsentNonce } from '../../../dist/lib/mcp/consentBinding.js';
+import {
+	BROWSER_SECRET_COOKIE_NAME,
+	buildBrowserSecretCookie,
+	hashBrowserSecret,
+} from '../../../dist/lib/mcp/consentBinding.js';
 
 /**
  * Minimal RequestTarget stub for the existing target.get?.() pattern.
@@ -508,6 +512,61 @@ describe('handleAuthorize', () => {
 			assert.equal(harnesses.github.generatedTokens[0].sessionId, undefined);
 		});
 
+		it('mints a stable browser-secret cookie and binds its hash into the DCR upstream state', async () => {
+			// Stored/DCR clients skip the CIMD interstitial, so the browser binding
+			// must be minted here on the direct redirect. Without it an anonymous
+			// initiator (no sessionId) leaves the callback with nothing to prove the
+			// flow completes in the initiating browser — the authorization-code
+			// injection this closes.
+			const { entries, harnesses } = newRegistry();
+			const target = makeTarget(BASE_QUERY);
+			const response = await handleAuthorize(makeRequest(), target, validConfig, entries);
+
+			assert.equal(response.status, 302);
+			const setCookie = response.headers['Set-Cookie'];
+			assert.ok(setCookie, 'stored/DCR authorize sets the stable browser-binding cookie');
+			// Stable cookie: exactly __Host-oauth_browser (no per-flow suffix)
+			assert.match(setCookie, new RegExp(`^${BROWSER_SECRET_COOKIE_NAME}=`), 'stable __Host- cookie name');
+			assert.match(setCookie, /HttpOnly/);
+			assert.match(setCookie, /Secure/);
+			assert.match(setCookie, /SameSite=Lax/);
+			assert.doesNotMatch(setCookie, /Domain=/i, '__Host- forbids Domain (blocks sibling injection)');
+
+			const secret = setCookie.split(';')[0].split('=').slice(1).join('=');
+			const minted = harnesses.github.generatedTokens[0];
+			assert.equal(minted.mcp.consentFlowId, undefined, 'no per-flow id in upstream state (stable cookie)');
+			assert.equal(
+				minted.mcp.browserNonceHash,
+				hashBrowserSecret(secret),
+				'upstream state carries sha256(browser secret)'
+			);
+		});
+
+		it('emits the stable browser-binding cookie over plain HTTP (loopback is a web-platform secure context)', async () => {
+			// Per the web platform spec, http://127.0.0.1 is a secure context and
+			// browsers accept __Host- cookies served over loopback plain HTTP.
+			// The integration test fixture runs over plain HTTP, so the server must
+			// NOT gate the Set-Cookie on TLS — an HTTP/HTTPS conditional would cause
+			// the integration test to see no cookie even though the handler returned one.
+			// Use a fixed issuer so validateCanonicalResource resolves the same value
+			// regardless of request protocol/host.
+			const { entries } = newRegistry();
+			const configWithFixedIssuer = { enabled: true, issuer: 'https://mcp.example.com' };
+			const target = makeTarget({ ...BASE_QUERY, resource: 'https://mcp.example.com/mcp' });
+			const httpRequest = makeRequest({
+				protocol: 'http',
+				host: '127.0.0.1:9998',
+				headers: { host: '127.0.0.1:9998' },
+			});
+			const response = await handleAuthorize(httpRequest, target, configWithFixedIssuer, entries);
+
+			assert.equal(response.status, 302);
+			const setCookie = response.headers['Set-Cookie'];
+			assert.ok(setCookie, 'Set-Cookie must be present even over plain HTTP (loopback = secure context)');
+			assert.match(setCookie, new RegExp(`^${BROWSER_SECRET_COOKIE_NAME}=`), 'stable cookie name present');
+			assert.match(setCookie, /Secure/, 'Secure attribute always emitted (browsers accept over loopback)');
+		});
+
 		it('accepts a redirect_uri that matches the registered loopback URI', async () => {
 			const { entries } = newRegistry();
 			const target = makeTarget({ ...BASE_QUERY, redirect_uri: 'http://localhost:6274/cb' });
@@ -747,25 +806,25 @@ describe('handleAuthorize — CIMD interstitial', () => {
 		assert.equal(response.headers['Cache-Control'], 'no-store');
 	});
 
-	it('sets the consent cookie whose hash is bound into the confirm token state', async () => {
+	it('sets the stable browser-secret cookie whose hash is bound into the confirm token state', async () => {
 		_setFetch(makeCimdFetch(makeCimdDoc(CIMD_CLIENT_ID)));
 		const { entries, harnesses } = makeProviderRegistry('github');
 		const response = await handleAuthorize(makeRequest(), makeTarget(CIMD_QUERY), { enabled: true }, entries);
 
 		const setCookie = response.headers['Set-Cookie'];
-		assert.ok(setCookie, 'interstitial sets the consent cookie');
-		assert.match(setCookie, /^__Host-mcp_consent_[A-Za-z0-9_-]+=/, 'per-flow __Host- cookie');
+		assert.ok(setCookie, 'interstitial sets the stable browser-secret cookie');
+		// Stable cookie: exactly __Host-oauth_browser (no per-flow suffix)
+		assert.match(setCookie, new RegExp(`^${BROWSER_SECRET_COOKIE_NAME}=`), 'stable __Host- cookie name');
 		assert.match(setCookie, /HttpOnly/);
 		assert.match(setCookie, /Secure/);
 		assert.match(setCookie, /SameSite=Lax/);
 		assert.doesNotMatch(setCookie, /Domain=/i, '__Host- forbids Domain (blocks sibling injection)');
 
-		const [cookieName, nonce] = setCookie.split(';')[0].split('=');
-		const flowId = cookieName.replace('__Host-mcp_consent_', '');
+		const secret = setCookie.split(';')[0].split('=').slice(1).join('=');
 		const minted = harnesses.github.generatedTokens[0];
 		assert.equal(minted._confirm, true);
-		assert.equal(minted.mcp.consentFlowId, flowId, 'state carries the cookie flow id');
-		assert.equal(minted.mcp.browserNonceHash, hashConsentNonce(nonce), 'state carries sha256(cookie nonce)');
+		assert.equal(minted.mcp.consentFlowId, undefined, 'no per-flow id in confirm state (stable cookie)');
+		assert.equal(minted.mcp.browserNonceHash, hashBrowserSecret(secret), 'state carries sha256(browser secret)');
 	});
 
 	it('displays the authoritative client_id hostname and labels client_uri unverified', async () => {
@@ -834,8 +893,7 @@ describe('handleAuthorize — CIMD interstitial', () => {
 // ────────────────────────────────────────────────────────────────────────────
 
 describe('handleAuthorizeConfirm', () => {
-	const NONCE = 'test-consent-nonce';
-	const FLOW_ID = 'testflowid';
+	const SECRET = 'test-browser-secret';
 	const MCP_STATE = {
 		clientId: 'https://mcp-client.example.com/client.json',
 		resource: 'https://app.example.com/mcp',
@@ -844,14 +902,13 @@ describe('handleAuthorizeConfirm', () => {
 		redirectUri: 'https://mcp-client.example.com/cb',
 		scope: 'mcp:read',
 		clientState: 'state-xyz',
-		browserNonceHash: hashConsentNonce(NONCE),
-		consentFlowId: FLOW_ID,
+		browserNonceHash: hashBrowserSecret(SECRET),
 	};
 
-	/** Request carrying the per-flow consent nonce cookie, as the interstitial browser would. */
-	function makeConsentRequest(nonce = NONCE, flowId = FLOW_ID) {
+	/** Request carrying the stable browser-secret cookie, as the interstitial browser would. */
+	function makeConsentRequest(secret = SECRET) {
 		return makeRequest({
-			headers: { host: 'app.example.com', cookie: `other=1; ${buildConsentCookie(flowId, nonce).split(';')[0]}` },
+			headers: { host: 'app.example.com', cookie: `other=1; ${buildBrowserSecretCookie(secret).split(';')[0]}` },
 		});
 	}
 
@@ -917,6 +974,28 @@ describe('handleAuthorizeConfirm', () => {
 		);
 		assert.equal(result.status, 302);
 		assert.match(result.headers.Location, /upstream\.example\.com/);
+	});
+
+	it('confirm refreshes the stable browser-secret cookie (rolling Max-Age)', async () => {
+		// performUpstreamRedirect always refreshes the cookie so active browsers
+		// never hit silent expiry. For the CIMD path, the hash is already in the
+		// state from the interstitial — the secret reused from the existing cookie.
+		const { entries, provider } = makeProviderWithCsrf();
+		const token = await provider.generateCSRFToken({ providerName: 'github', mcp: MCP_STATE, _confirm: true });
+
+		const result = await handleAuthorizeConfirm(
+			makeConsentRequest(),
+			{ confirm_token: token },
+			{ enabled: true },
+			entries
+		);
+		assert.equal(result.status, 302);
+		const setCookie = result.headers['Set-Cookie'];
+		assert.ok(setCookie, 'confirm refreshes the stable browser-secret cookie');
+		assert.match(setCookie, new RegExp(`^${BROWSER_SECRET_COOKIE_NAME}=`), 'same stable cookie name');
+		// The refreshed cookie carries the same secret value (existing secret reused).
+		const secret = setCookie.split(';')[0].split('=').slice(1).join('=');
+		assert.equal(secret, SECRET, 'same secret refreshed, not a new one');
 	});
 
 	it('token is single-use: second confirm returns 400', async () => {
@@ -986,7 +1065,7 @@ describe('handleAuthorizeConfirm', () => {
 		});
 
 		const result = await handleAuthorizeConfirm(
-			makeConsentRequest('a-different-nonce'),
+			makeConsentRequest('a-different-browser-secret'),
 			{ confirm_token: token },
 			{ enabled: true },
 			entries

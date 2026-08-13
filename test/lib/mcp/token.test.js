@@ -7,7 +7,7 @@
 import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, generateKeyPairSync, randomBytes, sign } from 'node:crypto';
-import { handleToken, _resetGrantRateLimiter } from '../../../dist/lib/mcp/token.js';
+import { handleToken, parseBasicAuth, _resetGrantRateLimiter } from '../../../dist/lib/mcp/token.js';
 import { resetMCPAssertionJtisTableCache } from '../../../dist/lib/mcp/assertionJtiStore.js';
 import { resetMCPAuthCodesTableCache } from '../../../dist/lib/mcp/authCodeStore.js';
 import { _clearCimdCache, _setDnsLookup, _setFetch } from '../../../dist/lib/mcp/cimd.js';
@@ -73,6 +73,38 @@ const mcpConfig = {
 function basicHeader(clientId, secret) {
 	return { authorization: `Basic ${Buffer.from(`${clientId}:${secret}`).toString('base64')}` };
 }
+
+describe('parseBasicAuth (RFC 6749 §2.3.1 form-encoding)', () => {
+	const basic = (raw) => `Basic ${Buffer.from(raw).toString('base64')}`;
+
+	it('form-decodes a URL-shaped CIMD client_id presented with an empty secret', () => {
+		// A compliant CIMD client sends its HTTPS client_id form-urlencoded, empty
+		// secret. Must decode back to the real URL, not be looked up as `%3A%2F…`.
+		const r = parseBasicAuth(basic('https%3A%2F%2Fclient.example%2Fmetadata:'));
+		assert.deepEqual(r, { clientId: 'https://client.example/metadata', clientSecret: '' });
+	});
+
+	it('form-decodes both fields (percent + plus)', () => {
+		const r = parseBasicAuth(basic('a%2Bb:p%20q+r'));
+		assert.deepEqual(r, { clientId: 'a+b', clientSecret: 'p q r' });
+	});
+
+	it('leaves opaque ids/secrets (no %/+) unchanged', () => {
+		const r = parseBasicAuth(basic('conf-1:s3cret-value-xyz-0123456789'));
+		assert.deepEqual(r, { clientId: 'conf-1', clientSecret: 's3cret-value-xyz-0123456789' });
+	});
+
+	it('rejects malformed percent-encoding rather than looking up a corrupt id', () => {
+		assert.equal(parseBasicAuth(basic('bad%zz:secret')), null);
+		assert.equal(parseBasicAuth(basic('id:bad%')), null);
+	});
+
+	it('returns null for a non-Basic scheme or a missing separator', () => {
+		assert.equal(parseBasicAuth('Bearer x'), null);
+		assert.equal(parseBasicAuth(basic('no-colon-here')), null);
+		assert.equal(parseBasicAuth(undefined), null);
+	});
+});
 
 describe('handleToken', () => {
 	let originalDatabases;
@@ -503,6 +535,18 @@ describe('handleToken', () => {
 		assert.ok(res.body.access_token);
 	});
 
+	it('authenticates client_secret_basic with a lowercase `basic` scheme (RFC 9110 case-insensitive)', async () => {
+		seedCode('code-1', { client_id: 'conf-1' });
+		const lower = { authorization: basicHeader('conf-1', CONF_SECRET).authorization.replace(/^Basic /, 'basic ') };
+		const res = await handleToken(
+			{ headers: lower },
+			{ grant_type: 'authorization_code', code: 'code-1', code_verifier: CODE_VERIFIER, redirect_uri: REDIRECT },
+			mcpConfig
+		);
+		assert.equal(res.status, 200);
+		assert.ok(res.body.access_token);
+	});
+
 	it('rejects a confidential client with a wrong secret', async () => {
 		seedCode('code-1', { client_id: 'conf-1' });
 		const res = await handleToken(
@@ -529,6 +573,45 @@ describe('handleToken', () => {
 		);
 		assert.equal(res.status, 400);
 		assert.equal(res.body.error, 'invalid_request');
+	});
+
+	it('authenticates client_secret_basic when headers use the Harper `.asObject` wrapper (runtime shape)', async () => {
+		// Regression: the live runtime wraps headers behind `.asObject`, so
+		// reading request.headers.authorization directly returns undefined and
+		// confidential-basic auth would fail closed in production.
+		seedCode('code-1', { client_id: 'conf-1' });
+		const res = await handleToken(
+			{ headers: { asObject: basicHeader('conf-1', CONF_SECRET) } },
+			{ grant_type: 'authorization_code', code: 'code-1', code_verifier: CODE_VERIFIER, redirect_uri: REDIRECT },
+			mcpConfig
+		);
+		assert.equal(res.status, 200);
+		assert.ok(res.body.access_token);
+	});
+
+	it('tolerates a public client presenting an empty Basic secret (client_id only)', async () => {
+		// `Authorization: Basic base64("<client_id>:")` carries only the client_id;
+		// some clients always send it. An empty secret is not "presenting a secret",
+		// so a public client must not be rejected for it.
+		seedCode('code-1'); // public-1
+		const res = await handleToken(
+			{ headers: basicHeader('public-1', '') },
+			{ grant_type: 'authorization_code', code: 'code-1', code_verifier: CODE_VERIFIER, redirect_uri: REDIRECT },
+			mcpConfig
+		);
+		assert.equal(res.status, 200, 'empty Basic secret tolerated as no-secret for a public client');
+		assert.ok(res.body.access_token);
+	});
+
+	it('still rejects a public client that presents a real (non-empty) Basic secret', async () => {
+		seedCode('code-1'); // public-1
+		const res = await handleToken(
+			{ headers: basicHeader('public-1', 'unexpected-secret') },
+			{ grant_type: 'authorization_code', code: 'code-1', code_verifier: CODE_VERIFIER, redirect_uri: REDIRECT },
+			mcpConfig
+		);
+		assert.equal(res.status, 401);
+		assert.equal(res.body.error, 'invalid_client');
 	});
 
 	it('authenticates a confidential client via client_secret_post (secret in body)', async () => {
