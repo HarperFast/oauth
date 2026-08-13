@@ -116,6 +116,11 @@ describe('handleRegister (RFC 7591 DCR)', () => {
 			assert.equal(response.status, 201);
 		});
 
+		it('accepts a matching token with a lowercase `bearer` scheme (RFC 6750 case-insensitive)', async () => {
+			const response = await handleRegister(makeRequest({ authorization: 'bearer secret-token' }), VALID_BODY, config);
+			assert.equal(response.status, 201);
+		});
+
 		it('accepts a matching Bearer token via the Harper `.asObject` headers wrapper (runtime shape)', async () => {
 			// Regression: the live runtime wraps headers behind `.asObject`, so
 			// reading request.headers.authorization directly returns undefined and

@@ -503,6 +503,18 @@ describe('handleToken', () => {
 		assert.ok(res.body.access_token);
 	});
 
+	it('authenticates client_secret_basic with a lowercase `basic` scheme (RFC 9110 case-insensitive)', async () => {
+		seedCode('code-1', { client_id: 'conf-1' });
+		const lower = { authorization: basicHeader('conf-1', CONF_SECRET).authorization.replace(/^Basic /, 'basic ') };
+		const res = await handleToken(
+			{ headers: lower },
+			{ grant_type: 'authorization_code', code: 'code-1', code_verifier: CODE_VERIFIER, redirect_uri: REDIRECT },
+			mcpConfig
+		);
+		assert.equal(res.status, 200);
+		assert.ok(res.body.access_token);
+	});
+
 	it('rejects a confidential client with a wrong secret', async () => {
 		seedCode('code-1', { client_id: 'conf-1' });
 		const res = await handleToken(

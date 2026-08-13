@@ -159,7 +159,9 @@ function safeEqual(a: string, b: string): boolean {
 }
 
 function parseBasicAuth(authHeader: string | undefined): { clientId: string; clientSecret: string } | null {
-	if (!authHeader || !authHeader.startsWith('Basic ')) return null;
+	// Scheme name is case-insensitive (RFC 9110 §11.1) — matches the `/^basic\s/i`
+	// check on the client_credentials path.
+	if (!authHeader || !/^basic /i.test(authHeader)) return null;
 	let decoded: string;
 	try {
 		decoded = Buffer.from(authHeader.slice('Basic '.length).trim(), 'base64').toString('utf8');
