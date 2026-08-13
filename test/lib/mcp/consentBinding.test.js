@@ -60,6 +60,20 @@ describe('consentBinding', () => {
 		assert.equal(readConsentNonce({ headers: { cookie: 'no-equals-sign' } }, 'f'), undefined);
 	});
 
+	// Regression: the live Harper runtime passes headers as a wrapper exposing
+	// only `.asObject` (or a Web `Headers` with `.get()`), NOT a plain object.
+	// Reading `request.headers.cookie` directly returns undefined there, which
+	// fails every browser-binding check closed. Cover both wrapper shapes.
+	it('readConsentNonce reads the cookie from a Harper `.asObject` headers wrapper', () => {
+		const request = { headers: { asObject: { cookie: `x=1; __Host-mcp_consent_flowA=wrapped-nonce` } } };
+		assert.equal(readConsentNonce(request, 'flowA'), 'wrapped-nonce');
+	});
+
+	it('readConsentNonce reads the cookie from a Web `Headers` object (.get)', () => {
+		const request = { headers: new Headers({ cookie: `__Host-mcp_consent_flowA=header-nonce` }) };
+		assert.equal(readConsentNonce(request, 'flowA'), 'header-nonce');
+	});
+
 	it('consentNonceMatches round-trips and rejects mismatches', () => {
 		const nonce = generateConsentNonce();
 		const hash = hashConsentNonce(nonce);
