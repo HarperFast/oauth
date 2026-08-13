@@ -295,6 +295,25 @@ describe('handleAuthorize', () => {
 				const url = new URL(response.headers.Location);
 				assert.equal(url.host, 'upstream.example.com', 'absent grant_types allows the flow through');
 			});
+
+			it('a restricted client requesting response_type=token gets unsupported_response_type, not unauthorized_client', async () => {
+				const restrictedClient = encodeClientForStorage({
+					...VALID_CLIENT,
+					client_id: 'restricted-3',
+					grant_types: [],
+				});
+				storedClients.set('restricted-3', restrictedClient);
+				const { entries } = newRegistry();
+				const target = makeTarget({ ...BASE_QUERY, client_id: 'restricted-3', response_type: 'token' });
+				const response = await handleAuthorize(makeRequest(), target, validConfig, entries);
+				const { host, params } = parseRedirect(response);
+				assert.equal(host, 'mcp-client.example.com');
+				assert.equal(
+					params.error,
+					'unsupported_response_type',
+					'response_type guard fires before the grant check (RFC 6749 §3.1.1)'
+				);
+			});
 		});
 
 		it('redirects with unsupported_response_type when response_type is not "code"', async () => {

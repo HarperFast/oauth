@@ -427,14 +427,16 @@ export async function handleAuthorize(
 	const redirect = (error: string, description: string) =>
 		buildClientErrorRedirect(query.redirect_uri as string, error, description, clientState, issuer);
 
-	// RFC 6749 §4.1.2.1: reject before initiating authorization if the client
-	// is not authorized for this grant type.
-	if (!allowsGrant(client, 'authorization_code')) {
-		return redirect('unauthorized_client', 'Client is not authorized for the authorization_code grant');
-	}
-
+	// response_type identifies the requested flow; an unsupported one is
+	// unsupported_response_type regardless of the client's grants (RFC 6749
+	// §3.1.1). Only then can §4.1.2.1's unauthorized_client apply to the
+	// authorization_code flow actually being requested.
 	if (query.response_type !== 'code') {
 		return redirect('unsupported_response_type', 'response_type must be "code"');
+	}
+
+	if (!allowsGrant(client, 'authorization_code')) {
+		return redirect('unauthorized_client', 'Client is not authorized for the authorization_code grant');
 	}
 
 	if (!query.code_challenge) {
