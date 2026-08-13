@@ -1,126 +1,81 @@
 /**
- * CIMD consent browser binding
+ * OAuth browser binding via a stable per-browser secret cookie.
  *
- * The consent interstitial (#166) is only meaningful if the browser that
- * approves it is the browser the upstream authorization completes in. Without
- * a binding, a malicious CIMD client can fetch the interstitial itself,
- * confirm it, and hand the victim the resulting upstream IdP URL — the victim
- * never sees the client identity or redirect-host disclosure but an existing
- * IdP session still produces an authorization code at the attacker's
- * redirect_uri.
+ * Every browser-initiated OAuth flow — human login and all MCP authorize paths
+ * — binds to the browser that started it, closing login-CSRF /
+ * authorization-code-injection attacks where an attacker-initiated flow is
+ * completed in a victim's browser.
  *
- * Binding: when the interstitial is served, a random nonce is set as a cookie
- * and its SHA-256 hash is stored in the confirm token's `mcp` state. POST
- * /oauth/mcp/confirm requires the cookie to hash-match, and the hash is carried
- * through the upstream CSRF state so the OAuth callback re-checks the same
- * cookie before minting an MCP authorization code.
+ * Binding: when a flow is initiated, this module reads (or generates) a single
+ * stable `__Host-oauth_browser` cookie. The SHA-256 hash of the secret is
+ * stored in the server-side flow state (CSRF token or confirm token); the
+ * callback/confirm step re-reads the cookie and constant-time-checks the hash.
+ * Only the hash leaves this server; the cookie value never appears in state.
+ *
+ * Single stable cookie design (resolves issue #205 — per-flow cookie exhaustion):
+ * - Each browser carries ONE `__Host-oauth_browser` cookie across all flows.
+ *   Parallel tabs share it (same browser — the property we bind on).
+ * - The secret is generated once and reused; Max-Age is refreshed on every
+ *   flow initiation so active browsers never hit silent expiry.
+ * - Abandoned flows leave only server-side CSRF rows, which Harper's built-in
+ *   table expiration already reaps — no per-flow cookie, no accumulation.
  *
  * Cookie hardening:
- * - `__Host-` prefix: the browser only accepts a `__Host-`-named cookie when it
- *   is `Secure`, `Path=/`, and has NO `Domain` — which means a sibling origin
- *   (evil.example.com attacking auth.example.com) CANNOT plant a parent-domain
- *   cookie to forge the binding. Plain `SameSite=Lax` does not stop that,
- *   because sibling subdomains are same-site. (RFC 6265bis §4.1.3.2.)
- * - Per-flow name: the cookie name embeds a random flow id (also carried in the
- *   confirm/upstream state), so concurrent authorization flows in the same
- *   browser (parallel tabs) don't overwrite each other's binding.
- * - `SameSite=Lax` keeps the cookie on the top-level redirect back from the
- *   IdP while excluding it from cross-site subresource/framed requests;
- *   `HttpOnly` keeps it out of script.
- *
- * Only the hash ever leaves the cookie: the state payload lives server-side in
- * the CSRF store, so a party that observes or replays state tokens still cannot
- * reconstruct the cookie value. Cookies expire via `Max-Age`; per-flow naming
- * makes explicit clearing unnecessary for correctness.
- *
- * The human login flow uses the same binding under a distinct cookie namespace:
- * session binding only protects flows initiated while logged in, so the
- * logged-out login flow needs the nonce cookie to prove the
- * callback arrived in the browser that initiated it. handleLogin mints it;
- * handleCallback enforces it via the `buildLoginCookie`/`readLoginNonce`
- * variants below.
+ * - `__Host-` prefix: only accepted when `Secure`, `Path=/`, no `Domain` —
+ *   a sibling origin cannot plant a parent-domain cookie to forge the binding
+ *   (RFC 6265bis §4.1.3.2).
+ * - `HttpOnly` keeps it out of script.
+ * - `SameSite=Lax` sends the cookie on the top-level redirect back from the
+ *   upstream IdP while excluding cross-site subresource/framed requests.
  */
 
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { Request } from '../../types.ts';
 
-/** `__Host-` prefix + a per-flow id suffix. See module header for why. */
-const CONSENT_COOKIE_PREFIX = '__Host-mcp_consent_';
-
-/** Human-login binding cookie namespace. */
-const LOGIN_COOKIE_PREFIX = '__Host-oauth_login_';
+export const BROWSER_SECRET_COOKIE_NAME = '__Host-oauth_browser';
 
 /**
- * Must outlast TWO sequential CSRF-token lifetimes: the interstitial pause
- * (bounded by the confirm token, ~10 min) THEN the upstream IdP login (bounded
- * by the upstream state token, ~10 min). At 900 s the cookie could expire during
- * a slow login/MFA while the upstream state is still valid, rejecting an
- * otherwise-good callback. 30 min covers 2×10 min plus margin.
+ * Rolling 7-day lifetime: refreshed on every flow initiation so an active
+ * browser never hits silent expiry. An inactive browser's cookie expires
+ * naturally and a new secret is generated on the next flow.
  */
-const CONSENT_COOKIE_MAX_AGE_S = 1800;
+const BROWSER_SECRET_MAX_AGE_S = 7 * 24 * 60 * 60;
 
-/** Random, cookie-name-safe id identifying one authorization flow. */
-export function generateConsentFlowId(): string {
-	return randomBytes(16).toString('base64url');
-}
-
-export function generateConsentNonce(): string {
+/** Generate a new cryptographically random browser secret. */
+export function generateBrowserSecret(): string {
 	return randomBytes(32).toString('base64url');
 }
 
-export function hashConsentNonce(nonce: string): string {
-	return createHash('sha256').update(nonce).digest('base64url');
-}
-
-function buildBindingCookie(prefix: string, flowId: string, nonce: string): string {
-	return `${prefix}${flowId}=${nonce}; Max-Age=${CONSENT_COOKIE_MAX_AGE_S}; Path=/; Secure; HttpOnly; SameSite=Lax`;
+/** SHA-256 (base64url) of the browser secret. Only the hash is stored server-side. */
+export function hashBrowserSecret(secret: string): string {
+	return createHash('sha256').update(secret).digest('base64url');
 }
 
 /**
- * Set-Cookie value pairing the interstitial page with its confirm token.
+ * Build the `Set-Cookie` value for the stable browser secret.
  * `__Host-` requires exactly `Secure` + `Path=/` + no `Domain`.
+ * Always call this on every flow initiation to refresh the rolling Max-Age.
  */
-export function buildConsentCookie(flowId: string, nonce: string): string {
-	return buildBindingCookie(CONSENT_COOKIE_PREFIX, flowId, nonce);
-}
-
-/** Set-Cookie value pairing a human login initiation with its state token. */
-export function buildLoginCookie(flowId: string, nonce: string): string {
-	return buildBindingCookie(LOGIN_COOKIE_PREFIX, flowId, nonce);
+export function buildBrowserSecretCookie(secret: string): string {
+	return `${BROWSER_SECRET_COOKIE_NAME}=${secret}; Max-Age=${BROWSER_SECRET_MAX_AGE_S}; Path=/; Secure; HttpOnly; SameSite=Lax`;
 }
 
 /**
- * Read this flow's consent nonce from the request's Cookie header, if present.
+ * Read the browser secret from the request's Cookie header.
  *
- * Simple split parser, first name-match wins. Safe because both the name
- * suffix (flow id) and the value (nonce) are base64url — no `=`, `;`, quotes,
- * or spaces — and `__Host-` naming means a same-name cookie can only be set
- * by this origin over TLS at `Path=/` (one cookie per name+host+path in the
- * jar). Revisit the parser if the encoding ever changes.
+ * Simple split parser, first name-match wins. Safe because the cookie name is
+ * a fixed constant and the value is base64url — no `=`, `;`, quotes, or
+ * spaces — and `__Host-` naming means a same-name cookie can only be set by
+ * this origin over TLS at `Path=/`. Revisit the parser if the encoding changes.
  */
-export function readConsentNonce(request: Request | undefined, flowId: string | undefined): string | undefined {
-	return readBindingNonce(CONSENT_COOKIE_PREFIX, request, flowId);
-}
-
-/** Read this login flow's binding nonce from the request's Cookie header. */
-export function readLoginNonce(request: Request | undefined, flowId: string | undefined): string | undefined {
-	return readBindingNonce(LOGIN_COOKIE_PREFIX, request, flowId);
-}
-
-function readBindingNonce(
-	prefix: string,
-	request: Request | undefined,
-	flowId: string | undefined
-): string | undefined {
-	if (!flowId) return undefined;
+export function readBrowserSecret(request: Request | undefined): string | undefined {
 	const header = readCookieHeader(request);
 	if (typeof header !== 'string' || !header) return undefined;
-	const name = prefix + flowId;
 	for (const part of header.split(';')) {
 		const eq = part.indexOf('=');
 		if (eq === -1) continue;
-		if (part.slice(0, eq).trim() === name) {
-			return part.slice(eq + 1).trim();
+		if (part.slice(0, eq).trim() === BROWSER_SECRET_COOKIE_NAME) {
+			return part.slice(eq + 1).trim() || undefined;
 		}
 	}
 	return undefined;
@@ -152,10 +107,10 @@ function readCookieHeader(request: Request | undefined): string | undefined {
 	return Array.isArray(raw) ? raw.join('; ') : String(raw);
 }
 
-/** Constant-time check that `nonce` hashes to `expectedHash`. */
-export function consentNonceMatches(nonce: string | undefined, expectedHash: string | undefined): boolean {
-	if (!nonce || !expectedHash) return false;
-	const actual = Buffer.from(hashConsentNonce(nonce));
+/** Constant-time check that `secret` hashes to `expectedHash`. */
+export function browserSecretMatches(secret: string | undefined, expectedHash: string | undefined): boolean {
+	if (!secret || !expectedHash) return false;
+	const actual = Buffer.from(hashBrowserSecret(secret));
 	const expected = Buffer.from(expectedHash);
 	return actual.length === expected.length && timingSafeEqual(actual, expected);
 }

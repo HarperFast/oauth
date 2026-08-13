@@ -295,21 +295,14 @@ export interface MCPAuthorizeState {
 	/** Original `state` parameter from the MCP client; echoed verbatim on redirect */
 	clientState?: string;
 	/**
-	 * MCP consent browser binding: SHA-256 of the per-flow nonce cookie set when
-	 * the authorize flow is initiated. Set on EVERY /oauth/mcp/authorize flow —
-	 * the CIMD interstitial mints it up front, and the stored/DCR path mints it in
-	 * performUpstreamRedirect. /oauth/mcp/confirm (CIMD) and the upstream OAuth
+	 * MCP browser binding: SHA-256 (base64url) of the stable `__Host-oauth_browser`
+	 * cookie set when the authorize flow is initiated. Set on EVERY
+	 * /oauth/mcp/authorize flow. /oauth/mcp/confirm (CIMD) and the upstream OAuth
 	 * callback (all flows) require the caller's cookie to hash-match before
 	 * proceeding; the callback fails closed on an MCP state that lacks it (see
 	 * lib/mcp/consentBinding.ts and handlers.ts).
 	 */
 	browserNonceHash?: string;
-	/**
-	 * MCP consent flow id: identifies which per-flow `__Host-` cookie carries
-	 * this flow's nonce, so concurrent authorization flows in one browser don't
-	 * collide. Paired with `browserNonceHash`.
-	 */
-	consentFlowId?: string;
 }
 
 /**
@@ -677,9 +670,7 @@ export interface CSRFTokenData {
 	originalUrl?: string;
 	/** Session ID to link OAuth flow with existing session */
 	sessionId?: string;
-	/** Per-flow id naming the login browser-binding cookie */
-	loginFlowId?: string;
-	/** SHA-256 (base64url) of the login browser-binding nonce; the callback requires the cookie to hash-match */
+	/** SHA-256 (base64url) of the stable browser-binding secret; the callback requires the cookie to hash-match */
 	browserNonceHash?: string;
 	[key: string]: any;
 }

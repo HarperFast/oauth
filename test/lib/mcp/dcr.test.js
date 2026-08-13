@@ -146,16 +146,22 @@ describe('handleRegister (RFC 7591 DCR)', () => {
 	describe('rejection log safety (CWE-117)', () => {
 		const config = { enabled: true, dynamicClientRegistration: {} };
 
-		it('CRLF-encodes the attacker-controlled grant_type in the rejected-registration log', async () => {
-			// Open DCR is pre-auth; an invalid grant_type echoes into error_description
+		it('CRLF-encodes attacker-controlled token_endpoint_auth_method in the rejected-registration log', async () => {
+			// Open DCR is pre-auth; an unsupported auth method echoes into error_description
 			// which is logged. A CR/LF in it must not forge a new log line.
+			// (grant_types with CRLF are silently filtered by filterGrantTypes per #200
+			// and never appear in the rejection log; token_endpoint_auth_method is still
+			// echoed verbatim in the validateAuthMethod error string.)
 			const original = harperLogger.warn;
 			const lines = [];
 			harperLogger.warn = (msg) => lines.push(String(msg));
 			try {
 				const res = await handleRegister(
 					makeRequest(),
-					{ redirect_uris: ['https://app.example.com/cb'], grant_types: ['authorization_code\r\nFORGED ENTRY'] },
+					{
+						redirect_uris: ['https://app.example.com/cb'],
+						token_endpoint_auth_method: 'none\r\nFORGED ENTRY',
+					},
 					config
 				);
 				assert.equal(res.status, 400);

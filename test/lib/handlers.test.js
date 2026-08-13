@@ -165,20 +165,20 @@ describe('OAuth Handlers', () => {
 			assert.equal(csrfCall.arguments[0].sessionId, 'session-123');
 		});
 
-		it('mints a browser-binding nonce: hash in the state token, nonce in a __Host- cookie', async () => {
-			const { hashConsentNonce } = await import('../../dist/lib/mcp/consentBinding.js');
+		it('mints a browser-binding secret: hash in the state token, stable secret in a __Host- cookie', async () => {
+			const { BROWSER_SECRET_COOKIE_NAME, hashBrowserSecret } = await import('../../dist/lib/mcp/consentBinding.js');
 			const result = await handleLogin(mockRequest, mockTarget, mockProvider, mockConfig, 'test-provider', mockLogger);
 
 			const meta = mockProvider.generateCSRFToken.mock.calls[0].arguments[0];
-			assert.ok(meta.loginFlowId, 'flow id stored in the state token');
-			assert.ok(meta.browserNonceHash, 'nonce hash stored in the state token');
+			assert.ok(meta.browserNonceHash, 'secret hash stored in the state token');
+			assert.equal(meta.loginFlowId, undefined, 'no per-flow id in the state (stable cookie)');
 
 			const setCookie = result.headers['Set-Cookie'];
 			const [pair, ...attrs] = setCookie.split('; ');
 			const eq = pair.indexOf('=');
-			assert.equal(pair.slice(0, eq), `__Host-oauth_login_${meta.loginFlowId}`, 'cookie name embeds the flow id');
+			assert.equal(pair.slice(0, eq), BROWSER_SECRET_COOKIE_NAME, 'stable cookie name (no per-flow suffix)');
 			assert.equal(
-				hashConsentNonce(pair.slice(eq + 1)),
+				hashBrowserSecret(pair.slice(eq + 1)),
 				meta.browserNonceHash,
 				'cookie value hashes to the bound hash'
 			);
@@ -824,16 +824,14 @@ describe('OAuth Handlers', () => {
 		let storedAuthCodes;
 		// Import lazily so the dist symbol load doesn't happen at file parse.
 		let resetMCPAuthCodesTableCache;
-		let hashConsentNonce, buildConsentCookie;
+		let hashBrowserSecret, buildBrowserSecretCookie;
 
-		// Every /oauth/mcp/authorize flow (CIMD and stored/DCR) now mints a
-		// per-flow nonce cookie and binds its hash into the upstream state; the
+		// Every /oauth/mcp/authorize flow (CIMD and stored/DCR) mints a stable
+		// browser-secret cookie and binds its hash into the upstream state; the
 		// callback fails closed without a matching cookie. The default fixtures
-		// below therefore carry a valid binding so the happy-path assertions
-		// exercise the bound flow — tests that need an unbound/mismatched state
-		// override them locally.
-		const MCP_NONCE = 'mcp-branch-consent-nonce';
-		const MCP_FLOW_ID = 'mcpbranchflow';
+		// below carry a valid binding so happy-path assertions exercise the bound
+		// flow — tests that need an unbound/mismatched state override them locally.
+		const MCP_SECRET = 'mcp-branch-browser-secret';
 
 		const MCP_STATE = {
 			clientId: 'mcp-client-1',
@@ -852,7 +850,7 @@ describe('OAuth Handlers', () => {
 
 		beforeEach(async () => {
 			({ resetMCPAuthCodesTableCache } = await import('../../dist/lib/mcp/authCodeStore.js'));
-			({ hashConsentNonce, buildConsentCookie } = await import('../../dist/lib/mcp/consentBinding.js'));
+			({ hashBrowserSecret, buildBrowserSecretCookie } = await import('../../dist/lib/mcp/consentBinding.js'));
 			resetMCPAuthCodesTableCache();
 			originalDatabases = global.databases;
 			storedAuthCodes = new Map();
@@ -871,10 +869,10 @@ describe('OAuth Handlers', () => {
 			mockProvider.verifyCSRFToken = createMockFn(async () => ({
 				timestamp: Date.now(),
 				providerName: 'test-provider',
-				mcp: { ...MCP_STATE, browserNonceHash: hashConsentNonce(MCP_NONCE), consentFlowId: MCP_FLOW_ID },
+				mcp: { ...MCP_STATE, browserNonceHash: hashBrowserSecret(MCP_SECRET) },
 			}));
-			// The initiating browser's per-flow consent cookie accompanies the callback.
-			mockRequest.headers.cookie = buildConsentCookie(MCP_FLOW_ID, MCP_NONCE).split(';')[0];
+			// The initiating browser's stable cookie accompanies the callback.
+			mockRequest.headers.cookie = buildBrowserSecretCookie(MCP_SECRET).split(';')[0];
 		});
 
 		// Restore global.databases in afterEach so a failing assertion mid-test
@@ -1119,23 +1117,22 @@ describe('OAuth Handlers', () => {
 			assert.equal(mockProvider.exchangeCodeForToken.mock.calls.length, 0, 'upstream code never exchanged');
 		});
 
-		describe('CIMD consent browser binding', () => {
-			const NONCE = 'callback-consent-nonce';
-			const FLOW_ID = 'cbflow';
-			let hashConsentNonce, buildConsentCookie, cookieHeader;
+		describe('MCP browser binding (stable cookie)', () => {
+			const SECRET = 'callback-browser-secret';
+			let cookieHeader;
 
 			beforeEach(async () => {
-				({ hashConsentNonce, buildConsentCookie } = await import('../../dist/lib/mcp/consentBinding.js'));
-				// The per-flow Set-Cookie value minus its attributes → a Cookie header pair.
-				cookieHeader = buildConsentCookie(FLOW_ID, NONCE).split(';')[0];
+				// The stable browser-secret cookie accompanies the callback.
+				// Reuse the BROWSER_SECRET_COOKIE_NAME / buildBrowserSecretCookie imported in the outer beforeEach.
+				cookieHeader = buildBrowserSecretCookie(SECRET).split(';')[0];
 				mockProvider.verifyCSRFToken = createMockFn(async () => ({
 					timestamp: Date.now(),
 					providerName: 'test-provider',
-					mcp: { ...MCP_STATE, browserNonceHash: hashConsentNonce(NONCE), consentFlowId: FLOW_ID },
+					mcp: { ...MCP_STATE, browserNonceHash: hashBrowserSecret(SECRET) },
 				}));
 			});
 
-			it('completes when the callback arrives with the consent cookie', async () => {
+			it('completes when the callback arrives with the stable browser-secret cookie', async () => {
 				mockRequest.headers.cookie = cookieHeader;
 				const result = await handleCallback(
 					mockRequest,
@@ -1151,10 +1148,9 @@ describe('OAuth Handlers', () => {
 				assert.ok(url.searchParams.get('code'), 'auth code minted for the bound browser');
 			});
 
-			it('rejects when the consent cookie is missing — victim browser never approved', async () => {
-				// Attack: the malicious client self-approves the interstitial, then
-				// sends the victim the upstream IdP URL. The victim's browser has no
-				// (or a different) consent cookie, so no code may be minted.
+			it('rejects when the browser-secret cookie is missing — victim browser never approved', async () => {
+				// Attack: the malicious client initiates the flow (cookie in THEIR browser),
+				// then sends the victim the upstream IdP URL. The victim has no cookie.
 				delete mockRequest.headers.cookie;
 				const result = await handleCallback(
 					mockRequest,
@@ -1173,8 +1169,8 @@ describe('OAuth Handlers', () => {
 				assert.equal(storedAuthCodes.size, 0);
 			});
 
-			it('rejects when the consent cookie does not match the bound hash', async () => {
-				mockRequest.headers.cookie = buildConsentCookie(FLOW_ID, 'some-other-browser-nonce').split(';')[0];
+			it('rejects when the browser-secret cookie does not match the bound hash', async () => {
+				mockRequest.headers.cookie = buildBrowserSecretCookie('some-other-browser-secret').split(';')[0];
 				const result = await handleCallback(
 					mockRequest,
 					mockTarget,
@@ -1190,16 +1186,12 @@ describe('OAuth Handlers', () => {
 			});
 
 			it('fails closed on an MCP state with no browser binding (forged/pre-upgrade state)', async () => {
-				// After the DCR browser-binding fix, EVERY MCP
-				// authorize flow mints a per-flow nonce cookie and binds its hash into
-				// the upstream state. An MCP state that reaches the callback with no
-				// binding is a forged or pre-upgrade in-flight state and must NOT mint
-				// an auth code — this is the authorization-code injection the fix
-				// closes (an attacker-supplied, unbound state fed to a victim).
+				// An MCP state with no browserNonceHash is a forged or pre-upgrade
+				// in-flight state — must NOT mint an auth code (authorization-code injection).
 				mockProvider.verifyCSRFToken = createMockFn(async () => ({
 					timestamp: Date.now(),
 					providerName: 'test-provider',
-					mcp: { ...MCP_STATE }, // no browserNonceHash / consentFlowId
+					mcp: { ...MCP_STATE }, // no browserNonceHash
 				}));
 				delete mockRequest.headers.cookie;
 				const result = await handleCallback(
@@ -1441,25 +1433,23 @@ describe('OAuth Handlers', () => {
 	});
 
 	describe('handleCallback — login browser binding', () => {
-		const NONCE = 'login-binding-nonce';
-		const FLOW_ID = 'loginflow';
-		let hashConsentNonce, buildLoginCookie;
+		const SECRET = 'login-binding-secret';
+		let hashBrowserSecret, buildBrowserSecretCookie;
 
 		beforeEach(async () => {
-			({ hashConsentNonce, buildLoginCookie } = await import('../../dist/lib/mcp/consentBinding.js'));
+			({ hashBrowserSecret, buildBrowserSecretCookie } = await import('../../dist/lib/mcp/consentBinding.js'));
 			// A logged-out flow: no sessionId in the token (the session binding
-			// has nothing to check — the exact gap the nonce cookie closes).
+			// has nothing to check — the exact gap the browser-secret cookie closes).
 			mockProvider.verifyCSRFToken = createMockFn(async () => ({
 				originalUrl: '/dashboard',
 				timestamp: Date.now(),
 				providerName: 'test-provider',
-				loginFlowId: FLOW_ID,
-				browserNonceHash: hashConsentNonce(NONCE),
+				browserNonceHash: hashBrowserSecret(SECRET),
 			}));
 		});
 
 		it('completes when the callback arrives in the browser that initiated the login', async () => {
-			mockRequest.headers.cookie = buildLoginCookie(FLOW_ID, NONCE).split(';')[0];
+			mockRequest.headers.cookie = buildBrowserSecretCookie(SECRET).split(';')[0];
 
 			const result = await handleCallback(
 				mockRequest,
@@ -1499,8 +1489,8 @@ describe('OAuth Handlers', () => {
 			assert.equal(mockRequest.session.update.mock.calls.length, 0);
 		});
 
-		it('rejects when the binding cookie does not hash-match', async () => {
-			mockRequest.headers.cookie = buildLoginCookie(FLOW_ID, 'some-other-browser-nonce').split(';')[0];
+		it('rejects when the browser-secret cookie does not hash-match', async () => {
+			mockRequest.headers.cookie = buildBrowserSecretCookie('some-other-browser-secret').split(';')[0];
 
 			const result = await handleCallback(
 				mockRequest,
