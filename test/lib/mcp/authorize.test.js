@@ -882,6 +882,23 @@ describe('handleAuthorizeConfirm', () => {
 		assert.match(result.headers.Location, /upstream\.example\.com/);
 	});
 
+	it('confirm does not re-mint a binding cookie — the interstitial cookie is preserved (CIMD)', async () => {
+		// The interstitial already set the per-flow cookie and bound its hash into
+		// this state; performUpstreamRedirect must see the hash present and NOT mint
+		// a second cookie. Overwriting it would break the callback's binding check.
+		const { entries, provider } = makeProviderWithCsrf();
+		const token = await provider.generateCSRFToken({ providerName: 'github', mcp: MCP_STATE, _confirm: true });
+
+		const result = await handleAuthorizeConfirm(
+			makeConsentRequest(),
+			{ confirm_token: token },
+			{ enabled: true },
+			entries
+		);
+		assert.equal(result.status, 302);
+		assert.equal(result.headers['Set-Cookie'], undefined, 'no new/overwriting binding cookie on confirm');
+	});
+
 	it('token is single-use: second confirm returns 400', async () => {
 		const { entries, provider } = makeProviderWithCsrf();
 		const token = await provider.generateCSRFToken({

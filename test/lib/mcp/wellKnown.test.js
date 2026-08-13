@@ -44,6 +44,17 @@ describe('MCP well-known: URI resolution', () => {
 		assert.equal(resolveIssuer(req, {}), 'https://auto.example.com');
 	});
 
+	it('resolveIssuer reads the Host header from a Harper `.asObject` wrapper when request.host is absent', () => {
+		// Runtime shape: request.host may be unset and headers is the `.asObject`
+		// wrapper, so a direct `headers.host` read would miss it.
+		const req = makeRequest({
+			protocol: 'https',
+			host: undefined,
+			headers: { asObject: { host: 'wrapped.example.com' } },
+		});
+		assert.equal(resolveIssuer(req, {}), 'https://wrapped.example.com');
+	});
+
 	it('resolveIssuer takes the first value when the Host header is an array', async () => {
 		const req = makeRequest({ protocol: 'https', host: undefined, headers: { host: ['first.example.com', 'second'] } });
 		assert.equal(resolveIssuer(req, {}), 'https://first.example.com');
