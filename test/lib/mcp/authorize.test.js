@@ -542,6 +542,31 @@ describe('handleAuthorize', () => {
 			);
 		});
 
+		it('emits the stable browser-binding cookie over plain HTTP (loopback is a web-platform secure context)', async () => {
+			// Per the web platform spec, http://127.0.0.1 is a secure context and
+			// browsers accept __Host- cookies served over loopback plain HTTP.
+			// The integration test fixture runs over plain HTTP, so the server must
+			// NOT gate the Set-Cookie on TLS — an HTTP/HTTPS conditional would cause
+			// the integration test to see no cookie even though the handler returned one.
+			// Use a fixed issuer so validateCanonicalResource resolves the same value
+			// regardless of request protocol/host.
+			const { entries } = newRegistry();
+			const configWithFixedIssuer = { enabled: true, issuer: 'https://mcp.example.com' };
+			const target = makeTarget({ ...BASE_QUERY, resource: 'https://mcp.example.com/mcp' });
+			const httpRequest = makeRequest({
+				protocol: 'http',
+				host: '127.0.0.1:9998',
+				headers: { host: '127.0.0.1:9998' },
+			});
+			const response = await handleAuthorize(httpRequest, target, configWithFixedIssuer, entries);
+
+			assert.equal(response.status, 302);
+			const setCookie = response.headers['Set-Cookie'];
+			assert.ok(setCookie, 'Set-Cookie must be present even over plain HTTP (loopback = secure context)');
+			assert.match(setCookie, new RegExp(`^${BROWSER_SECRET_COOKIE_NAME}=`), 'stable cookie name present');
+			assert.match(setCookie, /Secure/, 'Secure attribute always emitted (browsers accept over loopback)');
+		});
+
 		it('accepts a redirect_uri that matches the registered loopback URI', async () => {
 			const { entries } = newRegistry();
 			const target = makeTarget({ ...BASE_QUERY, redirect_uri: 'http://localhost:6274/cb' });

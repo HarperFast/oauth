@@ -342,6 +342,22 @@ describe('OAuthResource - Response Builders', () => {
 			assert.equal(toHttpResponse(redirect), redirect, 'redirects already work — leave them be');
 		});
 
+		it('passes through a redirect with Set-Cookie unchanged (cookie must reach the HTTP layer)', () => {
+			// The authorize handler returns { status:302, headers:{ Location, 'Set-Cookie' } }.
+			// toHttpResponse must leave it untouched so the Set-Cookie header reaches Harper's
+			// REST → http layers and is emitted to the browser. If toHttpResponse wraps it in
+			// { body: JSON.stringify(...) } the HTTP layer still forwards the headers, but the
+			// intent here is that the passthrough path is exercised for responses with Set-Cookie.
+			const redirect = {
+				status: 302,
+				headers: {
+					Location: 'https://idp.example/authorize',
+					'Set-Cookie': '__Host-oauth_browser=abc123; Max-Age=604800; Path=/; Secure; HttpOnly; SameSite=Lax',
+				},
+			};
+			assert.equal(toHttpResponse(redirect), redirect, 'redirect with Set-Cookie passes through');
+		});
+
 		it('leaves non-object values untouched', () => {
 			assert.equal(toHttpResponse(undefined), undefined);
 			assert.equal(toHttpResponse('raw'), 'raw');
