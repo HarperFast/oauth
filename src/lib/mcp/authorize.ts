@@ -36,7 +36,7 @@ import type {
 	Request,
 } from '../../types.ts';
 import { CimdClientError, resolveClient } from './cimd.ts';
-import { LOCAL_HOSTS } from './clientValidator.ts';
+import { allowsGrant, LOCAL_HOSTS } from './clientValidator.ts';
 import {
 	buildConsentCookie,
 	consentNonceMatches,
@@ -426,6 +426,12 @@ export async function handleAuthorize(
 	// Phase 2: everything else redirects to the verified client redirect_uri.
 	const redirect = (error: string, description: string) =>
 		buildClientErrorRedirect(query.redirect_uri as string, error, description, clientState, issuer);
+
+	// RFC 6749 §4.1.2.1: reject before initiating authorization if the client
+	// is not authorized for this grant type.
+	if (!allowsGrant(client, 'authorization_code')) {
+		return redirect('unauthorized_client', 'Client is not authorized for the authorization_code grant');
+	}
 
 	if (query.response_type !== 'code') {
 		return redirect('unsupported_response_type', 'response_type must be "code"');

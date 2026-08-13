@@ -55,6 +55,15 @@ export function validateStringArray(value: unknown, fieldName: string): string |
 	return null;
 }
 
+/**
+ * Whether the client's registered grant_types permit the requested grant.
+ * Absent/undefined grant_types is treated as the legacy default
+ * ['authorization_code', 'refresh_token'], matching the CIMD and DCR paths.
+ */
+export function allowsGrant(client: { grant_types?: string[] }, grant: string): boolean {
+	return !client.grant_types || client.grant_types.includes(grant);
+}
+
 /** Returns an error if authorization_code is absent from the declared grants. */
 export function validateGrantTypes(grantTypes: string[]): string | null {
 	if (!grantTypes.includes('authorization_code')) {
