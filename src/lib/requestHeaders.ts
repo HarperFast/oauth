@@ -26,5 +26,9 @@ export function getRequestHeader(headers: unknown, name: string): string | undef
 		raw = obj?.[name.toLowerCase()] ?? obj?.[name];
 	}
 	if (raw == null) return undefined;
-	return Array.isArray(raw) ? raw[0] : String(raw);
+	// Take the first value for a multi-valued header, and always coerce to string
+	// (or undefined) so the declared return type holds even for a malformed
+	// headers object with a non-string / empty-array value.
+	const value = Array.isArray(raw) ? raw[0] : raw;
+	return value == null ? undefined : String(value);
 }

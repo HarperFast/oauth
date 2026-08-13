@@ -27,6 +27,15 @@ describe('getRequestHeader', () => {
 		assert.equal(getRequestHeader({ 'x-forwarded-for': ['1.1.1.1', '2.2.2.2'] }, 'x-forwarded-for'), '1.1.1.1');
 	});
 
+	it('always returns a string (or undefined) even for a malformed value', () => {
+		// Non-string first element → coerced to string, not returned raw.
+		assert.strictEqual(getRequestHeader({ cookie: [123] }, 'cookie'), '123');
+		// Empty array → undefined, not the array's missing first element.
+		assert.strictEqual(getRequestHeader({ cookie: [] }, 'cookie'), undefined);
+		// Null first element → undefined.
+		assert.strictEqual(getRequestHeader({ cookie: [null] }, 'cookie'), undefined);
+	});
+
 	it('returns undefined for missing headers or missing container', () => {
 		assert.equal(getRequestHeader(undefined, 'cookie'), undefined);
 		assert.equal(getRequestHeader(null, 'cookie'), undefined);
