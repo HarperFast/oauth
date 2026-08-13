@@ -11,18 +11,32 @@ same upstream providers you already configure for human login, then mints
 audience-bound JWT access tokens your MCP routes can verify with a single wrapper.
 
 It implements the [MCP authorization specification (2026-07-28)](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization)
-and the OAuth RFCs it builds on. Note: the 2026-07-28 revision deprecates Dynamic Client Registration; our DCR support (`/register`) is retained for backwards compatibility with existing clients.
+and the OAuth RFCs it builds on:
 
-| RFC                                                   | Role here                                                      |
-| ----------------------------------------------------- | -------------------------------------------------------------- |
-| [6749](https://datatracker.ietf.org/doc/html/rfc6749) | OAuth 2.0 authorization-code grant                             |
-| [6750](https://datatracker.ietf.org/doc/html/rfc6750) | Bearer token usage (`Authorization: Bearer`)                   |
-| [7591](https://datatracker.ietf.org/doc/html/rfc7591) | Dynamic Client Registration (`/register`)                      |
-| [7636](https://datatracker.ietf.org/doc/html/rfc7636) | PKCE (`S256`, required — `plain` is rejected)                  |
-| [8252](https://datatracker.ietf.org/doc/html/rfc8252) | OAuth for native apps (loopback redirect URIs)                 |
-| [8414](https://datatracker.ietf.org/doc/html/rfc8414) | Authorization Server Metadata (`/.well-known/...`)             |
-| [8707](https://datatracker.ietf.org/doc/html/rfc8707) | Resource Indicators (the `resource` parameter, `aud` binding)  |
-| [9728](https://datatracker.ietf.org/doc/html/rfc9728) | Protected Resource Metadata (the `WWW-Authenticate` challenge) |
+| RFC                                                   | Role here                                                                                         |
+| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| [6749](https://datatracker.ietf.org/doc/html/rfc6749) | OAuth 2.0 authorization-code grant                                                                |
+| [6750](https://datatracker.ietf.org/doc/html/rfc6750) | Bearer token usage (`Authorization: Bearer`)                                                      |
+| [7591](https://datatracker.ietf.org/doc/html/rfc7591) | Dynamic Client Registration (`/register`) — **deprecated** in 2026-07-28 (compat path; see below) |
+| [7636](https://datatracker.ietf.org/doc/html/rfc7636) | PKCE (`S256`, required — `plain` is rejected)                                                     |
+| [8252](https://datatracker.ietf.org/doc/html/rfc8252) | OAuth for native apps (loopback redirect URIs)                                                    |
+| [8414](https://datatracker.ietf.org/doc/html/rfc8414) | Authorization Server Metadata (`/.well-known/...`)                                                |
+| [8707](https://datatracker.ietf.org/doc/html/rfc8707) | Resource Indicators (the `resource` parameter, `aud` binding)                                     |
+| [9207](https://datatracker.ietf.org/doc/html/rfc9207) | Issuer identification (`iss` on authorization responses)                                          |
+| [9728](https://datatracker.ietf.org/doc/html/rfc9728) | Protected Resource Metadata (the `WWW-Authenticate` challenge)                                    |
+
+> **Client registration in 2026-07-28.** The spec makes [Client ID Metadata
+> Documents](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization/client-registration#client-id-metadata-documents)
+> (CIMD) the primary registration mechanism (a **SHOULD**) and [**deprecates**
+> Dynamic Client Registration](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization/client-registration#dynamic-client-registration)
+> (now a **MAY**, "retained for backwards compatibility") under a 12-month
+> window. The plugin already matches this posture: **CIMD is default-on** and
+> DCR (`/register`) is opt-in — see [Client ID Metadata Documents](#client-id-metadata-documents-cimd)
+> below. Discovery (RFC 9728 Protected Resource Metadata) is a **MUST** in
+> 2026-07-28 and is served unconditionally when `mcp.enabled`.
+
+For a requirement-by-requirement map of what's implemented and the test that
+asserts each one, see [MCP OAuth conformance](./mcp-oauth-conformance.md).
 
 ---
 
@@ -84,7 +98,7 @@ GitHub login, and presents a bearer token on every subsequent call — which
 ```
  MCP Client                  Harper (OAuth plugin)              Upstream IdP
      │                                │                          (GitHub/…)
-     │  1. GET /mcp  (no token)       │                              │
+     │  1. MCP request (no token)     │                              │
      │ ─────────────────────────────▶│                              │
      │  401 + WWW-Authenticate:       │                              │
      │     Bearer resource_metadata   │                              │
@@ -95,7 +109,7 @@ GitHub login, and presents a bearer token on every subsequent call — which
      │  3. GET /.well-known/oauth-authorization-server (RFC 8414)    │
      │ ─────────────────────────────▶│                              │
      │                                │                              │
-     │  4. POST /oauth/mcp/register   (RFC 7591 DCR)                 │
+     │  4. Obtain client_id (CIMD URL, or DCR /register)             │
      │ ─────────────────────────────▶│   → client_id                │
      │                                │                              │
      │  5. GET /oauth/mcp/authorize?code_challenge=…&resource=…      │
@@ -110,7 +124,7 @@ GitHub login, and presents a bearer token on every subsequent call — which
      │ ─────────────────────────────▶│  → access_token (signed JWT) │
      │                                │     + refresh_token          │
      │                                │                              │
-     │  7. GET /mcp  Authorization: Bearer <access_token>            │
+     │  7. MCP request + Authorization: Bearer <access_token>        │
      │ ─────────────────────────────▶│  withMCPAuth verifies → 200  │
      │ ◀─────────────────────────────│                              │
 ```
@@ -122,9 +136,13 @@ GitHub login, and presents a bearer token on every subsequent call — which
    authorization server to use.
 3. **Authorization Server Metadata.** The client fetches the AS metadata (RFC 8414) to learn the `authorize`, `token`, `register`, and `jwks_uri` endpoints
    and the supported methods.
-4. **Dynamic Client Registration.** The client registers itself (RFC 7591) and
-   receives a `client_id`. Registrations persist, so a cached `client_id`
-   survives Harper restarts.
+4. **Client registration.** In 2026-07-28 the primary path is a **Client ID
+   Metadata Document** (CIMD): the client uses an HTTPS URL as its `client_id`,
+   which the AS resolves at authorize time — there is no registration call.
+   Dynamic Client Registration (RFC 7591, `POST /oauth/mcp/register`) is the
+   deprecated backwards-compat path — off by default, opt-in. Either way the
+   client ends up with a `client_id`; DCR registrations persist so a cached
+   `client_id` survives Harper restarts. See [CIMD](#client-id-metadata-documents-cimd).
 5. **Authorization.** The client opens `/oauth/mcp/authorize` with a PKCE
    challenge and the `resource` it wants a token for. The plugin redirects the
    user to the upstream IdP; on return it mints a single-use authorization code
@@ -139,6 +157,13 @@ GitHub login, and presents a bearer token on every subsequent call — which
 
 No upstream IdP token is ever embedded in the issued JWT — the access token is
 minted and signed by this plugin.
+
+> **Transport note.** The diagram shows the guarded MCP request abstractly.
+> 2026-07-28 Streamable HTTP is POST-based — the earlier `GET /mcp` endpoint was
+> replaced ([SEP-2575](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2575)),
+> and POSTs carry `Mcp-Method`/`Mcp-Name` headers. `withMCPAuth` is
+> **method-agnostic**: it guards on the `Authorization: Bearer` token regardless
+> of HTTP method, so the transport change needs no change here.
 
 ---
 
@@ -164,11 +189,11 @@ form the `WWW-Authenticate` challenge advertises.
 
 ### Authorization server
 
-| Endpoint               | Method | Notes                                                                                                                                                                     |
-| ---------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `/oauth/mcp/register`  | POST   | RFC 7591 Dynamic Client Registration. Exists only when `mcp.dynamicClientRegistration` is configured (absent block ⇒ 404); gate with `initialAccessToken`. Returns `201`. |
-| `/oauth/mcp/authorize` | GET    | OAuth 2.1 + PKCE. Requires `client_id`, `redirect_uri`, `response_type=code`, `code_challenge`, `code_challenge_method=S256`, `resource`.                                 |
-| `/oauth/mcp/token`     | POST   | Grants: `authorization_code`, `refresh_token`, and (opt-in) `client_credentials`. Returns the token pair with `Cache-Control: no-store`.                                  |
+| Endpoint               | Method | Notes                                                                                                                                                                                                                                   |
+| ---------------------- | ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/oauth/mcp/register`  | POST   | RFC 7591 Dynamic Client Registration — **deprecated in 2026-07-28** (compat path; CIMD is primary). Exists only when `mcp.dynamicClientRegistration` is configured (absent block ⇒ 404); gate with `initialAccessToken`. Returns `201`. |
+| `/oauth/mcp/authorize` | GET    | OAuth 2.1 + PKCE. Requires `client_id`, `redirect_uri`, `response_type=code`, `code_challenge`, `code_challenge_method=S256`, `resource`.                                                                                               |
+| `/oauth/mcp/token`     | POST   | Grants: `authorization_code`, `refresh_token`, and (opt-in) `client_credentials`. Returns the token pair with `Cache-Control: no-store`.                                                                                                |
 
 > `mcp` is a reserved provider name — the plugin refuses to start if you configure
 > a provider called `mcp`, because it would collide with `/oauth/mcp/*`.
@@ -757,6 +782,10 @@ for cached documents.
 These are **not** available and no config or code sample here implies them:
 
 - Per-tool / fine-grained scopes (the `scope` claim is passed through, not enforced per tool)
+- The 2026-07-28 **step-up authorization flow** (SEP-2350): a `403 insufficient_scope`
+  with a `scope` hint in `WWW-Authenticate`, and the `scope` challenge parameter on
+  the initial 401. `withMCPAuth` denies with `invalid_token`, not `insufficient_scope`;
+  per-operation scope challenges are v1.1 forward-work (tracked in [#156](https://github.com/HarperFast/oauth/issues/156)).
 - Transitive revocation (revoking the upstream IdP session does not invalidate already-issued MCP tokens)
 - Signing algorithms other than RS256 and ES256 (e.g. EdDSA)
 - A native, composed MCP server (this plugin is the authorization server, not the MCP transport)
