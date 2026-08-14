@@ -256,8 +256,9 @@ test('should logout when token expired and no refresh token', async () => {
 
 	assert.strictEqual(result.valid, false);
 	assert.strictEqual(result.error, 'Token expired and no refresh token available');
-	// Session should be cleared
-	assert.strictEqual(session.oauth, undefined);
+	// Session is invalidated — clearOAuthSession persists { user: null, oauth: null }
+	assert.strictEqual(session.oauth, null);
+	assert.strictEqual(session.user, null);
 });
 
 test('should handle refresh failure for expired token', async () => {
@@ -279,8 +280,8 @@ test('should handle refresh failure for expired token', async () => {
 
 	assert.strictEqual(result.valid, false);
 	assert.ok(result.error.includes('Token refresh failed'));
-	// Session should be cleared after failed refresh of expired token
-	assert.strictEqual(session.oauth, undefined);
+	// Session invalidated after failed refresh — persisted { user: null, oauth: null }
+	assert.strictEqual(session.oauth, null);
 });
 
 test('should not logout when refresh fails for non-expired token', async () => {
@@ -513,7 +514,7 @@ test('should logout when periodic validation fails (token revoked)', async () =>
 
 	assert.strictEqual(result.valid, false);
 	assert.strictEqual(result.error, 'Token validation failed - token may have been revoked');
-	assert.strictEqual(session.oauth, undefined, 'Session should be cleared after validation failure');
+	assert.strictEqual(session.oauth, null, 'Session invalidated (user/oauth null) after validation failure');
 });
 
 test('should handle validation errors gracefully (network issues)', async () => {

@@ -1214,21 +1214,24 @@ describe('OAuth Handlers', () => {
 	});
 
 	describe('handleLogout', () => {
-		it('should clear session data', async () => {
-			// Add delete method mock to session
-			mockRequest.session.delete = createMockFn();
+		it('persists an invalidated session record (user: null) — not just an in-memory clear', async () => {
+			// Regression (F4): the real Harper session exposes only `.update` (a
+			// put to hdb_session), never `.delete`. Logout must persist a null-user
+			// record or the stored session keeps authenticating.
+			mockRequest.session.update = createMockFn();
 
 			const result = await handleLogout(mockRequest, mockHookManager, mockLogger);
 
 			assert.equal(result.status, 200);
 			assert.equal(result.body.message, 'Logged out successfully');
-
-			// Should call session.delete with session ID
-			assert.equal(mockRequest.session.delete.mock.calls.length, 1);
-			assert.equal(mockRequest.session.delete.mock.calls[0].arguments[0], 'session-123');
+			assert.equal(mockRequest.session.update.mock.calls.length, 1);
+			const persisted = mockRequest.session.update.mock.calls[0].arguments[0];
+			assert.equal(persisted.user, null, 'persists user: null so the next request is unauthenticated');
+			assert.equal(persisted.oauth, null);
+			assert.equal(persisted.oauthUser, null);
 		});
 
-		it('should handle session without delete function', async () => {
+		it('falls back to an in-memory clear when the session cannot persist (no update)', async () => {
 			mockRequest.session = {
 				user: 'test-user',
 				oauthUser: { username: 'test' },
@@ -1238,7 +1241,6 @@ describe('OAuth Handlers', () => {
 			const result = await handleLogout(mockRequest, mockHookManager, mockLogger);
 
 			assert.equal(result.status, 200);
-			// Falls back to clearing fields when delete method isn't available
 			assert.equal(mockRequest.session.user, null);
 			assert.equal(mockRequest.session.oauth, undefined);
 			assert.equal(mockRequest.session.oauthUser, undefined);
