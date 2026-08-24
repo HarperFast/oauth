@@ -18,6 +18,13 @@ import type {
 	OnLoginResultNeedsConfirmation,
 } from '../types.ts';
 import type { HookManager } from './hookManager.ts';
+import {
+	browserSecretMatches,
+	buildBrowserSecretCookie,
+	generateBrowserSecret,
+	hashBrowserSecret,
+	readBrowserSecret,
+} from './browserBinding.ts';
 
 /**
  * Sanitize a redirect parameter to prevent open redirect attacks
@@ -128,12 +135,22 @@ export async function handleLogin(
 	const referer = request.headers?.referer ? sanitizeRedirect(request.headers.referer) : undefined;
 	const originalUrl = redirectParam || referer || config.postLoginRedirect || '/';
 
+	// Browser binding: session binding (#185) covers flows started while logged
+	// in, but Harper 4 mints no session id for logged-out requests, leaving the
+	// primary login flow unprotected against login-CSRF.  One stable
+	// `__Host-oauth_browser` cookie per browser closes the gap: its hash is
+	// stored in the CSRF state and checked in the callback before any upstream
+	// call.  Max-Age is refreshed here so active browsers never silently expire.
+	const existingSecret = readBrowserSecret(request);
+	const browserSecret = existingSecret ?? generateBrowserSecret();
+
 	// Generate CSRF token with metadata
 	// Bind token to provider to prevent cross-provider CSRF attacks
 	const csrfToken = await provider.generateCSRFToken({
 		originalUrl,
 		sessionId: request.session?.id,
 		providerName, // Bind state token to this provider
+		browserNonceHash: hashBrowserSecret(browserSecret),
 	});
 
 	// Build authorization URL with CSRF token as state parameter
@@ -144,7 +161,8 @@ export async function handleLogin(
 	return {
 		status: 302,
 		headers: {
-			Location: authUrl,
+			'Location': authUrl,
+			'Set-Cookie': buildBrowserSecretCookie(browserSecret),
 		},
 	};
 }
@@ -169,7 +187,8 @@ export async function handleCallback(
 
 	// Handle OAuth errors from provider
 	if (error) {
-		logger?.error?.(`OAuth error: ${error} - ${errorDescription}`);
+		// JSON.stringify: CRLF-safe logging of browser-controlled params (CWE-117).
+		logger?.error?.(`OAuth error: ${JSON.stringify(error)} - ${JSON.stringify(errorDescription)}`);
 		const errorUrl = buildErrorRedirect(config.postLoginRedirect || '/', { error: 'oauth_failed', reason: error });
 		return {
 			status: 302,
@@ -245,6 +264,27 @@ export async function handleCallback(
 				Location: errorUrl,
 			},
 		};
+	}
+
+	// Browser binding (GHSA-xf67): session binding has nothing to check when the
+	// flow starts logged out (no session id).  The `__Host-oauth_browser` cookie
+	// closes that gap — handleLogin stores hash(secret) in the state; the
+	// callback must arrive in the same browser.  Enforced when the state carries
+	// the hash; pre-upgrade in-flight tokens (no hash) pass through.
+	if (tokenData.browserNonceHash) {
+		if (!browserSecretMatches(readBrowserSecret(request), tokenData.browserNonceHash)) {
+			logger?.warn?.(`OAuth callback: login browser binding mismatch (provider '${providerName}')`);
+			const errorUrl = buildErrorRedirect(tokenData.originalUrl || config.postLoginRedirect || '/', {
+				error: 'auth_failed',
+				reason: 'csrf',
+			});
+			return {
+				status: 302,
+				headers: {
+					Location: errorUrl,
+				},
+			};
+		}
 	}
 
 	try {

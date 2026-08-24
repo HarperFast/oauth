@@ -5,6 +5,11 @@
 import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { handleLogin, handleCallback, handleLogout, handleUserInfo, handleTestPage } from '../../dist/lib/handlers.js';
+import {
+	BROWSER_SECRET_COOKIE_NAME,
+	buildBrowserSecretCookie,
+	hashBrowserSecret,
+} from '../../dist/lib/browserBinding.js';
 import { createMockFn, createMockLogger } from '../helpers/mockFn.js';
 
 describe('OAuth Handlers', () => {
@@ -150,6 +155,41 @@ describe('OAuth Handlers', () => {
 
 			const csrfCall = mockProvider.generateCSRFToken.mock.calls[0];
 			assert.equal(csrfCall.arguments[0].sessionId, 'session-123');
+		});
+
+		it('mints a browser-binding secret: hash in the state token, stable secret in a __Host- cookie', async () => {
+			const result = await handleLogin(mockRequest, mockTarget, mockProvider, mockConfig, 'test-provider', mockLogger);
+
+			const meta = mockProvider.generateCSRFToken.mock.calls[0].arguments[0];
+			assert.ok(meta.browserNonceHash, 'secret hash stored in the state token');
+
+			const setCookie = result.headers['Set-Cookie'];
+			const [pair, ...attrs] = setCookie.split('; ');
+			const eq = pair.indexOf('=');
+			assert.equal(pair.slice(0, eq), BROWSER_SECRET_COOKIE_NAME, 'stable cookie name');
+			assert.equal(
+				hashBrowserSecret(pair.slice(eq + 1)),
+				meta.browserNonceHash,
+				'cookie value hashes to the bound hash'
+			);
+			for (const attr of ['Path=/', 'Secure', 'HttpOnly', 'SameSite=Lax']) {
+				assert.ok(attrs.includes(attr), `cookie carries ${attr}`);
+			}
+		});
+
+		it('reuses an existing browser secret cookie rather than generating a new one', async () => {
+			const existingSecret = 'existing-browser-secret-abc';
+			mockRequest.headers.cookie = buildBrowserSecretCookie(existingSecret).split(';')[0];
+
+			const result = await handleLogin(mockRequest, mockTarget, mockProvider, mockConfig, 'test-provider', mockLogger);
+
+			const meta = mockProvider.generateCSRFToken.mock.calls[0].arguments[0];
+			assert.equal(meta.browserNonceHash, hashBrowserSecret(existingSecret), 'reuses existing secret hash');
+
+			// The Set-Cookie refreshes the Max-Age on the same secret
+			const setCookie = result.headers['Set-Cookie'];
+			const [pair] = setCookie.split('; ');
+			assert.equal(pair.slice(pair.indexOf('=') + 1), existingSecret, 'cookie value unchanged');
 		});
 	});
 
@@ -982,6 +1022,98 @@ describe('OAuth Handlers', () => {
 		it('tolerates state tokens without a sessionId (pre-binding tokens)', async () => {
 			// The default mock tokenData carries no sessionId — enforcement is
 			// conditional on presence so in-flight logins across a deploy survive.
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				mockLogger
+			);
+
+			assert.equal(result.status, 302);
+			assert.equal(result.headers.Location, '/dashboard');
+		});
+	});
+
+	describe('handleCallback — login browser binding (GHSA-xf67)', () => {
+		const SECRET = 'login-binding-secret';
+
+		beforeEach(() => {
+			// Logged-out flow: no sessionId in the token (session binding has nothing
+			// to check — the exact gap the browser-secret cookie closes).
+			mockProvider.verifyCSRFToken = createMockFn(async () => ({
+				originalUrl: '/dashboard',
+				timestamp: Date.now(),
+				providerName: 'test-provider',
+				browserNonceHash: hashBrowserSecret(SECRET),
+			}));
+		});
+
+		it('completes when the callback arrives in the browser that initiated the login', async () => {
+			mockRequest.headers.cookie = buildBrowserSecretCookie(SECRET).split(';')[0];
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				mockLogger
+			);
+
+			assert.equal(result.status, 302);
+			assert.equal(result.headers.Location, '/dashboard');
+			assert.equal(mockProvider.exchangeCodeForToken.mock.calls.length, 1);
+		});
+
+		it('rejects when the binding cookie is missing — attacker-minted state in a victim browser', async () => {
+			delete mockRequest.headers.cookie;
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				mockLogger
+			);
+
+			assert.equal(result.status, 302);
+			assert.equal(result.headers.Location, '/dashboard?error=auth_failed&reason=csrf');
+			// Rejected before any upstream call or session write.
+			assert.equal(mockProvider.exchangeCodeForToken.mock.calls.length, 0);
+			assert.equal(mockRequest.session.update.mock.calls.length, 0);
+		});
+
+		it('rejects when the browser-secret cookie does not hash-match', async () => {
+			mockRequest.headers.cookie = buildBrowserSecretCookie('some-other-browser-secret').split(';')[0];
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				mockLogger
+			);
+
+			assert.equal(result.headers.Location, '/dashboard?error=auth_failed&reason=csrf');
+			assert.equal(mockProvider.exchangeCodeForToken.mock.calls.length, 0);
+		});
+
+		it('tolerates state tokens without a browserNonceHash (pre-upgrade in-flight logins)', async () => {
+			mockProvider.verifyCSRFToken = createMockFn(async () => ({
+				originalUrl: '/dashboard',
+				timestamp: Date.now(),
+				providerName: 'test-provider',
+			}));
+			delete mockRequest.headers.cookie;
+
 			const result = await handleCallback(
 				mockRequest,
 				mockTarget,
