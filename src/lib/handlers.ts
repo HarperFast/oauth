@@ -547,14 +547,24 @@ export async function handleCallback(
 export async function clearOAuthSession(session: any, logger?: Logger): Promise<void> {
 	if (!session) return;
 
-	if (typeof session.update === 'function') {
-		await session.update({ user: null, oauth: null, oauthUser: null });
+	// Only persist an invalidation when there is an EXISTING session to invalidate.
+	// Harper defines `.update` on every request — including anonymous, cookie-less
+	// ones — and calling it mints a fresh hdb_session row (new UUID + Set-Cookie),
+	// with no expiry when `authentication.cookieExpires` is unset. Guarding on
+	// `session.id` stops an unauthenticated POST /oauth/logout from spamming
+	// non-expiring rows.
+	if (session.id && typeof session.update === 'function') {
+		// Match Harper's own logout(): a full-replace put of `{ user: null }` clears
+		// the identity (unauthenticated on the next request) AND drops the oauth
+		// tokens — leaving them absent, not `null`, which keeps the `Session` type
+		// and the downstream `session.oauth === undefined` checks honest.
+		await session.update({ user: null });
 	} else {
-		// No persistence available (e.g. non-session transports / tests): clear in
-		// memory. Null (not delete) to match the persisted invalidation shape.
+		// No existing session / no persistence (anonymous logout, non-session
+		// transport, tests): clear in memory only.
 		session.user = null;
-		session.oauth = null;
-		session.oauthUser = null;
+		delete session.oauth;
+		delete session.oauthUser;
 	}
 
 	logger?.info?.('OAuth session cleared');

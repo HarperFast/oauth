@@ -1217,8 +1217,10 @@ describe('OAuth Handlers', () => {
 		it('persists an invalidated session record (user: null) — not just an in-memory clear', async () => {
 			// Regression (F4): the real Harper session exposes only `.update` (a
 			// put to hdb_session), never `.delete`. Logout must persist a null-user
-			// record or the stored session keeps authenticating.
-			mockRequest.session.update = createMockFn();
+			// record or the stored session keeps authenticating. `{ user: null }`
+			// mirrors Harper's own logout(); a full-replace put drops oauth/oauthUser
+			// (absent, not null — the `Session` type has no nullable oauth).
+			mockRequest.session.update = createMockFn(); // session already has id: 'session-123'
 
 			const result = await handleLogout(mockRequest, mockHookManager, mockLogger);
 
@@ -1226,13 +1228,28 @@ describe('OAuth Handlers', () => {
 			assert.equal(result.body.message, 'Logged out successfully');
 			assert.equal(mockRequest.session.update.mock.calls.length, 1);
 			const persisted = mockRequest.session.update.mock.calls[0].arguments[0];
-			assert.equal(persisted.user, null, 'persists user: null so the next request is unauthenticated');
-			assert.equal(persisted.oauth, null);
-			assert.equal(persisted.oauthUser, null);
+			assert.deepEqual(
+				persisted,
+				{ user: null },
+				'persists only { user: null } — oauth keys dropped by the full-replace put'
+			);
+		});
+
+		it('does NOT persist a row for an anonymous logout (session with .update but no id)', async () => {
+			// Harper defines `.update` on every request, including cookie-less ones,
+			// and calling it mints a fresh non-expiring hdb_session row. An
+			// unauthenticated POST /oauth/logout must not create session rows.
+			mockRequest.session = { update: createMockFn() }; // no id → nothing to invalidate
+
+			const result = await handleLogout(mockRequest, mockHookManager, mockLogger);
+
+			assert.equal(result.status, 200);
+			assert.equal(mockRequest.session.update.mock.calls.length, 0, 'no persistence for an anonymous logout');
 		});
 
 		it('falls back to an in-memory clear when the session cannot persist (no update)', async () => {
 			mockRequest.session = {
+				id: 'session-123',
 				user: 'test-user',
 				oauthUser: { username: 'test' },
 				oauth: { accessToken: 'token' },
@@ -1242,8 +1259,8 @@ describe('OAuth Handlers', () => {
 
 			assert.equal(result.status, 200);
 			assert.equal(mockRequest.session.user, null);
-			assert.equal(mockRequest.session.oauth, null);
-			assert.equal(mockRequest.session.oauthUser, null);
+			assert.equal(mockRequest.session.oauth, undefined);
+			assert.equal(mockRequest.session.oauthUser, undefined);
 		});
 
 		it('should handle missing session', async () => {

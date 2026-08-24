@@ -40,11 +40,12 @@ export interface OAuthValidationOptions {
 	 * - `!validation.valid` (expired token with no refresh token) —
 	 *   `validateAndRefreshSession` has ALREADY called
 	 *   `clearOAuthSession` internally before the callback runs. On a
-	 *   production Harper session this calls `session.delete(session.id)`
-	 *   (DB record destroyed; in-memory fields untouched). On a session
-	 *   without a `delete()` method it falls back to in-memory deletion
-	 *   of `.oauth` / `.oauthUser`. The callback is still invoked, but
-	 *   the session state it observes depends on which path ran.
+	 *   production Harper session this persists `session.update({ user: null })`
+	 *   (the hdb_session record survives but is invalidated — user null, oauth
+	 *   dropped; the in-memory `request.session` copy is untouched, so the
+	 *   callback still sees `.oauth` / `.oauthUser`). On a session with no
+	 *   `.update()` (or no id) it falls back to an in-memory clear. Either way
+	 *   the callback is still invoked.
 	 */
 	onValidationError?: (request: Request, error: string) => any;
 }
@@ -249,12 +250,12 @@ async function validateOAuthForRequest(context: MaybeContext, options: OAuthVali
  *   config issue.
  * - Expired-token path (`validateAndRefreshSession` returns
  *   `{valid: false}`): `validateAndRefreshSession` internally calls
- *   `clearOAuthSession`, which on a Harper production session
- *   invokes `session.delete(session.id)` — the DB record is destroyed.
- *   This is terminal: the user is logged out, not just detached from
- *   OAuth. `requireAuth: false` resources still receive the
- *   passthrough call, but they observe a session that is about to
- *   stop existing on the next request.
+ *   `clearOAuthSession`, which on a Harper production session persists
+ *   `session.update({ user: null })` — the hdb_session record survives but
+ *   is invalidated (user null, oauth dropped), so the next request resolves
+ *   to no user. This is terminal: the user is logged out, not just detached
+ *   from OAuth. `requireAuth: false` resources still receive the passthrough
+ *   call, but they observe a session that is invalidated for the next request.
  */
 export function withOAuthValidation<T extends abstract new (...args: any[]) => any>(
 	ResourceClass: T,

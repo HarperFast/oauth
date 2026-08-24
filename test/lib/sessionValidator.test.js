@@ -36,6 +36,7 @@ function createMockProvider(overrides = {}) {
  */
 function createMockSession(overrides = {}) {
 	const session = {
+		id: 'sess-validator', // an authenticated session has an id → clearOAuthSession persists via update
 		user: 'test@example.com',
 		oauthUser: {
 			username: 'test@example.com',
@@ -256,9 +257,10 @@ test('should logout when token expired and no refresh token', async () => {
 
 	assert.strictEqual(result.valid, false);
 	assert.strictEqual(result.error, 'Token expired and no refresh token available');
-	// Session is invalidated — clearOAuthSession persists { user: null, oauth: null }
-	assert.strictEqual(session.oauth, null);
+	// Session invalidated — clearOAuthSession persists { user: null }; the
+	// full-replace put drops oauth, so the reloaded record has no oauth.
 	assert.strictEqual(session.user, null);
+	assert.strictEqual(session.oauth, undefined);
 });
 
 test('should handle refresh failure for expired token', async () => {
@@ -280,8 +282,8 @@ test('should handle refresh failure for expired token', async () => {
 
 	assert.strictEqual(result.valid, false);
 	assert.ok(result.error.includes('Token refresh failed'));
-	// Session invalidated after failed refresh — persisted { user: null, oauth: null }
-	assert.strictEqual(session.oauth, null);
+	// Session invalidated after failed refresh — persisted { user: null }, oauth dropped
+	assert.strictEqual(session.oauth, undefined);
 });
 
 test('should not logout when refresh fails for non-expired token', async () => {
@@ -514,7 +516,7 @@ test('should logout when periodic validation fails (token revoked)', async () =>
 
 	assert.strictEqual(result.valid, false);
 	assert.strictEqual(result.error, 'Token validation failed - token may have been revoked');
-	assert.strictEqual(session.oauth, null, 'Session invalidated (user/oauth null) after validation failure');
+	assert.strictEqual(session.oauth, undefined, 'Session invalidated (oauth dropped) after validation failure');
 });
 
 test('should handle validation errors gracefully (network issues)', async () => {
