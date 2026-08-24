@@ -550,10 +550,11 @@ export async function clearOAuthSession(session: any, logger?: Logger): Promise<
 	if (typeof session.update === 'function') {
 		await session.update({ user: null, oauth: null, oauthUser: null });
 	} else {
-		// No persistence available (e.g. non-session transports / tests): clear in memory.
+		// No persistence available (e.g. non-session transports / tests): clear in
+		// memory. Null (not delete) to match the persisted invalidation shape.
 		session.user = null;
-		delete session.oauth;
-		delete session.oauthUser;
+		session.oauth = null;
+		session.oauthUser = null;
 	}
 
 	logger?.info?.('OAuth session cleared');

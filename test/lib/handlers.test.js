@@ -1242,8 +1242,8 @@ describe('OAuth Handlers', () => {
 
 			assert.equal(result.status, 200);
 			assert.equal(mockRequest.session.user, null);
-			assert.equal(mockRequest.session.oauth, undefined);
-			assert.equal(mockRequest.session.oauthUser, undefined);
+			assert.equal(mockRequest.session.oauth, null);
+			assert.equal(mockRequest.session.oauthUser, null);
 		});
 
 		it('should handle missing session', async () => {

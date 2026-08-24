@@ -1132,10 +1132,10 @@ describe('withOAuthValidation', () => {
 			assert.equal(result.status, 200, 'underlying method must run when requireAuth is false');
 			assert.equal(result.body.ran, true);
 			assert.equal(calls.length, 1);
-			// In the fallback path, clearOAuthSession clears the in-memory
-			// oauth fields directly, so the resource observes an empty session.
-			assert.equal(calls[0].oauthAfterValidate, undefined);
-			assert.equal(calls[0].oauthUserAfterValidate, undefined);
+			// In the fallback path, clearOAuthSession nulls the in-memory oauth
+			// fields (matching the persisted shape), so the resource observes them cleared.
+			assert.equal(calls[0].oauthAfterValidate, null);
+			assert.equal(calls[0].oauthUserAfterValidate, null);
 		});
 
 		it('production path (session has update): underlying method runs, invalidation persisted via update({user:null})', async () => {
