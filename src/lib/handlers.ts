@@ -553,6 +553,14 @@ export async function clearOAuthSession(session: any, logger?: Logger): Promise<
 	// with no expiry when `authentication.cookieExpires` is unset. Guarding on
 	// `session.id` stops an unauthenticated POST /oauth/logout from spamming
 	// non-expiring rows.
+	//
+	// `session.id` is the right signal here because every caller of this function
+	// (logout, validateAndRefreshSession, the provider-gone middleware) runs on a
+	// session LOADED FROM A COOKIE, which carries its id. Known limitation, not
+	// reachable via any OAuth flow today: a session created id-less earlier in the
+	// SAME request via a separate `update({...})` payload wouldn't expose an id
+	// here (Harper mints it onto the payload, not back onto request.session), so
+	// this would no-op. OAuth never creates-then-clears in one request.
 	if (session.id && typeof session.update === 'function') {
 		// Match Harper's own logout(): a full-replace put of `{ user: null }` clears
 		// the identity (unauthenticated on the next request) AND drops the oauth

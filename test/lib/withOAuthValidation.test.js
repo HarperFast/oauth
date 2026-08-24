@@ -57,12 +57,11 @@ describe('withOAuthValidation', () => {
 	}
 
 	function makeSession(overrides = {}) {
-		// IMPORTANT: this session has NO `delete()` method. That matters
-		// for tests that hit `clearOAuthSession` (e.g. expired-token
-		// paths): those tests exercise the in-memory fallback inside
-		// `clearOAuthSession`, not the production `session.delete(id)`
-		// path. For production-shaped behavior use
-		// `makeProductionLikeSession` below.
+		// Production-shaped: has an `id` and an `.update` (a persisting put), like a
+		// real cookie-loaded hdb_session. So `clearOAuthSession` takes the persist
+		// branch (`update({ user: null })`); the in-memory fallback only runs when a
+		// test strips `.update` (or the session has no id). `makeProductionLikeSession`
+		// below adds an `.update` spy for asserting the persisted invalidation.
 		return {
 			id: 'sess-1',
 			oauth: {
