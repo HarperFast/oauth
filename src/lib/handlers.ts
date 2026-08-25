@@ -353,7 +353,9 @@ export async function handleCallback(
 		if (isGatedLoginOutcome(hookData)) {
 			const denied = hookData.status === 'denied';
 			const reason = denied ? hookData.error : undefined;
-			logger?.info?.(`OAuth login ${denied ? 'denied' : 'deferred'} by onLogin hook for user: ${JSON.stringify(user.username)}`);
+			logger?.info?.(
+				`OAuth login ${denied ? 'denied' : 'deferred'} by onLogin hook for user: ${JSON.stringify(user.username)}`
+			);
 			if (hookData.redirect) {
 				return { status: 302, headers: { Location: resolveHookRedirect(hookData.redirect) } };
 			}
