@@ -62,6 +62,27 @@ describe('browserBinding', () => {
 			assert.equal(readBrowserSecret(request), secret);
 		});
 
+		it('reads the secret when .get() returns an array of cookie crumbs (HTTP/2 crumbling)', () => {
+			// Harper 4 Headers (extends Map; append with commaDelimited) can store
+			// repeated Cookie fields as string[] — the binding cookie may be in any crumb.
+			const secret = 'crumbled-secret';
+			const request = {
+				headers: {
+					get: (name) =>
+						name === 'cookie' ? ['session=abc', `${BROWSER_SECRET_COOKIE_NAME}=${secret}`, 'other=1'] : null,
+				},
+			};
+			assert.equal(readBrowserSecret(request), secret);
+		});
+
+		it('reads the secret from a plain-object headers.cookie array', () => {
+			const secret = 'plain-array-secret';
+			const request = {
+				headers: { cookie: [`other=x`, `${BROWSER_SECRET_COOKIE_NAME}=${secret}`] },
+			};
+			assert.equal(readBrowserSecret(request), secret);
+		});
+
 		it('returns undefined when the cookie is absent', () => {
 			assert.equal(readBrowserSecret({ headers: { cookie: 'other=value' } }), undefined);
 			assert.equal(readBrowserSecret({ headers: {} }), undefined);

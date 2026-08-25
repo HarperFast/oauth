@@ -255,6 +255,55 @@ describe('OAuth Handlers', () => {
 			assert.equal(result.headers.Location, '/dashboard?error=oauth_failed&reason=access_denied');
 		});
 
+		it('error= callback with a present state token consumes the token before returning (Fix 2)', async () => {
+			// State is present alongside the error — the token must be consumed
+			// (verifyCSRFToken called) so it cannot be replayed.
+			mockTarget.get = createMockFn((key) => {
+				if (key === 'error') return 'access_denied';
+				if (key === 'state') return 'csrf-token-123';
+				return null;
+			});
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				mockLogger
+			);
+
+			// verifyCSRFToken must have been called (state consumed / single-use enforced)
+			assert.equal(mockProvider.verifyCSRFToken.mock.calls.length, 1, 'state token must be consumed on error path');
+			assert.equal(result.status, 302);
+			// Redirect uses tokenData.originalUrl, not a hardcoded fallback
+			assert.ok(result.headers.Location.includes('error=oauth_failed'), 'error code surfaced');
+			assert.ok(result.headers.Location.includes('reason=access_denied'), 'reason surfaced');
+		});
+
+		it('error= callback without state does not attempt token verification', async () => {
+			// No state → no token to consume; must still redirect with the error reason.
+			mockTarget.get = createMockFn((key) => {
+				if (key === 'error') return 'server_error';
+				return null;
+			});
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				mockLogger
+			);
+
+			assert.equal(mockProvider.verifyCSRFToken.mock.calls.length, 0, 'no token to consume when state absent');
+			assert.equal(result.status, 302);
+			assert.ok(result.headers.Location.includes('error=oauth_failed'));
+		});
+
 		it('should handle missing code parameter', async () => {
 			mockTarget.get = createMockFn(() => null);
 
@@ -843,6 +892,50 @@ describe('OAuth Handlers', () => {
 				!mockLogger.warn.mock.calls.some((call) => String(call.arguments[0]).includes('unrecognized status')),
 				'recognized statuses must not warn'
 			);
+		});
+	});
+
+	describe('handleCallback — CRLF-safe username logging (Fix 3)', () => {
+		const callbackWith = (request, target) =>
+			handleCallback(request, target, mockProvider, mockConfig, mockHookManager, 'test-provider', mockLogger);
+
+		it('CRLF in username is JSON-encoded on the denied-login log line', async () => {
+			const maliciousUsername = 'admin\r\nX-Injected: evil';
+			mockProvider.mapUserToHarper = createMockFn(() => ({
+				username: maliciousUsername,
+				role: 'user',
+				email: 'x@x.com',
+				name: 'X',
+				provider: 'test',
+			}));
+			mockHookManager.callOnLogin = createMockFn(async () => ({ status: 'denied' }));
+
+			await callbackWith(mockRequest, mockTarget);
+
+			for (const call of mockLogger.info.mock.calls) {
+				const msg = String(call.arguments[0]);
+				assert.ok(!msg.includes('\r'), 'CR must not appear raw in log output');
+				assert.ok(!msg.includes('\n'), 'LF must not appear raw in log output');
+			}
+		});
+
+		it('CRLF in username is JSON-encoded on the successful-login log line', async () => {
+			const maliciousUsername = 'user\r\nX-Injected: evil';
+			mockProvider.mapUserToHarper = createMockFn(() => ({
+				username: maliciousUsername,
+				role: 'user',
+				email: 'u@u.com',
+				name: 'U',
+				provider: 'test',
+			}));
+
+			await callbackWith(mockRequest, mockTarget);
+
+			for (const call of mockLogger.info.mock.calls) {
+				const msg = String(call.arguments[0]);
+				assert.ok(!msg.includes('\r'), 'CR must not appear raw in log output');
+				assert.ok(!msg.includes('\n'), 'LF must not appear raw in log output');
+			}
 		});
 	});
 

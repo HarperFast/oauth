@@ -185,21 +185,20 @@ export async function handleCallback(
 	const error = target.get?.('error');
 	const errorDescription = target.get?.('error_description');
 
-	// Handle OAuth errors from provider
-	if (error) {
-		// JSON.stringify: CRLF-safe logging of browser-controlled params (CWE-117).
-		logger?.error?.(`OAuth error: ${JSON.stringify(error)} - ${JSON.stringify(errorDescription)}`);
-		const errorUrl = buildErrorRedirect(config.postLoginRedirect || '/', { error: 'oauth_failed', reason: error });
-		return {
-			status: 302,
-			headers: {
-				Location: errorUrl,
-			},
-		};
-	}
-
-	// Validate parameters
-	if (!code || !state) {
+	// Without state there is no token to consume; handle stateless error/missing
+	// params and return before attempting any token verification.
+	if (!state) {
+		if (error) {
+			// JSON.stringify: CRLF-safe logging of browser-controlled params (CWE-117).
+			logger?.error?.(`OAuth error: ${JSON.stringify(error)} - ${JSON.stringify(errorDescription)}`);
+			const errorUrl = buildErrorRedirect(config.postLoginRedirect || '/', { error: 'oauth_failed', reason: error });
+			return {
+				status: 302,
+				headers: {
+					Location: errorUrl,
+				},
+			};
+		}
 		logger?.warn?.('Missing required OAuth callback parameters');
 		const errorUrl = buildErrorRedirect(config.postLoginRedirect || '/', { error: 'invalid_request' });
 		return {
@@ -210,7 +209,10 @@ export async function handleCallback(
 		};
 	}
 
-	// Verify CSRF token
+	// Verify (and consume) CSRF token BEFORE handling any upstream error.
+	// Single-use-state: even an error callback must burn the state so the
+	// same state cannot be replayed.  Consuming on error is intentional —
+	// OAuth callbacks are not retried with the same state.
 	const tokenData = await provider.verifyCSRFToken(state);
 	if (!tokenData) {
 		logger?.warn?.('Invalid or expired CSRF token');
@@ -287,6 +289,36 @@ export async function handleCallback(
 		}
 	}
 
+	// Handle upstream IdP errors now that the state is consumed and all binding
+	// checks have passed.  Using tokenData.originalUrl here mirrors 2.x.
+	if (error) {
+		// JSON.stringify: CRLF-safe logging of browser-controlled params (CWE-117).
+		logger?.error?.(`OAuth error: ${JSON.stringify(error)} - ${JSON.stringify(errorDescription)}`);
+		const errorUrl = buildErrorRedirect(tokenData.originalUrl || config.postLoginRedirect || '/', {
+			error: 'oauth_failed',
+			reason: error,
+		});
+		return {
+			status: 302,
+			headers: {
+				Location: errorUrl,
+			},
+		};
+	}
+
+	if (!code) {
+		logger?.warn?.('Missing required OAuth callback parameters');
+		const errorUrl = buildErrorRedirect(tokenData.originalUrl || config.postLoginRedirect || '/', {
+			error: 'invalid_request',
+		});
+		return {
+			status: 302,
+			headers: {
+				Location: errorUrl,
+			},
+		};
+	}
+
 	try {
 		// Exchange code for tokens
 		const tokenResponse = await provider.exchangeCodeForToken(code, config.redirectUri || '');
@@ -321,7 +353,7 @@ export async function handleCallback(
 		if (isGatedLoginOutcome(hookData)) {
 			const denied = hookData.status === 'denied';
 			const reason = denied ? hookData.error : undefined;
-			logger?.info?.(`OAuth login ${denied ? 'denied' : 'deferred'} by onLogin hook for user: ${user.username}`);
+			logger?.info?.(`OAuth login ${denied ? 'denied' : 'deferred'} by onLogin hook for user: ${JSON.stringify(user.username)}`);
 			if (hookData.redirect) {
 				return { status: 302, headers: { Location: resolveHookRedirect(hookData.redirect) } };
 			}
@@ -394,7 +426,7 @@ export async function handleCallback(
 			}
 
 			logger?.info?.(
-				`OAuth login successful for user: ${user.username}${tokenResponse.expires_in ? `, token expires in ${tokenResponse.expires_in}s` : ', token does not expire'}`
+				`OAuth login successful for user: ${JSON.stringify(user.username)}${tokenResponse.expires_in ? `, token expires in ${tokenResponse.expires_in}s` : ', token does not expire'}`
 			);
 		} else {
 			logger?.warn?.('No session available for OAuth user');

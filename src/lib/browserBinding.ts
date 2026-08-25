@@ -51,15 +51,24 @@ export function buildBrowserSecretCookie(secret: string): string {
  * Read the Cookie header from a Harper 4 request.
  *
  * Harper 4 exposes `request.headers` as a custom Headers object with `.get()`.
+ * HTTP/2 crumbling (and transports that preserve repeated header fields as an
+ * array) can split Cookie across multiple values — join all crumbs so the
+ * binding cookie is found regardless of which crumb carries it.
  * Tests pass a plain object with a `.cookie` property.  Handle both.
  */
 function readCookieHeader(request: Request | undefined): string | undefined {
 	const headers = request?.headers as any;
 	if (!headers) return undefined;
 	// Harper 4 runtime: Headers object with .get()
-	if (typeof headers.get === 'function') return headers.get('cookie') ?? undefined;
+	if (typeof headers.get === 'function') {
+		const raw = headers.get('cookie');
+		if (raw == null) return undefined;
+		return Array.isArray(raw) ? raw.join('; ') : String(raw);
+	}
 	// Test doubles: plain object
-	return headers.cookie ?? undefined;
+	const raw = headers.cookie;
+	if (raw == null) return undefined;
+	return Array.isArray(raw) ? raw.join('; ') : String(raw);
 }
 
 /**
