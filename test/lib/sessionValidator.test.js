@@ -403,6 +403,55 @@ test('should perform periodic validation for non-expiring tokens', async () => {
 	assert.ok(session.oauth.lastValidated > Date.now() - 100, 'lastValidated timestamp should be updated');
 });
 
+test('should update lastValidated on a read-only tracked session.oauth without throwing', async () => {
+	let validationCalled = false;
+	const provider = createMockProvider({
+		config: {
+			...createMockProvider().config,
+			validateToken: async () => {
+				validationCalled = true;
+				return true;
+			},
+			tokenValidationInterval: 1000,
+		},
+	});
+
+	// A read-only, non-enumerable session.oauth reproduces Harper's v5 tracked object:
+	// in-place assignment throws and spread copies nothing.
+	const lastRefreshed = Date.now() - 5000;
+	const trackedFields = {
+		provider: 'github',
+		providerConfigId: 'github',
+		providerType: 'github',
+		accessToken: 'github_token',
+		refreshToken: undefined,
+		scope: 'repo read:org',
+		tokenType: 'bearer',
+		lastRefreshed,
+		lastValidated: Date.now() - 2000, // 2s ago, past the interval
+	};
+	const trackedOAuth = {};
+	for (const [key, value] of Object.entries(trackedFields)) {
+		Object.defineProperty(trackedOAuth, key, { value, writable: false, enumerable: false, configurable: false });
+	}
+	Object.freeze(trackedOAuth);
+
+	const session = createMockSession({ oauth: trackedOAuth });
+
+	const result = await validateAndRefreshSession({ session }, provider);
+
+	assert.strictEqual(result.valid, true);
+	assert.strictEqual(validationCalled, true, 'validateToken should have been called');
+	assert.ok(session.oauth.lastValidated > Date.now() - 100, 'lastValidated should advance (rebuilt, not mutated)');
+	assert.strictEqual(session.oauth.provider, 'github', 'provider preserved');
+	assert.strictEqual(session.oauth.providerConfigId, 'github', 'providerConfigId preserved');
+	assert.strictEqual(session.oauth.providerType, 'github', 'providerType preserved');
+	assert.strictEqual(session.oauth.accessToken, 'github_token', 'accessToken preserved');
+	assert.strictEqual(session.oauth.scope, 'repo read:org', 'scope preserved');
+	assert.strictEqual(session.oauth.tokenType, 'bearer', 'tokenType preserved');
+	assert.strictEqual(session.oauth.lastRefreshed, lastRefreshed, 'lastRefreshed preserved');
+});
+
 test('should skip validation when interval has not passed', async () => {
 	let validationCalled = false;
 	const provider = createMockProvider({
