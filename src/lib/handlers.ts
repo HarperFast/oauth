@@ -18,6 +18,13 @@ import type {
 	OnLoginResultNeedsConfirmation,
 } from '../types.ts';
 import type { HookManager } from './hookManager.ts';
+import {
+	browserSecretMatches,
+	buildBrowserSecretCookie,
+	generateBrowserSecret,
+	hashBrowserSecret,
+	readBrowserSecret,
+} from './browserBinding.ts';
 
 /**
  * Sanitize a redirect parameter to prevent open redirect attacks
@@ -128,12 +135,17 @@ export async function handleLogin(
 	const referer = request.headers?.referer ? sanitizeRedirect(request.headers.referer) : undefined;
 	const originalUrl = redirectParam || referer || config.postLoginRedirect || '/';
 
+	// Browser binding: read or mint the stable __Host- cookie; store its hash in the CSRF state.
+	const existingSecret = readBrowserSecret(request);
+	const browserSecret = existingSecret ?? generateBrowserSecret();
+
 	// Generate CSRF token with metadata
 	// Bind token to provider to prevent cross-provider CSRF attacks
 	const csrfToken = await provider.generateCSRFToken({
 		originalUrl,
 		sessionId: request.session?.id,
 		providerName, // Bind state token to this provider
+		browserNonceHash: hashBrowserSecret(browserSecret),
 	});
 
 	// Build authorization URL with CSRF token as state parameter
@@ -144,7 +156,8 @@ export async function handleLogin(
 	return {
 		status: 302,
 		headers: {
-			Location: authUrl,
+			'Location': authUrl,
+			'Set-Cookie': buildBrowserSecretCookie(browserSecret),
 		},
 	};
 }
@@ -167,20 +180,19 @@ export async function handleCallback(
 	const error = target.get?.('error');
 	const errorDescription = target.get?.('error_description');
 
-	// Handle OAuth errors from provider
-	if (error) {
-		logger?.error?.(`OAuth error: ${error} - ${errorDescription}`);
-		const errorUrl = buildErrorRedirect(config.postLoginRedirect || '/', { error: 'oauth_failed', reason: error });
-		return {
-			status: 302,
-			headers: {
-				Location: errorUrl,
-			},
-		};
-	}
-
-	// Validate parameters
-	if (!code || !state) {
+	// No state token: handle stateless errors and missing params without token verification.
+	if (!state) {
+		if (error) {
+			// JSON.stringify: CRLF-safe logging of browser-controlled params (CWE-117).
+			logger?.error?.(`OAuth error: ${JSON.stringify(error)} - ${JSON.stringify(errorDescription)}`);
+			const errorUrl = buildErrorRedirect(config.postLoginRedirect || '/', { error: 'oauth_failed', reason: error });
+			return {
+				status: 302,
+				headers: {
+					Location: errorUrl,
+				},
+			};
+		}
 		logger?.warn?.('Missing required OAuth callback parameters');
 		const errorUrl = buildErrorRedirect(config.postLoginRedirect || '/', { error: 'invalid_request' });
 		return {
@@ -191,7 +203,7 @@ export async function handleCallback(
 		};
 	}
 
-	// Verify CSRF token
+	// Consume the single-use state before handling any upstream error or binding check.
 	const tokenData = await provider.verifyCSRFToken(state);
 	if (!tokenData) {
 		logger?.warn?.('Invalid or expired CSRF token');
@@ -247,6 +259,52 @@ export async function handleCallback(
 		};
 	}
 
+	// Browser binding: verify the __Host- cookie hash before the code exchange; absent hash passes (pre-upgrade tokens).
+	if (tokenData.browserNonceHash) {
+		if (!browserSecretMatches(readBrowserSecret(request), tokenData.browserNonceHash)) {
+			logger?.warn?.(`OAuth callback: login browser binding mismatch (provider '${providerName}')`);
+			const errorUrl = buildErrorRedirect(tokenData.originalUrl || config.postLoginRedirect || '/', {
+				error: 'auth_failed',
+				reason: 'csrf',
+			});
+			return {
+				status: 302,
+				headers: {
+					Location: errorUrl,
+				},
+			};
+		}
+	}
+
+	// Handle provider errors after state consumption and binding verification.
+	if (error) {
+		// JSON.stringify: CRLF-safe logging of browser-controlled params (CWE-117).
+		logger?.error?.(`OAuth error: ${JSON.stringify(error)} - ${JSON.stringify(errorDescription)}`);
+		const errorUrl = buildErrorRedirect(tokenData.originalUrl || config.postLoginRedirect || '/', {
+			error: 'oauth_failed',
+			reason: error,
+		});
+		return {
+			status: 302,
+			headers: {
+				Location: errorUrl,
+			},
+		};
+	}
+
+	if (!code) {
+		logger?.warn?.('Missing required OAuth callback parameters');
+		const errorUrl = buildErrorRedirect(tokenData.originalUrl || config.postLoginRedirect || '/', {
+			error: 'invalid_request',
+		});
+		return {
+			status: 302,
+			headers: {
+				Location: errorUrl,
+			},
+		};
+	}
+
 	try {
 		// Exchange code for tokens
 		const tokenResponse = await provider.exchangeCodeForToken(code, config.redirectUri || '');
@@ -281,7 +339,9 @@ export async function handleCallback(
 		if (isGatedLoginOutcome(hookData)) {
 			const denied = hookData.status === 'denied';
 			const reason = denied ? hookData.error : undefined;
-			logger?.info?.(`OAuth login ${denied ? 'denied' : 'deferred'} by onLogin hook for user: ${user.username}`);
+			logger?.info?.(
+				`OAuth login ${denied ? 'denied' : 'deferred'} by onLogin hook for user: ${JSON.stringify(user.username)}`
+			);
 			if (hookData.redirect) {
 				return { status: 302, headers: { Location: resolveHookRedirect(hookData.redirect) } };
 			}
@@ -354,7 +414,7 @@ export async function handleCallback(
 			}
 
 			logger?.info?.(
-				`OAuth login successful for user: ${user.username}${tokenResponse.expires_in ? `, token expires in ${tokenResponse.expires_in}s` : ', token does not expire'}`
+				`OAuth login successful for user: ${JSON.stringify(user.username)}${tokenResponse.expires_in ? `, token expires in ${tokenResponse.expires_in}s` : ', token does not expire'}`
 			);
 		} else {
 			logger?.warn?.('No session available for OAuth user');
