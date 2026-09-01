@@ -84,9 +84,22 @@ export async function validateAndRefreshSession(
 					return { valid: false, error: 'Token validation failed - token may have been revoked' };
 				}
 
-				// Update last validated timestamp in session
-				oauthMetadata.lastValidated = now;
-				session.oauth = oauthMetadata;
+				// session.oauth is a Harper tracked object: its properties are read-only and
+				// spread copies nothing, so rebuild it explicitly (mirrors the refresh path
+				// below) instead of mutating in place, which throws on the frozen record.
+				session.oauth = {
+					provider: oauthMetadata.provider,
+					providerConfigId: oauthMetadata.providerConfigId,
+					providerType: oauthMetadata.providerType,
+					accessToken: oauthMetadata.accessToken,
+					refreshToken: oauthMetadata.refreshToken,
+					expiresAt: oauthMetadata.expiresAt,
+					refreshThreshold: oauthMetadata.refreshThreshold,
+					scope: oauthMetadata.scope,
+					tokenType: oauthMetadata.tokenType,
+					lastRefreshed: oauthMetadata.lastRefreshed,
+					lastValidated: now,
+				};
 
 				if (typeof session.update === 'function') {
 					await session.update(session);

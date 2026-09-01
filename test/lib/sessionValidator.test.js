@@ -403,6 +403,51 @@ test('should perform periodic validation for non-expiring tokens', async () => {
 	assert.ok(session.oauth.lastValidated > Date.now() - 100, 'lastValidated timestamp should be updated');
 });
 
+test('should update lastValidated on a read-only tracked session.oauth without throwing', async () => {
+	let validationCalled = false;
+	const provider = createMockProvider({
+		config: {
+			...createMockProvider().config,
+			validateToken: async () => {
+				validationCalled = true;
+				return true;
+			},
+			tokenValidationInterval: 1000,
+		},
+	});
+
+	// Simulate a Harper GenericTrackedObject: properties are read-only (in-place
+	// assignment throws) and non-enumerable (spread copies nothing), as production
+	// session.oauth is. On the pre-fix code this made line-88's mutation throw, the
+	// throw was swallowed, and lastValidated never advanced -> revalidation every request.
+	const trackedFields = {
+		provider: 'github',
+		providerConfigId: 'github',
+		providerType: 'github',
+		accessToken: 'github_token',
+		refreshToken: undefined,
+		lastValidated: Date.now() - 2000, // 2s ago, past the interval
+	};
+	const trackedOAuth = {};
+	for (const [key, value] of Object.entries(trackedFields)) {
+		Object.defineProperty(trackedOAuth, key, { value, writable: false, enumerable: false, configurable: false });
+	}
+	Object.freeze(trackedOAuth);
+
+	const session = createMockSession({ oauth: trackedOAuth });
+
+	const result = await validateAndRefreshSession({ session }, provider);
+
+	assert.strictEqual(result.valid, true);
+	assert.strictEqual(validationCalled, true, 'validateToken should have been called');
+	assert.ok(session.oauth.lastValidated > Date.now() - 100, 'lastValidated should advance (rebuilt, not mutated)');
+	// Guard the spread trap: rebuilding must copy every field explicitly.
+	assert.strictEqual(session.oauth.provider, 'github', 'provider preserved');
+	assert.strictEqual(session.oauth.providerConfigId, 'github', 'providerConfigId preserved');
+	assert.strictEqual(session.oauth.providerType, 'github', 'providerType preserved');
+	assert.strictEqual(session.oauth.accessToken, 'github_token', 'accessToken preserved');
+});
+
 test('should skip validation when interval has not passed', async () => {
 	let validationCalled = false;
 	const provider = createMockProvider({
