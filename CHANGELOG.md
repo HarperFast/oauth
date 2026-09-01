@@ -2,6 +2,12 @@
 
 All notable changes to `@harperfast/oauth` are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Entries prior to 2.2.0 were backfilled from the [GitHub release notes](https://github.com/HarperFast/oauth/releases).
 
+## [2.5.1] - 2026-09-01
+
+### Fixed
+
+- **Periodic OAuth token validation no longer throws on Harper v5 frozen sessions** (#222, #223): on Harper v5 the `session.oauth` record is a read-only tracked object, so the periodic-validation path's in-place `lastValidated` update threw `Cannot assign to read only property 'lastValidated'`, breaking long-lived (non-expiring, e.g. GitHub) OAuth sessions once the validation interval elapsed. `validateAndRefreshSession` now rebuilds `session.oauth` with the updated timestamp instead of mutating it in place — mirroring the token-refresh path — and preserves all token fields.
+
 ## [2.5.0] - 2026-08-13
 
 ### Security
