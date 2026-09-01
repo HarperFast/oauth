@@ -2,6 +2,16 @@
 
 Notable changes to the `@harperfast/oauth` **1.x maintenance line** are documented here, following [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). History prior to 1.6.0 lives in the [GitHub release notes](https://github.com/HarperFast/oauth/releases); the 2.x line has its own changelog on `main`.
 
+## [1.6.2] - 2026-09-01
+
+### Security
+
+- **Browser-initiated OAuth flows are bound to the initiating browser** (#215; backport of 2.x/#203, GHSA-xf67-jxfx-jf88): login mints a stable per-browser `__Host-oauth_browser` secret cookie whose SHA-256 hash travels in the CSRF state; the callback requires the cookie back (constant-time check) before any upstream code exchange, closing the login-CSRF / authorization-code-injection class for logged-out flows that the 1.6.1 state↔session binding could not cover. Hardening landed alongside: multi-crumb `Cookie` headers (HTTP/2) are joined before parsing, the single-use CSRF state is consumed even on provider-error callbacks, the cookie value is validated (bounded base64url) and the compare is guarded against non-string inputs, and browser-controlled values are CRLF-safe in logs. In-flight pre-upgrade logins (no hash in state) still complete, so a rolling deploy is safe. **⚠️ Requires HTTPS:** the `__Host-`/`Secure` cookie is dropped by browsers on plain-HTTP non-localhost origins, so OAuth must be served over TLS (or behind a TLS-terminating proxy) — otherwise every callback fails with `reason=csrf`.
+
+### Changed
+
+- **Peer range pinned to Harper 4** (#214): the `harperdb` peer dependency is now `>=4.6.0 <5.0.0`. The 1.x line targets Harper 4 only; Harper 5 ships as the separate `harper` package and is served by the 2.x line.
+
 ## [1.6.1] - 2026-07-20
 
 ### Security
