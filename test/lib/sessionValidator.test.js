@@ -257,8 +257,7 @@ test('should logout when token expired and no refresh token', async () => {
 
 	assert.strictEqual(result.valid, false);
 	assert.strictEqual(result.error, 'Token expired and no refresh token available');
-	// Session invalidated — clearOAuthSession persists { user: null }; the
-	// full-replace put drops oauth, so the reloaded record has no oauth.
+	// clearOAuthSession persisted { user: null }, dropping oauth.
 	assert.strictEqual(session.user, null);
 	assert.strictEqual(session.oauth, undefined);
 });

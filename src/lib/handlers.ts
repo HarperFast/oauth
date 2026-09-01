@@ -532,46 +532,20 @@ export async function handleCallback(
 }
 
 /**
- * Clear OAuth session data and log out the user.
- * Shared by explicit logout and automatic logout on token expiration.
- *
- * `request.session` is a shallow copy of the `hdb_session` record exposing only
- * `.update` (a full-replace `put` keyed on the session id) — it has NO `.delete`,
- * and mutating the copy in memory never persists. So we INVALIDATE by persisting
- * a null-user record via `.update`, mirroring Harper's own `logout()`: on the
- * next request `session.user` is null, so the bearer resolves to no user. The
- * previous code's `session.delete` branch never ran (no such method) and its
- * in-memory fallback left the stored `hdb_session` record fully valid — a
- * captured cookie (or an upstream-revoked account) kept authenticating.
+ * Clear OAuth session data and log out (explicit logout and token-expiry logout).
+ * Harper 5's request.session is a shallow copy with only `.update` (a full-replace put) and
+ * no `.delete`; in-memory mutation never persists — so invalidate by persisting `{ user: null }`,
+ * mirroring Harper's own logout().
  */
 export async function clearOAuthSession(session: any, logger?: Logger): Promise<void> {
 	if (!session) return;
 
-	// Only persist an invalidation when there is an EXISTING session to invalidate.
-	// Harper defines `.update` on every request — including anonymous, cookie-less
-	// ones — and calling it mints a fresh hdb_session row (new UUID + Set-Cookie),
-	// with no expiry when `authentication.cookieExpires` is unset. Guarding on
-	// `session.id` stops an unauthenticated POST /oauth/logout from spamming
-	// non-expiring rows.
-	//
-	// `session.id` is the right signal here because every caller of this function
-	// (logout, validateAndRefreshSession, the provider-gone middleware) runs on a
-	// session LOADED FROM A COOKIE, which carries its id. Known limitation, not
-	// reachable via any OAuth flow today: a session created id-less earlier in the
-	// SAME request via a separate `update({...})` payload wouldn't expose an id
-	// here (Harper mints it onto the payload, not back onto request.session), so
-	// this would no-op. OAuth never creates-then-clears in one request.
+	// Persist only for an existing session: `.update` on an anonymous request would mint a
+	// fresh, non-expiring hdb_session row.
 	if (session.id && typeof session.update === 'function') {
-		// Match Harper's own logout(): a full-replace put of `{ user: null }` clears
-		// the identity (unauthenticated on the next request) AND drops the oauth
-		// tokens — leaving them absent, not `null`, which keeps the `Session` type
-		// and the downstream `session.oauth === undefined` checks honest.
 		await session.update({ user: null });
 	}
-	// Always clear the in-memory copy so the current request no longer sees a
-	// valid identity (requireAuth:false resources / later middleware). The
-	// persisted row is already null via update() above when a session.id was present;
-	// this keeps the in-memory view consistent in every path.
+	// Clear in memory too so the current request sees no identity.
 	session.user = null;
 	delete session.oauth;
 	delete session.oauthUser;

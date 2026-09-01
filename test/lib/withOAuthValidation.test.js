@@ -57,11 +57,7 @@ describe('withOAuthValidation', () => {
 	}
 
 	function makeSession(overrides = {}) {
-		// Production-shaped: has an `id` and an `.update` (a persisting put), like a
-		// real cookie-loaded hdb_session. So `clearOAuthSession` takes the persist
-		// branch (`update({ user: null })`); the in-memory fallback only runs when a
-		// test strips `.update` (or the session has no id). `makeProductionLikeSession`
-		// below adds an `.update` spy for asserting the persisted invalidation.
+		// Typical authenticated session — id + update so clearOAuthSession takes the persist branch.
 		return {
 			id: 'sess-1',
 			oauth: {
@@ -76,9 +72,7 @@ describe('withOAuthValidation', () => {
 		};
 	}
 
-	// A Harper-production-shaped session: the real hdb_session record exposes
-	// only `.update` (a persisting put keyed on id), never `.delete`. Spy on it
-	// so tests can assert `clearOAuthSession` persists an invalidation.
+	// Spy on .update so tests can assert clearOAuthSession persisted { user: null }.
 	function makeProductionLikeSession(overrides = {}) {
 		const base = makeSession(overrides);
 		const updateCalls = [];
@@ -954,12 +948,7 @@ describe('withOAuthValidation', () => {
 		});
 
 		it('production-path session: callback sees cleared in-memory session after clearOAuthSession', async () => {
-			// `validateAndRefreshSession` calls `clearOAuthSession` before returning
-			// `{valid: false}`. clearOAuthSession now unconditionally clears the
-			// in-memory session fields (user=null, oauth/oauthUser deleted) AND
-			// persists via session.update({ user: null }) when session.id is present.
-			// The onValidationError callback therefore sees the session AFTER the
-			// in-memory clear — oauth and oauthUser are undefined.
+			// clearOAuthSession clears in-memory fields and persists — callback sees undefined oauth.
 			const session = makeProductionLikeSession({
 				oauth: {
 					provider: 'github',
@@ -1084,14 +1073,7 @@ describe('withOAuthValidation', () => {
 		// through to the underlying method, which runs with a session
 		// that's about to be (or has already been) cleaned up.
 		//
-		// `clearOAuthSession` has TWO code paths depending on whether the
-		// session provides an `update()` method:
-		//   - with `update`:  production path — persists an invalidated
-		//                     record (`user: null`) to hdb_session. The
-		//                     in-memory session object is NOT mutated.
-		//   - without:        in-memory fallback — clears `oauth`/`oauthUser`
-		//                     on the object directly (no persistence).
-		//
+		// clearOAuthSession takes the persist path when session.update exists, otherwise clears in-memory only.
 		// Both paths are exercised below so behavior is pinned down for
 		// integrators.
 
@@ -1107,8 +1089,7 @@ describe('withOAuthValidation', () => {
 					return { status: 200, body: { ran: true } };
 				}
 			}
-			// A session with NO update method (and no delete) — e.g. a
-			// non-session transport — exercises the in-memory fallback.
+			// No .update method — exercises the in-memory fallback.
 			const session = makeSession({
 				oauth: {
 					provider: 'github',
@@ -1131,8 +1112,7 @@ describe('withOAuthValidation', () => {
 			assert.equal(result.status, 200, 'underlying method must run when requireAuth is false');
 			assert.equal(result.body.ran, true);
 			assert.equal(calls.length, 1);
-			// In the fallback path, clearOAuthSession deletes the in-memory oauth
-			// fields, so the resource observes an empty session (undefined, not null).
+			// Fallback: oauth fields deleted in memory.
 			assert.equal(calls[0].oauthAfterValidate, undefined);
 			assert.equal(calls[0].oauthUserAfterValidate, undefined);
 		});
@@ -1141,9 +1121,6 @@ describe('withOAuthValidation', () => {
 			const calls = [];
 			class MyResource extends MockResource {
 				async get(target) {
-					// clearOAuthSession now always clears the in-memory session fields,
-					// so by the time the resource runs, oauth is undefined even on
-					// the production path.
 					calls.push({
 						target,
 						oauthAfterValidate: this._context.session.oauth,
