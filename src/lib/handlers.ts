@@ -567,13 +567,14 @@ export async function clearOAuthSession(session: any, logger?: Logger): Promise<
 		// tokens — leaving them absent, not `null`, which keeps the `Session` type
 		// and the downstream `session.oauth === undefined` checks honest.
 		await session.update({ user: null });
-	} else {
-		// No existing session / no persistence (anonymous logout, non-session
-		// transport, tests): clear in memory only.
-		session.user = null;
-		delete session.oauth;
-		delete session.oauthUser;
 	}
+	// Always clear the in-memory copy so the current request no longer sees a
+	// valid identity (requireAuth:false resources / later middleware). The
+	// persisted row is already null via update() above when a session.id was present;
+	// this keeps the in-memory view consistent in every path.
+	session.user = null;
+	delete session.oauth;
+	delete session.oauthUser;
 
 	logger?.info?.('OAuth session cleared');
 }

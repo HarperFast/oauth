@@ -953,14 +953,13 @@ describe('withOAuthValidation', () => {
 			assert.equal(calls.length, 0, 'protected method must NOT run — silent-bypass guard');
 		});
 
-		it('production-path session: callback sees full oauth data (not mutated by clearOAuthSession)', async () => {
-			// `validateAndRefreshSession` calls `clearOAuthSession` as a
-			// side effect before returning `{valid: false}`. In the
-			// production path `clearOAuthSession` persists an invalidation
-			// via `session.update({ user: null, ... })` and does NOT mutate
-			// the in-memory session object. So the `onValidationError`
-			// callback — invoked after that — still observes the full
-			// oauth/oauthUser data. Pin this behavior so it can't regress.
+		it('production-path session: callback sees cleared in-memory session after clearOAuthSession', async () => {
+			// `validateAndRefreshSession` calls `clearOAuthSession` before returning
+			// `{valid: false}`. clearOAuthSession now unconditionally clears the
+			// in-memory session fields (user=null, oauth/oauthUser deleted) AND
+			// persists via session.update({ user: null }) when session.id is present.
+			// The onValidationError callback therefore sees the session AFTER the
+			// in-memory clear — oauth and oauthUser are undefined.
 			const session = makeProductionLikeSession({
 				oauth: {
 					provider: 'github',
@@ -999,9 +998,10 @@ describe('withOAuthValidation', () => {
 
 			assert.equal(calls.length, 0, 'protected method must not run');
 			assert.equal(seen.length, 1);
-			assert.equal(seen[0].oauthProvider, 'github', 'oauth.provider must be readable in production path');
-			assert.equal(seen[0].oauthAccessToken, 'expired', 'oauth.accessToken must be readable in production path');
-			assert.equal(seen[0].oauthUserEmail, 'alice@example.com', 'oauthUser.email must be readable');
+			// In-memory fields are cleared before the callback runs
+			assert.equal(seen[0].oauthProvider, undefined, 'session.oauth is cleared in memory before callback');
+			assert.equal(seen[0].oauthAccessToken, undefined, 'session.oauth is cleared in memory before callback');
+			assert.equal(seen[0].oauthUserEmail, undefined, 'session.oauthUser is cleared in memory before callback');
 			assert.equal(session.__updateCalls.length, 1, 'clearOAuthSession persisted an invalidation via update');
 			assert.equal(session.__updateCalls[0].user, null, 'persisted user: null');
 		});
@@ -1137,15 +1137,13 @@ describe('withOAuthValidation', () => {
 			assert.equal(calls[0].oauthUserAfterValidate, undefined);
 		});
 
-		it('production path (session has update): underlying method runs, invalidation persisted via update({user:null})', async () => {
+		it('production path (session has update): underlying method runs, invalidation persisted and in-memory cleared', async () => {
 			const calls = [];
 			class MyResource extends MockResource {
 				async get(target) {
-					// In the production path, `clearOAuthSession` persists an
-					// invalidation via `session.update({ user: null, ... })` — it
-					// does NOT mutate the in-memory session object. So by the time
-					// the resource runs, the DB record is invalidated but the
-					// in-memory oauth fields may still be populated.
+					// clearOAuthSession now always clears the in-memory session fields,
+					// so by the time the resource runs, oauth is undefined even on
+					// the production path.
 					calls.push({
 						target,
 						oauthAfterValidate: this._context.session.oauth,
@@ -1181,11 +1179,11 @@ describe('withOAuthValidation', () => {
 				null,
 				'clearOAuthSession must persist user: null in the production path'
 			);
-			// The in-memory session object isn't mutated by the production path —
-			// documenting this so integrators know what the resource observes.
-			assert.ok(
-				calls[0].oauthAfterValidate !== undefined,
-				'production path does not mutate the in-memory session object'
+			// In-memory session is now cleared too — the resource sees oauth as undefined.
+			assert.equal(
+				calls[0].oauthAfterValidate,
+				undefined,
+				'in-memory oauth cleared so the current request sees no identity'
 			);
 		});
 	});

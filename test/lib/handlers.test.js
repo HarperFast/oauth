@@ -1235,6 +1235,31 @@ describe('OAuth Handlers', () => {
 			);
 		});
 
+		it('clears in-memory session fields on the production path so the current request sees no identity', async () => {
+			// Regression: before the fix, clearOAuthSession only cleared in-memory
+			// fields in the else branch. On the production path (session.id + update),
+			// update() persisted { user: null } to the DB but the in-memory session
+			// object still held the stale identity for the remainder of the request.
+			mockRequest.session = {
+				id: 'session-123',
+				update: createMockFn(),
+				user: { username: 'alice', role: 'superuser' },
+				oauth: { accessToken: 'tok-abc' },
+				oauthUser: { username: 'alice', provider: 'github' },
+			};
+
+			const result = await handleLogout(mockRequest, mockHookManager, mockLogger);
+
+			assert.equal(result.status, 200);
+			// update() must still have been called once with { user: null }
+			assert.equal(mockRequest.session.update.mock.calls.length, 1);
+			assert.deepEqual(mockRequest.session.update.mock.calls[0].arguments[0], { user: null });
+			// In-memory fields must be cleared so the current request sees no identity
+			assert.equal(mockRequest.session.user, null, 'session.user cleared in memory');
+			assert.equal(mockRequest.session.oauth, undefined, 'session.oauth deleted in memory');
+			assert.equal(mockRequest.session.oauthUser, undefined, 'session.oauthUser deleted in memory');
+		});
+
 		it('does NOT persist a row for an anonymous logout (session with .update but no id)', async () => {
 			// Harper defines `.update` on every request, including cookie-less ones,
 			// and calling it mints a fresh non-expiring hdb_session row. An

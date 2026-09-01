@@ -39,13 +39,12 @@ export interface OAuthValidationOptions {
 	 *   `request.session.oauth` and `.oauthUser` are readable.
 	 * - `!validation.valid` (expired token with no refresh token) —
 	 *   `validateAndRefreshSession` has ALREADY called
-	 *   `clearOAuthSession` internally before the callback runs. On a
-	 *   production Harper session this persists `session.update({ user: null })`
-	 *   (the hdb_session record survives but is invalidated — user null, oauth
-	 *   dropped; the in-memory `request.session` copy is untouched, so the
-	 *   callback still sees `.oauth` / `.oauthUser`). On a session with no
-	 *   `.update()` (or no id) it falls back to an in-memory clear. Either way
-	 *   the callback is still invoked.
+	 *   `clearOAuthSession` internally before the callback runs.
+	 *   `clearOAuthSession` always clears the in-memory session fields
+	 *   (`session.user = null`, `delete session.oauth`, `delete session.oauthUser`)
+	 *   and, when a session.id is present, also persists `session.update({ user: null })`
+	 *   to the DB. As a result, the callback sees `request.session.oauth` and
+	 *   `.oauthUser` as `undefined`. Either way the callback is still invoked.
 	 */
 	onValidationError?: (request: Request, error: string) => any;
 }
