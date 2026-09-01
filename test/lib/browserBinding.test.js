@@ -1,7 +1,4 @@
-/**
- * Tests for the browser-binding cookie helpers (GHSA-xf67 backport).
- */
-
+// Tests for the browser-binding cookie helpers.
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
@@ -63,8 +60,7 @@ describe('browserBinding', () => {
 		});
 
 		it('reads the secret when .get() returns an array of cookie crumbs (HTTP/2 crumbling)', () => {
-			// Harper 4 Headers (extends Map; append with commaDelimited) can store
-			// repeated Cookie fields as string[] — the binding cookie may be in any crumb.
+			// Harper 4 Headers can split Cookie across array crumbs — binding cookie may be in any.
 			const secret = 'crumbled-secret';
 			const request = {
 				headers: {
@@ -90,7 +86,6 @@ describe('browserBinding', () => {
 		});
 
 		it('returns the secret for a valid 43-char base64url value', () => {
-			// generateBrowserSecret() produces exactly 43 base64url chars from randomBytes(32)
 			const secret = generateBrowserSecret();
 			assert.equal(secret.length, 43);
 			assert.match(secret, /^[A-Za-z0-9_-]+$/);
@@ -130,7 +125,6 @@ describe('browserBinding', () => {
 
 		it('returns false without throwing when either argument is a non-string (number, object)', () => {
 			assert.doesNotThrow(() => {
-				// Cast to any to simulate unexpected runtime types reaching the function
 				assert.ok(!browserSecretMatches(/** @type {any} */ (42), hashBrowserSecret('x')));
 				assert.ok(!browserSecretMatches('x', /** @type {any} */ (42)));
 				assert.ok(!browserSecretMatches(/** @type {any} */ ({ valueOf: () => 'x' }), hashBrowserSecret('x')));

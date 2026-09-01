@@ -135,12 +135,7 @@ export async function handleLogin(
 	const referer = request.headers?.referer ? sanitizeRedirect(request.headers.referer) : undefined;
 	const originalUrl = redirectParam || referer || config.postLoginRedirect || '/';
 
-	// Browser binding: session binding (#185) covers flows started while logged
-	// in, but Harper 4 mints no session id for logged-out requests, leaving the
-	// primary login flow unprotected against login-CSRF.  One stable
-	// `__Host-oauth_browser` cookie per browser closes the gap: its hash is
-	// stored in the CSRF state and checked in the callback before any upstream
-	// call.  Max-Age is refreshed here so active browsers never silently expire.
+	// Browser binding: read or mint the stable __Host- cookie; store its hash in the CSRF state.
 	const existingSecret = readBrowserSecret(request);
 	const browserSecret = existingSecret ?? generateBrowserSecret();
 
@@ -185,8 +180,7 @@ export async function handleCallback(
 	const error = target.get?.('error');
 	const errorDescription = target.get?.('error_description');
 
-	// Without state there is no token to consume; handle stateless error/missing
-	// params and return before attempting any token verification.
+	// No state token: handle stateless errors and missing params without token verification.
 	if (!state) {
 		if (error) {
 			// JSON.stringify: CRLF-safe logging of browser-controlled params (CWE-117).
@@ -209,10 +203,7 @@ export async function handleCallback(
 		};
 	}
 
-	// Verify (and consume) CSRF token BEFORE handling any upstream error.
-	// Single-use-state: even an error callback must burn the state so the
-	// same state cannot be replayed.  Consuming on error is intentional —
-	// OAuth callbacks are not retried with the same state.
+	// Consume the single-use state before handling any upstream error or binding check.
 	const tokenData = await provider.verifyCSRFToken(state);
 	if (!tokenData) {
 		logger?.warn?.('Invalid or expired CSRF token');
@@ -268,11 +259,7 @@ export async function handleCallback(
 		};
 	}
 
-	// Browser binding (GHSA-xf67): session binding has nothing to check when the
-	// flow starts logged out (no session id).  The `__Host-oauth_browser` cookie
-	// closes that gap — handleLogin stores hash(secret) in the state; the
-	// callback must arrive in the same browser.  Enforced when the state carries
-	// the hash; pre-upgrade in-flight tokens (no hash) pass through.
+	// Browser binding: verify the __Host- cookie hash before the code exchange; absent hash passes (pre-upgrade tokens).
 	if (tokenData.browserNonceHash) {
 		if (!browserSecretMatches(readBrowserSecret(request), tokenData.browserNonceHash)) {
 			logger?.warn?.(`OAuth callback: login browser binding mismatch (provider '${providerName}')`);
@@ -289,8 +276,7 @@ export async function handleCallback(
 		}
 	}
 
-	// Handle upstream IdP errors now that the state is consumed and all binding
-	// checks have passed.  Using tokenData.originalUrl here mirrors 2.x.
+	// Handle provider errors after state consumption and binding verification.
 	if (error) {
 		// JSON.stringify: CRLF-safe logging of browser-controlled params (CWE-117).
 		logger?.error?.(`OAuth error: ${JSON.stringify(error)} - ${JSON.stringify(errorDescription)}`);

@@ -256,8 +256,7 @@ describe('OAuth Handlers', () => {
 		});
 
 		it('error= callback with a present state token consumes the token before returning (Fix 2)', async () => {
-			// State is present alongside the error — the token must be consumed
-			// (verifyCSRFToken called) so it cannot be replayed.
+			// state present: token must be consumed (single-use) even on error.
 			mockTarget.get = createMockFn((key) => {
 				if (key === 'error') return 'access_denied';
 				if (key === 'state') return 'csrf-token-123';
@@ -277,13 +276,12 @@ describe('OAuth Handlers', () => {
 			// verifyCSRFToken must have been called (state consumed / single-use enforced)
 			assert.equal(mockProvider.verifyCSRFToken.mock.calls.length, 1, 'state token must be consumed on error path');
 			assert.equal(result.status, 302);
-			// Redirect uses tokenData.originalUrl, not a hardcoded fallback
 			assert.ok(result.headers.Location.includes('error=oauth_failed'), 'error code surfaced');
 			assert.ok(result.headers.Location.includes('reason=access_denied'), 'reason surfaced');
 		});
 
 		it('error= callback without state does not attempt token verification', async () => {
-			// No state → no token to consume; must still redirect with the error reason.
+			// No state: no token to consume; must still redirect with the error reason.
 			mockTarget.get = createMockFn((key) => {
 				if (key === 'error') return 'server_error';
 				return null;
@@ -1134,8 +1132,7 @@ describe('OAuth Handlers', () => {
 		const SECRET = 'login-binding-secret';
 
 		beforeEach(() => {
-			// Logged-out flow: no sessionId in the token (session binding has nothing
-			// to check — the exact gap the browser-secret cookie closes).
+			// Logged-out flow: no sessionId in the token, so only browser binding applies.
 			mockProvider.verifyCSRFToken = createMockFn(async () => ({
 				originalUrl: '/dashboard',
 				timestamp: Date.now(),
