@@ -1214,22 +1214,58 @@ describe('OAuth Handlers', () => {
 	});
 
 	describe('handleLogout', () => {
-		it('should clear session data', async () => {
-			// Add delete method mock to session
-			mockRequest.session.delete = createMockFn();
+		it('persists an invalidated session record (user: null) — not just an in-memory clear', async () => {
+			// Regression (F4): Harper session exposes only .update, never .delete — logout must persist { user: null }.
+			mockRequest.session.update = createMockFn(); // session already has id: 'session-123'
 
 			const result = await handleLogout(mockRequest, mockHookManager, mockLogger);
 
 			assert.equal(result.status, 200);
 			assert.equal(result.body.message, 'Logged out successfully');
-
-			// Should call session.delete with session ID
-			assert.equal(mockRequest.session.delete.mock.calls.length, 1);
-			assert.equal(mockRequest.session.delete.mock.calls[0].arguments[0], 'session-123');
+			assert.equal(mockRequest.session.update.mock.calls.length, 1);
+			const persisted = mockRequest.session.update.mock.calls[0].arguments[0];
+			assert.deepEqual(
+				persisted,
+				{ user: null },
+				'persists only { user: null } — oauth keys dropped by the full-replace put'
+			);
 		});
 
-		it('should handle session without delete function', async () => {
+		it('clears in-memory session fields on the production path so the current request sees no identity', async () => {
+			// Production path must also clear in-memory so the current request sees no identity.
 			mockRequest.session = {
+				id: 'session-123',
+				update: createMockFn(),
+				user: { username: 'alice', role: 'superuser' },
+				oauth: { accessToken: 'tok-abc' },
+				oauthUser: { username: 'alice', provider: 'github' },
+			};
+
+			const result = await handleLogout(mockRequest, mockHookManager, mockLogger);
+
+			assert.equal(result.status, 200);
+			// update() must still have been called once with { user: null }
+			assert.equal(mockRequest.session.update.mock.calls.length, 1);
+			assert.deepEqual(mockRequest.session.update.mock.calls[0].arguments[0], { user: null });
+			// In-memory fields must be cleared so the current request sees no identity
+			assert.equal(mockRequest.session.user, null, 'session.user cleared in memory');
+			assert.equal(mockRequest.session.oauth, undefined, 'session.oauth deleted in memory');
+			assert.equal(mockRequest.session.oauthUser, undefined, 'session.oauthUser deleted in memory');
+		});
+
+		it('does NOT persist a row for an anonymous logout (session with .update but no id)', async () => {
+			// .update on an anonymous request mints a non-expiring hdb_session row — must not call it.
+			mockRequest.session = { update: createMockFn() }; // no id → nothing to invalidate
+
+			const result = await handleLogout(mockRequest, mockHookManager, mockLogger);
+
+			assert.equal(result.status, 200);
+			assert.equal(mockRequest.session.update.mock.calls.length, 0, 'no persistence for an anonymous logout');
+		});
+
+		it('falls back to an in-memory clear when the session cannot persist (no update)', async () => {
+			mockRequest.session = {
+				id: 'session-123',
 				user: 'test-user',
 				oauthUser: { username: 'test' },
 				oauth: { accessToken: 'token' },
@@ -1238,7 +1274,6 @@ describe('OAuth Handlers', () => {
 			const result = await handleLogout(mockRequest, mockHookManager, mockLogger);
 
 			assert.equal(result.status, 200);
-			// Falls back to clearing fields when delete method isn't available
 			assert.equal(mockRequest.session.user, null);
 			assert.equal(mockRequest.session.oauth, undefined);
 			assert.equal(mockRequest.session.oauthUser, undefined);

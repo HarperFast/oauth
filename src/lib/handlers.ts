@@ -532,25 +532,23 @@ export async function handleCallback(
 }
 
 /**
- * Clear OAuth session data and log out the user
- * Shared function for explicit logout and automatic logout on token expiration
- *
- * Deletes the session record from the hdb_session table, completely removing it
- * rather than just clearing the user field. This ensures no orphaned sessions remain.
+ * Clear OAuth session data and log out (explicit logout and token-expiry logout).
+ * Harper 5's request.session is a shallow copy with only `.update` (a full-replace put) and
+ * no `.delete`; in-memory mutation never persists — so invalidate by persisting `{ user: null }`,
+ * mirroring Harper's own logout().
  */
 export async function clearOAuthSession(session: any, logger?: Logger): Promise<void> {
 	if (!session) return;
 
-	// Delete the session record from the hdb_session table
-	// This completely removes the session on logout, rather than just nulling the user field
-	if (typeof session.delete === 'function') {
-		await session.delete(session.id);
-	} else {
-		// Fallback for sessions without delete method - clear in-memory
-		session.user = null;
-		delete session.oauth;
-		delete session.oauthUser;
+	// Persist only for an existing session: `.update` on an anonymous request would mint a
+	// fresh, non-expiring hdb_session row.
+	if (session.id && typeof session.update === 'function') {
+		await session.update({ user: null });
 	}
+	// Clear in memory too so the current request sees no identity.
+	session.user = null;
+	delete session.oauth;
+	delete session.oauthUser;
 
 	logger?.info?.('OAuth session cleared');
 }

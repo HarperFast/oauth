@@ -36,6 +36,7 @@ function createMockProvider(overrides = {}) {
  */
 function createMockSession(overrides = {}) {
 	const session = {
+		id: 'sess-validator', // an authenticated session has an id → clearOAuthSession persists via update
 		user: 'test@example.com',
 		oauthUser: {
 			username: 'test@example.com',
@@ -256,7 +257,8 @@ test('should logout when token expired and no refresh token', async () => {
 
 	assert.strictEqual(result.valid, false);
 	assert.strictEqual(result.error, 'Token expired and no refresh token available');
-	// Session should be cleared
+	// clearOAuthSession persisted { user: null }, dropping oauth.
+	assert.strictEqual(session.user, null);
 	assert.strictEqual(session.oauth, undefined);
 });
 
@@ -279,7 +281,7 @@ test('should handle refresh failure for expired token', async () => {
 
 	assert.strictEqual(result.valid, false);
 	assert.ok(result.error.includes('Token refresh failed'));
-	// Session should be cleared after failed refresh of expired token
+	// Session invalidated after failed refresh — persisted { user: null }, oauth dropped
 	assert.strictEqual(session.oauth, undefined);
 });
 
@@ -562,7 +564,7 @@ test('should logout when periodic validation fails (token revoked)', async () =>
 
 	assert.strictEqual(result.valid, false);
 	assert.strictEqual(result.error, 'Token validation failed - token may have been revoked');
-	assert.strictEqual(session.oauth, undefined, 'Session should be cleared after validation failure');
+	assert.strictEqual(session.oauth, undefined, 'Session invalidated (oauth dropped) after validation failure');
 });
 
 test('should handle validation errors gracefully (network issues)', async () => {
