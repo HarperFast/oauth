@@ -85,7 +85,8 @@ export function readBrowserSecret(request: Request | undefined): string | undefi
 		const eq = part.indexOf('=');
 		if (eq === -1) continue;
 		if (part.slice(0, eq).trim() === BROWSER_SECRET_COOKIE_NAME) {
-			return part.slice(eq + 1).trim() || undefined;
+			const value = part.slice(eq + 1).trim();
+			return /^[A-Za-z0-9_-]{1,64}$/.test(value) ? value : undefined;
 		}
 	}
 	return undefined;
@@ -93,7 +94,7 @@ export function readBrowserSecret(request: Request | undefined): string | undefi
 
 /** Constant-time check that `secret` hashes to `expectedHash`. */
 export function browserSecretMatches(secret: string | undefined, expectedHash: string | undefined): boolean {
-	if (!secret || !expectedHash) return false;
+	if (typeof secret !== 'string' || typeof expectedHash !== 'string' || !secret || !expectedHash) return false;
 	const actual = Buffer.from(hashBrowserSecret(secret));
 	const expected = Buffer.from(expectedHash);
 	return actual.length === expected.length && timingSafeEqual(actual, expected);

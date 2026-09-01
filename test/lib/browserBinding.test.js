@@ -88,6 +88,27 @@ describe('browserBinding', () => {
 			assert.equal(readBrowserSecret({ headers: {} }), undefined);
 			assert.equal(readBrowserSecret(undefined), undefined);
 		});
+
+		it('returns the secret for a valid 43-char base64url value', () => {
+			// generateBrowserSecret() produces exactly 43 base64url chars from randomBytes(32)
+			const secret = generateBrowserSecret();
+			assert.equal(secret.length, 43);
+			assert.match(secret, /^[A-Za-z0-9_-]+$/);
+			const request = { headers: { cookie: `${BROWSER_SECRET_COOKIE_NAME}=${secret}` } };
+			assert.equal(readBrowserSecret(request), secret);
+		});
+
+		it('returns undefined for a malformed cookie value (contains disallowed chars)', () => {
+			const malformed = 'abc!@#$%^&*()malformed value with spaces';
+			const request = { headers: { cookie: `${BROWSER_SECRET_COOKIE_NAME}=${malformed}` } };
+			assert.equal(readBrowserSecret(request), undefined);
+		});
+
+		it('returns undefined for an over-length cookie value (65+ chars)', () => {
+			const overLength = 'a'.repeat(65);
+			const request = { headers: { cookie: `${BROWSER_SECRET_COOKIE_NAME}=${overLength}` } };
+			assert.equal(readBrowserSecret(request), undefined);
+		});
 	});
 
 	describe('browserSecretMatches', () => {
@@ -105,6 +126,16 @@ describe('browserBinding', () => {
 			assert.ok(!browserSecretMatches(undefined, hashBrowserSecret('x')));
 			assert.ok(!browserSecretMatches('x', undefined));
 			assert.ok(!browserSecretMatches('', 'anyhash'));
+		});
+
+		it('returns false without throwing when either argument is a non-string (number, object)', () => {
+			assert.doesNotThrow(() => {
+				// Cast to any to simulate unexpected runtime types reaching the function
+				assert.ok(!browserSecretMatches(/** @type {any} */ (42), hashBrowserSecret('x')));
+				assert.ok(!browserSecretMatches('x', /** @type {any} */ (42)));
+				assert.ok(!browserSecretMatches(/** @type {any} */ ({ valueOf: () => 'x' }), hashBrowserSecret('x')));
+				assert.ok(!browserSecretMatches(/** @type {any} */ (null), hashBrowserSecret('x')));
+			});
 		});
 	});
 });
