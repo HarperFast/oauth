@@ -198,9 +198,13 @@ async function onLogin(
 **Parameters:**
 
 - `oauthUser` - OAuth user profile (username, email, name, role, `providerUserId`).
-  - `oauthUser.emailAuthenticated` is the signal to gate account adoption on: the plugin sets it `true` **only** when `email` is verified _and_ came from an authenticated source (a JWKS-signature-verified, issuer-validated OIDC id token, or GitHub's authenticated email fetch). This is the plugin's own trust determination — use it, not `emailVerified`, before returning `{ user }` for an **existing** account.
+  - `oauthUser.authEvidence` is the plugin's own trust determination — gate account adoption on it, not on `emailVerified`. It is attached only when an `onLogin` hook is registered, and is a frozen login-time snapshot with:
+    - `emailAuthenticated` — `true` only when `email` is verified **and** came from an authenticated source. The conservative one-line check for adopting an existing account.
+    - `emailProvenance` — `'signed-oidc'` (verified signature **and** validated issuer), `'github-authenticated'` (GitHub's authenticated email fetch), or `'unauthenticated'`. Normalized: a decoded-but-unverified id token is reported `'unauthenticated'`.
+    - `signatureVerified` / `issuerValidated` — id-token verification outcomes (`issuerValidated` means the `iss` matched _a_ configured issuer, not which one).
+    - `emailVerified` (`boolean | undefined`), `email` (the address the evidence describes — use it, not a later-mutated `oauthUser.email`), and `idTokenSubject` (present only when signature+issuer validated).
   - `oauthUser.emailVerified` mirrors the provider's `email_verified` claim and **is not proof of an authenticated source** — an unsigned UserInfo body can assert `email_verified: true`. It's a reasonable signal for provisioning a brand-new low-privilege account, never for adopting/elevating an existing one, and never a "not false" check.
-  - Returning `{ user }` is authoritative and bypasses the [account-adoption gate](./configuration.md#account-adoption-gate); for an existing account, require `emailAuthenticated === true` (or bind to `providerUserId` / a confirmation flow). Raw provider claims remain at `oauthUser.metadata.oauthClaims`.
+  - Returning `{ user }` is authoritative and bypasses the [account-adoption gate](./configuration.md#account-adoption-gate); for an existing account, require `authEvidence.emailAuthenticated === true` (or a policy over the evidence fields, e.g. binding on `authEvidence.idTokenSubject`). **Missing `authEvidence` means insufficient authentication — never fall back to `emailVerified`.** Raw provider claims remain at `oauthUser.metadata.oauthClaims`.
 - `tokenResponse` - Complete OAuth token response from provider
 - `session` - Current session object
 - `request` - HTTP request object
