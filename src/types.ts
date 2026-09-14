@@ -622,6 +622,40 @@ export interface GetUserInfoHelpers {
 }
 
 /**
+ * Normalized source of the email the plugin will trust:
+ *  - `signed-oidc`          — a JWKS-signature-verified id token whose issuer was validated.
+ *  - `github-authenticated` — GitHub's provider-authenticated `/user/emails` fetch.
+ *  - `unauthenticated`      — anything else (unsigned/decoded-only token, plain UserInfo).
+ * This is NORMALIZED: a decoded-but-unverified id token is reported `unauthenticated`, not
+ * `signed-oidc`, so consumers cannot over-trust it.
+ */
+export type EmailProvenance = 'signed-oidc' | 'github-authenticated' | 'unauthenticated';
+
+/**
+ * Plugin-computed evidence about how the login's email/identity was established,
+ * exposed to the `onLogin` hook (`oauthUser.authEvidence`) so a hook that adopts an
+ * existing Harper account can make the same trust decision the built-in gate makes.
+ * All fields describe the values actually checked at callback time; the object is
+ * frozen and a login-time snapshot (not refreshed, not durably immutable).
+ */
+export interface OAuthAuthEvidence {
+	/** Normalized email source — see {@link EmailProvenance}. */
+	emailProvenance: EmailProvenance;
+	/** The id token's JWKS signature was verified. */
+	signatureVerified: boolean;
+	/** The id token's `iss` matched a configured issuer (not which one — issuer may be a list). */
+	issuerValidated: boolean;
+	/** Provider `email_verified` for the standard email claim; `undefined` when unknown. */
+	emailVerified: boolean | undefined;
+	/** Conservative predicate: `emailVerified === true` AND `emailProvenance !== 'unauthenticated'`. */
+	emailAuthenticated: boolean;
+	/** The email this evidence describes (use it, not a later-mutated `oauthUser.email`). */
+	email: string | undefined;
+	/** The verified id token subject (only when signature+issuer validated), else `undefined`. */
+	idTokenSubject: string | undefined;
+}
+
+/**
  * OAuth User Object
  * Represents a user authenticated via OAuth
  */
@@ -642,14 +676,13 @@ export interface OAuthUser {
 	 */
 	emailVerified?: boolean;
 	/**
-	 * Plugin-computed: `true` only when `email` is verified AND came from an
-	 * authenticated source (a JWKS-signature-verified, issuer-validated OIDC id
-	 * token, or GitHub's authenticated email fetch). Unlike `emailVerified` — which
-	 * mirrors a provider claim an unsigned UserInfo body can assert — this reflects
-	 * the plugin's own trust determination. Gate account adoption in an `onLogin`
-	 * hook on this, not on `emailVerified` alone.
+	 * Plugin-computed authenticated-source evidence, attached only when an `onLogin`
+	 * hook is registered (non-enumerable, so it is not persisted into the session).
+	 * See {@link OAuthAuthEvidence}. A hook that adopts an existing account should gate
+	 * on `authEvidence.emailAuthenticated` (or a policy over the fields), never on
+	 * `emailVerified` alone; missing evidence means insufficient authentication.
 	 */
-	emailAuthenticated?: boolean;
+	authEvidence?: OAuthAuthEvidence;
 	name?: string;
 	/** Additional provider-specific data */
 	metadata?: Record<string, any>;

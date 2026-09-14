@@ -19,6 +19,8 @@ import type {
 	OnLoginResultDenied,
 	OnLoginResultNeedsConfirmation,
 	AuthTrust,
+	EmailProvenance,
+	OAuthAuthEvidence,
 } from '../types.ts';
 import {
 	browserSecretMatches,
@@ -426,13 +428,36 @@ export async function handleCallback(
 		// Map to Harper user
 		const user = provider.mapUserToHarper(userInfo);
 
-		// Expose the plugin's authenticated-source determination to the hook: true only
-		// when the email is verified AND came from a signed/authenticated source, so a
-		// hook can gate adoption on it instead of the spoofable emailVerified alone.
-		user.emailAuthenticated =
-			user.emailVerified === true &&
-			((emailProvenance === 'signed-oidc' && idTokenSignatureVerified && idTokenIssuerValidated) ||
-				(emailProvenance === 'github-authenticated' && config.provider === 'github'));
+		// Expose authenticated-source evidence to onLogin only (non-enumerable, so it is
+		// not persisted into the session). Normalize provenance: 'signed-oidc' requires a
+		// verified signature AND validated issuer — getUserInfo labels even a decoded-only
+		// token 'signed-oidc', which must not be exported as trusted.
+		if (hookManager.hasHook('onLogin')) {
+			const provenance: EmailProvenance =
+				emailProvenance === 'signed-oidc' && idTokenSignatureVerified && idTokenIssuerValidated
+					? 'signed-oidc'
+					: emailProvenance === 'github-authenticated' && config.provider === 'github'
+						? 'github-authenticated'
+						: 'unauthenticated';
+			const authEvidence: OAuthAuthEvidence = Object.freeze({
+				emailProvenance: provenance,
+				signatureVerified: idTokenSignatureVerified,
+				issuerValidated: idTokenIssuerValidated,
+				emailVerified: user.emailVerified,
+				emailAuthenticated: user.emailVerified === true && provenance !== 'unauthenticated',
+				email: user.email,
+				idTokenSubject:
+					idTokenSignatureVerified && idTokenIssuerValidated && idTokenClaims?.sub != null
+						? String(idTokenClaims.sub)
+						: undefined,
+			});
+			Object.defineProperty(user, 'authEvidence', {
+				value: authEvidence,
+				enumerable: false,
+				writable: false,
+				configurable: false,
+			});
+		}
 
 		// Call onLogin hook before storing session
 		// This allows user provisioning plugins to create/update user records

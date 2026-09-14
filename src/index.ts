@@ -29,6 +29,8 @@ export { OAuthResource } from './lib/resource.ts';
 export type {
 	OAuthHooks,
 	OAuthUser,
+	OAuthAuthEvidence,
+	EmailProvenance,
 	TokenResponse,
 	OnLoginResult,
 	OnLoginResultOk,
