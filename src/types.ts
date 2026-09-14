@@ -641,6 +641,15 @@ export interface OAuthUser {
 	 * gate on `emailVerified === true`, never on "not false".
 	 */
 	emailVerified?: boolean;
+	/**
+	 * Plugin-computed: `true` only when `email` is verified AND came from an
+	 * authenticated source (a JWKS-signature-verified, issuer-validated OIDC id
+	 * token, or GitHub's authenticated email fetch). Unlike `emailVerified` — which
+	 * mirrors a provider claim an unsigned UserInfo body can assert — this reflects
+	 * the plugin's own trust determination. Gate account adoption in an `onLogin`
+	 * hook on this, not on `emailVerified` alone.
+	 */
+	emailAuthenticated?: boolean;
 	name?: string;
 	/** Additional provider-specific data */
 	metadata?: Record<string, any>;

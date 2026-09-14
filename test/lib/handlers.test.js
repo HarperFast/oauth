@@ -352,6 +352,57 @@ describe('OAuth Handlers', () => {
 			assert.equal(mockProvider.verifyIdToken.mock.calls[0].arguments[0], 'id-token-jwt');
 		});
 
+		it('passes emailAuthenticated: true to onLogin for a signed, issuer-validated, verified email', async () => {
+			mockProvider.verifyIdToken = createMockFn(async () => ({
+				claims: { sub: 'user-123', email: 'user@example.com' },
+				signatureVerified: true,
+				issuerValidated: true,
+			}));
+			mockProvider.exchangeCodeForToken = createMockFn(async () => ({ access_token: 'at', id_token: 'jwt' }));
+			mockProvider.getUserInfo = createMockFn(async () => ({
+				sub: 'user-123',
+				email: 'user@example.com',
+				_emailProvenance: 'signed-oidc',
+			}));
+			mockProvider.mapUserToHarper = createMockFn(() => ({
+				username: 'user@example.com',
+				email: 'user@example.com',
+				emailVerified: true,
+				role: 'user',
+			}));
+
+			await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockHookManager, 'test-provider', {
+				logger: mockLogger,
+			});
+
+			const oauthUser = mockHookManager.callOnLogin.mock.calls[0].arguments[0];
+			assert.equal(oauthUser.emailAuthenticated, true);
+		});
+
+		it('passes emailAuthenticated: false to onLogin for an unauthenticated (userinfo) email even if emailVerified', async () => {
+			// No id token → userinfo path → provenance unauthenticated, so the hook must
+			// not be told the email is authenticated even though emailVerified is true.
+			mockProvider.exchangeCodeForToken = createMockFn(async () => ({ access_token: 'at' }));
+			mockProvider.getUserInfo = createMockFn(async () => ({
+				sub: 'user-123',
+				email: 'user@example.com',
+				_emailProvenance: 'unauthenticated',
+			}));
+			mockProvider.mapUserToHarper = createMockFn(() => ({
+				username: 'user@example.com',
+				email: 'user@example.com',
+				emailVerified: true,
+				role: 'user',
+			}));
+
+			await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockHookManager, 'test-provider', {
+				logger: mockLogger,
+			});
+
+			const oauthUser = mockHookManager.callOnLogin.mock.calls[0].arguments[0];
+			assert.equal(oauthUser.emailAuthenticated, false);
+		});
+
 		it('should handle ID token verification failure gracefully', async () => {
 			mockProvider.verifyIdToken = createMockFn(async () => {
 				throw new Error('Invalid signature');

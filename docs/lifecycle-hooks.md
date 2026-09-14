@@ -197,7 +197,10 @@ async function onLogin(
 
 **Parameters:**
 
-- `oauthUser` - OAuth user profile (username, email, name, role). `oauthUser.emailVerified` mirrors the provider's `email_verified` claim (`true`/`false`, or `undefined` when absent). **It is not proof the email came from a cryptographically authenticated source** — an unsigned UserInfo body can assert `email_verified: true`, and a hook cannot currently distinguish that from a JWKS-signed token. So do **not** adopt or elevate an existing privileged account on `emailVerified === true` alone: for that, either let the built-in [account-adoption gate](./configuration.md#account-adoption-gate) decide (don't return `{ user }` for an untrusted claim), or bind to a stable provider identity you control. `emailVerified === true` is a reasonable signal for provisioning a brand-new low-privilege account, never a "not false" check. (Raw provider claims remain at `oauthUser.metadata.oauthClaims`; exposing the plugin's own authenticated-source provenance to hooks is tracked as a follow-up.)
+- `oauthUser` - OAuth user profile (username, email, name, role, `providerUserId`).
+  - `oauthUser.emailAuthenticated` is the signal to gate account adoption on: the plugin sets it `true` **only** when `email` is verified _and_ came from an authenticated source (a JWKS-signature-verified, issuer-validated OIDC id token, or GitHub's authenticated email fetch). This is the plugin's own trust determination — use it, not `emailVerified`, before returning `{ user }` for an **existing** account.
+  - `oauthUser.emailVerified` mirrors the provider's `email_verified` claim and **is not proof of an authenticated source** — an unsigned UserInfo body can assert `email_verified: true`. It's a reasonable signal for provisioning a brand-new low-privilege account, never for adopting/elevating an existing one, and never a "not false" check.
+  - Returning `{ user }` is authoritative and bypasses the [account-adoption gate](./configuration.md#account-adoption-gate); for an existing account, require `emailAuthenticated === true` (or bind to `providerUserId` / a confirmation flow). Raw provider claims remain at `oauthUser.metadata.oauthClaims`.
 - `tokenResponse` - Complete OAuth token response from provider
 - `session` - Current session object
 - `request` - HTTP request object

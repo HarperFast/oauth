@@ -426,6 +426,14 @@ export async function handleCallback(
 		// Map to Harper user
 		const user = provider.mapUserToHarper(userInfo);
 
+		// Expose the plugin's authenticated-source determination to the hook: true only
+		// when the email is verified AND came from a signed/authenticated source, so a
+		// hook can gate adoption on it instead of the spoofable emailVerified alone.
+		user.emailAuthenticated =
+			user.emailVerified === true &&
+			((emailProvenance === 'signed-oidc' && idTokenSignatureVerified && idTokenIssuerValidated) ||
+				(emailProvenance === 'github-authenticated' && config.provider === 'github'));
+
 		// Call onLogin hook before storing session
 		// This allows user provisioning plugins to create/update user records
 		// Pass providerName (registry key) not config.provider (provider type) for multi-tenant support
