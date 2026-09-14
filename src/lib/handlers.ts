@@ -439,17 +439,24 @@ export async function handleCallback(
 					: emailProvenance === 'github-authenticated' && config.provider === 'github'
 						? 'github-authenticated'
 						: 'unauthenticated';
+			const idTokenVerified = idTokenSignatureVerified && idTokenIssuerValidated;
+			const toIdString = (v: unknown): string | undefined =>
+				typeof v === 'string' ? v : typeof v === 'number' ? String(v) : undefined;
 			const authEvidence: OAuthAuthEvidence = Object.freeze({
 				emailProvenance: provenance,
 				signatureVerified: idTokenSignatureVerified,
 				issuerValidated: idTokenIssuerValidated,
 				emailVerified: user.emailVerified,
-				emailAuthenticated: user.emailVerified === true && provenance !== 'unauthenticated',
+				// Attests a usable email from an authenticated source — never the username,
+				// which may be a reassignable handle.
+				emailAuthenticated:
+					typeof user.email === 'string' &&
+					user.email !== '' &&
+					user.emailVerified === true &&
+					provenance !== 'unauthenticated',
 				email: user.email,
-				idTokenSubject:
-					idTokenSignatureVerified && idTokenIssuerValidated && idTokenClaims?.sub != null
-						? String(idTokenClaims.sub)
-						: undefined,
+				idTokenIssuer: idTokenVerified ? toIdString(idTokenClaims?.iss) : undefined,
+				idTokenSubject: idTokenVerified ? toIdString(idTokenClaims?.sub) : undefined,
 			});
 			Object.defineProperty(user, 'authEvidence', {
 				value: authEvidence,

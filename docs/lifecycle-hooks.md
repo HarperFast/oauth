@@ -198,13 +198,14 @@ async function onLogin(
 **Parameters:**
 
 - `oauthUser` - OAuth user profile (username, email, name, role, `providerUserId`).
-  - `oauthUser.authEvidence` is the plugin's own trust determination — gate account adoption on it, not on `emailVerified`. It is attached only when an `onLogin` hook is registered, and is a frozen login-time snapshot with:
-    - `emailAuthenticated` — `true` only when `email` is verified **and** came from an authenticated source. The conservative one-line check for adopting an existing account.
+  - `oauthUser.authEvidence` is the plugin's own trust determination — base account adoption on it, not on `emailVerified`. It is attached only when an `onLogin` hook is registered, and is a frozen login-time snapshot with:
+    - `emailAuthenticated` — `true` only when there is a **usable, verified email from an authenticated source**. It attests `authEvidence.email` — **not `oauthUser.username`**, which may be a reassignable handle (e.g. Okta `preferred_username`, GitHub `login`). So when it is `true`, adopt the account you resolve **from `authEvidence.email`**, never `{ user: oauthUser.username }`.
     - `emailProvenance` — `'signed-oidc'` (verified signature **and** validated issuer), `'github-authenticated'` (GitHub's authenticated email fetch), or `'unauthenticated'`. Normalized: a decoded-but-unverified id token is reported `'unauthenticated'`.
-    - `signatureVerified` / `issuerValidated` — id-token verification outcomes (`issuerValidated` means the `iss` matched _a_ configured issuer, not which one).
-    - `emailVerified` (`boolean | undefined`), `email` (the address the evidence describes — use it, not a later-mutated `oauthUser.email`), and `idTokenSubject` (present only when signature+issuer validated).
+    - `signatureVerified` / `issuerValidated` — id-token verification outcomes. `issuerValidated` means the `iss` matched _a_ configured issuer; **which** one is `idTokenIssuer`.
+    - `idTokenIssuer` / `idTokenSubject` — the validated issuer and subject (both present only when signature+issuer verified). To bind by stable identity, key on the **pair** `(idTokenIssuer, idTokenSubject)` — `idTokenSubject` alone is not unique when a provider config lists multiple issuers.
+    - `emailVerified` (`boolean | undefined`) and `email` (the address the evidence describes — use it, not a later-mutated `oauthUser.email`).
   - `oauthUser.emailVerified` mirrors the provider's `email_verified` claim and **is not proof of an authenticated source** — an unsigned UserInfo body can assert `email_verified: true`. It's a reasonable signal for provisioning a brand-new low-privilege account, never for adopting/elevating an existing one, and never a "not false" check.
-  - Returning `{ user }` is authoritative and bypasses the [account-adoption gate](./configuration.md#account-adoption-gate); for an existing account, require `authEvidence.emailAuthenticated === true` (or a policy over the evidence fields, e.g. binding on `authEvidence.idTokenSubject`). **Missing `authEvidence` means insufficient authentication — never fall back to `emailVerified`.** Raw provider claims remain at `oauthUser.metadata.oauthClaims`.
+  - Returning `{ user }` is authoritative and bypasses the [account-adoption gate](./configuration.md#account-adoption-gate); for an existing account, resolve it from `authEvidence.email` when `emailAuthenticated === true`, or bind on `(authEvidence.idTokenIssuer, authEvidence.idTokenSubject)`. **Missing `authEvidence` means insufficient authentication — never fall back to `emailVerified`.** Raw provider claims remain at `oauthUser.metadata.oauthClaims`.
 - `tokenResponse` - Complete OAuth token response from provider
 - `session` - Current session object
 - `request` - HTTP request object

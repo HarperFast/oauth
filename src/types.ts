@@ -633,26 +633,33 @@ export type EmailProvenance = 'signed-oidc' | 'github-authenticated' | 'unauthen
 
 /**
  * Plugin-computed evidence about how the login's email/identity was established,
- * exposed to the `onLogin` hook (`oauthUser.authEvidence`) so a hook that adopts an
- * existing Harper account can make the same trust decision the built-in gate makes.
- * All fields describe the values actually checked at callback time; the object is
- * frozen and a login-time snapshot (not refreshed, not durably immutable).
+ * exposed to the `onLogin` hook (`oauthUser.authEvidence`) so a hook can decide whether
+ * to trust the login before adopting an existing Harper account. The built-in gate is
+ * unchanged and decides independently. Fields describe the values actually checked at
+ * callback time; the object is a frozen login-time snapshot (not refreshed).
  */
 export interface OAuthAuthEvidence {
 	/** Normalized email source — see {@link EmailProvenance}. */
-	emailProvenance: EmailProvenance;
+	readonly emailProvenance: EmailProvenance;
 	/** The id token's JWKS signature was verified. */
-	signatureVerified: boolean;
-	/** The id token's `iss` matched a configured issuer (not which one — issuer may be a list). */
-	issuerValidated: boolean;
+	readonly signatureVerified: boolean;
+	/** An `iss` matched a configured issuer; the one that matched is {@link idTokenIssuer}. */
+	readonly issuerValidated: boolean;
 	/** Provider `email_verified` for the standard email claim; `undefined` when unknown. */
-	emailVerified: boolean | undefined;
-	/** Conservative predicate: `emailVerified === true` AND `emailProvenance !== 'unauthenticated'`. */
-	emailAuthenticated: boolean;
-	/** The email this evidence describes (use it, not a later-mutated `oauthUser.email`). */
-	email: string | undefined;
+	readonly emailVerified: boolean | undefined;
+	/**
+	 * Attests {@link email}: `true` only when a usable verified email came from an
+	 * authenticated source. It says nothing about `oauthUser.username`, which may be a
+	 * reassignable handle — adopt the account you resolve from `email` (or from the
+	 * `idTokenIssuer`+`idTokenSubject` pair), never from the username on this alone.
+	 */
+	readonly emailAuthenticated: boolean;
+	/** The verified email this evidence describes (use it, not a later-mutated `oauthUser.email`). */
+	readonly email: string | undefined;
+	/** The validated id token issuer (`iss`) — pair with {@link idTokenSubject}; else `undefined`. */
+	readonly idTokenIssuer: string | undefined;
 	/** The verified id token subject (only when signature+issuer validated), else `undefined`. */
-	idTokenSubject: string | undefined;
+	readonly idTokenSubject: string | undefined;
 }
 
 /**
