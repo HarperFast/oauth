@@ -654,7 +654,10 @@ export interface OAuthAuthEvidence {
 	 * `idTokenIssuer`+`idTokenSubject` pair), never from the username on this alone.
 	 */
 	readonly emailAuthenticated: boolean;
-	/** The verified email this evidence describes (use it, not a later-mutated `oauthUser.email`). */
+	/**
+	 * The email this evidence describes — verified only when `emailAuthenticated` is `true`
+	 * (it is populated regardless of trust). Use it, not a later-mutated `oauthUser.email`.
+	 */
 	readonly email: string | undefined;
 	/** The validated id token issuer (`iss`) — pair with {@link idTokenSubject}; else `undefined`. */
 	readonly idTokenIssuer: string | undefined;
@@ -689,7 +692,7 @@ export interface OAuthUser {
 	 * on `authEvidence.emailAuthenticated` (or a policy over the fields), never on
 	 * `emailVerified` alone; missing evidence means insufficient authentication.
 	 */
-	authEvidence?: OAuthAuthEvidence;
+	readonly authEvidence?: OAuthAuthEvidence;
 	name?: string;
 	/** Additional provider-specific data */
 	metadata?: Record<string, any>;
