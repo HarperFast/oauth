@@ -23,6 +23,7 @@ describe('OAuth Handlers', () => {
 			callOnLogin: createMockFn(async () => {}),
 			callOnLogout: createMockFn(async () => {}),
 			callOnTokenRefresh: createMockFn(async () => {}),
+			hasHook: createMockFn(() => true),
 		};
 
 		mockConfig = {
@@ -350,6 +351,221 @@ describe('OAuth Handlers', () => {
 
 			assert.equal(mockProvider.verifyIdToken.mock.calls.length, 1);
 			assert.equal(mockProvider.verifyIdToken.mock.calls[0].arguments[0], 'id-token-jwt');
+		});
+
+		// authEvidence exposed to onLogin — mapUserToHarper is mocked to return a verified
+		// email; the signal must come from token verification + provenance, not that alone.
+		function stubEmail(mockedEmailVerified = true) {
+			mockProvider.mapUserToHarper = createMockFn(() => ({
+				username: 'user@example.com',
+				email: 'user@example.com',
+				emailVerified: mockedEmailVerified,
+				role: 'user',
+			}));
+		}
+		const evidenceFromHook = () => mockHookManager.callOnLogin.mock.calls[0].arguments[0].authEvidence;
+
+		it('authEvidence: signed + issuer-validated + verified email → emailAuthenticated true, signed-oidc, idTokenSubject set', async () => {
+			mockProvider.verifyIdToken = createMockFn(async () => ({
+				claims: { sub: 'user-123', iss: 'https://idp.example.com', email: 'user@example.com' },
+				signatureVerified: true,
+				issuerValidated: true,
+			}));
+			mockProvider.exchangeCodeForToken = createMockFn(async () => ({ access_token: 'at', id_token: 'jwt' }));
+			mockProvider.getUserInfo = createMockFn(async () => ({
+				email: 'user@example.com',
+				_emailProvenance: 'signed-oidc',
+			}));
+			stubEmail();
+
+			await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockHookManager, 'test-provider', {
+				logger: mockLogger,
+			});
+
+			const e = evidenceFromHook();
+			assert.equal(e.emailProvenance, 'signed-oidc');
+			assert.equal(e.emailAuthenticated, true);
+			assert.equal(e.signatureVerified, true);
+			assert.equal(e.issuerValidated, true);
+			assert.equal(e.email, 'user@example.com');
+			assert.equal(e.idTokenSubject, 'user-123');
+			assert.equal(e.idTokenIssuer, 'https://idp.example.com');
+		});
+
+		it('authEvidence: NORMALIZES an unsigned id token (getUserInfo says signed-oidc but signature unverified) to unauthenticated', async () => {
+			mockProvider.verifyIdToken = createMockFn(async () => ({
+				claims: { sub: 'user-123' },
+				signatureVerified: false,
+				issuerValidated: false,
+			}));
+			mockProvider.exchangeCodeForToken = createMockFn(async () => ({ access_token: 'at', id_token: 'jwt' }));
+			mockProvider.getUserInfo = createMockFn(async () => ({
+				email: 'user@example.com',
+				_emailProvenance: 'signed-oidc',
+			}));
+			stubEmail();
+
+			await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockHookManager, 'test-provider', {
+				logger: mockLogger,
+			});
+
+			const e = evidenceFromHook();
+			assert.equal(
+				e.emailProvenance,
+				'unauthenticated',
+				'decoded-but-unverified token must not be labelled signed-oidc'
+			);
+			assert.equal(e.emailAuthenticated, false);
+			assert.equal(e.idTokenSubject, undefined);
+		});
+
+		it('authEvidence: github-authenticated + verified email → emailAuthenticated true even without id-token flags', async () => {
+			mockProvider.exchangeCodeForToken = createMockFn(async () => ({ access_token: 'at' }));
+			mockProvider.getUserInfo = createMockFn(async () => ({
+				email: 'user@example.com',
+				_emailProvenance: 'github-authenticated',
+			}));
+			stubEmail();
+
+			await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				{ ...mockConfig, provider: 'github' },
+				mockHookManager,
+				'test-provider',
+				{ logger: mockLogger }
+			);
+
+			const e = evidenceFromHook();
+			assert.equal(e.emailProvenance, 'github-authenticated');
+			assert.equal(e.emailAuthenticated, true);
+			assert.equal(e.signatureVerified, false);
+		});
+
+		it('authEvidence: plain userinfo with emailVerified true is still emailAuthenticated false', async () => {
+			mockProvider.exchangeCodeForToken = createMockFn(async () => ({ access_token: 'at' }));
+			mockProvider.getUserInfo = createMockFn(async () => ({
+				email: 'user@example.com',
+				_emailProvenance: 'unauthenticated',
+			}));
+			stubEmail();
+
+			await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockHookManager, 'test-provider', {
+				logger: mockLogger,
+			});
+
+			assert.equal(evidenceFromHook().emailAuthenticated, false);
+		});
+
+		it('authEvidence: not attached when no onLogin hook is registered', async () => {
+			mockHookManager.hasHook = createMockFn(() => false);
+			mockProvider.getUserInfo = createMockFn(async () => ({
+				email: 'user@example.com',
+				_emailProvenance: 'unauthenticated',
+			}));
+			stubEmail();
+
+			await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockHookManager, 'test-provider', {
+				logger: mockLogger,
+			});
+
+			const oauthUser = mockHookManager.callOnLogin.mock.calls[0].arguments[0];
+			assert.equal(oauthUser.authEvidence, undefined);
+		});
+
+		it('authEvidence: a verified signature but UNvalidated issuer is unauthenticated', async () => {
+			mockProvider.verifyIdToken = createMockFn(async () => ({
+				claims: { sub: 'user-123', iss: 'https://idp.example.com' },
+				signatureVerified: true,
+				issuerValidated: false,
+			}));
+			mockProvider.exchangeCodeForToken = createMockFn(async () => ({ access_token: 'at', id_token: 'jwt' }));
+			mockProvider.getUserInfo = createMockFn(async () => ({
+				email: 'user@example.com',
+				_emailProvenance: 'signed-oidc',
+			}));
+			stubEmail();
+
+			await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockHookManager, 'test-provider', {
+				logger: mockLogger,
+			});
+
+			const e = evidenceFromHook();
+			assert.equal(e.emailProvenance, 'unauthenticated');
+			assert.equal(e.emailAuthenticated, false);
+			assert.equal(e.idTokenIssuer, undefined, 'no issuer exposed unless validated');
+			assert.equal(e.idTokenSubject, undefined);
+		});
+
+		it('authEvidence: github-authenticated provenance on a NON-github provider is unauthenticated', async () => {
+			mockProvider.exchangeCodeForToken = createMockFn(async () => ({ access_token: 'at' }));
+			mockProvider.getUserInfo = createMockFn(async () => ({
+				email: 'user@example.com',
+				_emailProvenance: 'github-authenticated',
+			}));
+			stubEmail();
+
+			await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				{ ...mockConfig, provider: 'google' },
+				mockHookManager,
+				'test-provider',
+				{
+					logger: mockLogger,
+				}
+			);
+
+			const e = evidenceFromHook();
+			assert.equal(e.emailProvenance, 'unauthenticated');
+			assert.equal(e.emailAuthenticated, false);
+		});
+
+		it('authEvidence: emailAuthenticated is false when there is no usable email (attests the email, not the username)', async () => {
+			mockProvider.exchangeCodeForToken = createMockFn(async () => ({ access_token: 'at' }));
+			mockProvider.getUserInfo = createMockFn(async () => ({ _emailProvenance: 'github-authenticated' }));
+			mockProvider.mapUserToHarper = createMockFn(() => ({
+				username: 'handle',
+				email: undefined,
+				emailVerified: true,
+				role: 'user',
+			}));
+
+			await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				{ ...mockConfig, provider: 'github' },
+				mockHookManager,
+				'test-provider',
+				{
+					logger: mockLogger,
+				}
+			);
+
+			const e = evidenceFromHook();
+			assert.equal(e.email, undefined);
+			assert.equal(e.emailAuthenticated, false, 'no email → cannot attest an authenticated email');
+		});
+
+		it('authEvidence: is frozen and non-enumerable (not persisted into the session)', async () => {
+			mockProvider.exchangeCodeForToken = createMockFn(async () => ({ access_token: 'at' }));
+			mockProvider.getUserInfo = createMockFn(async () => ({
+				email: 'user@example.com',
+				_emailProvenance: 'unauthenticated',
+			}));
+			stubEmail();
+
+			await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockHookManager, 'test-provider', {
+				logger: mockLogger,
+			});
+
+			const oauthUser = mockHookManager.callOnLogin.mock.calls[0].arguments[0];
+			assert.equal(Object.getOwnPropertyDescriptor(oauthUser, 'authEvidence').enumerable, false);
+			assert.equal(Object.isFrozen(oauthUser.authEvidence), true);
+			assert.equal(Object.keys(oauthUser).includes('authEvidence'), false);
 		});
 
 		it('should handle ID token verification failure gracefully', async () => {
