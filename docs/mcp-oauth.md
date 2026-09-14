@@ -204,15 +204,15 @@ A signed JWT — RS256 by default, ES256 when configured (`mcp.signingAlgorithm`
 The `kid` header identifies the signing key; resolve it against the published
 JWKS rather than assuming a fixed key id. Claims:
 
-| Claim       | Value                                                                 |
-| ----------- | --------------------------------------------------------------------- |
-| `iss`       | `mcp.issuer`                                                          |
-| `sub`       | The Harper user the token was issued to (from your `onLogin` mapping) |
-| `aud`       | `mcp.resource` (RFC 8707 audience binding)                            |
-| `client_id` | The DCR-issued client identifier                                      |
-| `scope`     | Space-separated scope string (omitted when empty)                     |
-| `iat`/`exp` | Issued-at / expiry (`exp` = `iat` + `accessTokenTtl`, default 1 hour) |
-| `jti`       | Unique token id (used in audit events; safe to log)                   |
+| Claim       | Value                                                                                                                                                                                                                                                                                                                     |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `iss`       | `mcp.issuer`                                                                                                                                                                                                                                                                                                              |
+| `sub`       | The Harper user the token was issued to (from your `onLogin` mapping). For a login whose claim is not from an authenticated source and matches no existing account, this is the non-resolvable quarantine principal `unverified:<claim>#<random>` — see [Account-Adoption Gate](./configuration.md#account-adoption-gate) |
+| `aud`       | `mcp.resource` (RFC 8707 audience binding)                                                                                                                                                                                                                                                                                |
+| `client_id` | The DCR-issued client identifier                                                                                                                                                                                                                                                                                          |
+| `scope`     | Space-separated scope string (omitted when empty)                                                                                                                                                                                                                                                                         |
+| `iat`/`exp` | Issued-at / expiry (`exp` = `iat` + `accessTokenTtl`, default 1 hour)                                                                                                                                                                                                                                                     |
+| `jti`       | Unique token id (used in audit events; safe to log)                                                                                                                                                                                                                                                                       |
 
 Refresh tokens rotate on use: presenting an already-used token from a family
 revokes the whole family (replay defense). Refresh families live for

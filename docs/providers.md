@@ -76,6 +76,28 @@ export OAUTH_REDIRECT_URI="https://yourdomain.com/oauth/callback"
 
 [GitHub OAuth Scopes Documentation](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps)
 
+### Account adoption and the `login` claim
+
+GitHub's default username claim is `login` (the GitHub handle, e.g. `octocat`). Because a login handle is not an email address, the plugin's account-adoption gate will **deny** any login whose username (`login`) matches an existing Harper account but whose email differs from it. This is by design — login handles are user-chosen and can be transferred or reassigned.
+
+GitHub's verified email, however, **is** trusted when the `/user/emails` API call **succeeds**: the plugin fetches the primary email via the authenticated `/user/emails` API and marks it as `github-authenticated` provenance. If the fetch fails (network error, missing `user:email` scope), the provenance falls back to `unauthenticated` and adoption is denied. If you configure `usernameClaim: 'email'` (or use an `onLogin` hook to map the email to the account name), GitHub logins with a verified email can adopt an existing Harper account whose name matches that email.
+
+**Default behavior (login claim):**
+
+| GitHub login | Harper account     | Outcome                                     |
+| ------------ | ------------------ | ------------------------------------------- |
+| `octocat`    | `octocat` (exists) | **Denied** — `login` claim is not the email |
+| `octocat`    | (does not exist)   | Allowed — new session, no existing account  |
+
+**With `usernameClaim: 'email'` or an email-mapping hook:**
+
+| GitHub verified email | Harper account               | Outcome                                      |
+| --------------------- | ---------------------------- | -------------------------------------------- |
+| `alice@example.com`   | `alice@example.com` (exists) | Allowed — email is verified via GitHub's API |
+| `alice@example.com`   | (does not exist)             | Allowed — new session                        |
+
+See [Account-Adoption Gate](./configuration.md#account-adoption-gate) for the full trust model.
+
 ---
 
 ## Google OAuth (OIDC)

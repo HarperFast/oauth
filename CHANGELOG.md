@@ -2,6 +2,24 @@
 
 All notable changes to `@harperfast/oauth` are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Entries prior to 2.2.0 were backfilled from the [GitHub release notes](https://github.com/HarperFast/oauth/releases).
 
+## [2.6.0] - 2026-09-14
+
+### Security
+
+- **Harden OAuth account adoption to require a verified identity claim** (GHSA-vf58-5v5f-mvpm): an OAuth login adopts an existing Harper `hdb_user` only when the claim is a verified email from an authenticated source — a JWKS-signature-verified OIDC id token with a validated issuer, or GitHub's authenticated email fetch. This closes an edge case in which a login could otherwise inherit an existing account from an **unverified or non-email claim** — e.g. an unsigned userinfo `email`, or a reassignable handle/username. Typical deployments (Google or GitHub keyed on the account's verified email) were already on the trusted path and are unaffected; a login resolved by an `onLogin` hook is likewise unchanged (the hook is authoritative). An _untrusted_ login (unverified/non-email claim) with no matching account gets a non-resolvable quarantine principal instead of the raw claim, so an account provisioned later under that name can't be adopted either; a verified login keeps its real identity. An escape hatch (`allowUnverifiedClaimInheritance`, default off) restores the previous behavior for deployments that intentionally adopt on an unverified/handle claim. GitHub's verified email is asserted through an in-process channel a remote userinfo body cannot forge, so a custom `userInfoUrl` (GHES/proxy) returning `email_verified: true` cannot earn adoption trust without a successful authenticated email fetch.
+
+  **Upgrade note (protects new logins only):** the gate does not retract sessions established before the upgrade — Harper does not expire sessions by default, so they persist. Typical Google/GitHub verified-email deployments have nothing to retract. Any deployment that _could_ have accepted an unverified or non-email claim (intentionally or not) should, on upgrade, revoke pre-2.6 OAuth sessions fleet-wide by clearing `system.hdb_session` — an administrator action. A user re-login is **not** sufficient: it only replaces that user's own session cookie and leaves any other (e.g. attacker-held) session active. Automatic neutralization of pre-existing sessions is a tracked follow-up.
+
+### Changed
+
+- **`IOAuthProvider.verifyIdToken` returns `{ claims, signatureVerified, issuerValidated }`** (previously the bare claims): the adoption gate needs the verification result, not only the decoded claims. A custom provider that implements this method should return the new shape.
+- **`oauthUser.email` now reflects the configured `emailClaim`** (previously always `userInfo.email`): the mapped email is read from `emailClaim` for consistency with the gate's verification. A deployment that sets a custom `emailClaim` — and an `onLogin` hook that reads `oauthUser.email` — now sees that claim's value rather than the standard `email` field.
+
+### Fixed
+
+- **Google logins carrying the bare `accounts.google.com` issuer are no longer denied adoption**: Google issues the OIDC `iss` claim as either `https://accounts.google.com` or `accounts.google.com`; the issuer check now accepts both forms. Provider `issuer` configuration accepts a single value or a list.
+- **The MCP callback log no longer prints the quarantine principal's random suffix**: an untrusted no-account login's info-level log line redacts the unpredictable suffix (`unverified:<claim>#<redacted>`) instead of printing it in full.
+
 ## [2.5.1] - 2026-09-01
 
 ### Fixed

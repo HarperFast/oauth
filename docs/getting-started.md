@@ -65,6 +65,8 @@ registerHooks({
 
 See [Lifecycle Hooks](./lifecycle-hooks.md) for complete details.
 
+> **Security:** returning `{ user }` is authoritative and bypasses the built-in account-adoption gate. This example is illustrative — before adopting an _existing_ account, confirm the identity (bind to a stable provider identity such as `oauthUser.providerUserId`, or use a confirmation flow) rather than resolving by email alone; `oauthUser.emailVerified` is not proof of an authenticated source. See [onLogin](./lifecycle-hooks.md#onlogin).
+
 ### 4. Start Your Application
 
 ```bash

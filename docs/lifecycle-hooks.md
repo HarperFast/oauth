@@ -197,7 +197,7 @@ async function onLogin(
 
 **Parameters:**
 
-- `oauthUser` - OAuth user profile (username, email, name, role). `oauthUser.emailVerified` is `true`/`false` when the provider attested the email's verified status, `undefined` when it didn't — gate provisioning on `emailVerified === true`, never on "not false". (Raw provider claims remain available at `oauthUser.metadata.oauthClaims`.)
+- `oauthUser` - OAuth user profile (username, email, name, role). `oauthUser.emailVerified` mirrors the provider's `email_verified` claim (`true`/`false`, or `undefined` when absent). **It is not proof the email came from a cryptographically authenticated source** — an unsigned UserInfo body can assert `email_verified: true`, and a hook cannot currently distinguish that from a JWKS-signed token. So do **not** adopt or elevate an existing privileged account on `emailVerified === true` alone: for that, either let the built-in [account-adoption gate](./configuration.md#account-adoption-gate) decide (don't return `{ user }` for an untrusted claim), or bind to a stable provider identity you control. `emailVerified === true` is a reasonable signal for provisioning a brand-new low-privilege account, never a "not false" check. (Raw provider claims remain at `oauthUser.metadata.oauthClaims`; exposing the plugin's own authenticated-source provenance to hooks is tracked as a follow-up.)
 - `tokenResponse` - Complete OAuth token response from provider
 - `session` - Current session object
 - `request` - HTTP request object

@@ -44,6 +44,37 @@ describe('OAuth Configuration', () => {
 		};
 	});
 
+	describe('expandEnvVar + coerceConfigBoolean (escape-hatch pattern)', () => {
+		it('${VAR}=true enables a boolean flag via environment variable', () => {
+			process.env._TEST_HATCH = 'true';
+			try {
+				assert.equal(coerceConfigBoolean(expandEnvVar('${_TEST_HATCH}')), true);
+			} finally {
+				delete process.env._TEST_HATCH;
+			}
+		});
+
+		it('${VAR}=false disables a boolean flag — strict coercion', () => {
+			process.env._TEST_HATCH = 'false';
+			try {
+				assert.equal(coerceConfigBoolean(expandEnvVar('${_TEST_HATCH}')), false);
+			} finally {
+				delete process.env._TEST_HATCH;
+			}
+		});
+
+		it('unresolved ${VAR} (env unset) → undefined, so caller default applies', () => {
+			// expandEnvVar leaves the placeholder intact; coerceConfigBoolean returns
+			// undefined for junk so the caller's ?? false default applies.
+			delete process.env._TEST_HATCH_UNSET;
+			assert.equal(
+				coerceConfigBoolean(expandEnvVar('${_TEST_HATCH_UNSET}')),
+				undefined,
+				'unresolved placeholder must not flip the gate'
+			);
+		});
+	});
+
 	describe('coerceConfigBoolean', () => {
 		it('passes real booleans through', () => {
 			assert.equal(coerceConfigBoolean(true), true);

@@ -10,6 +10,7 @@ import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { handleMCPCallback } from '../../../dist/lib/mcp/callback.js';
 import { resetMCPAuthCodesTableCache } from '../../../dist/lib/mcp/authCodeStore.js';
+import { makeQuarantinePrincipal } from '../../../dist/lib/quarantinePrincipal.js';
 
 const SAMPLE_MCP_STATE = {
 	clientId: 'client-abc',
@@ -138,6 +139,18 @@ describe('handleMCPCallback', () => {
 		assert.equal(url.searchParams.get('state'), SAMPLE_MCP_STATE.clientState);
 		// RFC 9207: iss must appear on error redirects too
 		assert.equal(url.searchParams.get('iss'), SAMPLE_MCP_CONFIG.issuer);
+	});
+
+	it('redacts a quarantine principal in the info log (no 16-hex suffix logged)', async () => {
+		const quarantinePrincipal = makeQuarantinePrincipal('attacker@example.com');
+		const infoLines = [];
+		const logger = { info: (...args) => infoLines.push(args.join(' ')) };
+
+		await handleMCPCallback(SAMPLE_REQUEST, SAMPLE_MCP_STATE, quarantinePrincipal, SAMPLE_MCP_CONFIG, logger);
+
+		assert.equal(infoLines.length, 1);
+		assert.ok(infoLines[0].includes('unverified:attacker@example.com#<redacted>'));
+		assert.doesNotMatch(infoLines[0], /#[0-9a-f]{16}/, 'the random suffix must not reach the log line');
 	});
 
 	it('never includes upstream provider token in the redirect URL', async () => {

@@ -11,6 +11,7 @@ import {
 	expandEnvVarsDeep,
 	extractPluginDefaults,
 	normalizeMcpSecurityConfig,
+	coerceConfigBoolean,
 } from './lib/config.ts';
 import { OAuthResource } from './lib/resource.ts';
 import { validateAndRefreshSession } from './lib/sessionValidator.ts';
@@ -297,6 +298,19 @@ export async function handleApplication(scope: Scope): Promise<void> {
 			}
 		}
 
+		// Normalize the escape-hatch flag. Expand ${VAR} first (like `debug`)
+		// so operators can toggle it via environment variable, then apply strict
+		// coercion: "false" / junk → off; unknown/non-boolean → false (off).
+		const allowUnverifiedClaimInheritance =
+			coerceConfigBoolean(expandEnvVar(options.allowUnverifiedClaimInheritance)) ?? false;
+		if (allowUnverifiedClaimInheritance) {
+			logger?.warn?.(
+				'OAuth: allowUnverifiedClaimInheritance is enabled — this restores legacy behavior that ' +
+					'allows an unverified OAuth claim to inherit an existing Harper account role. ' +
+					'This is a security regression; disable this setting unless you have a specific operational need.'
+			);
+		}
+
 		// Re-initialize providers from new configuration
 		// Clear existing providers and repopulate (don't reassign to preserve closure reference)
 		const newProviders = initializeProviders(options, logger);
@@ -321,6 +335,7 @@ export async function handleApplication(scope: Scope): Promise<void> {
 			// that static, so they'd keep verifying tokens / serving discovery against
 			// stale config after the plugin is no longer validly configured.
 			OAuthResource.mcpConfig = undefined;
+			OAuthResource.allowUnverifiedClaimInheritance = false;
 			resources.set('oauth', {
 				async get() {
 					return {
@@ -353,7 +368,8 @@ export async function handleApplication(scope: Scope): Promise<void> {
 				pluginDefaults,
 				logger,
 				dynamicProviderCache,
-				mcpConfig
+				mcpConfig,
+				allowUnverifiedClaimInheritance
 			);
 
 			// Register the OAuth resource class
@@ -452,15 +468,18 @@ export async function handleApplication(scope: Scope): Promise<void> {
 
 		updating = true;
 		try {
-			await updateConfiguration();
-
-			// If another update was requested while we were running, run again
-			if (pendingUpdate) {
+			// Loop while holding the guard so the last snapshot wins. Catch per-iteration
+			// (not around the loop): a throwing intermediate snapshot must not abort before
+			// a queued final snapshot applies — otherwise a reload disabling the escape
+			// hatch is dropped if an earlier snapshot in the same batch throws.
+			do {
 				pendingUpdate = false;
-				await runUpdate();
-			}
-		} catch (error) {
-			logger?.error?.('Failed to update OAuth configuration:', error);
+				try {
+					await updateConfiguration();
+				} catch (error) {
+					logger?.error?.('Failed to update OAuth configuration:', error);
+				}
+			} while (pendingUpdate);
 		} finally {
 			updating = false;
 		}

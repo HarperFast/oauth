@@ -79,6 +79,11 @@ function createMockSession(overrides = {}) {
 		},
 	};
 
+	// Default a provenance stamp so sessions look like current-rules logins.
+	if (session.oauth && !('authTrust' in session.oauth)) {
+		session.oauth.authTrust = 'verified';
+	}
+
 	return session;
 }
 
@@ -106,7 +111,7 @@ test('should return invalid for session without oauth data', async () => {
 
 test('should return invalid for session without access token', async () => {
 	const provider = createMockProvider();
-	const session = { user: 'test', oauth: { provider: 'google' } };
+	const session = { user: 'test', oauth: { provider: 'google', authTrust: 'verified' } };
 	const result = await validateAndRefreshSession({ session }, provider);
 
 	assert.strictEqual(result.valid, false);
@@ -235,6 +240,27 @@ test('should update token metadata correctly', async () => {
 	assert.ok(session.oauth.expiresAt > beforeRefresh);
 	assert.ok(session.oauth.refreshThreshold > beforeRefresh);
 	assert.ok(session.oauth.lastRefreshed >= beforeRefresh);
+});
+
+test('preserves authTrust provenance across token refresh', async () => {
+	const provider = createMockProvider();
+	const session = createMockSession({
+		oauth: {
+			provider: 'google',
+			accessToken: 'old_token',
+			refreshToken: 'old_refresh',
+			expiresAt: Date.now() - 1000, // expired → forces refresh
+			refreshThreshold: Date.now() - 1000,
+			scope: 'openid profile email',
+			authTrust: 'verified',
+		},
+	});
+
+	const result = await validateAndRefreshSession({ session }, provider);
+
+	assert.strictEqual(result.refreshed, true);
+	assert.strictEqual(session.oauth.accessToken, 'new_access_token');
+	assert.strictEqual(session.oauth.authTrust, 'verified', 'provenance stamp must survive refresh (no resurrection)');
 });
 
 // ============================================================================
@@ -431,6 +457,7 @@ test('should update lastValidated on a read-only tracked session.oauth without t
 		tokenType: 'bearer',
 		lastRefreshed,
 		lastValidated: Date.now() - 2000, // 2s ago, past the interval
+		authTrust: 'verified', // stamped: a real frozen tracked session carries its provenance
 	};
 	const trackedOAuth = {};
 	for (const [key, value] of Object.entries(trackedFields)) {

@@ -99,6 +99,7 @@ export async function validateAndRefreshSession(
 					tokenType: oauthMetadata.tokenType,
 					lastRefreshed: oauthMetadata.lastRefreshed,
 					lastValidated: now,
+					authTrust: oauthMetadata.authTrust,
 				};
 
 				if (typeof session.update === 'function') {
@@ -174,6 +175,7 @@ export async function validateAndRefreshSession(
 			tokenType: tokenResponse.token_type || oauthMetadata.tokenType,
 			lastRefreshed: now,
 			lastValidated: oauthMetadata.lastValidated, // Preserve if exists
+			authTrust: oauthMetadata.authTrust, // Preserve provenance across refresh
 		};
 
 		// Update session with refreshed token

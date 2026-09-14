@@ -67,6 +67,7 @@ export class OAuthResource extends Resource {
 	static dynamicProviderCache: DynamicProviderCache | null = null;
 	static logger: Logger | undefined = undefined;
 	static mcpConfig: MCPConfig | undefined = undefined;
+	static allowUnverifiedClaimInheritance: boolean = false;
 
 	/**
 	 * Configure the OAuth resource with providers and settings
@@ -79,7 +80,8 @@ export class OAuthResource extends Resource {
 		pluginDefaults: Partial<OAuthProviderConfig>,
 		logger?: Logger,
 		dynamicProviderCache?: DynamicProviderCache,
-		mcpConfig?: MCPConfig
+		mcpConfig?: MCPConfig,
+		allowUnverifiedClaimInheritance?: boolean
 	): void {
 		OAuthResource.providers = providers;
 		OAuthResource.debugMode = debugMode;
@@ -88,6 +90,7 @@ export class OAuthResource extends Resource {
 		OAuthResource.logger = logger;
 		OAuthResource.dynamicProviderCache = dynamicProviderCache ?? null;
 		OAuthResource.mcpConfig = mcpConfig;
+		OAuthResource.allowUnverifiedClaimInheritance = allowUnverifiedClaimInheritance ?? false;
 	}
 
 	/**
@@ -409,6 +412,7 @@ export class OAuthResource extends Resource {
 				return handleCallback(request, target, provider, config, hookManager, providerName, {
 					mcpConfig: OAuthResource.mcpConfig,
 					logger,
+					allowUnverifiedClaimInheritance: OAuthResource.allowUnverifiedClaimInheritance,
 				});
 
 			case 'user':
@@ -506,5 +510,6 @@ export class OAuthResource extends Resource {
 		OAuthResource.dynamicProviderCache = null;
 		OAuthResource.logger = undefined;
 		OAuthResource.mcpConfig = undefined;
+		OAuthResource.allowUnverifiedClaimInheritance = false;
 	}
 }

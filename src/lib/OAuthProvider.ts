@@ -17,6 +17,7 @@ import type {
 	IOAuthProvider,
 } from '../types.ts';
 import { csrfTokenManager } from './CSRFTokenManager.ts';
+import { ADAPTER_EMAIL_PROVENANCE } from './emailProvenance.ts';
 
 export class OAuthProvider implements IOAuthProvider {
 	public config: OAuthProviderConfig;
@@ -137,7 +138,21 @@ export class OAuthProvider implements IOAuthProvider {
 	}
 
 	/**
-	 * Get user info using access token
+	 * Get user info using access token.
+	 *
+	 * Returns the user-info object augmented with `_emailProvenance`, a signal
+	 * consumed by the account-adoption gate in handleCallback:
+	 *   - 'signed-oidc'          — email is a claim in a signature-verified id token
+	 *                              whose issuer was validated against the provider's
+	 *                              expected issuer.
+	 *   - 'github-authenticated' — email came from a successful GitHub /user/emails
+	 *                              authenticated API call, only when the running adapter
+	 *                              is the built-in GitHub adapter and email_verified is true.
+	 *   - 'unauthenticated'      — any other source; adoption denied.
+	 *
+	 * `_emailProvenance` is ALWAYS assigned by this method, never read from
+	 * adapter/remote output. Any `_emailProvenance` key in adapter or userinfo
+	 * responses is stripped before provenance is determined.
 	 */
 	async getUserInfo(accessToken: string, idTokenClaims: any = null): Promise<any> {
 		// Check if provider has custom getUserInfo implementation
@@ -146,33 +161,57 @@ export class OAuthProvider implements IOAuthProvider {
 				getUserInfo: this.fetchUserInfo.bind(this),
 				logger: this.logger,
 			};
-			return this.config.getUserInfo.call(this, accessToken, helpers);
+			const raw = await this.config.getUserInfo.call(this, accessToken, helpers);
+			// Provenance is trusted ONLY through the ADAPTER_EMAIL_PROVENANCE Symbol,
+			// which a remote JSON body cannot carry and a custom adapter that does not
+			// import it cannot set — so a trusted value can originate only in in-process
+			// adapter code that did the authenticated work (the built-in GitHub adapter,
+			// which sets it from its /user/emails fetch result and the verified flag).
+			// Any string `_emailProvenance` in the adapter/remote output is discarded, and
+			// the Symbol is stripped here so it never travels downstream.
+			const { [ADAPTER_EMAIL_PROVENANCE]: asserted, _emailProvenance: _droppedStr, ...rest } = raw ?? {};
+			const provenance = asserted === 'github-authenticated' ? 'github-authenticated' : 'unauthenticated';
+			return { ...rest, _emailProvenance: provenance };
 		}
 
-		// If we have verified ID token claims and config says to prefer them
+		// Signed id-token path: email is a claim in the verified token.
 		if (idTokenClaims && this.config.preferIdToken !== false) {
-			this.logger?.debug?.('Using verified ID token claims for user info');
-			// Some providers don't include email in ID token, fetch it separately
+			// When the id token lacks an email claim and fetchEmail is configured,
+			// fetch userinfo to resolve it. The email is merged in but provenance
+			// remains 'unauthenticated' — it is not signed — so adoption is denied.
+			// Signed identity fields (iss, sub) come exclusively from the id token.
 			if (!idTokenClaims.email && this.config.fetchEmail) {
+				this.logger?.debug?.('ID token lacks email; fetching from userinfo (unauthenticated)');
 				try {
-					const additionalInfo = await this.fetchUserInfo(accessToken);
-					return { ...idTokenClaims, ...additionalInfo };
+					const userInfo = await this.fetchUserInfo(accessToken);
+					const { iss: _iss, sub: _sub, ...mergeableUserInfo } = userInfo;
+					// Drop the token's email AND email_verified so the fetched address keeps its
+					// own flag rather than inheriting the token's unrelated one.
+					const { email: _idEmail, email_verified: _idEmailVerified, ...idClaimsNoEmail } = idTokenClaims;
+					return { ...mergeableUserInfo, ...idClaimsNoEmail, _emailProvenance: 'unauthenticated' };
 				} catch (error) {
+					// A transient userinfo failure must not abort a login backed by a verified
+					// id token: fall back to the id-token claims. They carry no email, so no
+					// email-based adoption is possible regardless.
 					this.logger?.warn?.(
-						'Failed to fetch additional user info:',
+						'userinfo fetch failed on the fetchEmail fallback; using id-token claims only:',
 						error instanceof Error ? error.message : String(error)
 					);
+					return { ...idTokenClaims, _emailProvenance: 'unauthenticated' };
 				}
 			}
-			return idTokenClaims;
+			this.logger?.debug?.('Using verified ID token claims for user info');
+			return { ...idTokenClaims, _emailProvenance: 'signed-oidc' };
 		}
 
-		// Fetch from userinfo endpoint
-		return this.fetchUserInfo(accessToken);
+		// Fetch from userinfo endpoint — no id-token correlation, so unauthenticated.
+		const userInfo = await this.fetchUserInfo(accessToken);
+		return { ...userInfo, _emailProvenance: 'unauthenticated' };
 	}
 
 	/**
-	 * Fetch user info from the provider's userinfo endpoint
+	 * Fetch user info from the provider's userinfo endpoint.
+	 * Strips `_emailProvenance` from the response so remote data cannot inject a trusted value.
 	 */
 	async fetchUserInfo(accessToken: string): Promise<any> {
 		const response = await fetch(this.config.userInfoUrl, {
@@ -186,13 +225,26 @@ export class OAuthProvider implements IOAuthProvider {
 			throw new Error(`Failed to fetch user info: ${response.statusText}`);
 		}
 
-		return response.json();
+		const data = await response.json();
+		if (data && typeof data === 'object' && '_emailProvenance' in data) {
+			const { _emailProvenance: _dropped, ...rest } = data;
+			return rest;
+		}
+		return data;
 	}
 
 	/**
-	 * Verify ID token with proper signature verification using JWKS
+	 * Verify ID token with proper signature verification using JWKS.
+	 *
+	 * Returns `{ claims, signatureVerified, issuerValidated }`:
+	 *   - `signatureVerified` — true only when the token was checked against a
+	 *     JWKS-fetched public key. The no-JWKS fallback always yields false.
+	 *   - `issuerValidated` — true only when `config.issuer` is set AND the token's
+	 *     `iss` was verified to equal that value by jwt.verify. Providers without a
+	 *     known issuer (Azure /common, issuer-less generic) yield false; their tokens
+	 *     are not trusted for account adoption.
 	 */
-	async verifyIdToken(idToken: string): Promise<any> {
+	async verifyIdToken(idToken: string): Promise<{ claims: any; signatureVerified: boolean; issuerValidated: boolean }> {
 		// First decode to get the header and payload
 		const decoded = jwt.decode(idToken, { complete: true });
 
@@ -213,16 +265,36 @@ export class OAuthProvider implements IOAuthProvider {
 				const key = await this.jwksClient.getSigningKey(kid);
 				const publicKey = key.getPublicKey();
 
+				// jsonwebtoken's `issuer` accepts a string or a non-empty tuple; normalize
+				// (an array issuer lets a provider accept several valid iss forms).
+				const expectedIssuer: string | [string, ...string[]] | undefined = Array.isArray(this.config.issuer)
+					? this.config.issuer.length
+						? (this.config.issuer as [string, ...string[]])
+						: undefined
+					: this.config.issuer || undefined;
+
 				// Verify signature and claims
 				const verified = jwt.verify(idToken, publicKey, {
 					algorithms: ['RS256', 'RS384', 'RS512', 'ES256', 'ES384', 'ES512'],
 					audience: this.config.clientId,
-					issuer: this.config.issuer || undefined,
+					issuer: expectedIssuer,
 					clockTolerance: 60, // Allow 60 seconds clock skew
-				});
+				}) as Record<string, any>;
+
+				// Require standard claims that jwt.verify does not always enforce.
+				// iss is enforced only when config.issuer is set; iat/exp are not
+				// required by jwt.verify when absent. Require all four unconditionally
+				// on the signature-verified path so a token lacking any of them cannot
+				// be treated as signature-verified (e.g. a custom token with no exp).
+				if (!verified.iss) throw new Error('ID token missing required iss claim');
+				if (!verified.sub) throw new Error('ID token missing required sub claim');
+				if (typeof verified.iat !== 'number') throw new Error('ID token missing required iat claim');
+				if (!verified.exp) throw new Error('ID token missing required exp claim');
 
 				this.logger?.debug?.('ID token signature verified successfully');
-				return verified;
+				// issuerValidated only when a non-empty issuer was actually passed to
+				// jwt.verify (an empty array normalizes to undefined and skips the check).
+				return { claims: verified, signatureVerified: true, issuerValidated: expectedIssuer != null };
 			} catch (error) {
 				// Signature verification failed - this is a security issue
 				this.logger?.error?.(
@@ -234,9 +306,11 @@ export class OAuthProvider implements IOAuthProvider {
 				});
 			}
 		} else {
-			// No JWKS client - fall back to claims validation only
+			// No JWKS client — fall back to claims validation only.
+			// signatureVerified and issuerValidated are false: callers must not treat
+			// this as proof of claim authenticity.
 			this.logger?.warn?.('JWKS not configured - verifying claims only, not signature');
-			return this.verifyIdTokenClaims(decoded.payload);
+			return { claims: this.verifyIdTokenClaims(decoded.payload), signatureVerified: false, issuerValidated: false };
 		}
 	}
 
@@ -265,8 +339,13 @@ export class OAuthProvider implements IOAuthProvider {
 			throw new Error(`ID token audience mismatch`);
 		}
 
-		if (this.config.issuer && payload.iss !== this.config.issuer) {
-			throw new Error(`ID token issuer mismatch`);
+		if (this.config.issuer) {
+			const allowedIssuers = Array.isArray(this.config.issuer) ? this.config.issuer : [this.config.issuer];
+			// An empty array means "no issuer configured" — matches the JWKS path,
+			// which normalizes [] to undefined and skips issuer validation.
+			if (allowedIssuers.length && !allowedIssuers.includes(payload.iss)) {
+				throw new Error(`ID token issuer mismatch`);
+			}
 		}
 
 		if (!payload.sub) {
@@ -287,19 +366,25 @@ export class OAuthProvider implements IOAuthProvider {
 
 		const role = this.extractClaim(userInfo, this.config.roleClaim) || this.config.defaultRole || 'user';
 
+		const emailClaim = this.config.emailClaim || 'email';
+		// `email_verified` attests the standard `email` claim. When a custom emailClaim
+		// is used, the verified flag has no known relationship to the adopted value, so
+		// leave emailVerified undefined to ensure the trust gate cannot pass.
+		const emailVerified =
+			emailClaim === 'email' && typeof userInfo.email_verified === 'boolean' ? userInfo.email_verified : undefined;
+		// Strip internal meta-field before persisting; it must not appear in stored claims.
+		const { _emailProvenance: _dropped, ...storedClaims } = userInfo ?? {};
 		return {
 			username,
 			role,
 			provider: this.config.provider,
 			providerUserId: userInfo.sub || userInfo.id || userInfo.user_id,
-			email: userInfo.email,
-			// Strictly boolean — some IdPs omit the claim entirely; the raw value
-			// (whatever its type) stays available in metadata.oauthClaims
-			emailVerified: typeof userInfo.email_verified === 'boolean' ? userInfo.email_verified : undefined,
+			email: userInfo[emailClaim],
+			emailVerified,
 			name: userInfo.name || userInfo.display_name || userInfo.full_name,
 			metadata: {
 				oauthProvider: this.config.provider,
-				oauthClaims: userInfo,
+				oauthClaims: storedClaims,
 			},
 		};
 	}

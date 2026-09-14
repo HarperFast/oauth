@@ -5,6 +5,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { getProvider } from '../../../dist/lib/providers/index.js';
+import { ADAPTER_EMAIL_PROVENANCE } from '../../../dist/lib/emailProvenance.js';
 
 describe('GitHub Provider', () => {
 	it('should return GitHub provider config', () => {
@@ -453,6 +454,111 @@ describe('GitHub Provider', () => {
 			assert.equal(userInfo.login, 'testuser');
 			assert.equal(userInfo.email, null);
 			assert.ok(warned, 'non-OK response (e.g. missing user:email scope) should warn');
+		} finally {
+			global.fetch = originalFetch;
+		}
+	});
+
+	it('asserts github-authenticated via the provenance Symbol only on a successful fetch of a verified email', async () => {
+		const github = getProvider('github');
+		const mockHelpers = {
+			getUserInfo: async () => ({ login: 'user', email: null }),
+			logger: { warn: () => {} },
+		};
+
+		const originalFetch = global.fetch;
+
+		// Success path: primary email found and verified → github-authenticated
+		global.fetch = async () => ({
+			ok: true,
+			json: async () => [{ email: 'user@example.com', primary: true, verified: true }],
+		});
+		try {
+			const info = await github.getUserInfo.call({ config: github }, 'token', mockHelpers);
+			assert.equal(
+				info[ADAPTER_EMAIL_PROVENANCE],
+				'github-authenticated',
+				'a successful fetch of a verified email must assert github-authenticated'
+			);
+			assert.equal(info._emailProvenance, undefined, 'the adapter must not set the string _emailProvenance');
+		} finally {
+			global.fetch = originalFetch;
+		}
+
+		// Successful fetch of an UNVERIFIED email → unauthenticated (verified is required)
+		global.fetch = async () => ({
+			ok: true,
+			json: async () => [{ email: 'user@example.com', primary: true, verified: false }],
+		});
+		try {
+			const info = await github.getUserInfo.call({ config: github }, 'token', mockHelpers);
+			assert.equal(
+				info[ADAPTER_EMAIL_PROVENANCE],
+				'unauthenticated',
+				'an unverified email must not earn github-authenticated even on a successful fetch'
+			);
+		} finally {
+			global.fetch = originalFetch;
+		}
+
+		// GHES / custom userInfoUrl: the userinfo body claims email_verified:true but the
+		// hard-coded api.github.com/user/emails fetch fails → must stay unauthenticated
+		// (the trust signal is the authenticated fetch, never the body's claim).
+		global.fetch = async () => {
+			throw new Error('network error');
+		};
+		try {
+			const info = await github.getUserInfo.call({ config: github }, 'token', {
+				getUserInfo: async () => ({ login: 'user', email: 'victim@corp.example', email_verified: true }),
+				logger: { warn: () => {} },
+			});
+			assert.equal(
+				info[ADAPTER_EMAIL_PROVENANCE],
+				'unauthenticated',
+				'a failed fetch must yield unauthenticated even when the userinfo body claims email_verified'
+			);
+		} finally {
+			global.fetch = originalFetch;
+		}
+
+		// Non-OK response → unauthenticated
+		global.fetch = async () => ({
+			ok: false,
+			status: 403,
+			statusText: 'Forbidden',
+			body: { cancel: async () => {} },
+		});
+		try {
+			const info = await github.getUserInfo.call({ config: github }, 'token', {
+				...mockHelpers,
+				logger: { warn: () => {} },
+			});
+			assert.equal(info[ADAPTER_EMAIL_PROVENANCE], 'unauthenticated', 'non-OK response must yield unauthenticated');
+		} finally {
+			global.fetch = originalFetch;
+		}
+	});
+
+	it('sets the provenance assertion as a non-enumerable symbol a spread cannot carry', async () => {
+		const github = getProvider('github');
+		const originalFetch = global.fetch;
+		global.fetch = async () => ({
+			ok: true,
+			json: async () => [{ email: 'user@example.com', primary: true, verified: true }],
+		});
+		try {
+			const info = await github.getUserInfo.call({ config: github }, 'token', {
+				getUserInfo: async () => ({ login: 'user', email: null }),
+				logger: { warn: () => {} },
+			});
+			assert.equal(info[ADAPTER_EMAIL_PROVENANCE], 'github-authenticated', 'the adapter asserts via the symbol');
+			// A spread onto a substituted email must not carry the assertion.
+			const spread = { ...info, email: 'attacker@evil.example' };
+			assert.equal(
+				spread[ADAPTER_EMAIL_PROVENANCE],
+				undefined,
+				'a spread must not carry the assertion onto a substituted email'
+			);
 		} finally {
 			global.fetch = originalFetch;
 		}

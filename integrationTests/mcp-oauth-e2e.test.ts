@@ -68,6 +68,10 @@ const STUB_UPSTREAM_ACCESS_TOKEN = `stub-upstream-token-${randomBytes(8).toStrin
 const STUB_USER_SUB = 'stub-user-42';
 const STUB_USER_EMAIL = 'stub@example.com';
 
+function escapeRegExp(s: string): string {
+	return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 /**
  * Start a minimal HTTP server that plays the role of the upstream IdP.
  *
@@ -391,8 +395,16 @@ suite('MCP OAuth Stage 7: full round-trip e2e', (ctx: ContextWithHarper) => {
 
 		const mcpBody = (await mcpRes.json()) as any;
 		strictEqual(mcpBody.ok, true);
-		// The generic provider maps email → username; the MCP auth code stores that as sub.
-		strictEqual(mcpBody.sub, STUB_USER_EMAIL, 'sub must be the mapped username (email)');
+		// The stub IdP returns an unsigned, unverifiable claim and no hdb_user named
+		// STUB_USER_EMAIL exists, so the account-adoption gate issues the token to a
+		// non-resolvable quarantine principal (`unverified:<claim>#<random>`) rather than
+		// the raw mapped username: an account provisioned later under that name can never
+		// be adopted by this token or its refresh family (GHSA-vf58-5v5f-mvpm).
+		match(
+			mcpBody.sub,
+			new RegExp(`^unverified:${escapeRegExp(STUB_USER_EMAIL)}#[0-9a-f]{16}$`),
+			'sub must be the quarantine principal for an untrusted claim with no matching account'
+		);
 		strictEqual(mcpBody.aud, 'https://mcp.test/mcp', 'aud must match the configured resource');
 		strictEqual(mcpBody.client_id, clientId, 'client_id must match the registered client');
 

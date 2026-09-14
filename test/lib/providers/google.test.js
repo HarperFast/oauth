@@ -15,7 +15,7 @@ describe('Google Provider', () => {
 		assert.equal(google.tokenUrl, 'https://oauth2.googleapis.com/token');
 		assert.equal(google.userInfoUrl, 'https://www.googleapis.com/oauth2/v3/userinfo');
 		assert.equal(google.jwksUri, 'https://www.googleapis.com/oauth2/v3/certs');
-		assert.equal(google.issuer, 'https://accounts.google.com');
+		assert.deepEqual(google.issuer, ['https://accounts.google.com', 'accounts.google.com']);
 		assert.equal(google.scope, 'openid profile email');
 		assert.equal(google.usernameClaim, 'email');
 		// defaultRole is not in provider preset - it's added by the main config

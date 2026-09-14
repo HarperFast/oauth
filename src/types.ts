@@ -34,6 +34,15 @@ export interface OAuthPluginConfig {
 	cacheDynamicProviders?: boolean | number;
 	/** MCP OAuth flow configuration (RFC 9728 PRM, RFC 7591 DCR, RFC 8707 audience binding) */
 	mcp?: MCPConfig;
+	/**
+	 * When true, restores the pre-2.6 behavior: an OAuth claim that matches an
+	 * existing Harper account username inherits that account's role even when the
+	 * claim is not verified or comes from a reassignable IdP claim (e.g. GitHub
+	 * `login`). Off by default; enabling this is a security regression. Accepts
+	 * booleans and "true"/"false" env-expanded strings; env-string "false" does
+	 * NOT enable this flag.
+	 */
+	allowUnverifiedClaimInheritance?: boolean;
 }
 
 // ============================================================================
@@ -572,8 +581,9 @@ export interface OAuthProviderConfig {
 	scope?: string;
 	/** JWKS URI for ID token validation (OIDC only) */
 	jwksUri?: string | null;
-	/** Expected token issuer for validation (OIDC only) */
-	issuer?: string | null;
+	/** Expected token issuer(s) for validation (OIDC only). An array accepts any
+	 *  of several valid issuer strings (e.g. Google's https and bare forms). */
+	issuer?: string | string[] | null;
 	/** Claim to use as username (dot notation supported for nested) */
 	usernameClaim?: string;
 	/** Claim containing user's email address */
@@ -694,8 +704,10 @@ export interface IOAuthProvider {
 	getUserInfo(accessToken: string, idTokenClaims?: any): Promise<any>;
 	/** Map provider user info to Harper user format */
 	mapUserToHarper(userInfo: any): OAuthUser;
-	/** Verify and decode ID token (OIDC only) */
-	verifyIdToken?(idToken: string): Promise<any>;
+	/** Verify and decode ID token (OIDC only). Returns claims, whether the signature
+	 *  was cryptographically verified via JWKS, and whether the issuer was validated
+	 *  against the provider's expected issuer (config.issuer). */
+	verifyIdToken?(idToken: string): Promise<{ claims: any; signatureVerified: boolean; issuerValidated: boolean }>;
 	/** Exchange refresh token for new access token */
 	refreshAccessToken?(refreshToken: string): Promise<TokenResponse>;
 }
@@ -801,6 +813,22 @@ export interface MCPRequestClaims {
 
 /**
  * OAuth Session Metadata
+ * How the session's identity was established. Stamped at login and preserved
+ * across token refresh so a session's provenance is durable:
+ *  - `verified`          — adopted/created from a verified email carried by an
+ *                          authenticated source (JWKS-signed OIDC token with a
+ *                          validated issuer, or GitHub's authenticated email).
+ *  - `hook`              — identity supplied by the application's onLogin hook.
+ *  - `operator-override` — an unverified claim adopted an existing account
+ *                          because `allowUnverifiedClaimInheritance` is enabled.
+ *  - `untrusted`         — no authenticated claim and no account; the session
+ *                          carries a non-resolvable quarantine principal.
+ *
+ * A session that predates provenance stamping carries no `authTrust` at all.
+ */
+export type AuthTrust = 'verified' | 'hook' | 'operator-override' | 'untrusted';
+
+/**
  * Token and expiration data stored in session for automatic refresh
  */
 export interface OAuthSessionMetadata {
@@ -829,6 +857,8 @@ export interface OAuthSessionMetadata {
 	lastRefreshed?: number;
 	/** Unix timestamp (ms) of last token validation (for non-expiring tokens) */
 	lastValidated?: number;
+	/** How this session's identity was established (see {@link AuthTrust}). */
+	authTrust?: AuthTrust;
 }
 
 /**

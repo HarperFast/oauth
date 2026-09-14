@@ -58,18 +58,21 @@ describe('withOAuthValidation', () => {
 
 	function makeSession(overrides = {}) {
 		// Typical authenticated session — id + update so clearOAuthSession takes the persist branch.
-		return {
+		const session = {
 			id: 'sess-1',
-			oauth: {
-				provider: 'github',
-				accessToken: 'token-abc',
-				refreshToken: undefined,
-				...overrides.oauth,
-			},
 			oauthUser: { username: 'alice', email: 'alice@example.com', role: 'user' },
 			update: async () => {},
 			...overrides,
 		};
+		// Set oauth AFTER the spread so `...overrides` can't drop the default stamp. An
+		// oauth override still fully controls the metadata (preserving tests that omit
+		// provider/accessToken), but `authTrust` defaults to a stamp so the session reads as
+		// current-rules; a legacy-path test sets `authTrust` explicitly in its override.
+		session.oauth =
+			'oauth' in overrides
+				? { authTrust: 'verified', ...overrides.oauth }
+				: { provider: 'github', accessToken: 'token-abc', refreshToken: undefined, authTrust: 'verified' };
+		return session;
 	}
 
 	// Spy on .update so tests can assert clearOAuthSession persisted { user: null }.

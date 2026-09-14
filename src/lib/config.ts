@@ -169,6 +169,11 @@ export function buildProviderConfig(
 		expandedOptions[key] = expandEnvVar(value);
 	}
 
+	// Accept jwksUrl as an alias for jwksUri (the docs used both names historically).
+	if (expandedOptions.jwksUrl && !expandedOptions.jwksUri) {
+		expandedOptions.jwksUri = expandedOptions.jwksUrl;
+	}
+
 	// Check for known provider presets
 	const providerType = expandedOptions.provider || providerName;
 	const providerPreset = providerType ? getProvider(providerType) : null;
@@ -240,10 +245,10 @@ export function extractPluginDefaults(options: OAuthPluginConfig): Partial<OAuth
 	const pluginDefaults: Partial<OAuthProviderConfig> = {};
 
 	// Copy all non-provider config to defaults, expanding environment variables.
-	// `mcp` is a structured top-level config block (not a provider-level default)
-	// so it's excluded; it's threaded through OAuthResource.configure separately.
+	// `mcp` and `allowUnverifiedClaimInheritance` are plugin-level options that
+	// do not apply per-provider and are excluded from the provider defaults copy.
 	for (const [key, value] of Object.entries(options)) {
-		if (key !== 'providers' && key !== 'debug' && key !== 'mcp') {
+		if (key !== 'providers' && key !== 'debug' && key !== 'mcp' && key !== 'allowUnverifiedClaimInheritance') {
 			pluginDefaults[key as keyof OAuthProviderConfig] = expandEnvVar(value);
 		}
 	}

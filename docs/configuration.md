@@ -54,7 +54,7 @@ Each provider requires:
 - `authorizationUrl` - Authorization endpoint URL (required)
 - `tokenUrl` - Token endpoint URL (required)
 - `userInfoUrl` - User info endpoint URL (required)
-- `jwksUri` - JWKS endpoint URL (required for ID token verification). Note the spelling: `jwksUri`, not `jwksUrl` — a misspelled key is ignored, leaving ID tokens unverifiable
+- `jwksUri` - JWKS endpoint URL (required for ID token verification). The alias `jwksUrl` is also accepted for backwards compatibility.
 
 ### MCP OAuth
 
@@ -365,6 +365,113 @@ registerHooks(hooks);
 ```
 
 For complete hook implementation patterns, see [Lifecycle Hooks](./lifecycle-hooks.md).
+
+## Account-Adoption Gate
+
+When an OAuth login resolves a username that matches an existing `hdb_user` account, the plugin applies a trust gate before allowing the session to inherit that account's roles. This prevents an attacker from choosing a provider username that collides with a privileged Harper account.
+
+Most deployments are already on the trusted path and need no change: Google or GitHub keyed on the account's **verified email** satisfies the gate, and any login resolved by an `onLogin` hook is authoritative and bypasses it. The gate only changes behavior for logins that would have adopted an account from an **unverified or non-email** claim (an unsigned userinfo `email`, or a reassignable handle/username such as GitHub `login`); those are now denied unless the escape hatch below is enabled.
+
+### Trust model
+
+Email provenance is **always assigned by the plugin**, never read from adapter or remote data. Any `_emailProvenance` value a custom `getUserInfo` adapter or UserInfo endpoint returns is stripped before the gate runs; only the plugin's own determination counts.
+
+There are exactly **two** trusted email sources. A login may adopt an existing account only when **all** conditions for one of these sources are satisfied:
+
+**Source 1 — JWKS-signed OIDC id token (`signed-oidc`)**:
+
+- The email is a claim in a JWKS-signature-verified id token.
+- The token's `iss` was validated against the provider's **expected issuer** (`config.issuer`). Providers without a known issuer — Azure `/common` (multi-tenant) and issuer-less generic providers — are not trusted for adoption.
+- `email_verified === true` for the **standard `email` claim**. Providers that use a custom `emailClaim` cannot earn adoption trust because `email_verified` only attests the standard claim.
+- The verified email equals the resolved username (`usernameClaim === 'email'`).
+
+**Source 2 — GitHub authenticated email fetch (`github-authenticated`)**:
+
+- `config.provider` is `'github'` (defense-in-depth: a non-GitHub provider cannot claim this trust level).
+- A call to GitHub's `/user/emails` API actually succeeded and returned the verified flag.
+- `email_verified === true` for the fetched email (a `verified: false` record does not qualify).
+- The verified email equals the resolved username.
+
+Any other source (unsigned token, plain UserInfo, failed GitHub fetch, custom `emailClaim`, non-GitHub provider) yields provenance `unauthenticated` → adoption denied.
+
+When an `onLogin` hook supplies the identity (`hookData.user`), the gate is skipped entirely — the hook is authoritative.
+
+**`fetchEmail` and OIDC providers without email in the id token** — when `fetchEmail: true` is configured and the id token lacks an `email` claim, the plugin fetches the email from the UserInfo endpoint so the login can resolve a username. The email is populated but the provenance is `unauthenticated` (it is not a signed claim), so adoption of an existing account is still denied. The login proceeds as a roleless session carrying a quarantine principal (see below).
+
+**Unverified sessions for new accounts** — when the login claim is not trusted and no existing account is found, the session identity is set to an unpredictable, non-resolvable **quarantine principal** of the form `unverified:<email>#<random>` rather than the raw claim. Because the random suffix cannot be guessed, no `hdb_user` can be created to match it, so a later-provisioned privileged account of the claim's name can never be adopted by a replayed unverified login. `oauthUser` (including any app-level role claim) is preserved for the application's own authorization. The `/user` endpoint for such sessions reports the IdP-derived identity with a `null` role — never leaking the opaque principal. See [Quarantine principal](#quarantine-principal) and [Pre-emption](#known-limitations) below.
+
+**Denied by default:**
+
+| Scenario                                                            | Reason                                               |
+| ------------------------------------------------------------------- | ---------------------------------------------------- |
+| GitHub `login` claim → existing account                             | `login` ≠ email; username and email differ           |
+| Okta `preferred_username` ≠ email → existing account                | username claim differs from email                    |
+| `email_verified` absent or false                                    | Provider has not attested the email                  |
+| Custom `emailClaim` (non-`email` claim used as identity)            | `email_verified` does not attest the custom claim    |
+| Unsigned / unverified id token                                      | Signature not verified                               |
+| JWKS-signed token from issuer-less provider (Azure /common, etc.)   | Issuer cannot be validated; nOAuth class attack      |
+| Azure id token without `email_verified`                             | No verified-email attestation available              |
+| Plain UserInfo response (no id token)                               | No authenticated binding to the identity             |
+| GitHub `/user/emails` fetch failed or returned non-OK               | Email not confirmed by an authenticated call         |
+| GitHub `/user/emails` returned `verified: false`                    | Email not verified by GitHub                         |
+| Non-GitHub provider with custom `getUserInfo` adapter               | `github-authenticated` requires `provider=github`    |
+| Custom adapter returning `_emailProvenance: 'github-authenticated'` | Provenance is plugin-assigned; adapter value ignored |
+| `fetchEmail: true` resolved email from UserInfo (no signed token)   | Email is present but provenance is unauthenticated   |
+
+**Allowed:**
+
+| Scenario                                                       | Reason                                                      |
+| -------------------------------------------------------------- | ----------------------------------------------------------- |
+| Google (JWKS-signed token, `email_verified=true`)              | `signed-oidc`: issuer validated, email verified             |
+| Auth0 (JWKS-signed token, `email_verified=true`)               | `signed-oidc`: issuer derived from domain                   |
+| Okta (JWKS-signed token, `preferred_username` equals email)    | `signed-oidc`: issuer derived from domain                   |
+| Azure single-tenant (JWKS-signed, `email_verified=true`)       | `signed-oidc`: issuer derived from tenant ID                |
+| GitHub (`provider=github`) with verified email, username=email | `github-authenticated`: successful `/user/emails`, verified |
+| `onLogin` hook returns `{ user }`                              | Hook path, gate skipped                                     |
+
+### Escape hatch: `allowUnverifiedClaimInheritance`
+
+If you have an operational need to allow adoption without the full trust chain (e.g., a legacy deployment migrating to verified claims), you can enable the escape hatch:
+
+```yaml
+'@harperfast/oauth':
+  allowUnverifiedClaimInheritance: true # or ${MY_ENV_VAR} for env-controlled rollout
+```
+
+This setting accepts `${ENV_VAR}` expansion, so you can enable it via environment variable for a controlled rollout:
+
+```bash
+export OAUTH_ALLOW_UNVERIFIED=true  # disable once migration is complete
+```
+
+```yaml
+'@harperfast/oauth':
+  allowUnverifiedClaimInheritance: ${OAUTH_ALLOW_UNVERIFIED}
+```
+
+When enabled, the plugin logs a warning on every login that uses the escape hatch. **Disable this setting as soon as operationally practical** — it restores the pre-gate behavior where an unverified claim can adopt any existing account.
+
+Default: `false` (off). Junk values, unresolved `${VAR}` placeholders (environment variable not set), and anything that is not `true` or `false` are treated as `false`.
+
+### Quarantine principal
+
+For a roleless login with no matching account and an untrusted claim, the plugin sets the session identity to a **quarantine principal** of the form `unverified:<claim>#<random>`. The random suffix makes the value unpredictable, so it can never be created as an `hdb_user` and can never resolve to a role. Unlike a fixed reserved prefix, it requires no naming convention and no fail-closed collision check — its security comes from unpredictability, not from a reserved namespace. The claim is embedded before the `#` purely for log readability and is never parsed back out.
+
+### Pre-existing sessions (upgrade note)
+
+Harper sessions do not expire by default. A session established **before this release** still holds a raw claim as its identity, which Harper resolves by name against `hdb_user` — and the login-time gate governs only _new_ logins, so it cannot retract an already-persisted session. Every OAuth login from this release forward records a provenance stamp (`authTrust`) on the session; a session whose `oauth` metadata carries no stamp is a **legacy** (pre-gate) session.
+
+This release does **not** yet neutralize legacy sessions automatically. On the operations-API path in particular, the session cookie is resolved to an `hdb_user` role in Harper's core — on a listener this plugin's request middleware never wraps — so a legacy session there cannot be retracted from within the plugin at request time; retracting it requires rewriting the stored session rows, which is deferred to a follow-up.
+
+**What operators should do on upgrade:** the gate protects new logins only — it does not retract sessions created before the upgrade. Typical Google/GitHub verified-email setups have nothing to retract. Any deployment that _could_ have accepted an unverified or non-email claim (intentionally or not) should revoke pre-2.6 OAuth sessions fleet-wide by clearing `system.hdb_session` — an administrator action. A user re-login is **not** sufficient: it only replaces that user's own session cookie and leaves any other (e.g. attacker-held) session active. Sessions created after the upgrade carry a provenance stamp and are governed by the gate.
+
+Automatic neutralization of pre-existing sessions (a durable, fail-closed mechanism that also covers the operations-API path) is tracked as a fast-follow.
+
+### Known limitations
+
+- **Pre-emption (closed)**: An untrusted login with no matching account persists a non-resolvable quarantine principal, not the raw claim, so a later-provisioned privileged account of the claim's name can never be adopted by that session — there is no window to exploit. A subsequent trusted login (with a verified claim) establishes a new session with the real identity.
+- **Naive passthrough hook**: An `onLogin` hook that returns `{ user: oauthUser.username }` bypasses the gate for that deployment — the hook is authoritative by design. Hooks must not blindly echo the OAuth username; they should validate before returning a `user`.
+- **Void-provisioning hook**: A hook that creates the account but returns void (no `{ user }`) is gated on that same login. Provisioning hooks should return `{ user }` so the gate treats them as authoritative.
 
 ## Debug Mode
 

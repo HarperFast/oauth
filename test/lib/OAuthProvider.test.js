@@ -5,6 +5,7 @@
 import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { OAuthProvider } from '../../dist/lib/OAuthProvider.js';
+import { GitHubProvider } from '../../dist/lib/providers/github.js';
 import { resetCSRFTableCache } from '../../dist/lib/CSRFTokenManager.js';
 
 describe('OAuthProvider', () => {
@@ -537,6 +538,29 @@ describe('OAuthProvider', () => {
 			assert.equal(userInfo.name, 'ID Token User');
 		});
 
+		it('fetchEmail fallback: a fetched email does not inherit the id token email_verified', async () => {
+			const fetchProvider = new OAuthProvider({ ...mockConfig, fetchEmail: true });
+			const originalFetch = global.fetch;
+			global.fetch = async () => ({
+				ok: true,
+				json: async () => ({ sub: '123', email: 'victim@example.com', email_verified: false }),
+			});
+			try {
+				// id token has no email but claims email_verified: true — it must not attach to
+				// the fetched (userinfo) address.
+				const userInfo = await fetchProvider.getUserInfo('token', {
+					sub: '123',
+					email: null,
+					email_verified: true,
+				});
+				assert.equal(userInfo.email, 'victim@example.com', 'fetched address wins');
+				assert.equal(userInfo.email_verified, false, 'fetched address keeps its own (false) flag');
+				assert.equal(userInfo._emailProvenance, 'unauthenticated');
+			} finally {
+				global.fetch = originalFetch;
+			}
+		});
+
 		it('should call custom getUserInfo function', async () => {
 			const customConfig = {
 				...mockConfig,
@@ -555,6 +579,110 @@ describe('OAuthProvider', () => {
 			const userInfo = await provider.getUserInfo('custom-token');
 			assert.equal(userInfo.email, 'custom@example.com');
 			assert.equal(userInfo.custom, true);
+		});
+
+		it('provenance injection: non-github adapter returning github-authenticated → unauthenticated', async () => {
+			// A custom adapter on a non-github provider cannot earn 'github-authenticated'.
+			// The plugin strips the adapter's _emailProvenance and assigns based on config.provider.
+			const nonGithubConfig = {
+				...mockConfig,
+				provider: 'custom-oidc',
+				getUserInfo: async () => ({
+					email: 'victim@example.com',
+					email_verified: true,
+					_emailProvenance: 'github-authenticated', // injection attempt
+				}),
+			};
+			provider = new OAuthProvider(nonGithubConfig, mockLogger);
+			const userInfo = await provider.getUserInfo('token');
+			assert.equal(
+				userInfo._emailProvenance,
+				'unauthenticated',
+				'non-github adapter must not earn github-authenticated'
+			);
+		});
+
+		it('provenance injection: non-github adapter returning signed-oidc → unauthenticated', async () => {
+			// A custom adapter cannot earn 'signed-oidc' either — that is only assigned
+			// by the plugin on the verified id-token path, never read from adapter output.
+			const nonGithubConfig = {
+				...mockConfig,
+				provider: 'custom-oidc',
+				getUserInfo: async () => ({
+					email: 'victim@example.com',
+					email_verified: true,
+					_emailProvenance: 'signed-oidc', // injection attempt
+				}),
+			};
+			provider = new OAuthProvider(nonGithubConfig, mockLogger);
+			const userInfo = await provider.getUserInfo('token');
+			assert.equal(userInfo._emailProvenance, 'unauthenticated', 'adapter cannot earn signed-oidc');
+		});
+
+		it('provenance: a custom getUserInfo labelled provider:github cannot earn github-authenticated', async () => {
+			// The trusted stamp comes only from the built-in adapter's authenticated fetch,
+			// asserted through the provenance Symbol. A custom adapter that returns
+			// email_verified:true without a fetch cannot set the Symbol, so it must not
+			// earn github-authenticated.
+			const githubConfig = {
+				...mockConfig,
+				provider: 'github',
+				getUserInfo: async () => ({
+					email: 'alice@example.com',
+					email_verified: true,
+				}),
+			};
+			provider = new OAuthProvider(githubConfig, mockLogger);
+			const userInfo = await provider.getUserInfo('token');
+			assert.equal(
+				userInfo._emailProvenance,
+				'unauthenticated',
+				'only the built-in GitHub adapter may earn github-authenticated'
+			);
+		});
+
+		it('provenance: the built-in GitHub adapter with a verified email → github-authenticated', async () => {
+			const originalFetch = global.fetch;
+			global.fetch = async (url) => {
+				if (String(url).includes('api.github.com/user/emails')) {
+					return { ok: true, json: async () => [{ email: 'alice@example.com', primary: true, verified: true }] };
+				}
+				return { ok: true, json: async () => ({ email: 'alice@example.com' }) };
+			};
+			try {
+				provider = new OAuthProvider(
+					{ ...mockConfig, provider: 'github', getUserInfo: GitHubProvider.getUserInfo },
+					mockLogger
+				);
+				const userInfo = await provider.getUserInfo('token');
+				assert.equal(userInfo._emailProvenance, 'github-authenticated');
+			} finally {
+				global.fetch = originalFetch;
+			}
+		});
+
+		it('provenance: the built-in GitHub adapter with an unverified email → unauthenticated', async () => {
+			const originalFetch = global.fetch;
+			global.fetch = async (url) => {
+				if (String(url).includes('api.github.com/user/emails')) {
+					return { ok: true, json: async () => [{ email: 'alice@example.com', primary: true, verified: false }] };
+				}
+				return { ok: true, json: async () => ({ email: 'alice@example.com' }) };
+			};
+			try {
+				provider = new OAuthProvider(
+					{ ...mockConfig, provider: 'github', getUserInfo: GitHubProvider.getUserInfo },
+					mockLogger
+				);
+				const userInfo = await provider.getUserInfo('token');
+				assert.equal(
+					userInfo._emailProvenance,
+					'unauthenticated',
+					'an unverified GitHub email must not earn github-authenticated'
+				);
+			} finally {
+				global.fetch = originalFetch;
+			}
 		});
 	});
 
@@ -794,44 +922,41 @@ describe('OAuthProvider', () => {
 			assert.equal(userInfo.name, 'ID Token User');
 		});
 
-		it('should fetch email separately when missing from ID token', async () => {
+		it('should set _emailProvenance signed-oidc when email is in the id token', async () => {
+			const idTokenClaims = {
+				sub: 'u1',
+				email: 'user@example.com',
+				email_verified: true,
+			};
+
+			const userInfo = await provider.getUserInfo('access-token', idTokenClaims);
+			assert.equal(userInfo._emailProvenance, 'signed-oidc');
+		});
+
+		it('should set _emailProvenance unauthenticated when no id token', async () => {
 			const originalFetch = global.fetch;
-
-			global.fetch = async (url) => {
-				assert.equal(url, mockConfig.userInfoUrl);
-				return {
-					ok: true,
-					json: async () => ({
-						email: 'fetched@example.com',
-					}),
-				};
-			};
-
-			const configWithFetchEmail = {
-				...mockConfig,
-				fetchEmail: true,
-			};
-			provider = new OAuthProvider(configWithFetchEmail, mockLogger);
-
+			global.fetch = async () => ({
+				ok: true,
+				json: async () => ({ sub: 'u1', email: 'user@example.com' }),
+			});
 			try {
-				const idTokenClaimsNoEmail = {
-					sub: '123',
-					name: 'User Without Email',
-				};
-
-				const userInfo = await provider.getUserInfo('access-token', idTokenClaimsNoEmail);
-				assert.equal(userInfo.email, 'fetched@example.com');
-				assert.equal(userInfo.name, 'User Without Email');
+				const userInfo = await provider.getUserInfo('access-token', null);
+				assert.equal(userInfo._emailProvenance, 'unauthenticated');
 			} finally {
 				global.fetch = originalFetch;
 			}
 		});
 
-		it('should handle fetchEmail failure gracefully', async () => {
+		it('should fetch userinfo email when ID token lacks email and fetchEmail is true (unauthenticated)', async () => {
+			// When the id token lacks email and fetchEmail is configured, userinfo
+			// is fetched to resolve the email so the login can succeed. Provenance is tagged
+			// 'unauthenticated' (the email is not signed), so adoption of an existing account
+			// is denied. Signed identity fields (iss, sub) come from the id token only.
+			let fetchCalled = false;
 			const originalFetch = global.fetch;
-
 			global.fetch = async () => {
-				throw new Error('Network error');
+				fetchCalled = true;
+				return { ok: true, json: async () => ({ email: 'fetched@example.com', name: 'Fetched User' }) };
 			};
 
 			const configWithFetchEmail = {
@@ -843,16 +968,49 @@ describe('OAuthProvider', () => {
 			try {
 				const idTokenClaimsNoEmail = {
 					sub: '123',
+					iss: 'https://issuer.example.com',
 					name: 'User Without Email',
 				};
 
 				const userInfo = await provider.getUserInfo('access-token', idTokenClaimsNoEmail);
-				// Should return ID token claims even though email fetch failed
-				assert.equal(userInfo.name, 'User Without Email');
-				assert.equal(userInfo.email, undefined);
+				assert.equal(
+					fetchCalled,
+					true,
+					'fetchUserInfo must be called when id token lacks email and fetchEmail is true'
+				);
+				assert.equal(userInfo.email, 'fetched@example.com', 'email must come from userinfo');
+				assert.equal(userInfo.sub, '123', 'sub must come from id token (not userinfo)');
+				assert.equal(userInfo.iss, 'https://issuer.example.com', 'iss must come from id token (not userinfo)');
+				assert.equal(userInfo.name, 'User Without Email', 'id token name takes precedence when both present');
+				assert.equal(userInfo._emailProvenance, 'unauthenticated', 'fetchEmail path is always unauthenticated');
 			} finally {
 				global.fetch = originalFetch;
 			}
+		});
+
+		it('should return signed-oidc with id token claims intact (no UserInfo merge)', async () => {
+			// Confirms the idTokenClaims path is a simple passthrough with signed-oidc tag.
+			// No UserInfo fetch happens regardless of fetchEmail.
+			const configWithFetchEmail = {
+				...mockConfig,
+				fetchEmail: true,
+			};
+			provider = new OAuthProvider(configWithFetchEmail, mockLogger);
+
+			const idTokenClaims = {
+				sub: 'u1',
+				iss: 'https://real.issuer.example.com',
+				email: 'user@example.com',
+				email_verified: true,
+				name: 'Real User',
+			};
+
+			const userInfo = await provider.getUserInfo('access-token', idTokenClaims);
+			assert.equal(userInfo.iss, 'https://real.issuer.example.com');
+			assert.equal(userInfo.sub, 'u1');
+			assert.equal(userInfo.email, 'user@example.com');
+			assert.equal(userInfo.email_verified, true);
+			assert.equal(userInfo._emailProvenance, 'signed-oidc');
 		});
 	});
 
@@ -873,6 +1031,28 @@ describe('OAuthProvider', () => {
 				await assert.rejects(async () => await provider.fetchUserInfo('invalid-token'), {
 					message: /Failed to fetch user info.*Unauthorized/i,
 				});
+			} finally {
+				global.fetch = originalFetch;
+			}
+		});
+
+		it('should strip _emailProvenance from raw UserInfo response', async () => {
+			// Remote data must never supply a trusted provenance value. fetchUserInfo
+			// strips _emailProvenance so an attacker-controlled UserInfo body cannot
+			// inject a trusted provenance tag.
+			const originalFetch = global.fetch;
+			global.fetch = async () => ({
+				ok: true,
+				json: async () => ({
+					sub: 'u1',
+					email: 'user@example.com',
+					_emailProvenance: 'signed-oidc', // injected by attacker
+				}),
+			});
+			try {
+				const result = await provider.fetchUserInfo('access-token');
+				assert.equal('_emailProvenance' in result, false, '_emailProvenance must be stripped');
+				assert.equal(result.email, 'user@example.com');
 			} finally {
 				global.fetch = originalFetch;
 			}
@@ -932,6 +1112,62 @@ describe('OAuthProvider', () => {
 			assert.equal(harperUser.metadata.oauthProvider, 'test');
 			assert.deepEqual(harperUser.metadata.oauthClaims, userInfo);
 		});
+
+		it('should read email from config.emailClaim when set', () => {
+			const configWithEmailClaim = {
+				...mockConfig,
+				emailClaim: 'upn', // Azure uses 'upn' or similar custom claim
+			};
+			const providerWithEmailClaim = new OAuthProvider(configWithEmailClaim, mockLogger);
+
+			const userInfo = {
+				email: 'user@example.com',
+				upn: 'azure-user@corp.onmicrosoft.com',
+				sub: '123',
+			};
+
+			const harperUser = providerWithEmailClaim.mapUserToHarper(userInfo);
+			assert.equal(
+				harperUser.email,
+				'azure-user@corp.onmicrosoft.com',
+				'emailClaim must override the default email field'
+			);
+		});
+
+		it('should set emailVerified undefined when emailClaim is not the standard email claim', () => {
+			// email_verified only attests the standard 'email' claim. When emailClaim is
+			// a custom field, there is no trustworthy paired verified flag, so emailVerified
+			// must be undefined to prevent the adoption gate from passing.
+			const configWithEmailClaim = {
+				...mockConfig,
+				emailClaim: 'upn',
+			};
+			const providerWithEmailClaim = new OAuthProvider(configWithEmailClaim, mockLogger);
+
+			const userInfo = {
+				upn: 'azure-user@corp.onmicrosoft.com',
+				email: 'user@example.com',
+				email_verified: true,
+				sub: '123',
+			};
+
+			const harperUser = providerWithEmailClaim.mapUserToHarper(userInfo);
+			assert.equal(
+				harperUser.emailVerified,
+				undefined,
+				'emailVerified must be undefined when emailClaim is not standard email'
+			);
+		});
+
+		it('should fall back to email field when emailClaim is not set', () => {
+			const userInfo = {
+				email: 'user@example.com',
+				sub: '123',
+			};
+
+			const harperUser = provider.mapUserToHarper(userInfo);
+			assert.equal(harperUser.email, 'user@example.com');
+		});
 	});
 
 	describe('ID Token Verification', () => {
@@ -943,6 +1179,24 @@ describe('OAuthProvider', () => {
 			await assert.rejects(async () => await provider.verifyIdToken('invalid.token'), {
 				message: /Invalid ID token format/i,
 			});
+		});
+
+		it('no-JWKS path: token without exp is rejected (cannot be trusted)', async () => {
+			// A JWT missing exp passes jwt.verify's expiry check (no exp = no expiry check),
+			// but must still be rejected because an untimed token cannot be safely trusted.
+			const header = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url');
+			const payload = Buffer.from(
+				JSON.stringify({
+					sub: '123',
+					aud: mockConfig.clientId,
+					iat: Math.floor(Date.now() / 1000),
+					// exp intentionally absent
+				})
+			).toString('base64url');
+			const fakeToken = `${header}.${payload}.fake-signature`;
+
+			// On the no-JWKS path, verifyIdTokenClaims is called. It requires exp.
+			await assert.rejects(async () => await provider.verifyIdToken(fakeToken), { message: /expired|exp/i });
 		});
 
 		it('should warn when JWKS is not configured', async () => {

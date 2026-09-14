@@ -14,7 +14,9 @@ export const GoogleProvider: OAuthProviderConfig = {
 	tokenUrl: 'https://oauth2.googleapis.com/token',
 	userInfoUrl: 'https://www.googleapis.com/oauth2/v3/userinfo',
 	jwksUri: 'https://www.googleapis.com/oauth2/v3/certs',
-	issuer: 'https://accounts.google.com',
+	// Google issues `iss` as either form; accept both so signed-token adoption
+	// isn't denied for the bare-issuer variant.
+	issuer: ['https://accounts.google.com', 'accounts.google.com'],
 	scope: 'openid profile email',
 	usernameClaim: 'email',
 	emailClaim: 'email',

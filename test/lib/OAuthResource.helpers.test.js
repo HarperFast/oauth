@@ -193,6 +193,12 @@ describe('OAuthResource - Helper Methods', () => {
 			assert.equal(OAuthResource.logger, undefined);
 		});
 
+		it('reset() clears allowUnverifiedClaimInheritance to false (no state leak between tests)', () => {
+			OAuthResource.allowUnverifiedClaimInheritance = true;
+			OAuthResource.reset();
+			assert.equal(OAuthResource.allowUnverifiedClaimInheritance, false);
+		});
+
 		it('should allow reconfiguration', () => {
 			const providers1 = { github: { config: { provider: 'github' } } };
 			const providers2 = { google: { config: { provider: 'google' } } };

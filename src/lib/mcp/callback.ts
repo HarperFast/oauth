@@ -20,6 +20,7 @@
 import { randomBytes } from 'node:crypto';
 import type { Logger, MCPAuthCodeRecord, MCPAuthorizeState, MCPConfig, Request } from '../../types.ts';
 import { MCPAuthCodeStore } from './authCodeStore.ts';
+import { redactQuarantinePrincipal } from '../quarantinePrincipal.ts';
 import { resolveIssuer } from './wellKnown.ts';
 
 type Redirect = {
@@ -102,6 +103,12 @@ export async function handleMCPCallback(
 		);
 	}
 
-	logger?.info?.(`MCP callback: minted auth code for client=${mcpState.clientId} user=${userIdentifier}`);
+	// Redact the quarantine principal's random suffix here — it's the log line, not
+	// the audit trail. `oauth.mcp.token.issued` (token.ts) deliberately keeps the
+	// full sub: an audit event's purpose is to record the exact identity a token
+	// was issued for.
+	logger?.info?.(
+		`MCP callback: minted auth code for client=${mcpState.clientId} user=${JSON.stringify(redactQuarantinePrincipal(userIdentifier))}`
+	);
 	return buildSuccessRedirect(mcpState.redirectUri, code, mcpState.clientState, issuer);
 }

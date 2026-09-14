@@ -18,6 +18,7 @@ import type {
 	OnLoginResult,
 	OnLoginResultDenied,
 	OnLoginResultNeedsConfirmation,
+	AuthTrust,
 } from '../types.ts';
 import {
 	browserSecretMatches,
@@ -26,6 +27,7 @@ import {
 	hashBrowserSecret,
 	readBrowserSecret,
 } from './mcp/consentBinding.ts';
+import { makeQuarantinePrincipal, isQuarantinePrincipal } from './quarantinePrincipal.ts';
 import { handleMCPCallback } from './mcp/index.ts';
 import { resolveIssuer } from './mcp/wellKnown.ts';
 import { getRequestHeader } from './requestHeaders.ts';
@@ -179,6 +181,24 @@ export async function handleLogin(
 /**
  * Handle OAuth callback from provider
  */
+/**
+ * Look up whether a Harper `hdb_user` with this exact name exists.
+ * Returns true when found, false when not found, null when the lookup
+ * cannot be completed (system DB unavailable or error). Callers treat
+ * null as fail-closed (same as true) so errors never silently bypass
+ * the account-adoption gate.
+ */
+async function checkHarperUserExists(name: string): Promise<boolean | null> {
+	try {
+		const db = (globalThis as any).databases?.system?.hdb_user;
+		if (!db) return null;
+		const record = await db.get(name);
+		return record != null;
+	} catch {
+		return null;
+	}
+}
+
 export async function handleCallback(
 	request: Request,
 	target: RequestTarget,
@@ -186,9 +206,9 @@ export async function handleCallback(
 	config: OAuthProviderConfig,
 	hookManager: HookManager,
 	providerName: string,
-	opts?: { mcpConfig?: MCPConfig; logger?: Logger }
+	opts?: { mcpConfig?: MCPConfig; logger?: Logger; allowUnverifiedClaimInheritance?: boolean }
 ): Promise<any> {
-	const { mcpConfig, logger } = opts ?? {};
+	const { mcpConfig, logger, allowUnverifiedClaimInheritance = false } = opts ?? {};
 	// Get query parameters from target
 	const code = target.get?.('code');
 	const state = target.get?.('state');
@@ -372,10 +392,21 @@ export async function handleCallback(
 
 		// Verify ID token if present (OIDC flow)
 		let idTokenClaims = null;
+		let idTokenSignatureVerified = false;
+		let idTokenIssuerValidated = false;
 		if (tokenResponse.id_token) {
 			try {
-				idTokenClaims = provider.verifyIdToken ? await provider.verifyIdToken(tokenResponse.id_token) : null;
-				logger?.info?.('ID token verified successfully');
+				if (provider.verifyIdToken) {
+					const result = await provider.verifyIdToken(tokenResponse.id_token);
+					idTokenClaims = result.claims;
+					idTokenSignatureVerified = result.signatureVerified;
+					idTokenIssuerValidated = result.issuerValidated;
+				}
+				if (idTokenSignatureVerified && idTokenIssuerValidated) {
+					logger?.info?.('ID token signature and issuer verified');
+				} else {
+					logger?.info?.('ID token decoded (unverified — no JWKS or no configured issuer)');
+				}
 			} catch (error) {
 				// Log verification failure but continue with userinfo endpoint
 				logger?.warn?.(
@@ -385,8 +416,12 @@ export async function handleCallback(
 			}
 		}
 
-		// Get user info (will use ID token claims if available and verified)
+		// Get user info (will use ID token claims if available and verified).
+		// getUserInfo also sets _emailProvenance on the returned object.
 		const userInfo = await provider.getUserInfo(tokenResponse.access_token, idTokenClaims);
+		// Extract provenance before mapUserToHarper discards the meta-field.
+		const emailProvenance: string =
+			typeof userInfo?._emailProvenance === 'string' ? userInfo._emailProvenance : 'unauthenticated';
 
 		// Map to Harper user
 		const user = provider.mapUserToHarper(userInfo);
@@ -403,7 +438,9 @@ export async function handleCallback(
 		if (isGatedLoginOutcome(hookData)) {
 			const denied = hookData.status === 'denied';
 			const reason = denied ? hookData.error : undefined;
-			logger?.info?.(`OAuth login ${denied ? 'denied' : 'deferred'} by onLogin hook for user: ${user.username}`);
+			logger?.info?.(
+				`OAuth login ${denied ? 'denied' : 'deferred'} by onLogin hook for user: ${JSON.stringify(user.username)}`
+			);
 			if (mcpState) {
 				// An MCP client can't follow an interactive confirmation step —
 				// fail the authorization cleanly; the user completes the step in
@@ -425,23 +462,166 @@ export async function handleCallback(
 		}
 
 		// Legacy behavior treats any other status value as session data, which
-		// silently un-gates a typo'd 'denied' — surface it (#175 review).
+		// would silently un-gate a typo'd 'denied', so surface it.
 		if (typeof hookData?.status === 'string' && hookData.status !== 'ok') {
 			logger?.warn?.(
 				`onLogin returned unrecognized status '${hookData.status}' — treated as session data (legacy behavior); use 'denied' or 'needs_confirmation' to gate the login`
 			);
 		}
 
+		// Unify resolved identity from hook override or OAuth claim (one value for
+		// both the MCP and session sinks); a hook-supplied empty string is preserved
+		// for the non-empty guard below.
+		const resolvedUser = hookData?.user ?? user.username;
+		if (!resolvedUser || typeof resolvedUser !== 'string') {
+			logger?.warn?.('OAuth: resolved identity is empty after login; denying');
+			if (mcpState) return mcpErrorRedirect(mcpState, 'server_error', 'identity_resolution');
+			return {
+				status: 302,
+				headers: {
+					Location: buildErrorRedirect(tokenData.originalUrl || config.postLoginRedirect || '/', {
+						error: 'auth_failed',
+						reason: 'identity_resolution',
+					}),
+				},
+			};
+		}
+
+		// Account-adoption gate: when no onLogin hook supplied the identity (i.e.
+		// the username came directly from the IdP claim), verify the claim is
+		// trustworthy before letting the login inherit an existing Harper account.
+		//
+		// A claim is trusted when ALL of the following hold:
+		//   1. The resolved username IS the email claim value (not a reassignable
+		//      claim like GitHub `login` or Okta `preferred_username`).
+		//   2. The provider attests the email is verified (email_verified === true).
+		//      For custom emailClaim values, emailVerified is always undefined (untrusted).
+		//   3. The email came from one of exactly two AUTHENTICATED SOURCES:
+		//      a. A JWKS-signature-verified OIDC id token whose issuer was validated
+		//         against the provider's expected issuer ('signed-oidc'). Providers
+		//         without a known issuer (Azure /common, issuer-less generic) are not
+		//         trusted for adoption.
+		//      b. GitHub's provider-authenticated /user/emails fetch, only when that
+		//         fetch actually succeeded ('github-authenticated').
+		//
+		// Trust classification of the OAuth claim, hoisted so it can both gate
+		// adoption and be stamped onto the session (its provenance must survive
+		// refresh). Only meaningful when the identity came from the IdP claim.
+		const claimIsTrusted =
+			!hookData?.user &&
+			typeof user.email === 'string' &&
+			user.email === resolvedUser &&
+			user.emailVerified === true &&
+			((emailProvenance === 'signed-oidc' && idTokenSignatureVerified && idTokenIssuerValidated) ||
+				(emailProvenance === 'github-authenticated' && config.provider === 'github'));
+		let adoptedViaEscapeHatch = false;
+
+		if (!hookData?.user) {
+			const userExists = await checkHarperUserExists(resolvedUser);
+			if (userExists !== false) {
+				// A resolved account — or a lookup error, treated fail-closed — requires a
+				// trusted claim to adopt.
+				if (!claimIsTrusted) {
+					if (allowUnverifiedClaimInheritance) {
+						adoptedViaEscapeHatch = true;
+						logger?.warn?.(
+							`OAuth: adopting existing account ${JSON.stringify(resolvedUser)} via unverified claim ` +
+								`(allowUnverifiedClaimInheritance is enabled — disable this setting to deny this login)`
+						);
+					} else {
+						logger?.warn?.(
+							`OAuth: login denied — claim for ${JSON.stringify(resolvedUser)} is not from an authenticated source; ` +
+								`a verified email from a JWKS-signed token with a validated issuer, or ` +
+								`GitHub's authenticated email fetch is required to adopt an existing account`
+						);
+						if (mcpState) {
+							return mcpErrorRedirect(mcpState, 'access_denied', 'login_denied');
+						}
+						return {
+							status: 302,
+							headers: {
+								Location: buildErrorRedirect(tokenData.originalUrl || config.postLoginRedirect || '/', {
+									error: 'access_denied',
+									reason: 'login_denied',
+								}),
+							},
+						};
+					}
+				}
+			} else if (!claimIsTrusted) {
+				// No existing account and the claim is not from an authenticated source.
+				// Persist an unpredictable, non-resolvable quarantine principal: because a
+				// later hdb_user cannot be created to match the random suffix, this login
+				// can never adopt a privileged account of the claim's name. The session is
+				// roleless (the principal resolves to no hdb_user), and `oauthUser` — incl.
+				// any app-level role claim — is preserved for the application's own authz.
+				const quarantinePrincipal = makeQuarantinePrincipal(resolvedUser);
+				logger?.warn?.(
+					`OAuth: no existing account for ${JSON.stringify(resolvedUser)} and the claim is not from an ` +
+						`authenticated source — establishing a roleless, non-adoptable session`
+				);
+				if (mcpState) {
+					return handleMCPCallback(request, mcpState, quarantinePrincipal, mcpConfig ?? {}, logger);
+				}
+				if (request.session) {
+					const now = Date.now();
+					let expiresAt: number | undefined;
+					let refreshThreshold: number | undefined;
+					if (tokenResponse.expires_in) {
+						const expiresIn = tokenResponse.expires_in;
+						expiresAt = now + expiresIn * 1000;
+						refreshThreshold = now + expiresIn * 800;
+					}
+					const sessionData: any = {
+						user: quarantinePrincipal,
+						oauthUser: user,
+						oauth: {
+							provider: providerName,
+							providerConfigId: providerName,
+							providerType: config.provider,
+							accessToken: tokenResponse.access_token,
+							refreshToken: tokenResponse.refresh_token,
+							expiresAt,
+							refreshThreshold,
+							scope: tokenResponse.scope,
+							tokenType: tokenResponse.token_type || 'Bearer',
+							lastRefreshed: now,
+							authTrust: 'untrusted',
+						},
+					};
+					if (hookData) {
+						const { user: _u, ...remainingHookData } = hookData;
+						if (remainingHookData.status === 'ok') delete remainingHookData.status;
+						// Plugin-owned session fields must not be overwritten by hook enrichment.
+						delete remainingHookData.oauth;
+						delete remainingHookData.oauthUser;
+						Object.assign(sessionData, remainingHookData);
+					}
+					if (typeof request.session.update === 'function') {
+						await request.session.update(sessionData);
+					} else {
+						Object.assign(request.session, sessionData);
+					}
+					logger?.info?.(`OAuth: login successful (roleless, non-adoptable) for ${JSON.stringify(resolvedUser)}`);
+				}
+				return {
+					status: 302,
+					headers: {
+						Location: sanitizeRedirect(tokenData.originalUrl || config.postLoginRedirect || '/'),
+					},
+				};
+			}
+		}
+
 		// MCP branch: if the CSRF state was minted by /oauth/mcp/authorize, the
 		// upstream callback's job is to mint an MCP authorization code, NOT to
 		// create a Harper session. Independent lifecycle per #86 resolved
 		// decision. The upstream IdP token never reaches the MCP client.
-		// Pass the onLogin-mapped username so the issued auth code (and the
-		// JWT exchanged for it in Stage 4) is bound to the correct identity.
+		// Pass the resolved username so the issued auth code (and the JWT
+		// exchanged for it in Stage 4) is bound to the correct identity.
 		if (mcpState) {
 			// Browser binding already verified above, before the code exchange.
-			const userIdentifier = hookData?.user ?? user.username;
-			return handleMCPCallback(request, mcpState, userIdentifier, mcpConfig ?? {}, logger);
+			return handleMCPCallback(request, mcpState, resolvedUser, mcpConfig ?? {}, logger);
 		}
 
 		// Store in session if available
@@ -462,9 +642,14 @@ export async function handleCallback(
 			// else: No expires_in means token doesn't expire (e.g., GitHub)
 			// Leave expiresAt and refreshThreshold undefined so middleware doesn't try to refresh
 
+			// Provenance of this established identity. Reaching here (non-quarantine)
+			// means a hook supplied the user, an authenticated claim was trusted, or an
+			// unverified claim adopted an account via the operator escape hatch.
+			const authTrust: AuthTrust = hookData?.user ? 'hook' : adoptedViaEscapeHatch ? 'operator-override' : 'verified';
+
 			// Prepare session data
 			const sessionData: any = {
-				user: hookData?.user || user.username, // Use hook's user if provided, otherwise OAuth username
+				user: resolvedUser, // Hook-supplied override or OAuth claim (unified above)
 				oauthUser: user, // Store full OAuth user object separately
 				oauth: {
 					provider: providerName, // Config key (backwards compatible - e.g., 'my-custom-github', 'production-okta')
@@ -477,6 +662,7 @@ export async function handleCallback(
 					scope: tokenResponse.scope,
 					tokenType: tokenResponse.token_type || 'Bearer',
 					lastRefreshed: now,
+					authTrust,
 				},
 			};
 
@@ -487,6 +673,9 @@ export async function handleCallback(
 				// `status: 'ok'` is flow control (#174), not session data; any
 				// other status value is passed through as before.
 				if (remainingHookData.status === 'ok') delete remainingHookData.status;
+				// Plugin-owned session fields must not be overwritten by hook enrichment.
+				delete remainingHookData.oauth;
+				delete remainingHookData.oauthUser;
 				Object.assign(sessionData, remainingHookData);
 			}
 
@@ -498,7 +687,7 @@ export async function handleCallback(
 			}
 
 			logger?.info?.(
-				`OAuth login successful for user: ${user.username}${tokenResponse.expires_in ? `, token expires in ${tokenResponse.expires_in}s` : ', token does not expire'}`
+				`OAuth login successful for user: ${JSON.stringify(user.username)}${tokenResponse.expires_in ? `, token expires in ${tokenResponse.expires_in}s` : ', token does not expire'}`
 			);
 		} else {
 			logger?.warn?.('No session available for OAuth user');
@@ -584,7 +773,8 @@ export async function handleUserInfo(request: Request, tokenRefreshed = false): 
 	// Check for OAuth user in session first, then Harper user
 	const oauthUser = request?.session?.oauthUser;
 	const oauthMetadata = request?.session?.oauth;
-	const username = request?.user || request?.session?.user;
+	const sessionUser = request?.session?.user;
+	const username = request?.user || sessionUser;
 
 	if (!username && !oauthUser) {
 		return {
@@ -596,8 +786,43 @@ export async function handleUserInfo(request: Request, tokenRefreshed = false): 
 		};
 	}
 
-	// If we have OAuth user details, use those
-	if (oauthUser) {
+	// A roleless, untrusted session carries a non-resolvable quarantine principal
+	// (authTrust === 'untrusted'). Report role: null and the IdP-derived identity
+	// rather than leaking the opaque principal. Trust the stamp first; only fall
+	// back to the principal's shape for a legacy session with no stamp, so a
+	// verified/hook account that happens to be named like a quarantine principal is
+	// not misreported as roleless.
+	const trust = oauthMetadata?.authTrust;
+	const isUntrusted = trust === 'untrusted' || (trust == null && isQuarantinePrincipal(sessionUser));
+
+	if (isUntrusted) {
+		return {
+			status: 200,
+			body: {
+				authenticated: true,
+				username: oauthUser?.username ?? oauthUser?.email ?? null,
+				role: null,
+				email: oauthUser?.email ?? null,
+				name: oauthUser?.name ?? null,
+				provider: oauthUser?.provider ?? oauthMetadata?.providerType ?? null,
+				oauth: oauthMetadata
+					? {
+							provider: oauthMetadata.provider,
+							providerConfigId: oauthMetadata.providerConfigId,
+							providerType: oauthMetadata.providerType,
+							expiresAt: oauthMetadata.expiresAt,
+							refreshThreshold: oauthMetadata.refreshThreshold,
+							lastRefreshed: oauthMetadata.lastRefreshed,
+							hasRefreshToken: !!oauthMetadata.refreshToken,
+							tokenRefreshed,
+						}
+					: undefined,
+			},
+		};
+	}
+
+	// If we have OAuth user details, use those (for trusted/normal sessions only)
+	if (oauthUser && !isUntrusted) {
 		return {
 			status: 200,
 			body: {

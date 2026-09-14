@@ -189,6 +189,18 @@ describe('OAuth Handlers', () => {
 	});
 
 	describe('handleCallback', () => {
+		// Default: no users exist in the Harper system DB — the gate never fires.
+		// Tests that need a collision override globalThis.databases.system.hdb_user.get.
+		beforeEach(() => {
+			globalThis.databases = {
+				system: { hdb_user: { get: async () => null } },
+			};
+		});
+
+		afterEach(() => {
+			delete globalThis.databases;
+		});
+
 		it('should handle successful OAuth callback', async () => {
 			const result = await handleCallback(
 				mockRequest,
@@ -209,13 +221,18 @@ describe('OAuth Handlers', () => {
 		});
 
 		it('should update session with user data', async () => {
+			// Default mock has no OIDC token and no trusted provenance. With no
+			// existing account, the login is roleless: session.user is set to a
+			// non-resolvable quarantine principal so no later-provisioned account of
+			// the claim's name can be adopted. oauthUser is preserved intact.
 			await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockHookManager, 'test-provider', {
 				logger: mockLogger,
 			});
 
 			const updateCall = mockRequest.session.update.mock.calls[0];
-			assert.equal(updateCall.arguments[0].user, 'user@example.com');
+			assert.match(updateCall.arguments[0].user, /^unverified:user@example\.com#[0-9a-f]{16}$/);
 			assert.ok(updateCall.arguments[0].oauthUser);
+			assert.equal(updateCall.arguments[0].oauth.authTrust, 'untrusted');
 			// Token data is now stored in oauth object
 			assert.ok(updateCall.arguments[0].oauth);
 			assert.equal(updateCall.arguments[0].oauth.accessToken, 'access-token-123');
@@ -318,7 +335,10 @@ describe('OAuth Handlers', () => {
 		});
 
 		it('should verify ID token when present', async () => {
-			mockProvider.verifyIdToken = createMockFn(async () => ({ sub: 'user-123', email: 'verified@example.com' }));
+			mockProvider.verifyIdToken = createMockFn(async () => ({
+				claims: { sub: 'user-123', email: 'verified@example.com' },
+				signatureVerified: true,
+			}));
 			mockProvider.exchangeCodeForToken = createMockFn(async () => ({
 				access_token: 'access-token',
 				id_token: 'id-token-jwt',
@@ -521,6 +541,8 @@ describe('OAuth Handlers', () => {
 		});
 
 		it('should handle session without update function', async () => {
+			// Without update(), session is written via Object.assign.
+			// Default mock is untrusted + no account → roleless quarantine principal.
 			mockRequest.session = {
 				id: 'session-123',
 			};
@@ -536,7 +558,8 @@ describe('OAuth Handlers', () => {
 			);
 
 			assert.equal(result.status, 302);
-			assert.equal(mockRequest.session.user, 'user@example.com');
+			assert.match(mockRequest.session.user, /^unverified:user@example\.com#[0-9a-f]{16}$/);
+			assert.equal(mockRequest.session.oauth.authTrust, 'untrusted');
 			assert.ok(mockRequest.session.oauthUser);
 			// Token data is now stored in oauth object
 			assert.ok(mockRequest.session.oauth);
@@ -692,9 +715,1212 @@ describe('OAuth Handlers', () => {
 			// Provider should be the registry key (providerName), not the provider type
 			assert.equal(updateCall.arguments[0].oauth.provider, 'acme-corp');
 		});
+
+		// ── Account-adoption gate ─────────────────────────────────────────────────
+
+		it('gate: Google-style (email usernameClaim, JWKS-signed token, email_verified=true) → adopted', async () => {
+			// Google uses usernameClaim:'email', so username===email. With a JWKS-signed
+			// id token carrying email_verified=true, the gate must allow adoption.
+			globalThis.databases = {
+				system: { hdb_user: { get: async (name) => (name === 'user@example.com' ? { username: name } : null) } },
+			};
+			// Simulate getUserInfo returning signed-oidc provenance (email in id token)
+			mockProvider.getUserInfo = createMockFn(async () => ({
+				sub: 'u1',
+				email: 'user@example.com',
+				email_verified: true,
+				iss: 'https://accounts.google.com',
+				iat: 1,
+				_emailProvenance: 'signed-oidc',
+			}));
+			mockProvider.mapUserToHarper = createMockFn(() => ({
+				username: 'user@example.com',
+				role: 'user',
+				email: 'user@example.com',
+				emailVerified: true,
+				provider: 'google',
+			}));
+			mockProvider.verifyIdToken = createMockFn(async () => ({
+				claims: {
+					sub: 'u1',
+					email: 'user@example.com',
+					email_verified: true,
+					iss: 'https://accounts.google.com',
+					iat: 1,
+					exp: Math.floor(Date.now() / 1000) + 3600,
+				},
+				signatureVerified: true,
+				issuerValidated: true,
+			}));
+			mockProvider.exchangeCodeForToken = createMockFn(async () => ({
+				access_token: 'token',
+				id_token: 'signed-jwt',
+			}));
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				{ logger: mockLogger }
+			);
+
+			// Must succeed (redirect to post-login URL, session written).
+			assert.equal(result.status, 302);
+			const updateCall = mockRequest.session.update.mock.calls[0];
+			assert.equal(updateCall.arguments[0].user, 'user@example.com');
+		});
+
+		it('gate: Okta preferred_username ≠ email, matching account → denied', async () => {
+			// Okta uses usernameClaim:'preferred_username'. When preferred_username is
+			// different from the email address, the gate must deny because the username
+			// (not an email) cannot be correlated to the verified email claim.
+			globalThis.databases = {
+				system: { hdb_user: { get: async (name) => (name === 'alice.smith' ? { username: name } : null) } },
+			};
+			// Okta preferred_username is a short handle, not the email
+			mockProvider.getUserInfo = createMockFn(async () => ({
+				sub: 'u1',
+				preferred_username: 'alice.smith',
+				email: 'alice@corp.example.com',
+				email_verified: true,
+				_emailProvenance: 'signed-oidc',
+			}));
+			mockProvider.mapUserToHarper = createMockFn(() => ({
+				username: 'alice.smith', // Okta's preferred_username — NOT the email
+				role: 'user',
+				email: 'alice@corp.example.com',
+				emailVerified: true,
+				provider: 'okta',
+			}));
+			mockProvider.verifyIdToken = createMockFn(async () => ({
+				claims: {
+					sub: 'u1',
+					preferred_username: 'alice.smith',
+					email: 'alice@corp.example.com',
+					email_verified: true,
+					iss: 'https://corp.okta.com',
+					iat: 1,
+					exp: Math.floor(Date.now() / 1000) + 3600,
+				},
+				signatureVerified: true,
+			}));
+			mockProvider.exchangeCodeForToken = createMockFn(async () => ({
+				access_token: 'token',
+				id_token: 'signed-jwt',
+			}));
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				{ logger: mockLogger }
+			);
+
+			// username !== email → gate denies
+			assert.equal(result.status, 302);
+			assert.ok(
+				result.headers.Location.includes('access_denied'),
+				`expected access_denied; got ${result.headers.Location}`
+			);
+			assert.equal(mockRequest.session.update.mock.calls.length, 0);
+		});
+
+		it('gate: Okta preferred_username === email, matching account → adopted', async () => {
+			// When Okta's preferred_username happens to equal the email address,
+			// the gate should allow adoption (all three trust conditions satisfied).
+			globalThis.databases = {
+				system: { hdb_user: { get: async (name) => (name === 'alice@corp.example.com' ? { username: name } : null) } },
+			};
+			mockProvider.getUserInfo = createMockFn(async () => ({
+				sub: 'u1',
+				preferred_username: 'alice@corp.example.com',
+				email: 'alice@corp.example.com',
+				email_verified: true,
+				_emailProvenance: 'signed-oidc',
+			}));
+			mockProvider.mapUserToHarper = createMockFn(() => ({
+				username: 'alice@corp.example.com',
+				role: 'user',
+				email: 'alice@corp.example.com',
+				emailVerified: true,
+				provider: 'okta',
+			}));
+			mockProvider.verifyIdToken = createMockFn(async () => ({
+				claims: {
+					sub: 'u1',
+					preferred_username: 'alice@corp.example.com',
+					email: 'alice@corp.example.com',
+					email_verified: true,
+					iss: 'https://corp.okta.com',
+					iat: 1,
+					exp: Math.floor(Date.now() / 1000) + 3600,
+				},
+				signatureVerified: true,
+				issuerValidated: true,
+			}));
+			mockProvider.exchangeCodeForToken = createMockFn(async () => ({
+				access_token: 'token',
+				id_token: 'signed-jwt',
+			}));
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				{ logger: mockLogger }
+			);
+
+			assert.equal(result.status, 302);
+			assert.equal(result.headers.Location, '/dashboard');
+			const updateCall = mockRequest.session.update.mock.calls[0];
+			assert.equal(updateCall.arguments[0].user, 'alice@corp.example.com');
+		});
+
+		it('gate: GitHub login claim (username ≠ email) + existing account → denied', async () => {
+			// GitHub uses usernameClaim:'login'. The login handle is NOT the email, so
+			// the gate must deny even when email_verified=true and provenance is github-authenticated.
+			globalThis.databases = {
+				system: { hdb_user: { get: async (name) => (name === 'victimadmin' ? { username: name } : null) } },
+			};
+			mockProvider.getUserInfo = createMockFn(async () => ({
+				login: 'victimadmin',
+				email: 'attacker@github.test',
+				email_verified: true,
+				_emailProvenance: 'github-authenticated',
+			}));
+			mockProvider.mapUserToHarper = createMockFn(() => ({
+				username: 'victimadmin', // GitHub login — NOT the email
+				role: 'user',
+				email: 'attacker@github.test',
+				emailVerified: true,
+				provider: 'github',
+			}));
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				{ logger: mockLogger }
+			);
+
+			assert.equal(result.status, 302);
+			assert.ok(
+				result.headers.Location.includes('access_denied'),
+				`expected access_denied; got ${result.headers.Location}`
+			);
+			assert.equal(mockRequest.session.update.mock.calls.length, 0);
+		});
+
+		it('gate: GitHub verified email (authenticated fetch, username=email) → adopted', async () => {
+			// When a GitHub user is identified by email (e.g. a custom usernameClaim
+			// override or a hook) and GitHub's /user/emails confirmed it verified,
+			// the authenticated-fetch provenance makes the claim trusted.
+			// config.provider must be 'github' for github-authenticated to be honored.
+			globalThis.databases = {
+				system: { hdb_user: { get: async (name) => (name === 'alice@example.com' ? { username: name } : null) } },
+			};
+			const githubConfig = { ...mockConfig, provider: 'github' };
+			mockProvider.getUserInfo = createMockFn(async () => ({
+				login: 'alice',
+				email: 'alice@example.com',
+				email_verified: true,
+				_emailProvenance: 'github-authenticated',
+			}));
+			mockProvider.mapUserToHarper = createMockFn(() => ({
+				username: 'alice@example.com', // email used as username
+				role: 'user',
+				email: 'alice@example.com',
+				emailVerified: true,
+				provider: 'github',
+			}));
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				githubConfig,
+				mockHookManager,
+				'test-provider',
+				{ logger: mockLogger }
+			);
+
+			// github-authenticated provenance + email===username + provider===github → trusted
+			assert.equal(result.status, 302);
+			assert.equal(result.headers.Location, '/dashboard');
+			const updateCall = mockRequest.session.update.mock.calls[0];
+			assert.equal(updateCall.arguments[0].user, 'alice@example.com');
+		});
+
+		it('gate: UserInfo email with sub mismatch → denied (unauthenticated provenance)', async () => {
+			// When getUserInfo returns _emailProvenance:'unauthenticated' (e.g. UserInfo
+			// sub did not match id-token sub), the gate must deny even if email_verified.
+			globalThis.databases = {
+				system: { hdb_user: { get: async (name) => (name === 'user@example.com' ? { username: name } : null) } },
+			};
+			mockProvider.getUserInfo = createMockFn(async () => ({
+				sub: 'different-sub',
+				email: 'user@example.com',
+				email_verified: true,
+				_emailProvenance: 'unauthenticated', // sub mismatch was detected by getUserInfo
+			}));
+			mockProvider.mapUserToHarper = createMockFn(() => ({
+				username: 'user@example.com',
+				role: 'user',
+				email: 'user@example.com',
+				emailVerified: true,
+				provider: 'test',
+			}));
+			mockProvider.verifyIdToken = createMockFn(async () => ({
+				claims: {
+					sub: 'original-sub',
+					email_verified: true,
+					iss: 'https://accounts.test',
+					iat: 1,
+					exp: Math.floor(Date.now() / 1000) + 3600,
+				},
+				signatureVerified: true,
+			}));
+			mockProvider.exchangeCodeForToken = createMockFn(async () => ({
+				access_token: 'token',
+				id_token: 'signed-jwt',
+			}));
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				{ logger: mockLogger }
+			);
+
+			assert.equal(result.status, 302);
+			assert.ok(
+				result.headers.Location.includes('access_denied'),
+				`expected access_denied; got ${result.headers.Location}`
+			);
+			assert.equal(mockRequest.session.update.mock.calls.length, 0);
+		});
+
+		it('gate: unsigned token + matching UserInfo email → denied (sub-matched-userinfo no longer trusted)', async () => {
+			// sub-matched-userinfo is no longer a trusted source. Even with a matching
+			// sub and email_verified=true in UserInfo, an unsigned token → denied.
+			globalThis.databases = {
+				system: { hdb_user: { get: async (name) => (name === 'user@example.com' ? { username: name } : null) } },
+			};
+			mockProvider.getUserInfo = createMockFn(async () => ({
+				sub: 'u1',
+				iss: 'https://accounts.example.com',
+				iat: 1,
+				exp: Math.floor(Date.now() / 1000) + 3600,
+				email: 'user@example.com',
+				email_verified: true,
+				name: 'Real User',
+				_emailProvenance: 'unauthenticated',
+			}));
+			mockProvider.mapUserToHarper = createMockFn(() => ({
+				username: 'user@example.com',
+				role: 'user',
+				email: 'user@example.com',
+				emailVerified: true,
+				provider: 'test',
+			}));
+			mockProvider.verifyIdToken = createMockFn(async () => ({
+				claims: { sub: 'u1', iss: 'https://accounts.example.com', iat: 1, exp: Math.floor(Date.now() / 1000) + 3600 },
+				signatureVerified: false,
+				issuerValidated: false,
+			}));
+			mockProvider.exchangeCodeForToken = createMockFn(async () => ({
+				access_token: 'token',
+				id_token: 'unsigned-jwt',
+			}));
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				{ logger: mockLogger }
+			);
+
+			// unsigned token is not a trusted source → denied
+			assert.equal(result.status, 302);
+			assert.ok(
+				result.headers.Location.includes('access_denied'),
+				`expected access_denied; got ${result.headers.Location}`
+			);
+			assert.equal(mockRequest.session.update.mock.calls.length, 0);
+		});
+
+		it('gate: unverified email (email_verified missing) matching existing account → denied', async () => {
+			globalThis.databases = {
+				system: { hdb_user: { get: async (name) => (name === 'user@example.com' ? { username: name } : null) } },
+			};
+			// email_verified not set (undefined) — the gate must deny.
+			mockProvider.mapUserToHarper = createMockFn(() => ({
+				username: 'user@example.com',
+				role: 'user',
+				email: 'user@example.com',
+				emailVerified: undefined,
+				provider: 'test',
+			}));
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				{ logger: mockLogger }
+			);
+
+			assert.equal(result.status, 302);
+			assert.ok(
+				result.headers.Location.includes('access_denied'),
+				`expected access_denied; got ${result.headers.Location}`
+			);
+			// No session must have been written.
+			assert.equal(mockRequest.session.update.mock.calls.length, 0);
+		});
+
+		it('gate: email_verified=true but unsigned token (signatureVerified=false) → denied', async () => {
+			globalThis.databases = {
+				system: { hdb_user: { get: async (name) => (name === 'user@example.com' ? { username: name } : null) } },
+			};
+			mockProvider.mapUserToHarper = createMockFn(() => ({
+				username: 'user@example.com',
+				role: 'user',
+				email: 'user@example.com',
+				emailVerified: true,
+				provider: 'test',
+			}));
+			// signatureVerified = false: the token was NOT JWKS-verified.
+			mockProvider.verifyIdToken = createMockFn(async () => ({
+				claims: { sub: 'u1', email: 'user@example.com', email_verified: true },
+				signatureVerified: false,
+			}));
+			mockProvider.exchangeCodeForToken = createMockFn(async () => ({
+				access_token: 'token',
+				id_token: 'unsigned-jwt',
+			}));
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				{ logger: mockLogger }
+			);
+
+			assert.equal(result.status, 302);
+			assert.ok(
+				result.headers.Location.includes('access_denied'),
+				`expected access_denied; got ${result.headers.Location}`
+			);
+			assert.equal(mockRequest.session.update.mock.calls.length, 0);
+		});
+
+		it('gate: reassignable/non-email claim (username ≠ email) matching existing account → denied', async () => {
+			// E.g. GitHub login claim — `username` is "victimadmin", not an email.
+			globalThis.databases = {
+				system: { hdb_user: { get: async (name) => (name === 'victimadmin' ? { username: name } : null) } },
+			};
+			mockProvider.mapUserToHarper = createMockFn(() => ({
+				username: 'victimadmin',
+				role: 'user',
+				email: 'attacker@github.test',
+				emailVerified: true,
+				provider: 'github',
+			}));
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				{ logger: mockLogger }
+			);
+
+			assert.equal(result.status, 302);
+			assert.ok(
+				result.headers.Location.includes('access_denied'),
+				`expected access_denied; got ${result.headers.Location}`
+			);
+			assert.equal(mockRequest.session.update.mock.calls.length, 0);
+		});
+
+		it('gate: no matching account → login proceeds (role-less, unchanged)', async () => {
+			// The default mock already returns null (no user) — this test is explicit.
+			globalThis.databases = {
+				system: { hdb_user: { get: async () => null } },
+			};
+			mockProvider.mapUserToHarper = createMockFn(() => ({
+				username: 'brand-new-user@example.com',
+				role: 'user',
+				email: 'brand-new-user@example.com',
+				emailVerified: undefined,
+				provider: 'test',
+			}));
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				{ logger: mockLogger }
+			);
+
+			assert.equal(result.status, 302);
+			assert.equal(result.headers.Location, '/dashboard');
+			// Session was set.
+			assert.equal(mockRequest.session.update.mock.calls.length, 1);
+		});
+
+		it('gate: hook-supplied user override → gate skipped, identity honored', async () => {
+			// When onLogin sets hookData.user, that is authoritative — the gate
+			// does not fire regardless of what the IdP claim says.
+			globalThis.databases = {
+				system: { hdb_user: { get: async (name) => (name === 'hook-user' ? { username: name } : null) } },
+			};
+			mockHookManager.callOnLogin = createMockFn(async () => ({ user: 'hook-user' }));
+			// The IdP claim is unverified — would be denied if the gate ran.
+			mockProvider.mapUserToHarper = createMockFn(() => ({
+				username: 'hook-user',
+				role: 'user',
+				email: 'hook-user',
+				emailVerified: undefined,
+				provider: 'test',
+			}));
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				{ logger: mockLogger }
+			);
+
+			assert.equal(result.status, 302);
+			assert.equal(result.headers.Location, '/dashboard');
+			const updateCall = mockRequest.session.update.mock.calls[0];
+			assert.equal(updateCall.arguments[0].user, 'hook-user', 'hook-supplied user must be used');
+			assert.equal(updateCall.arguments[0].oauth.authTrust, 'hook', 'hook-supplied identity stamps hook provenance');
+		});
+
+		it('gate: escape hatch enabled → unverified collision adopted with warning', async () => {
+			globalThis.databases = {
+				system: { hdb_user: { get: async (name) => (name === 'user@example.com' ? { username: name } : null) } },
+			};
+			// email_verified not set — would normally be denied.
+			mockProvider.getUserInfo = createMockFn(async () => ({
+				email: 'user@example.com',
+				email_verified: undefined,
+				_emailProvenance: 'unauthenticated',
+			}));
+			mockProvider.mapUserToHarper = createMockFn(() => ({
+				username: 'user@example.com',
+				role: 'user',
+				email: 'user@example.com',
+				emailVerified: undefined,
+				provider: 'test',
+			}));
+
+			const warnMessages = [];
+			const warnLogger = { ...mockLogger, warn: createMockFn((...args) => warnMessages.push(args.join(' '))) };
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				{ logger: warnLogger, allowUnverifiedClaimInheritance: true }
+			);
+
+			// Escape hatch restores legacy adopt behavior.
+			assert.equal(result.status, 302);
+			assert.equal(result.headers.Location, '/dashboard');
+			assert.equal(mockRequest.session.update.mock.calls.length, 1);
+			// A warning must be emitted.
+			const warned = warnMessages.some((m) => m.includes('allowUnverifiedClaimInheritance'));
+			assert.ok(warned, 'escape hatch must log a warning mentioning allowUnverifiedClaimInheritance');
+		});
+
+		it('gate: MCP path uses the same resolvedUser (both sinks unified)', async () => {
+			// Verify that the MCP branch also uses resolvedUser, not a separate hookData?.user ?? user.username.
+			globalThis.databases = {
+				system: { hdb_user: { get: async () => null } },
+			};
+			mockHookManager.callOnLogin = createMockFn(async () => ({ user: 'hook-user-mcp' }));
+			mockProvider.verifyCSRFToken = createMockFn(async () => ({
+				originalUrl: '/dashboard',
+				timestamp: Date.now(),
+				providerName: 'test-provider',
+				mcp: {
+					clientId: 'mcp-client',
+					redirectUri: 'https://mcp-client.test/callback',
+					clientState: 'mcp-state-123',
+					browserNonceHash: 'will-be-matched',
+				},
+			}));
+
+			// The browser binding check reads a cookie; mock it so the binding passes.
+			const { hashBrowserSecret } = await import('../../dist/lib/mcp/consentBinding.js');
+			const secret = 'test-secret';
+			const hash = hashBrowserSecret(secret);
+			mockProvider.verifyCSRFToken = createMockFn(async () => ({
+				originalUrl: '/dashboard',
+				timestamp: Date.now(),
+				providerName: 'test-provider',
+				mcp: {
+					clientId: 'mcp-client',
+					redirectUri: 'https://mcp-client.test/callback',
+					clientState: 'mcp-state-123',
+					browserNonceHash: hash,
+				},
+			}));
+			mockRequest.headers = { Cookie: `__Host-oauth_browser=${secret}` };
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				{ logger: mockLogger }
+			);
+
+			// MCP callback mints an auth code redirect. Check that hook-user-mcp was used.
+			// The MCP handler will redirect with an auth code to the client redirect_uri.
+			assert.equal(result.status, 302);
+			// The redirect goes to the MCP client — not the post-login path.
+			assert.ok(
+				result.headers.Location.startsWith('https://mcp-client.test/callback') ||
+					result.headers.Location.includes('code=') ||
+					result.headers.Location.includes('error='),
+				`MCP callback result unexpected: ${result.headers.Location}`
+			);
+		});
+
+		it('gate: issuer mismatch (JWKS-signed, wrong iss) → denied', async () => {
+			// Token is JWKS-signed (signatureVerified=true) but issuer does not match
+			// the provider's expected issuer (issuerValidated=false). Gate must deny.
+			globalThis.databases = {
+				system: { hdb_user: { get: async (name) => (name === 'user@example.com' ? { username: name } : null) } },
+			};
+			mockProvider.getUserInfo = createMockFn(async () => ({
+				sub: 'u1',
+				email: 'user@example.com',
+				email_verified: true,
+				_emailProvenance: 'signed-oidc',
+			}));
+			mockProvider.mapUserToHarper = createMockFn(() => ({
+				username: 'user@example.com',
+				role: 'user',
+				email: 'user@example.com',
+				emailVerified: true,
+				provider: 'test',
+			}));
+			mockProvider.verifyIdToken = createMockFn(async () => ({
+				claims: {
+					sub: 'u1',
+					email: 'user@example.com',
+					email_verified: true,
+					iss: 'https://evil.example.com',
+					iat: 1,
+					exp: Math.floor(Date.now() / 1000) + 3600,
+				},
+				signatureVerified: true,
+				issuerValidated: false,
+			}));
+			mockProvider.exchangeCodeForToken = createMockFn(async () => ({
+				access_token: 'token',
+				id_token: 'signed-but-wrong-issuer-jwt',
+			}));
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				{ logger: mockLogger }
+			);
+
+			assert.equal(result.status, 302);
+			assert.ok(
+				result.headers.Location.includes('access_denied'),
+				`expected access_denied; got ${result.headers.Location}`
+			);
+			assert.equal(mockRequest.session.update.mock.calls.length, 0);
+		});
+
+		it('gate: Azure /common (issuerValidated=false) without email_verified → denied', async () => {
+			// Azure multi-tenant tokens have no known expected issuer (issuer:null preset),
+			// so issuerValidated=false. Without email_verified, adoption must be denied.
+			globalThis.databases = {
+				system: { hdb_user: { get: async (name) => (name === 'user@example.com' ? { username: name } : null) } },
+			};
+			mockProvider.getUserInfo = createMockFn(async () => ({
+				sub: 'u1',
+				email: 'user@example.com',
+				_emailProvenance: 'signed-oidc',
+			}));
+			mockProvider.mapUserToHarper = createMockFn(() => ({
+				username: 'user@example.com',
+				role: 'user',
+				email: 'user@example.com',
+				emailVerified: undefined,
+				provider: 'azure',
+			}));
+			mockProvider.verifyIdToken = createMockFn(async () => ({
+				claims: {
+					sub: 'u1',
+					email: 'user@example.com',
+					iss: 'https://login.microsoftonline.com/tenant-id/v2.0',
+					iat: 1,
+					exp: Math.floor(Date.now() / 1000) + 3600,
+				},
+				signatureVerified: true,
+				issuerValidated: false,
+			}));
+			mockProvider.exchangeCodeForToken = createMockFn(async () => ({
+				access_token: 'token',
+				id_token: 'azure-jwt',
+			}));
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				{ logger: mockLogger }
+			);
+
+			assert.equal(result.status, 302);
+			assert.ok(
+				result.headers.Location.includes('access_denied'),
+				`expected access_denied; got ${result.headers.Location}`
+			);
+			assert.equal(mockRequest.session.update.mock.calls.length, 0);
+		});
+
+		it('gate: custom emailClaim → emailVerified undefined → denied', async () => {
+			// When emailClaim is not the standard 'email', mapUserToHarper yields
+			// emailVerified: undefined (no trustworthy verified flag). Gate must deny.
+			globalThis.databases = {
+				system: {
+					hdb_user: {
+						get: async (name) => (name === 'custom-email@example.com' ? { username: name } : null),
+					},
+				},
+			};
+			mockProvider.getUserInfo = createMockFn(async () => ({
+				sub: 'u1',
+				customEmail: 'custom-email@example.com',
+				email_verified: true,
+				_emailProvenance: 'signed-oidc',
+			}));
+			// Simulate mapUserToHarper behavior for custom emailClaim: emailVerified is undefined
+			mockProvider.mapUserToHarper = createMockFn(() => ({
+				username: 'custom-email@example.com',
+				role: 'user',
+				email: 'custom-email@example.com',
+				emailVerified: undefined,
+				provider: 'test',
+			}));
+			mockProvider.verifyIdToken = createMockFn(async () => ({
+				claims: {
+					sub: 'u1',
+					customEmail: 'custom-email@example.com',
+					email_verified: true,
+					iss: 'https://idp.example.com',
+					iat: 1,
+					exp: Math.floor(Date.now() / 1000) + 3600,
+				},
+				signatureVerified: true,
+				issuerValidated: true,
+			}));
+			mockProvider.exchangeCodeForToken = createMockFn(async () => ({
+				access_token: 'token',
+				id_token: 'signed-jwt',
+			}));
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				{ logger: mockLogger }
+			);
+
+			assert.equal(result.status, 302);
+			assert.ok(
+				result.headers.Location.includes('access_denied'),
+				`expected access_denied; got ${result.headers.Location}`
+			);
+			assert.equal(mockRequest.session.update.mock.calls.length, 0);
+		});
+
+		it('gate: GitHub /user/emails fetch failure → denied (no trusted tag)', async () => {
+			// When the GitHub email fetch fails, getUserInfo must NOT set github-authenticated.
+			// The gate must deny even if email is present.
+			globalThis.databases = {
+				system: { hdb_user: { get: async (name) => (name === 'user@example.com' ? { username: name } : null) } },
+			};
+			mockProvider.getUserInfo = createMockFn(async () => ({
+				login: 'someuser',
+				email: 'user@example.com',
+				email_verified: true,
+				_emailProvenance: 'unauthenticated',
+			}));
+			mockProvider.mapUserToHarper = createMockFn(() => ({
+				username: 'user@example.com',
+				role: 'user',
+				email: 'user@example.com',
+				emailVerified: true,
+				provider: 'github',
+			}));
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				{ logger: mockLogger }
+			);
+
+			assert.equal(result.status, 302);
+			assert.ok(
+				result.headers.Location.includes('access_denied'),
+				`expected access_denied; got ${result.headers.Location}`
+			);
+			assert.equal(mockRequest.session.update.mock.calls.length, 0);
+		});
+
+		it('gate: _emailProvenance in UserInfo body → stripped, still denied', async () => {
+			// A UserInfo body supplying _emailProvenance must be stripped — remote data
+			// must never supply a trusted provenance value.
+			globalThis.databases = {
+				system: { hdb_user: { get: async (name) => (name === 'user@example.com' ? { username: name } : null) } },
+			};
+			// getUserInfo simulates what OAuthProvider.getUserInfo does after stripping:
+			// the raw body had _emailProvenance:'signed-oidc' but it was stripped and
+			// replaced with 'unauthenticated' (no actual id token).
+			mockProvider.getUserInfo = createMockFn(async () => ({
+				sub: 'u1',
+				email: 'user@example.com',
+				email_verified: true,
+				_emailProvenance: 'unauthenticated',
+			}));
+			mockProvider.mapUserToHarper = createMockFn(() => ({
+				username: 'user@example.com',
+				role: 'user',
+				email: 'user@example.com',
+				emailVerified: true,
+				provider: 'test',
+			}));
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				{ logger: mockLogger }
+			);
+
+			assert.equal(result.status, 302);
+			assert.ok(
+				result.headers.Location.includes('access_denied'),
+				`expected access_denied; got ${result.headers.Location}`
+			);
+			assert.equal(mockRequest.session.update.mock.calls.length, 0);
+		});
+
+		it('gate: untrusted claim, no existing account → roleless non-adoptable quarantine principal', async () => {
+			// No account + untrusted claim: session.user is set to a non-resolvable
+			// quarantine principal (unpredictable suffix) so a later-created privileged
+			// account of the claim's name can never be adopted. oauthUser is preserved.
+			globalThis.databases = {
+				system: { hdb_user: { get: async () => null } },
+			};
+			mockProvider.getUserInfo = createMockFn(async () => ({
+				email: 'attacker@example.com',
+				email_verified: false,
+				_emailProvenance: 'unauthenticated',
+			}));
+			mockProvider.mapUserToHarper = createMockFn(() => ({
+				username: 'attacker@example.com',
+				role: 'user',
+				email: 'attacker@example.com',
+				emailVerified: false,
+				provider: 'test',
+			}));
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				{ logger: mockLogger }
+			);
+
+			assert.equal(result.status, 302);
+			assert.equal(result.headers.Location, '/dashboard');
+			const updateCall = mockRequest.session.update.mock.calls[0];
+			assert.ok(updateCall, 'session.update must have been called');
+			assert.match(
+				updateCall.arguments[0].user,
+				/^unverified:attacker@example\.com#[0-9a-f]{16}$/,
+				'session user must be a non-resolvable quarantine principal'
+			);
+			assert.equal(updateCall.arguments[0].oauth.authTrust, 'untrusted');
+			// oauthUser (incl. any app role claim) is preserved for app-level authz
+			assert.equal(updateCall.arguments[0].oauthUser.role, 'user');
+		});
+
+		it('gate: Option B — trusted claim, no existing account → real identity persisted', async () => {
+			// Trusted claim with no existing account: use the real identity (a later
+			// admin-created account with this name is the legitimate owner's).
+			globalThis.databases = {
+				system: { hdb_user: { get: async () => null } },
+			};
+			mockProvider.getUserInfo = createMockFn(async () => ({
+				sub: 'u1',
+				email: 'newuser@example.com',
+				email_verified: true,
+				iss: 'https://accounts.google.com',
+				_emailProvenance: 'signed-oidc',
+			}));
+			mockProvider.mapUserToHarper = createMockFn(() => ({
+				username: 'newuser@example.com',
+				role: 'user',
+				email: 'newuser@example.com',
+				emailVerified: true,
+				provider: 'google',
+			}));
+			mockProvider.verifyIdToken = createMockFn(async () => ({
+				claims: {
+					sub: 'u1',
+					email: 'newuser@example.com',
+					email_verified: true,
+					iss: 'https://accounts.google.com',
+					iat: 1,
+					exp: Math.floor(Date.now() / 1000) + 3600,
+				},
+				signatureVerified: true,
+				issuerValidated: true,
+			}));
+			mockProvider.exchangeCodeForToken = createMockFn(async () => ({
+				access_token: 'token',
+				id_token: 'signed-jwt',
+			}));
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				{ logger: mockLogger }
+			);
+
+			assert.equal(result.status, 302);
+			assert.equal(result.headers.Location, '/dashboard');
+			const updateCall = mockRequest.session.update.mock.calls[0];
+			assert.ok(updateCall, 'session.update must have been called');
+			assert.equal(
+				updateCall.arguments[0].user,
+				'newuser@example.com',
+				'trusted claim with no account must use real identity'
+			);
+			assert.equal(updateCall.arguments[0].oauth.authTrust, 'verified', 'trusted claim stamps verified provenance');
+		});
+
+		it('gate: Option B — unverified session cannot later adopt a provisioned account', async () => {
+			// An oauth-unverified: session cannot adopt a later-created account.
+			// This simulates the second login after an account is provisioned:
+			// the gate now sees userExists=true but the claim is untrusted → denied.
+			globalThis.databases = {
+				system: {
+					hdb_user: { get: async (name) => (name === 'attacker@example.com' ? { username: name } : null) },
+				},
+			};
+			mockProvider.getUserInfo = createMockFn(async () => ({
+				email: 'attacker@example.com',
+				email_verified: false,
+				_emailProvenance: 'unauthenticated',
+			}));
+			mockProvider.mapUserToHarper = createMockFn(() => ({
+				username: 'attacker@example.com',
+				role: 'user',
+				email: 'attacker@example.com',
+				emailVerified: false,
+				provider: 'test',
+			}));
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				{ logger: mockLogger }
+			);
+
+			assert.equal(result.status, 302);
+			assert.ok(
+				result.headers.Location.includes('access_denied'),
+				`expected access_denied after account provisioned; got ${result.headers.Location}`
+			);
+			assert.equal(mockRequest.session.update.mock.calls.length, 0);
+		});
+
+		it('gate: provenance injection — non-github adapter returning github-authenticated → denied', async () => {
+			// A custom getUserInfo on a non-github provider cannot earn github-authenticated.
+			// The plugin strips _emailProvenance from the adapter return and assigns based on
+			// config.provider; a non-github provider always gets 'unauthenticated'.
+			globalThis.databases = {
+				system: { hdb_user: { get: async (name) => (name === 'victim@example.com' ? { username: name } : null) } },
+			};
+			// config.provider is 'test' (not 'github'), so even if the adapter tries to inject
+			// 'github-authenticated' it is stripped and replaced with 'unauthenticated'.
+			mockProvider.getUserInfo = createMockFn(async () => ({
+				email: 'victim@example.com',
+				email_verified: true,
+				_emailProvenance: 'github-authenticated', // injection attempt — must be ignored
+			}));
+			mockProvider.mapUserToHarper = createMockFn(() => ({
+				username: 'victim@example.com',
+				role: 'superadmin',
+				email: 'victim@example.com',
+				emailVerified: true,
+				provider: 'test',
+			}));
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig, // provider: 'test'
+				mockHookManager,
+				'test-provider',
+				{ logger: mockLogger }
+			);
+
+			assert.equal(result.status, 302);
+			assert.ok(
+				result.headers.Location.includes('access_denied'),
+				`expected access_denied for provenance injection attempt; got ${result.headers.Location}`
+			);
+			assert.equal(mockRequest.session.update.mock.calls.length, 0);
+		});
+
+		it('gate: untrusted login persists a principal that is not the claim (pre-emption closed at mint)', async () => {
+			// Even though mapUserToHarper returns the raw claim as username, the session
+			// principal is an unpredictable quarantine value — so an hdb_user later
+			// created with the claim's name is never resolved as this session's identity.
+			globalThis.databases = {
+				system: { hdb_user: { get: async () => null } },
+			};
+			mockProvider.getUserInfo = createMockFn(async () => ({
+				email: 'collision@example.com',
+				email_verified: false,
+				_emailProvenance: 'unauthenticated',
+			}));
+			mockProvider.mapUserToHarper = createMockFn(() => ({
+				username: 'collision@example.com',
+				role: 'user',
+				email: 'collision@example.com',
+				emailVerified: false,
+				provider: 'test',
+			}));
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				{ logger: mockLogger }
+			);
+
+			assert.equal(result.status, 302);
+			const updateCall = mockRequest.session.update.mock.calls[0];
+			assert.ok(updateCall, 'session.update must have been called (login succeeds, roleless)');
+			assert.notEqual(
+				updateCall.arguments[0].user,
+				'collision@example.com',
+				'session principal must not be the raw claim'
+			);
+			assert.match(updateCall.arguments[0].user, /^unverified:collision@example\.com#[0-9a-f]{16}$/);
+		});
+
+		it('gate: fetchEmail — id token without email + fetchEmail:true → login succeeds but adoption denied', async () => {
+			// When the id token lacks email and fetchEmail is true, userinfo supplies the email.
+			// The provenance is 'unauthenticated', so adoption of an existing account is denied.
+			globalThis.databases = {
+				system: { hdb_user: { get: async (name) => (name === 'idp@example.com' ? { username: name } : null) } },
+			};
+			// getUserInfo returns unauthenticated provenance (fetchEmail path)
+			mockProvider.getUserInfo = createMockFn(async () => ({
+				sub: 'sub123',
+				email: 'idp@example.com',
+				email_verified: false,
+				_emailProvenance: 'unauthenticated',
+			}));
+			mockProvider.mapUserToHarper = createMockFn(() => ({
+				username: 'idp@example.com',
+				role: 'user',
+				email: 'idp@example.com',
+				emailVerified: false,
+				provider: 'test',
+			}));
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				{ logger: mockLogger }
+			);
+
+			// Existing account exists but claim is untrusted → denied
+			assert.equal(result.status, 302);
+			assert.ok(
+				result.headers.Location.includes('access_denied'),
+				`expected access_denied for unauthenticated fetchEmail against existing account; got ${result.headers.Location}`
+			);
+			assert.equal(mockRequest.session.update.mock.calls.length, 0);
+		});
+
+		it('gate: fetchEmail — id token without email + fetchEmail:true + no existing account → quarantine principal', async () => {
+			// Same fetchEmail scenario but no existing account: login succeeds with a
+			// roleless, non-adoptable quarantine principal.
+			globalThis.databases = {
+				system: { hdb_user: { get: async () => null } },
+			};
+			mockProvider.getUserInfo = createMockFn(async () => ({
+				sub: 'sub456',
+				email: 'new@example.com',
+				email_verified: false,
+				_emailProvenance: 'unauthenticated',
+			}));
+			mockProvider.mapUserToHarper = createMockFn(() => ({
+				username: 'new@example.com',
+				role: 'user',
+				email: 'new@example.com',
+				emailVerified: false,
+				provider: 'test',
+			}));
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				{ logger: mockLogger }
+			);
+
+			assert.equal(result.status, 302);
+			assert.equal(result.headers.Location, '/dashboard');
+			const updateCall = mockRequest.session.update.mock.calls[0];
+			assert.match(updateCall.arguments[0].user, /^unverified:new@example\.com#[0-9a-f]{16}$/);
+			assert.equal(updateCall.arguments[0].oauth.authTrust, 'untrusted');
+		});
+
+		it('gate: github verified:false → not github-authenticated → denied', async () => {
+			// email_verified must be true for the GitHub adapter to earn 'github-authenticated'.
+			// A verified:false record must not grant trusted status.
+			globalThis.databases = {
+				system: { hdb_user: { get: async (name) => (name === 'unverified@example.com' ? { username: name } : null) } },
+			};
+			const githubConfig = { ...mockConfig, provider: 'github' };
+			mockProvider.getUserInfo = createMockFn(async () => ({
+				login: 'unverified',
+				email: 'unverified@example.com',
+				email_verified: false, // not verified
+				_emailProvenance: 'github-authenticated', // would be stripped; plugin re-assigns based on email_verified
+			}));
+			mockProvider.mapUserToHarper = createMockFn(() => ({
+				username: 'unverified@example.com',
+				role: 'user',
+				email: 'unverified@example.com',
+				emailVerified: false,
+				provider: 'github',
+			}));
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				githubConfig,
+				mockHookManager,
+				'test-provider',
+				{ logger: mockLogger }
+			);
+
+			assert.equal(result.status, 302);
+			assert.ok(
+				result.headers.Location.includes('access_denied'),
+				`expected access_denied for unverified GitHub email; got ${result.headers.Location}`
+			);
+			assert.equal(mockRequest.session.update.mock.calls.length, 0);
+		});
 	});
 
 	describe('handleCallback — onLogin outcome gating (#174)', () => {
+		beforeEach(() => {
+			globalThis.databases = { system: { hdb_user: { get: async () => null } } };
+		});
+		afterEach(() => {
+			delete globalThis.databases;
+		});
+
 		const callback = () =>
 			handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockHookManager, 'test-provider', {
 				logger: mockLogger,
@@ -855,6 +2081,8 @@ describe('OAuth Handlers', () => {
 			originalDatabases = global.databases;
 			storedAuthCodes = new Map();
 			global.databases = {
+				// No users in the system DB — the account-adoption gate never fires.
+				system: { hdb_user: { get: async () => null } },
 				oauth: {
 					mcp_auth_codes: {
 						get: async (id) => storedAuthCodes.get(id) ?? null,
@@ -1353,6 +2581,49 @@ describe('OAuth Handlers', () => {
 			assert.equal(result.status, 500);
 			assert.equal(result.body.error, 'Request object not provided');
 		});
+
+		it('untrusted (quarantine) session → /user reports IdP identity with no role', async () => {
+			// A roleless untrusted session sets session.user to a non-resolvable quarantine
+			// principal and stamps oauth.authTrust='untrusted'. The /user endpoint reports
+			// the IdP-derived identity and a null role — never leaking the opaque principal,
+			// and never an IdP-derived Harper role.
+			mockRequest.session.user = 'unverified:attacker@example.com#0123456789abcdef';
+			mockRequest.session.oauth = { authTrust: 'untrusted', providerType: 'test' };
+			mockRequest.session.oauthUser = {
+				username: 'attacker@example.com', // raw IdP identity (preserved)
+				role: 'user', // app role claim preserved on oauthUser; not a Harper role
+				email: 'attacker@example.com',
+				name: 'Attacker',
+				provider: 'test',
+			};
+
+			const result = await handleUserInfo(mockRequest);
+
+			assert.equal(result.status, 200);
+			assert.equal(result.body.authenticated, true);
+			assert.equal(result.body.username, 'attacker@example.com', 'reports IdP identity, not the opaque principal');
+			assert.notEqual(result.body.username, mockRequest.session.user, 'must not leak the quarantine principal');
+			assert.equal(result.body.role, null, 'must not carry a Harper role');
+		});
+
+		it('trusted session → /user reports raw identity and IdP role (unchanged)', async () => {
+			// Normal trusted sessions must be unaffected: oauthUser.username and oauthUser.role
+			// are reported as before.
+			mockRequest.session.user = 'alice@example.com';
+			mockRequest.session.oauthUser = {
+				username: 'alice@example.com',
+				role: 'admin',
+				email: 'alice@example.com',
+				name: 'Alice',
+				provider: 'google',
+			};
+
+			const result = await handleUserInfo(mockRequest);
+
+			assert.equal(result.status, 200);
+			assert.equal(result.body.username, 'alice@example.com');
+			assert.equal(result.body.role, 'admin');
+		});
 	});
 
 	describe('handleTestPage', () => {
@@ -1373,6 +2644,13 @@ describe('OAuth Handlers', () => {
 		});
 	});
 	describe('handleCallback — state↔session binding (#181)', () => {
+		beforeEach(() => {
+			globalThis.databases = { system: { hdb_user: { get: async () => null } } };
+		});
+		afterEach(() => {
+			delete globalThis.databases;
+		});
+
 		it('rejects a callback processed in a different session than the one that initiated', async () => {
 			mockProvider.verifyCSRFToken = createMockFn(async () => ({
 				originalUrl: '/dashboard',
@@ -1481,6 +2759,12 @@ describe('OAuth Handlers', () => {
 				providerName: 'test-provider',
 				browserNonceHash: hashBrowserSecret(SECRET),
 			}));
+			// No users in system DB — account-adoption gate never fires.
+			globalThis.databases = { system: { hdb_user: { get: async () => null } } };
+		});
+
+		afterEach(() => {
+			delete globalThis.databases;
 		});
 
 		it('completes when the callback arrives in the browser that initiated the login', async () => {
@@ -1565,6 +2849,13 @@ describe('OAuth Handlers', () => {
 	});
 
 	describe('handleCallback — CRLF-safe error logging (CWE-117)', () => {
+		beforeEach(() => {
+			globalThis.databases = { system: { hdb_user: { get: async () => null } } };
+		});
+		afterEach(() => {
+			delete globalThis.databases;
+		});
+
 		const CRLF_ERROR = 'access_denied\r\nFORGED line';
 		const CRLF_DESC = 'desc\r\ninjected';
 

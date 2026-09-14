@@ -94,6 +94,8 @@ registerHooks({
 
 The hook can also gate the login: return `{ status: 'denied' }` or `{ status: 'needs_confirmation', redirect }` and no session is created — see [Lifecycle Hooks](docs/lifecycle-hooks.md#onlogin).
 
+> **Security:** returning `{ user }` is authoritative and **bypasses the account-adoption gate**. The example above is illustrative — do not resolve an existing account by email alone before you have confirmed the identity, because `oauthUser.emailVerified` is not proof the email came from an authenticated source (see [onLogin](docs/lifecycle-hooks.md#onlogin)). For adopting an existing account, bind to a stable provider identity (e.g. `oauthUser.providerUserId`) or use a confirmation flow.
+
 ### 5. Test Authentication
 
 Navigate to:
@@ -237,6 +239,7 @@ The plugin serves discovery (`/.well-known/*`), Dynamic Client Registration, the
 - **ID token verification** - OIDC providers verify token signatures
 - **Secure sessions** - Use Harper's secure session configuration
 - **Token storage** - Tokens stored in session (configure secure cookies)
+- **Account adoption requires a verified claim (2.6.0+)** - An OAuth login adopts an existing Harper `hdb_user` only when the claim is a verified email from an authenticated source (a signature-verified OIDC id token with a validated issuer, or GitHub's authenticated email). Typical Google/GitHub verified-email setups (and any `onLogin`-hook login) are unaffected; adoption from an unverified or non-email claim is now denied, or, when no account matches, given a roleless, non-resolvable identity. See [Account-Adoption Gate](./docs/configuration.md#account-adoption-gate).
 - **MCP client registration (when `mcp.enabled` is true)** - The `/oauth/mcp/register` endpoint defaults to **open registration** per RFC 7591. Set `mcp.dynamicClientRegistration.initialAccessToken` to require a bearer token on registration, or `mcp.dynamicClientRegistration.allowedRedirectUriHosts` to restrict which hosts may register `redirect_uri`s. See [`docs/configuration.md`](./docs/configuration.md).
 - **CIMD resolution (when `mcp.enabled` is true)** - URL-shaped `client_id`s are resolved as Client ID Metadata Documents **by default**. Disable with `mcp.clientIdMetadataDocuments.enabled: false`, or restrict which hosts are fetched with `mcp.clientIdMetadataDocuments.allowedHosts`.
 
