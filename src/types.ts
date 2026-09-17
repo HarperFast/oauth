@@ -34,6 +34,8 @@ export interface OAuthPluginConfig {
 	cacheDynamicProviders?: boolean | number;
 	/** MCP OAuth flow configuration (RFC 9728 PRM, RFC 7591 DCR, RFC 8707 audience binding) */
 	mcp?: MCPConfig;
+	/** Serve the OAuth endpoints as HTTP middleware as well as REST resources */
+	httpRoutes?: OAuthHttpRoutesConfig;
 	/**
 	 * When true, restores the pre-2.6 behavior: an OAuth claim that matches an
 	 * existing Harper account username inherits that account's role even when the
@@ -43,6 +45,21 @@ export interface OAuthPluginConfig {
 	 * NOT enable this flag.
 	 */
 	allowUnverifiedClaimInheritance?: boolean;
+}
+
+/**
+ * HTTP route mounting
+ *
+ * Opt-in for deployments where another component answers every request and the REST layer that
+ * serves the `oauth` resource is never reached — `@harperfast/nextjs` with `files: '*'` being the
+ * common case. When enabled, the OAuth endpoints are also served as HTTP middleware, which runs
+ * ahead of such a handler.
+ */
+export interface OAuthHttpRoutesConfig {
+	/** Mount the OAuth endpoints as HTTP middleware. Default: false */
+	enabled?: boolean;
+	/** Where to mount them. Must match the provider redirect URIs. Default: '/oauth' */
+	mountPath?: string;
 }
 
 // ============================================================================

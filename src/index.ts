@@ -19,9 +19,10 @@ import { clearOAuthSession } from './lib/handlers.ts';
 import { HookManager } from './lib/hookManager.ts';
 import { DynamicProviderCache, DEFAULT_DYNAMIC_PROVIDER_CACHE_TTL_SECONDS } from './lib/dynamicProviderCache.ts';
 import { registerWellKnownHandlers } from './lib/mcp/wellKnown.ts';
+import { registerOAuthHttpRoutes } from './lib/httpRoutes.ts';
 import { algFromPrivateKeyPem } from './lib/mcp/keyStore.ts';
 import { redactSecrets } from './lib/redact.ts';
-import type { Scope, OAuthPluginConfig, ProviderRegistry, OAuthHooks } from './types.ts';
+import type { Scope, OAuthPluginConfig, ProviderRegistry, OAuthHooks, OAuthHttpRoutesConfig } from './types.ts';
 
 // Export HookManager class, OAuthResource class, and types
 export { HookManager } from './lib/hookManager.ts';
@@ -121,6 +122,7 @@ export async function handleApplication(scope: Scope): Promise<void> {
 
 	let providers: ProviderRegistry = {};
 	let debugMode = false;
+	let httpRoutesConfig: OAuthHttpRoutesConfig | undefined;
 	let isInitialized = false;
 	let pluginDefaults: any = {}; // Store plugin defaults for dynamic provider resolution
 	const dynamicProviderCache = new DynamicProviderCache(); // TTL cache for dynamically-resolved providers
@@ -159,6 +161,16 @@ export async function handleApplication(scope: Scope): Promise<void> {
 			logger?.info?.('OAuth plugin loading with options:', JSON.stringify(redactSecrets(options), null, 2));
 			isInitialized = true;
 		}
+
+		// HTTP route mounting. expandEnvVarsDeep so `enabled`/`mountPath` support ${ENV_VAR};
+		// coerceConfigBoolean so an env-expanded "false" (or an unresolved placeholder) cannot
+		// leave the gate string-truthy. The mount path is only read at registration time.
+		httpRoutesConfig = options.httpRoutes
+			? {
+					...expandEnvVarsDeep(options.httpRoutes),
+					enabled: coerceConfigBoolean(expandEnvVar(options.httpRoutes.enabled)) ?? false,
+				}
+			: undefined;
 
 		// Build the MCP config block up front so we can fail fast on an unsafe
 		// combination before mutating any provider state. expandEnvVarsDeep so
@@ -493,6 +505,10 @@ export async function handleApplication(scope: Scope): Promise<void> {
 	// changes apply without re-registering routes (Harper's server.http does
 	// not support deregistration).
 	registerWellKnownHandlers(server, () => OAuthResource.mcpConfig, logger);
+
+	// Mount the OAuth endpoints as HTTP middleware when configured. Registered once, like the
+	// well-known handlers; the handler reads the current config per request.
+	registerOAuthHttpRoutes(server, () => httpRoutesConfig, logger);
 
 	// Watch for configuration changes (errors caught internally)
 	scope.options.on('change', () => {
