@@ -4,7 +4,11 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { registerOAuthHttpRoutes, DEFAULT_HTTP_ROUTES_MOUNT_PATH } from '../../dist/lib/httpRoutes.js';
+import {
+	registerOAuthHttpRoutes,
+	normalizeMountPath,
+	DEFAULT_HTTP_ROUTES_MOUNT_PATH,
+} from '../../dist/lib/httpRoutes.js';
 import { OAuthResource } from '../../dist/lib/resource.js';
 
 /** Captures what the plugin registers with `server.http()`. */
@@ -41,11 +45,33 @@ describe('registerOAuthHttpRoutes', () => {
 		assert.equal(server.registrations[0].options.after, 'authentication');
 	});
 
-	it('honours a configured mount path', () => {
+	it('honours a configured mount path and returns where it mounted', () => {
 		const server = makeServer();
-		registerOAuthHttpRoutes(server, () => ({ enabled: true, mountPath: '/auth/oauth' }));
+		const mounted = registerOAuthHttpRoutes(server, () => ({ enabled: true, mountPath: '/auth/oauth' }));
 
 		assert.equal(server.registrations[0].options.urlPath, '/auth/oauth');
+		assert.equal(mounted, '/auth/oauth');
+	});
+
+	it('normalizes the mount path', () => {
+		assert.equal(normalizeMountPath(undefined), DEFAULT_HTTP_ROUTES_MOUNT_PATH);
+		assert.equal(normalizeMountPath(''), DEFAULT_HTTP_ROUTES_MOUNT_PATH);
+		assert.equal(normalizeMountPath('/'), DEFAULT_HTTP_ROUTES_MOUNT_PATH);
+		assert.equal(normalizeMountPath('oauth'), '/oauth');
+		assert.equal(normalizeMountPath('/auth/oauth/'), '/auth/oauth');
+		assert.equal(normalizeMountPath('  auth/oauth//  '), '/auth/oauth');
+
+		const server = makeServer();
+		const mounted = registerOAuthHttpRoutes(server, () => ({ enabled: true, mountPath: 'oauth/' }));
+		assert.equal(server.registrations[0].options.urlPath, '/oauth');
+		assert.equal(mounted, '/oauth');
+	});
+
+	it('returns undefined when nothing was mounted', () => {
+		assert.equal(
+			registerOAuthHttpRoutes({}, () => ({ enabled: true }), { warn() {} }),
+			undefined
+		);
 	});
 
 	it('registers nothing when server.http is unavailable', () => {

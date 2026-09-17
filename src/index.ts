@@ -19,7 +19,7 @@ import { clearOAuthSession } from './lib/handlers.ts';
 import { HookManager } from './lib/hookManager.ts';
 import { DynamicProviderCache, DEFAULT_DYNAMIC_PROVIDER_CACHE_TTL_SECONDS } from './lib/dynamicProviderCache.ts';
 import { registerWellKnownHandlers } from './lib/mcp/wellKnown.ts';
-import { registerOAuthHttpRoutes } from './lib/httpRoutes.ts';
+import { registerOAuthHttpRoutes, normalizeMountPath } from './lib/httpRoutes.ts';
 import { algFromPrivateKeyPem } from './lib/mcp/keyStore.ts';
 import { redactSecrets } from './lib/redact.ts';
 import type { Scope, OAuthPluginConfig, ProviderRegistry, OAuthHooks, OAuthHttpRoutesConfig } from './types.ts';
@@ -123,6 +123,8 @@ export async function handleApplication(scope: Scope): Promise<void> {
 	let providers: ProviderRegistry = {};
 	let debugMode = false;
 	let httpRoutesConfig: OAuthHttpRoutesConfig | undefined;
+	let mountedHttpRoutesPath: string | undefined;
+	let warnedHttpRoutesMountChange = false;
 	let isInitialized = false;
 	let pluginDefaults: any = {}; // Store plugin defaults for dynamic provider resolution
 	const dynamicProviderCache = new DynamicProviderCache(); // TTL cache for dynamically-resolved providers
@@ -171,6 +173,21 @@ export async function handleApplication(scope: Scope): Promise<void> {
 					enabled: coerceConfigBoolean(expandEnvVar(options.httpRoutes.enabled)) ?? false,
 				}
 			: undefined;
+
+		// server.http() has no deregistration, so a mountPath edited after startup cannot move the
+		// mounted routes — warn once rather than leave the operator with routes on the old path.
+		if (
+			mountedHttpRoutesPath &&
+			!warnedHttpRoutesMountChange &&
+			httpRoutesConfig?.enabled &&
+			normalizeMountPath(httpRoutesConfig.mountPath) !== mountedHttpRoutesPath
+		) {
+			warnedHttpRoutesMountChange = true;
+			logger?.warn?.(
+				`OAuth HTTP routes: httpRoutes.mountPath is now "${normalizeMountPath(httpRoutesConfig.mountPath)}" ` +
+					`but the routes are mounted at "${mountedHttpRoutesPath}". Restart to apply the new mount path.`
+			);
+		}
 
 		// Build the MCP config block up front so we can fail fast on an unsafe
 		// combination before mutating any provider state. expandEnvVarsDeep so
@@ -508,7 +525,7 @@ export async function handleApplication(scope: Scope): Promise<void> {
 
 	// Mount the OAuth endpoints as HTTP middleware when configured. Registered once, like the
 	// well-known handlers; the handler reads the current config per request.
-	registerOAuthHttpRoutes(server, () => httpRoutesConfig, logger);
+	mountedHttpRoutesPath = registerOAuthHttpRoutes(server, () => httpRoutesConfig, logger);
 
 	// Watch for configuration changes (errors caught internally)
 	scope.options.on('change', () => {

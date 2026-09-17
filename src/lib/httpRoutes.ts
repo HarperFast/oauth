@@ -37,13 +37,13 @@ export function registerOAuthHttpRoutes(
 	server: HarperServer,
 	getConfig: () => OAuthHttpRoutesConfig | undefined,
 	logger?: Logger
-): void {
+): string | undefined {
 	if (typeof server?.http !== 'function') {
 		logger?.warn?.('OAuth HTTP routes: server.http() not available; skipping route registration');
-		return;
+		return undefined;
 	}
 
-	const mountPath = getConfig()?.mountPath || DEFAULT_HTTP_ROUTES_MOUNT_PATH;
+	const mountPath = normalizeMountPath(getConfig()?.mountPath);
 
 	server.http(
 		async (request: any, next: (request: any) => any) => {
@@ -70,4 +70,17 @@ export function registerOAuthHttpRoutes(
 	);
 
 	logger?.info?.(`OAuth HTTP routes mounted at ${mountPath}`);
+
+	return mountPath;
+}
+
+/**
+ * Harper normalizes `urlPath` itself, so this is about the value we report and compare: it keeps
+ * the logged mount path and a later config comparison in the same form the router uses.
+ */
+export function normalizeMountPath(value: string | undefined): string {
+	let path = (value ?? '').trim();
+	while (path.endsWith('/')) path = path.slice(0, -1);
+	if (!path) return DEFAULT_HTTP_ROUTES_MOUNT_PATH;
+	return path.startsWith('/') ? path : `/${path}`;
 }
