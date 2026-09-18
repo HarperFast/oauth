@@ -2,6 +2,12 @@
 
 All notable changes to `@harperfast/oauth` are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Entries prior to 2.2.0 were backfilled from the [GitHub release notes](https://github.com/HarperFast/oauth/releases).
 
+## [Unreleased]
+
+### Added
+
+- **`onLogin` hooks receive authenticated-source evidence** (`oauthUser.authEvidence`): a frozen, hook-only snapshot exposing the plugin's own trust determination — `emailProvenance` (`'signed-oidc'` / `'github-authenticated'` / `'unauthenticated'`, normalized), `emailAuthenticated`, `signatureVerified`, `issuerValidated`, `emailVerified`, the verified `email`, and the validated `idTokenIssuer` / `idTokenSubject`. A hook that adopts an existing account should base the decision on `authEvidence` (resolve from `authEvidence.email`, or bind on the `idTokenIssuer`+`idTokenSubject` pair), not on the spoofable `emailVerified`. The new `OAuthAuthEvidence` and `EmailProvenance` types are exported. Does not change the built-in account-adoption gate.
+
 ## [2.6.0] - 2026-09-14
 
 ### Security
