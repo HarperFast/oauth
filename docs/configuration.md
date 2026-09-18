@@ -28,6 +28,7 @@ Complete configuration options for the `@harperfast/oauth` plugin.
 | `postLoginRedirect`     | string            | `/`                                    | Default URL to redirect users after successful OAuth login                                                                                                                                                                                                                                                                                  |
 | `cacheDynamicProviders` | boolean \| number | `300`                                  | TTL (seconds) for providers resolved via the `onResolveProvider` hook. Number = seconds; `false` = never cache (call the hook every request); `true` = cache forever. Default 300s; freshness is controlled by this TTL (there is no manual invalidation).                                                                                  |
 | `mcp`                   | object            | (off)                                  | MCP OAuth flow configuration. See [MCP OAuth](#mcp-oauth) below                                                                                                                                                                                                                                                                             |
+| `httpRoutes`            | object            | (off)                                  | Also serve the OAuth endpoints as HTTP middleware, for apps where another component answers every request. See [HTTP route mounting](#http-route-mounting) below                                                                                                                                                                            |
 
 ### Provider Configuration
 
@@ -55,6 +56,43 @@ Each provider requires:
 - `tokenUrl` - Token endpoint URL (required)
 - `userInfoUrl` - User info endpoint URL (required)
 - `jwksUri` - JWKS endpoint URL (required for ID token verification). The alias `jwksUrl` is also accepted for backwards compatibility.
+
+### HTTP route mounting
+
+By default the OAuth endpoints are served as the `oauth` REST resource. A component that answers
+every request never falls through to the REST layer, so those endpoints become unreachable — the
+common case being `@harperfast/nextjs` configured with `files: '*'`, where `/oauth/<provider>/login`
+returns the Next.js 404 page. Ordering does not help: that handler never declines a request.
+
+Set `httpRoutes.enabled` to serve the same endpoints as HTTP middleware, which runs ahead of such a
+handler:
+
+```yaml
+'@harperfast/oauth':
+  package: '@harperfast/oauth'
+  redirectUri: ${OAUTH_REDIRECT_URI}
+  httpRoutes:
+    enabled: true
+  providers:
+    azure:
+      clientId: ${OAUTH_AZURE_CLIENT_ID}
+      clientSecret: ${OAUTH_AZURE_CLIENT_SECRET}
+      tenantId: ${OAUTH_AZURE_TENANT_ID}
+```
+
+| Option      | Type    | Default  | Description                                                            |
+| ----------- | ------- | -------- | ---------------------------------------------------------------------- |
+| `enabled`   | boolean | `false`  | Mount the OAuth endpoints as HTTP middleware as well as REST resources |
+| `mountPath` | string  | `/oauth` | Where to mount them. Must match the callback path in `redirectUri`     |
+
+Notes:
+
+- The REST resource is still registered, so nothing changes for apps that don't set this.
+- `GET` endpoints are mounted, which covers the browser flow (`/<provider>/login`,
+  `/<provider>/callback`). `POST` endpoints (`/logout`, the MCP endpoints) continue to be served by
+  the REST resource only.
+- `enabled` is read per request, so toggling it applies without a restart. `mountPath` is read once
+  at registration.
 
 ### MCP OAuth
 
