@@ -278,22 +278,15 @@ export async function handleApplication(scope: Scope): Promise<void> {
 		}
 		// A pinned key's algorithm comes from its key material; warn when
 		// mcp.signingAlgorithm disagrees so the operator isn't surprised the
-		// config value is ignored. An unparseable/unsupported pin only warns
-		// here — startup stays up for the human-OAuth flows; the mint path
-		// throws when the pin is actually used.
+		// config value is ignored. normalizeMcpSecurityConfig (above) already
+		// threw if signingKeyPem was declared but empty/unparseable, so a
+		// present value here is guaranteed to parse.
 		if (mcpConfig?.signingKeyPem) {
-			try {
-				const pinnedAlg = algFromPrivateKeyPem(mcpConfig.signingKeyPem);
-				if (mcpConfig.signingAlgorithm && pinnedAlg !== mcpConfig.signingAlgorithm) {
-					logger?.warn?.(
-						`MCP: mcp.signingAlgorithm is "${mcpConfig.signingAlgorithm}" but the pinned mcp.signingKeyPem ` +
-							`is a ${pinnedAlg} key. The pinned key's algorithm (${pinnedAlg}) is used.`
-					);
-				}
-			} catch (error) {
+			const pinnedAlg = algFromPrivateKeyPem(mcpConfig.signingKeyPem);
+			if (mcpConfig.signingAlgorithm && pinnedAlg !== mcpConfig.signingAlgorithm) {
 				logger?.warn?.(
-					'MCP: mcp.signingKeyPem is not a supported signing key (RSA or EC P-256):',
-					error instanceof Error ? error.message : String(error)
+					`MCP: mcp.signingAlgorithm is "${mcpConfig.signingAlgorithm}" but the pinned mcp.signingKeyPem ` +
+						`is a ${pinnedAlg} key. The pinned key's algorithm (${pinnedAlg}) is used.`
 				);
 			}
 		}

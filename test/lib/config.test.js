@@ -4,6 +4,7 @@
 
 import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { generateKeyPairSync } from 'node:crypto';
 import {
 	buildProviderConfig,
 	extractPluginDefaults,
@@ -172,6 +173,47 @@ describe('OAuth Configuration', () => {
 				() => normalizeMcpSecurityConfig({ clientIdMetadataDocuments: { allowedHosts: [123] } }),
 				/allowedHosts must be/
 			);
+		});
+
+		describe('signingKeyPem (#221 — declared-but-empty must not silently self-generate)', () => {
+			function rsaPem() {
+				return generateKeyPairSync('rsa', {
+					modulusLength: 2048,
+					publicKeyEncoding: { type: 'spki', format: 'pem' },
+					privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+				}).privateKey;
+			}
+
+			it('declared but resolved empty (e.g. unset/empty env var) throws, naming the field', () => {
+				assert.throws(() => normalizeMcpSecurityConfig({ signingKeyPem: '' }), /mcp\.signingKeyPem.*empty/s);
+			});
+
+			it('declared as an unresolved ${VAR} placeholder throws, naming the variable', () => {
+				assert.throws(
+					() => normalizeMcpSecurityConfig({ signingKeyPem: '${MY_SIGNING_KEY}' }),
+					/mcp\.signingKeyPem.*unresolved env placeholder.*MY_SIGNING_KEY/s
+				);
+			});
+
+			it('declared but unparseable throws (previously only warned, then 500s at first mint)', () => {
+				assert.throws(
+					() => normalizeMcpSecurityConfig({ signingKeyPem: 'not a pem' }),
+					/mcp\.signingKeyPem is not a supported signing key/
+				);
+			});
+
+			it('not declared at all leaves the config untouched — self-generation path unaffected', () => {
+				const cfg = { enabled: true };
+				normalizeMcpSecurityConfig(cfg);
+				assert.equal('signingKeyPem' in cfg, false);
+			});
+
+			it('declared with a valid PEM passes through unchanged — pin mode', () => {
+				const pem = rsaPem();
+				const cfg = { signingKeyPem: pem };
+				normalizeMcpSecurityConfig(cfg);
+				assert.equal(cfg.signingKeyPem, pem);
+			});
 		});
 	});
 

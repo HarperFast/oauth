@@ -7,6 +7,7 @@
 import { OAuthProvider } from './OAuthProvider.ts';
 import { getProvider } from './providers/index.ts';
 import { redactSecrets } from './redact.ts';
+import { algFromPrivateKeyPem } from './mcp/keyStore.ts';
 import type { OAuthProviderConfig, OAuthPluginConfig, ProviderRegistry, Logger } from '../types.ts';
 
 /**
@@ -103,6 +104,54 @@ function normalizeBooleanField(obj: Record<string, any>, field: string, path: st
 }
 
 /**
+ * Validate `mcp.signingKeyPem` when the operator DECLARED it — i.e. the field
+ * is present on the config object at all, regardless of what it resolved to.
+ * Unlike the documented booleans above, an unresolved/empty pin does NOT get
+ * a safe default to fall back to: `MCPKeyStore.getSigningKey` branches on
+ * truthiness (pin present → pin wins; falsy → self-generate), so a pin that
+ * resolves empty — e.g. `signingKeyPem: ${KEY}` with `KEY` unset-or-empty —
+ * would silently swap the trust model to a self-generated key instead of the
+ * operator-provisioned one (#221). That must fail loudly at boot instead:
+ * - declared + unresolved `${VAR}` placeholder → throw naming the variable.
+ * - declared + resolves empty (env var set-but-empty, or a literal `""`) →
+ *   throw.
+ * - declared + resolves to a value that isn't a parseable RSA/EC P-256 PEM →
+ *   throw (previously this only warned at startup and threw at first mint).
+ * - declared + a valid PEM → passes through untouched; pin mode as documented.
+ * - NOT declared at all → this function takes no action; self-generation
+ *   proceeds exactly as before.
+ */
+function validateSigningKeyPem(mcpConfig: Record<string, any>): void {
+	if (!('signingKeyPem' in mcpConfig)) return;
+	const value = mcpConfig.signingKeyPem;
+	if (typeof value === 'string' && /^\$\{[^}]*\}$/.test(value.trim())) {
+		throw new Error(
+			`mcp.signingKeyPem is the unresolved env placeholder ${JSON.stringify(value)} (variable unset). ` +
+				'Set the variable to a PEM-encoded private key, or remove mcp.signingKeyPem to use a self-generated key.'
+		);
+	}
+	if (!value) {
+		throw new Error(
+			'mcp.signingKeyPem is configured but resolved to an empty value (e.g. an unset or empty ' +
+				'environment variable). Provide a PEM-encoded private key, or remove mcp.signingKeyPem to use a ' +
+				'self-generated key.'
+		);
+	}
+	if (typeof value !== 'string') {
+		throw new Error(`mcp.signingKeyPem must be a PEM-encoded string; got ${typeof value}.`);
+	}
+	try {
+		algFromPrivateKeyPem(value);
+	} catch (error) {
+		throw new Error(
+			`mcp.signingKeyPem is not a supported signing key (RSA or EC P-256): ` +
+				(error instanceof Error ? error.message : String(error)),
+			{ cause: error }
+		);
+	}
+}
+
+/**
  * Normalize the security-relevant fields of the `mcp` config block in place,
  * so a mis-typed value can never silently flip a gate:
  * - Every documented boolean (`mcp.enabled`,
@@ -117,6 +166,10 @@ function normalizeBooleanField(obj: Record<string, any>, field: string, path: st
  *   `String.includes` would turn into substring matching) is wrapped into a
  *   single-element array; anything that isn't a string or array of strings is
  *   rejected rather than treated as "no restriction".
+ * - `mcp.signingKeyPem`, if declared, must resolve to a parseable key — see
+ *   {@link validateSigningKeyPem}. This one throws instead of dropping with a
+ *   warning: unlike the booleans above, there is no safe default to fall back
+ *   to for a declared-but-broken pin.
  */
 export function normalizeMcpSecurityConfig(mcpConfig: Record<string, any>, logger?: Logger): void {
 	normalizeBooleanField(mcpConfig, 'enabled', 'mcp.enabled', logger);
@@ -151,6 +204,8 @@ export function normalizeMcpSecurityConfig(mcpConfig: Record<string, any>, logge
 			cimd.allowedHosts = raw.map((h: string) => h.trim().toLowerCase()).filter((h: string) => h.length > 0);
 		}
 	}
+
+	validateSigningKeyPem(mcpConfig);
 }
 
 /**
