@@ -8,18 +8,20 @@
  * Tests cover:
  *   – Regression guard: unverified-claim collision is now denied.
  *   – No-op proofs: role-less login (no matching account) is unchanged.
- *
- * Not yet covered here (tracked in #230): end-to-end verified-claim adoption
- * through real JWKS verification, and the `allowUnverifiedClaimInheritance`
- * escape hatch.
+ *   – Positive proof (#230): a verified email claim from a real JWKS-signed,
+ *     issuer-validated id token adopts an existing account and inherits its
+ *     role.
+ *   – Escape-hatch proof (#230): with `allowUnverifiedClaimInheritance`
+ *     enabled, an unverified claim adopts an existing account too.
  */
 
 import { suite, test, before, after } from 'node:test';
 import { strictEqual, ok } from 'node:assert/strict';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, generateKeyPairSync } from 'node:crypto';
 import { join, dirname } from 'node:path';
 import { createRequire } from 'node:module';
+import jwt from 'jsonwebtoken';
 import {
 	setupHarperWithFixture,
 	teardownHarper,
@@ -34,6 +36,7 @@ function getHarperBinPath(): string {
 }
 
 const fixturePath = join(import.meta.dirname, 'fixtures', 'f2-repro-app');
+const verifiedFixturePath = join(import.meta.dirname, 'fixtures', 'adoption-verified-app');
 
 // The privileged hdb_user that the attacker collides with.
 const VICTIM_USERNAME = 'victimadmin';
@@ -261,5 +264,250 @@ suite('account-adoption gate: unverified claim must not inherit existing account
 			{ operation: 'list_users' }
 		);
 		strictEqual(status, 403, 'role-less session must be denied super_user operations');
+	});
+});
+
+// ── Stub IdP (JWKS-signing) ─────────────────────────────────────────────────
+
+// The privileged hdb_user that the verified claim adopts.
+const VERIFIED_VICTIM_EMAIL = 'verifiedadmin@example.test';
+const VERIFIED_VICTIM_PASSWORD = 'VerifiedAdminP@ssw0rd123!';
+
+const STUB_ISSUER = 'https://stub-idp.test/';
+const STUB_AUDIENCE = 'stub-client-id'; // matches the fixture's provider clientId
+const STUB_KID = 'stub-signing-key-1';
+
+const { privateKey: stubSigningKey, publicKey: stubVerifyingKey } = generateKeyPairSync('rsa', {
+	modulusLength: 2048,
+});
+const stubJwk = { ...stubVerifyingKey.export({ format: 'jwk' }), kid: STUB_KID, use: 'sig', alg: 'RS256' };
+
+function signStubIdToken(claims: Record<string, unknown>): string {
+	return jwt.sign(claims, stubSigningKey, {
+		algorithm: 'RS256',
+		keyid: STUB_KID,
+		issuer: STUB_ISSUER,
+		audience: STUB_AUDIENCE,
+		expiresIn: '1h',
+	});
+}
+
+// Mutable: controls what the stub IdP's /token issues as the id_token's email.
+let stubVerifiedEmail = VERIFIED_VICTIM_EMAIL;
+
+/**
+ * Stub IdP that issues a real JWKS-signed, verified-email id token and serves
+ * the matching public key at /jwks — the one authenticated source the
+ * account-adoption gate trusts for adoption.
+ */
+function startStubIdpWithJwks(getHarperBaseUrl: () => string): Promise<{
+	port: number;
+	close: () => Promise<void>;
+}> {
+	return new Promise((resolve, reject) => {
+		const server = createServer((req: IncomingMessage, res: ServerResponse) => {
+			const url = new URL(req.url ?? '/', `http://127.0.0.1`);
+			const path = url.pathname;
+
+			if (req.method === 'GET' && path === '/authorize') {
+				const state = url.searchParams.get('state') ?? '';
+				const code = `stub-code-${randomBytes(8).toString('hex')}`;
+				const callbackUrl = new URL(`/oauth/stub/callback`, getHarperBaseUrl());
+				callbackUrl.searchParams.set('code', code);
+				callbackUrl.searchParams.set('state', state);
+				res.writeHead(302, { Location: callbackUrl.toString() });
+				res.end();
+				return;
+			}
+
+			if (req.method === 'POST' && path === '/token') {
+				const idToken = signStubIdToken({
+					sub: `stub-sub-${randomBytes(4).toString('hex')}`,
+					email: stubVerifiedEmail,
+					email_verified: true,
+					name: 'Verified Stub User',
+				});
+				res.writeHead(200, { 'Content-Type': 'application/json' });
+				res.end(
+					JSON.stringify({
+						access_token: `stub-upstream-${randomBytes(8).toString('hex')}`,
+						token_type: 'Bearer',
+						expires_in: 3600,
+						id_token: idToken,
+					})
+				);
+				return;
+			}
+
+			if (req.method === 'GET' && path === '/jwks') {
+				res.writeHead(200, { 'Content-Type': 'application/json' });
+				res.end(JSON.stringify({ keys: [stubJwk] }));
+				return;
+			}
+
+			res.writeHead(404);
+			res.end('not found');
+		});
+
+		server.listen(0, '127.0.0.1', () => {
+			const addr = server.address();
+			if (!addr || typeof addr === 'string') {
+				reject(new Error('Stub IdP: unexpected address shape'));
+				return;
+			}
+			resolve({
+				port: addr.port,
+				close: () =>
+					new Promise<void>((res, rej) => {
+						server.close((err) => (err ? rej(err) : res()));
+						server.closeAllConnections();
+					}),
+			});
+		});
+
+		server.on('error', reject);
+	});
+}
+
+// ── Test suite: verified positive path (#230) ───────────────────────────────
+//
+// allowUnverifiedClaimInheritance is deliberately OFF in this fixture (see
+// adoption-verified-app/config.yaml), so this suite exercises ONLY the
+// trusted-claim path — a login here cannot adopt via the escape hatch,
+// keeping this proof specific to real JWKS/issuer verification.
+
+suite('account-adoption gate: verified claim adopts and inherits role', (ctx: ContextWithHarper) => {
+	let closeIdp: (() => Promise<void>) | undefined;
+
+	before(async () => {
+		let harperBaseUrl = '';
+		const idp = await startStubIdpWithJwks(() => harperBaseUrl);
+		closeIdp = idp.close;
+
+		const stubBase = `http://127.0.0.1:${idp.port}`;
+		await setupHarperWithFixture(ctx, verifiedFixturePath, {
+			harperBinPath: getHarperBinPath(),
+			config: { logging: { stdStreams: true } },
+			env: {
+				STUB_IDP_AUTHORIZE_URL: `${stubBase}/authorize`,
+				STUB_IDP_TOKEN_URL: `${stubBase}/token`,
+				STUB_IDP_USERINFO_URL: `${stubBase}/userinfo`,
+				STUB_IDP_JWKS_URL: `${stubBase}/jwks`,
+				STUB_IDP_ISSUER: STUB_ISSUER,
+			},
+		});
+
+		harperBaseUrl = ctx.harper.httpURL;
+
+		await sendOperation(ctx.harper, {
+			operation: 'add_user',
+			username: VERIFIED_VICTIM_EMAIL,
+			password: VERIFIED_VICTIM_PASSWORD,
+			active: true,
+			role: 'super_user',
+		});
+	});
+
+	after(async () => {
+		try {
+			await teardownHarper(ctx);
+		} finally {
+			await closeIdp?.();
+		}
+	});
+
+	test('adopt: a JWKS-signed, issuer-validated verified email claim adopts an existing account and inherits its role', async () => {
+		stubVerifiedEmail = VERIFIED_VICTIM_EMAIL;
+
+		const sessionCookiePair = await driveOAuthLogin(ctx.harper.httpURL);
+		ok(sessionCookiePair, 'a verified-claim adoption must set a session cookie');
+
+		// The session inherited the existing account's super_user role — proven
+		// by a super_user-only operation succeeding through the adopted session,
+		// the mirror image of the deny suite's 403 on the roleless session.
+		const { status, body } = await callOperationsWithSession(
+			ctx.harper.operationsAPIURL,
+			ctx.harper.hostname,
+			sessionCookiePair!,
+			{ operation: 'list_users' }
+		);
+		strictEqual(
+			status,
+			200,
+			`adopted super_user session must be permitted list_users; got ${status} ${JSON.stringify(body)}`
+		);
+	});
+});
+
+// ── Test suite: allowUnverifiedClaimInheritance escape hatch (#230) ────────
+//
+// A separate fixture/instance with the escape hatch ON and NO JWKS/issuer
+// configured, so the stub IdP's /token never issues an id_token — every
+// login here is on the unauthenticated-claim path the gate normally denies.
+// Isolating this from the verified-path suite above means each proof can
+// only pass for its own reason: this one exclusively exercises the operator
+// opt-out, not real claim verification.
+
+const escapeHatchFixturePath = join(import.meta.dirname, 'fixtures', 'adoption-escape-hatch-app');
+
+// The privileged hdb_user that the unverified claim collides with.
+const ESCAPE_HATCH_VICTIM_EMAIL = 'escapehatchadmin@example.test';
+const ESCAPE_HATCH_VICTIM_PASSWORD = 'EscapeHatchAdminP@ss123!';
+
+suite('account-adoption gate: allowUnverifiedClaimInheritance escape hatch', (ctx: ContextWithHarper) => {
+	let closeIdp: (() => Promise<void>) | undefined;
+
+	before(async () => {
+		let harperBaseUrl = '';
+		const idp = await startStubIdp(() => harperBaseUrl);
+		closeIdp = idp.close;
+
+		const stubBase = `http://127.0.0.1:${idp.port}`;
+		await setupHarperWithFixture(ctx, escapeHatchFixturePath, {
+			harperBinPath: getHarperBinPath(),
+			config: { logging: { stdStreams: true } },
+			env: {
+				STUB_IDP_AUTHORIZE_URL: `${stubBase}/authorize`,
+				STUB_IDP_TOKEN_URL: `${stubBase}/token`,
+				STUB_IDP_USERINFO_URL: `${stubBase}/userinfo`,
+			},
+		});
+
+		harperBaseUrl = ctx.harper.httpURL;
+
+		await sendOperation(ctx.harper, {
+			operation: 'add_user',
+			username: ESCAPE_HATCH_VICTIM_EMAIL,
+			password: ESCAPE_HATCH_VICTIM_PASSWORD,
+			active: true,
+			role: 'super_user',
+		});
+	});
+
+	after(async () => {
+		try {
+			await teardownHarper(ctx);
+		} finally {
+			await closeIdp?.();
+		}
+	});
+
+	test('adopt via escape hatch: allowUnverifiedClaimInheritance lets an unverified claim adopt an existing account', async () => {
+		stubbedEmail = ESCAPE_HATCH_VICTIM_EMAIL;
+
+		const sessionCookiePair = await driveOAuthLogin(ctx.harper.httpURL);
+		ok(sessionCookiePair, 'the escape hatch must let an unverified claim adopt and set a session cookie');
+
+		const { status, body } = await callOperationsWithSession(
+			ctx.harper.operationsAPIURL,
+			ctx.harper.hostname,
+			sessionCookiePair!,
+			{ operation: 'list_users' }
+		);
+		strictEqual(
+			status,
+			200,
+			`escape-hatch-adopted super_user session must be permitted list_users; got ${status} ${JSON.stringify(body)}`
+		);
 	});
 });
