@@ -205,7 +205,14 @@ export function normalizeMcpSecurityConfig(mcpConfig: Record<string, any>, logge
 		}
 	}
 
-	validateSigningKeyPem(mcpConfig);
+	// Only when the MCP surface is actually enabled: a disabled block must
+	// stay inert (the byte-identical-boot contract downstream components
+	// rely on — e.g. a shipped config carrying `${VAR}` placeholders with
+	// the surface off must not refuse boot). Mirrors the enabled-gating of
+	// the other MCP startup checks in src/index.ts.
+	if (mcpConfig.enabled === true) {
+		validateSigningKeyPem(mcpConfig);
+	}
 }
 
 /**

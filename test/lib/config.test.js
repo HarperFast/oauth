@@ -185,21 +185,26 @@ describe('OAuth Configuration', () => {
 			}
 
 			it('declared but resolved empty (e.g. unset/empty env var) throws, naming the field', () => {
-				assert.throws(() => normalizeMcpSecurityConfig({ signingKeyPem: '' }), /mcp\.signingKeyPem.*empty/s);
+				assert.throws(() => normalizeMcpSecurityConfig({ enabled: true, signingKeyPem: '' }), /mcp\.signingKeyPem.*empty/s);
 			});
 
 			it('declared as an unresolved ${VAR} placeholder throws, naming the variable', () => {
 				assert.throws(
-					() => normalizeMcpSecurityConfig({ signingKeyPem: '${MY_SIGNING_KEY}' }),
+					() => normalizeMcpSecurityConfig({ enabled: true, signingKeyPem: '${MY_SIGNING_KEY}' }),
 					/mcp\.signingKeyPem.*unresolved env placeholder.*MY_SIGNING_KEY/s
 				);
 			});
 
 			it('declared but unparseable throws (previously only warned, then 500s at first mint)', () => {
 				assert.throws(
-					() => normalizeMcpSecurityConfig({ signingKeyPem: 'not a pem' }),
+					() => normalizeMcpSecurityConfig({ enabled: true, signingKeyPem: 'not a pem' }),
 					/mcp\.signingKeyPem is not a supported signing key/
 				);
+			});
+
+			it('mcp.enabled false (or absent) leaves a declared-but-bad pin INERT — the disabled block must not refuse boot (byte-identical-boot contract)', () => {
+				assert.doesNotThrow(() => normalizeMcpSecurityConfig({ enabled: false, signingKeyPem: '${FLAIR_MCP_SIGNING_KEY_PEM}' }));
+				assert.doesNotThrow(() => normalizeMcpSecurityConfig({ signingKeyPem: '' }));
 			});
 
 			it('not declared at all leaves the config untouched — self-generation path unaffected', () => {
@@ -210,7 +215,7 @@ describe('OAuth Configuration', () => {
 
 			it('declared with a valid PEM passes through unchanged — pin mode', () => {
 				const pem = rsaPem();
-				const cfg = { signingKeyPem: pem };
+				const cfg = { enabled: true, signingKeyPem: pem };
 				normalizeMcpSecurityConfig(cfg);
 				assert.equal(cfg.signingKeyPem, pem);
 			});
