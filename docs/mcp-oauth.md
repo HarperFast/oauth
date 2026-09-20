@@ -218,6 +218,13 @@ Refresh tokens rotate on use: presenting an already-used token from a family
 revokes the whole family (replay defense). Refresh families live for
 `refreshTokenTtl` (default 30 days).
 
+Refresh families minted by this version are stamped with a provenance marker;
+a family from before that (or replicated from an older node) is rejected with
+`invalid_grant` and retired the first time it is presented for refresh, so the
+client re-authorizes into a fresh, stamped family. This is a lazy, per-family
+check on the existing refresh path — no startup sweep, nothing extra to run on
+upgrade — and it converges naturally across a rolling upgrade.
+
 By default any client whose registered `grant_types` include `refresh_token`
 receives a refresh token on the code exchange. The AS metadata advertises
 `offline_access` in `scopes_supported` (SEP-2207), so clients that want refresh

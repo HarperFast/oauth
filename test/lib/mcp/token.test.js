@@ -221,6 +221,8 @@ describe('handleToken', () => {
 
 		assert.equal(codes.has('code-1'), false, 'code consumed (single-use)');
 		assert.equal(families.size, 1, 'refresh family persisted');
+		const [minted] = families.values();
+		assert.equal(minted.stamped, true, 'newly-minted family is stamped (#229)');
 	});
 
 	it('sets no-store cache headers on a successful token response (RFC 6749 §5.1)', async () => {
@@ -677,6 +679,7 @@ describe('handleToken', () => {
 			scope: 'mcp:read',
 			created_at: 1700000000,
 			expires_at: Math.floor(Date.now() / 1000) + 86400,
+			stamped: true, // minted-by-current-version by default; individual tests opt into pre-provenance
 			...overrides,
 		});
 		return token;
@@ -805,6 +808,60 @@ describe('handleToken', () => {
 			mcpConfig
 		);
 		assert.equal(res.body.error, 'invalid_grant');
+	});
+
+	// ---- #229: pre-provenance (unstamped) family rejection ----
+
+	it('rejects a refresh from an unstamped (pre-provenance) family and retires it', async () => {
+		const token = seedFamily('fam-legacy', { stamped: false });
+		const res = await handleToken(
+			{ headers: {} },
+			{ grant_type: 'refresh_token', refresh_token: token, client_id: 'public-1' },
+			mcpConfig
+		);
+		assert.equal(res.status, 400);
+		assert.equal(res.body.error, 'invalid_grant');
+		assert.equal(families.get('fam-legacy').revoked, true, 'unstamped family is retired on refresh');
+	});
+
+	it('rejects a legacy family record missing the stamped field entirely', async () => {
+		// Simulates a row written before #229 — no `stamped` key at all, not
+		// merely `stamped: false`. Must read back as unstamped, no migration.
+		const token = seedFamily('fam-pre-229');
+		const record = families.get('fam-pre-229');
+		delete record.stamped;
+		families.set('fam-pre-229', record);
+		const res = await handleToken(
+			{ headers: {} },
+			{ grant_type: 'refresh_token', refresh_token: token, client_id: 'public-1' },
+			mcpConfig
+		);
+		assert.equal(res.body.error, 'invalid_grant');
+		assert.equal(families.get('fam-pre-229').revoked, true);
+	});
+
+	it('rejects even a replayed token on an unstamped family with invalid_grant (not a different failure mode)', async () => {
+		const oldToken = seedFamily('fam-legacy-2', { stamped: false });
+		// Replay path (hash mismatch) still returns invalid_grant for an
+		// already-rotated token even though this family also predates stamping.
+		families.get('fam-legacy-2').current_token_hash = 'not-the-real-hash';
+		const res = await handleToken(
+			{ headers: {} },
+			{ grant_type: 'refresh_token', refresh_token: oldToken, client_id: 'public-1' },
+			mcpConfig
+		);
+		assert.equal(res.body.error, 'invalid_grant');
+	});
+
+	it('does not retire a stamped family (control case for the rejection above)', async () => {
+		const token = seedFamily('fam-current', { stamped: true });
+		const res = await handleToken(
+			{ headers: {} },
+			{ grant_type: 'refresh_token', refresh_token: token, client_id: 'public-1' },
+			mcpConfig
+		);
+		assert.equal(res.status, 200);
+		assert.equal(families.get('fam-current').revoked, false);
 	});
 
 	describe('grant_types enforcement at token endpoint (RFC 6749 §5.2)', () => {

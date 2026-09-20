@@ -88,6 +88,7 @@ function encodeRecord(record: MCPRefreshFamilyRecord): Record<string, any> {
 		resource: record.resource,
 		scope: record.scope,
 		expires_at: record.expires_at,
+		stamped: record.stamped,
 	};
 }
 
@@ -101,6 +102,9 @@ function decodeRecord(raw: Record<string, any>): MCPRefreshFamilyRecord {
 		resource: raw.resource,
 		scope: raw.scope ?? undefined,
 		expires_at: raw.expires_at,
+		// Missing on any row minted before #229 (or replicated from an older
+		// node) — that absence IS the pre-provenance signal, not backfilled.
+		stamped: raw.stamped === true,
 	};
 }
 

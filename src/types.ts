@@ -359,6 +359,10 @@ export type MCPPublicKeyRecord = Omit<MCPSigningKeyRecord, 'private_key_pem'>;
  * SHA-256 hash of the full value is persisted (`current_token_hash`). Rotation
  * overwrites the hash; replay of a superseded token (hash mismatch) sets
  * `revoked`, which invalidates the whole family.
+ *
+ * `stamped` (#229) is set true only by this version's mint path. A family
+ * minted before it has no such field, decodes as `false`, and is rejected +
+ * retired on its next refresh — lazy, per-family migration, no startup sweep.
  */
 export interface MCPRefreshFamilyRecord {
 	family_id: string;
@@ -369,6 +373,7 @@ export interface MCPRefreshFamilyRecord {
 	resource: string;
 	scope?: string;
 	expires_at: number;
+	stamped: boolean;
 }
 
 /**

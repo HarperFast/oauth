@@ -337,6 +337,7 @@ async function mintTokenPair(
 			resource: grant.resource,
 			scope: grant.scope,
 			expires_at: now + refreshTtl,
+			stamped: true,
 		});
 		responseBody.refresh_token = refreshToken;
 	}
@@ -484,6 +485,29 @@ async function handleRefreshTokenGrant(
 		}
 		logger?.warn?.(`MCP token: refresh replay detected; revoked family ${family.family_id}`);
 		return errorResponse(400, 'invalid_grant', 'Refresh token has been superseded; family revoked');
+	}
+
+	// Defense in depth (#229): a family minted before provenance stamping is
+	// retired the first time it is presented for refresh, rather than rotated.
+	// Lazy, per-family — no startup sweep — and it converges across a rolling
+	// upgrade because every node's refresh path enforces it. The client
+	// re-authorizes into a fresh, stamped family per RFC 6749 §5.2.
+	if (!family.stamped) {
+		family.revoked = true;
+		try {
+			await familyStore.set(family);
+		} catch (error) {
+			logger?.error?.(
+				`MCP token: failed to persist retirement for pre-provenance family ${family.family_id}:`,
+				error instanceof Error ? error.message : String(error)
+			);
+		}
+		logger?.warn?.(`MCP token: rejected refresh for pre-provenance family ${family.family_id}; retired`);
+		return errorResponse(
+			400,
+			'invalid_grant',
+			'Refresh token family predates provenance tracking; reauthorize to continue'
+		);
 	}
 
 	// Sign the access token BEFORE committing the rotation. If key fetch or

@@ -162,6 +162,7 @@ describe('handleToken — audit events and onMCPTokenIssued hook', () => {
 			scope: 'mcp:read',
 			created_at: 1700000000,
 			expires_at: Math.floor(Date.now() / 1000) + 86400,
+			stamped: true,
 			...overrides,
 		});
 		return token;
