@@ -20,6 +20,7 @@ rest: true
 
 '@harperfast/oauth':
   package: '@harperfast/oauth'
+  redirectUri: 'http://localhost:9926/oauth' # integration-test loopback — opted in explicitly, no default
   providers:
     test:
       provider: generic

@@ -24,7 +24,7 @@ Add the plugin to your Harper application's `config.yaml`:
       clientSecret: ${OAUTH_GITHUB_CLIENT_SECRET}
 ```
 
-`redirectUri` is your app's public origin plus `/oauth/callback` — the plugin appends the provider name (`/oauth/github/callback`) when it talks to the provider. It defaults to `http://localhost:9926/oauth/callback`, which is fine for the local walkthrough below but **must be set on any deployed app** — otherwise the provider redirects your users to `localhost` and login silently never completes. See [Understanding Redirects](./configuration.md#understanding-redirects).
+`redirectUri` is your app's public origin plus `/oauth/callback` — the plugin appends the provider name (`/oauth/github/callback`) when it talks to the provider. It is **required**; there is no `localhost` default, so the plugin fails to start with a configuration error if it's missing. For the local walkthrough below, set it explicitly to `http://localhost:9926/oauth/callback`; on any deployed app, set it to your public origin. See [Understanding Redirects](./configuration.md#understanding-redirects).
 
 ### 2. Set Environment Variables
 

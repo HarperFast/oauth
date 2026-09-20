@@ -178,8 +178,21 @@ export function buildProviderConfig(
 	const providerType = expandedOptions.provider || providerName;
 	const providerPreset = providerType ? getProvider(providerType) : null;
 
-	// Build redirect URI with provider name in path
-	const baseRedirectUri = expandedOptions.redirectUri || pluginDefaults.redirectUri || 'http://localhost:9926/oauth';
+	// Build redirect URI with provider name in path. No loopback fallback: a missing
+	// redirectUri used to default to http://localhost:9926/oauth, which some IdPs
+	// (unlike GitHub) accept for native-app-style loopback flows — silently handing
+	// the authorization code to whatever is listening on the end user's own
+	// localhost:9926 instead of failing the login. Fail closed at config-resolution
+	// time instead (see HarperFast/oauth#208).
+	const baseRedirectUri = expandedOptions.redirectUri || pluginDefaults.redirectUri;
+	if (!baseRedirectUri) {
+		throw new Error(
+			`OAuth provider '${providerName}' has no redirectUri configured. Set the plugin-level ` +
+				`'redirectUri' option (or a per-provider 'redirectUri' on '${providerName}') to your app's ` +
+				`public origin, e.g. redirectUri: 'https://your-app.example.com/oauth' — the plugin appends ` +
+				`'/${providerName}/callback'. See docs/configuration.md#understanding-redirects.`
+		);
+	}
 	const redirectUri = baseRedirectUri
 		.replace('/oauth/callback', `/oauth/${providerName}/callback`)
 		.replace(/\/oauth$/, `/oauth/${providerName}/callback`);

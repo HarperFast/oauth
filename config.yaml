@@ -19,5 +19,6 @@ usernameClaim: 'email'
 defaultRole: 'user'
 postLoginRedirect: '/'
 
-# Default redirect URI pattern (will be adjusted per provider)
-redirectUri: 'http://localhost:9926/oauth/callback'
+# redirectUri has no default — it must be set in the consuming app's config.yaml
+# to that app's public origin. A missing redirectUri is a startup error, not a
+# silent localhost fallback (see docs/configuration.md#understanding-redirects).

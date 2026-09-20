@@ -259,6 +259,7 @@ describe('OAuth Configuration', () => {
 				authorizationUrl: 'https://auth.test.com/authorize',
 				tokenUrl: 'https://auth.test.com/token',
 				userInfoUrl: 'https://auth.test.com/userinfo',
+				redirectUri: 'http://localhost:9926/oauth',
 			};
 
 			const config = buildProviderConfig(providerConfig, 'test', {});
@@ -267,6 +268,34 @@ describe('OAuth Configuration', () => {
 			assert.equal(config.clientSecret, 'test-secret');
 			assert.equal(config.authorizationUrl, 'https://auth.test.com/authorize');
 			assert.equal(config.redirectUri, 'http://localhost:9926/oauth/test/callback');
+		});
+
+		it('should throw a configuration error when redirectUri is not set (no localhost fallback)', () => {
+			const providerConfig = {
+				clientId: 'test-client',
+				clientSecret: 'test-secret',
+				authorizationUrl: 'https://auth.test.com/authorize',
+				tokenUrl: 'https://auth.test.com/token',
+				userInfoUrl: 'https://auth.test.com/userinfo',
+			};
+
+			assert.throws(
+				() => buildProviderConfig(providerConfig, 'myprovider', {}),
+				(error) => {
+					assert.match(error.message, /myprovider/);
+					assert.match(error.message, /redirectUri/);
+					assert.doesNotMatch(error.message, /localhost:9926/);
+					return true;
+				}
+			);
+		});
+
+		it('throws even when other required fields are also missing (redirectUri is checked regardless)', () => {
+			// A provider config missing everything (clientId, clientSecret, URLs) is normally
+			// skipped-with-a-warning by initializeProviders — but that's a downstream check;
+			// buildProviderConfig itself must still fail closed on the redirectUri it's asked
+			// to resolve, not silently hand back a localhost one.
+			assert.throws(() => buildProviderConfig({}, 'empty', {}), /redirectUri/);
 		});
 
 		it('should expand environment variables', () => {
@@ -279,6 +308,7 @@ describe('OAuth Configuration', () => {
 				authorizationUrl: 'https://auth.test.com/authorize',
 				tokenUrl: 'https://auth.test.com/token',
 				userInfoUrl: 'https://auth.test.com/userinfo',
+				redirectUri: 'https://auth.test.com/oauth',
 			};
 
 			const config = buildProviderConfig(providerConfig, 'test', {});
@@ -294,6 +324,7 @@ describe('OAuth Configuration', () => {
 				authorizationUrl: 'https://auth.test.com/authorize',
 				tokenUrl: 'https://auth.test.com/token',
 				userInfoUrl: 'https://auth.test.com/userinfo',
+				redirectUri: 'https://auth.test.com/oauth',
 			};
 
 			const config = buildProviderConfig(providerConfig, 'test', {});
@@ -316,6 +347,7 @@ describe('OAuth Configuration', () => {
 				usernameClaim: 'custom-username',
 				defaultRole: 'custom-role',
 				postLoginRedirect: '/custom-redirect',
+				redirectUri: 'https://app.test.com/oauth',
 			};
 
 			const config = buildProviderConfig(providerConfig, 'test', pluginDefaults);
@@ -340,6 +372,7 @@ describe('OAuth Configuration', () => {
 			const pluginDefaults = {
 				scope: 'default-scope',
 				defaultRole: 'default-role',
+				redirectUri: 'https://app.test.com/oauth',
 			};
 
 			const config = buildProviderConfig(providerConfig, 'test', pluginDefaults);
@@ -357,7 +390,9 @@ describe('OAuth Configuration', () => {
 				userInfoUrl: 'https://auth.test.com/userinfo',
 			};
 
-			const config = buildProviderConfig(providerConfig, 'myprovider', {});
+			const config = buildProviderConfig(providerConfig, 'myprovider', {
+				redirectUri: 'http://localhost:9926/oauth',
+			});
 
 			assert.equal(config.redirectUri, 'http://localhost:9926/oauth/myprovider/callback');
 		});
@@ -398,6 +433,7 @@ describe('OAuth Configuration', () => {
 					provider: 'github',
 					clientId: 'github-client',
 					clientSecret: 'github-secret',
+					redirectUri: 'https://app.test.com/oauth',
 				};
 
 				const config = buildProviderConfig(providerConfig, 'github', {});
@@ -413,6 +449,7 @@ describe('OAuth Configuration', () => {
 					provider: 'google',
 					clientId: 'google-client',
 					clientSecret: 'google-secret',
+					redirectUri: 'https://app.test.com/oauth',
 				};
 
 				const config = buildProviderConfig(providerConfig, 'google', {});
@@ -430,6 +467,7 @@ describe('OAuth Configuration', () => {
 					clientId: 'azure-client',
 					clientSecret: 'azure-secret',
 					tenantId,
+					redirectUri: 'https://app.test.com/oauth',
 				};
 
 				const config = buildProviderConfig(providerConfig, 'azure', {});
@@ -444,6 +482,7 @@ describe('OAuth Configuration', () => {
 					clientId: 'auth0-client',
 					clientSecret: 'auth0-secret',
 					domain: 'myapp.auth0.com',
+					redirectUri: 'https://app.test.com/oauth',
 				};
 
 				const config = buildProviderConfig(providerConfig, 'auth0', {});
@@ -459,6 +498,7 @@ describe('OAuth Configuration', () => {
 					clientId: 'auth0-client',
 					clientSecret: 'auth0-secret',
 					domain: 'https://myapp.auth0.com/',
+					redirectUri: 'https://app.test.com/oauth',
 				};
 
 				const config = buildProviderConfig(providerConfig, 'auth0', {});
@@ -473,6 +513,7 @@ describe('OAuth Configuration', () => {
 				// No 'provider' field
 				clientId: 'github-client',
 				clientSecret: 'github-secret',
+				redirectUri: 'https://app.test.com/oauth',
 			};
 
 			const config = buildProviderConfig(providerConfig, 'github', {});
@@ -488,6 +529,7 @@ describe('OAuth Configuration', () => {
 				authorizationUrl: 'https://custom.com/auth',
 				tokenUrl: 'https://custom.com/token',
 				userInfoUrl: 'https://custom.com/user',
+				redirectUri: 'https://app.test.com/oauth',
 			};
 
 			const config = buildProviderConfig(providerConfig, 'custom', {});
@@ -595,6 +637,7 @@ describe('OAuth Configuration', () => {
 	describe('initializeProviders', () => {
 		it('should initialize configured providers', () => {
 			const options = {
+				redirectUri: 'https://app.test.com/oauth',
 				providers: {
 					github: {
 						clientId: 'github-client',
@@ -639,6 +682,7 @@ describe('OAuth Configuration', () => {
 
 		it('should skip providers with missing required fields', () => {
 			const options = {
+				redirectUri: 'https://app.test.com/oauth',
 				providers: {
 					incomplete: {
 						clientId: 'test-client',
@@ -678,6 +722,7 @@ describe('OAuth Configuration', () => {
 			const options = {
 				scope: 'plugin-scope',
 				defaultRole: 'plugin-role',
+				redirectUri: 'https://app.test.com/oauth',
 				providers: {
 					test1: {
 						clientId: 'test1-client',
@@ -707,6 +752,7 @@ describe('OAuth Configuration', () => {
 
 		it('should use provider presets', () => {
 			const options = {
+				redirectUri: 'https://app.test.com/oauth',
 				providers: {
 					github: {
 						provider: 'github',
@@ -724,6 +770,7 @@ describe('OAuth Configuration', () => {
 
 		it('should handle provider initialization errors', () => {
 			const options = {
+				redirectUri: 'https://app.test.com/oauth',
 				providers: {
 					bad: {
 						clientId: 'bad-client',
@@ -740,6 +787,23 @@ describe('OAuth Configuration', () => {
 			// Since OAuthProvider constructor is robust, this should still work
 			const providers = initializeProviders(options, mockLogger);
 			assert.ok(providers.bad || !providers.bad); // Either initialized or skipped
+		});
+
+		it('should throw when a provider has no redirectUri anywhere in the config (no localhost fallback)', () => {
+			const options = {
+				// No plugin-level redirectUri, and none on the provider either.
+				providers: {
+					github: {
+						clientId: 'github-client',
+						clientSecret: 'github-secret',
+						authorizationUrl: 'https://github.com/login/oauth/authorize',
+						tokenUrl: 'https://github.com/login/oauth/access_token',
+						userInfoUrl: 'https://api.github.com/user',
+					},
+				},
+			};
+
+			assert.throws(() => initializeProviders(options, mockLogger), /redirectUri/);
 		});
 
 		it('should expand environment variables in plugin-level redirectUri', () => {

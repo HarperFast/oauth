@@ -373,11 +373,11 @@ Both failures happen before the provider is involved, so neither shows up in you
 
 ## Common Issues
 
-### Deployed App Redirects Users to `localhost`
+### Missing `redirectUri` Fails to Start
 
-**Symptom:** login appears to work — the provider's consent screen shows, you approve — and then the browser lands on `http://localhost:9926/oauth/{provider}/callback` and stalls or loops. No error appears in the app log.
+**Symptom:** the app fails to start with an error naming a provider and `redirectUri`.
 
-**Cause:** `redirectUri` isn't set, so the plugin fell back to its `http://localhost:9926/oauth/callback` default and sent that to the provider. It reaches the consent screen (rather than failing with `redirect_uri_mismatch`) whenever `localhost` is also registered with the provider — a very common leftover from local development.
+**Cause:** `redirectUri` isn't set at the plugin level or on that provider. There is no `localhost` fallback — a missing `redirectUri` used to default to `http://localhost:9926/oauth/callback` and reach the provider's consent screen (rather than failing with `redirect_uri_mismatch`) whenever `localhost` was also registered with the provider, so login just silently never completed. That's now a startup error instead.
 
 **Solution:** set the plugin-level `redirectUri` to your public origin, as described in [Callback URLs](#callback-urls-both-sides-are-required). Registering the URL with your provider does not affect what the plugin sends.
 
