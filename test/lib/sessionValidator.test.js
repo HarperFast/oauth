@@ -487,7 +487,9 @@ test('persists rebuilt lastValidated via session.update on a read-only tracked s
 	}
 	Object.freeze(trackedOAuth);
 
-	const session = createMockSession({ oauth: trackedOAuth });
+	// A custom array field (e.g. set by an onLogin hook) must round-trip as an
+	// array through snapshotSessionData, not get flattened to a {0:…,1:…} object.
+	const session = createMockSession({ oauth: trackedOAuth, permissions: ['repo:read', 'repo:write'] });
 
 	const result = await validateAndRefreshSession({ session }, provider);
 
@@ -513,6 +515,8 @@ test('persists rebuilt lastValidated via session.update on a read-only tracked s
 	assert.ok(persisted.oauth.lastValidated > Date.now() - 100, 'persisted lastValidated should be advanced');
 	assert.strictEqual(persisted.oauth.provider, 'github', 'persisted provider preserved');
 	assert.strictEqual(persisted.oauth.accessToken, 'github_token', 'persisted accessToken preserved');
+	assert.ok(Array.isArray(persisted.permissions), 'persisted array field stays an array, not a flattened object');
+	assert.deepStrictEqual(persisted.permissions, ['repo:read', 'repo:write'], 'persisted array field round-trips');
 
 	// Reload a second request from exactly what was persisted (a fresh session
 	// object, not the same reference) and confirm it is throttled: the persisted
