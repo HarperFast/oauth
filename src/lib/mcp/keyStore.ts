@@ -74,14 +74,31 @@ export function resolveConfiguredAlg(mcpConfig?: MCPConfig): SupportedSigningAlg
 	return mcpConfig?.signingAlgorithm === 'ES256' ? 'ES256' : 'RS256';
 }
 
+// jsonwebtoken (sign.js) refuses to sign with an RSA key whose modulus is
+// under this size (no `allowInsecureKeySizes` is passed by tokenIssuer).
+// Rejecting here, at boot, surfaces that as a clear config error instead of
+// letting getOrPersistPinnedKey persist the weak key into the replicated key
+// table / JWKS before the first mint fails.
+const MIN_RSA_MODULUS_LENGTH = 2048;
+
 /**
  * Derive the signing algorithm from pinned private-key material: RSA → RS256,
- * EC P-256 → ES256. Throws on any other key type/curve — a pin the issuer
- * cannot sign with must fail loudly at mint time, not emit broken tokens.
+ * EC P-256 → ES256. Throws on any other key type/curve, or an RSA key below
+ * {@link MIN_RSA_MODULUS_LENGTH} — a pin the issuer cannot sign with must fail
+ * loudly at mint time, not emit broken tokens.
  */
 export function algFromPrivateKeyPem(privateKeyPem: string): SupportedSigningAlg {
 	const key = createPrivateKey(privateKeyPem);
-	if (key.asymmetricKeyType === 'rsa') return 'RS256';
+	if (key.asymmetricKeyType === 'rsa') {
+		const modulusLength = key.asymmetricKeyDetails?.modulusLength;
+		if (typeof modulusLength === 'number' && modulusLength < MIN_RSA_MODULUS_LENGTH) {
+			throw new Error(
+				`MCP: signingKeyPem RSA key is ${modulusLength} bits; jsonwebtoken requires at least ` +
+					`${MIN_RSA_MODULUS_LENGTH} bits to sign RS256 tokens. Provide a stronger key.`
+			);
+		}
+		return 'RS256';
+	}
 	if (key.asymmetricKeyType === 'ec') {
 		const curve = key.asymmetricKeyDetails?.namedCurve;
 		if (curve === 'prime256v1') return 'ES256';
