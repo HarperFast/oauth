@@ -122,9 +122,12 @@ function normalizeBooleanField(obj: Record<string, any>, field: string, path: st
  *   proceeds exactly as before.
  */
 function validateSigningKeyPem(mcpConfig: Record<string, any>): void {
-	// `undefined` is undeclared (a JS config doing `signingKeyPem: process.env.X`
-	// with X unset). YAML never yields undefined; an empty YAML value is null,
-	// which IS declared-and-empty and falls through to the checks below.
+	// `undefined` is undeclared. YAML never yields undefined for a present key
+	// (an empty YAML value is null, which IS declared-and-empty and falls
+	// through to the checks below) — the real source is `OptionsWatcher#merge`
+	// setting a removed key to undefined on live config reload. Self-generation
+	// is the documented result of removing the pin that way; throwing here
+	// would turn "unpin on reload" into a boot-validation failure.
 	if (!('signingKeyPem' in mcpConfig) || mcpConfig.signingKeyPem === undefined) return;
 	const value = mcpConfig.signingKeyPem;
 	if (typeof value === 'string' && /^\$\{[^}]*\}$/.test(value.trim())) {

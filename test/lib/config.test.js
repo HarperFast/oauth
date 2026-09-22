@@ -205,6 +205,25 @@ describe('OAuth Configuration', () => {
 				);
 			});
 
+			it('declared with an RSA key under 2048 bits throws at boot (jsonwebtoken refuses to sign with it)', () => {
+				const weakPem = generateKeyPairSync('rsa', {
+					modulusLength: 1024,
+					publicKeyEncoding: { type: 'spki', format: 'pem' },
+					privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+				}).privateKey;
+				assert.throws(
+					() => normalizeMcpSecurityConfig({ enabled: true, signingKeyPem: weakPem }),
+					/mcp\.signingKeyPem is not a supported signing key.*RSA key is 1024 bits/s
+				);
+			});
+
+			it('declared with a 2048-bit RSA key passes through unchanged', () => {
+				const pem = rsaPem();
+				const cfg = { enabled: true, signingKeyPem: pem };
+				normalizeMcpSecurityConfig(cfg);
+				assert.equal(cfg.signingKeyPem, pem);
+			});
+
 			it('mcp.enabled false (or absent) leaves a declared-but-bad pin INERT — the disabled block must not refuse boot (byte-identical-boot contract)', () => {
 				assert.doesNotThrow(() =>
 					normalizeMcpSecurityConfig({ enabled: false, signingKeyPem: '${FLAIR_MCP_SIGNING_KEY_PEM}' })
@@ -212,7 +231,7 @@ describe('OAuth Configuration', () => {
 				assert.doesNotThrow(() => normalizeMcpSecurityConfig({ signingKeyPem: '' }));
 			});
 
-			it('declared as undefined (JS config with an unset env lookup) counts as undeclared — no throw', () => {
+			it('declared as undefined (live-reload removed the key; OptionsWatcher#merge sets it undefined) counts as undeclared — no throw', () => {
 				assert.doesNotThrow(() => normalizeMcpSecurityConfig({ enabled: true, signingKeyPem: undefined }));
 			});
 
