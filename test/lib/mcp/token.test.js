@@ -864,6 +864,41 @@ describe('handleToken', () => {
 		assert.equal(families.get('fam-current').revoked, false);
 	});
 
+	it('survives a second refresh on a rotated stamped family (stamp is not lost on rotation)', async () => {
+		seedCode('code-1');
+		const minted = await handleToken(
+			{ headers: {} },
+			{
+				grant_type: 'authorization_code',
+				code: 'code-1',
+				code_verifier: CODE_VERIFIER,
+				redirect_uri: REDIRECT,
+				client_id: 'public-1',
+			},
+			mcpConfig
+		);
+		assert.equal(minted.status, 200);
+		const [familyId] = families.keys();
+
+		const first = await handleToken(
+			{ headers: {} },
+			{ grant_type: 'refresh_token', refresh_token: minted.body.refresh_token, client_id: 'public-1' },
+			mcpConfig
+		);
+		assert.equal(first.status, 200);
+		assert.equal(families.get(familyId).stamped, true, 'stamp survives the first rotation');
+
+		const second = await handleToken(
+			{ headers: {} },
+			{ grant_type: 'refresh_token', refresh_token: first.body.refresh_token, client_id: 'public-1' },
+			mcpConfig
+		);
+		assert.equal(second.status, 200, 'second refresh on the rotated token succeeds');
+		assert.ok(second.body.access_token);
+		assert.ok(second.body.refresh_token);
+		assert.equal(families.get(familyId).stamped, true, 'stamp survives the second rotation');
+	});
+
 	describe('grant_types enforcement at token endpoint (RFC 6749 §5.2)', () => {
 		it('rejects authorization_code exchange when client has grant_types: []', async () => {
 			clients.set('no-grants', {
