@@ -222,8 +222,15 @@ Refresh families minted by this version are stamped with a provenance marker;
 a family from before that (or replicated from an older node) is rejected with
 `invalid_grant` and retired the first time it is presented for refresh, so the
 client re-authorizes into a fresh, stamped family. This is a lazy, per-family
-check on the existing refresh path — no startup sweep, nothing extra to run on
-upgrade — and it converges naturally across a rolling upgrade.
+check on the existing refresh path — no startup sweep.
+
+Real cost when upgrading: every MCP client holding a refresh token minted
+before this version re-authorizes once. During a rolling upgrade, a client
+whose refresh request lands on a not-yet-upgraded worker or node may have its
+provenance marker silently stripped on rotation and have to re-authorize a
+second time once it later hits upgraded code. Rolling back and re-upgrading
+repeats the mass re-auth. Nothing else to run — no manual step, no data
+migration.
 
 By default any client whose registered `grant_types` include `refresh_token`
 receives a refresh token on the code exchange. The AS metadata advertises

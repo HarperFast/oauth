@@ -489,9 +489,14 @@ async function handleRefreshTokenGrant(
 
 	// Defense in depth (#229): a family minted before provenance stamping is
 	// retired the first time it is presented for refresh, rather than rotated.
-	// Lazy, per-family — no startup sweep — and it converges across a rolling
-	// upgrade because every node's refresh path enforces it. The client
-	// re-authorizes into a fresh, stamped family per RFC 6749 §5.2.
+	// Lazy, per-family — no startup sweep. This does NOT converge cleanly
+	// across a rolling upgrade: `put` is a full-record replace, so a
+	// not-yet-upgraded node's `encodeRecord` (which has no `stamped` field)
+	// strips the marker off any family it rotates, and `mcp_refresh_families`
+	// replicates that loss to every other node. The next refresh on upgraded
+	// code then sees an unstamped family and retires it. Fails closed either
+	// way — the cost is an extra client re-authorization, never a bypass. The
+	// client re-authorizes into a fresh, stamped family per RFC 6749 §5.2.
 	if (!family.stamped) {
 		family.revoked = true;
 		try {
