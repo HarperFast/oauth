@@ -30,7 +30,7 @@ Every provider setup below has you register a callback URL with the provider. Th
 ```
 
 - Set it **once**, at the plugin level (a sibling of `providers`, not inside a provider). The plugin appends the provider name per request: `https://yourdomain.com/oauth/callback` → `https://yourdomain.com/oauth/github/callback`, `.../oauth/google/callback`, and so on. That's why the value you configure has no provider name in it but the URL you register with the provider does.
-- If you omit it, the plugin refuses to start: a provider with no `redirectUri` (per-provider or plugin-level) is a configuration error raised at startup, naming the missing key. There is no default. (Earlier versions silently defaulted to `http://localhost:9926/oauth/callback`, which on a deployed app sent users to their own machine with no error raised anywhere.)
+- If you omit it (or its environment variable is unset), the plugin refuses to start: a provider with no `redirectUri` (per-provider or plugin-level) is a configuration error raised at startup, naming the missing key. There is no default. (Earlier versions silently defaulted to `http://localhost:9926/oauth/callback`, which on a deployed app sent users to their own machine with no error raised anywhere.)
 - After deploying, [verify what the plugin actually sends](#verifying-the-authorization-request).
 
 See [Understanding Redirects](./configuration.md#understanding-redirects) for how this differs from `postLoginRedirect`.

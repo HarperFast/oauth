@@ -189,7 +189,21 @@ export function buildProviderConfig(
 		throw new Error(
 			`OAuth provider '${providerName}' has no redirectUri configured. Set the plugin-level ` +
 				`'redirectUri' option (or a per-provider 'redirectUri' on '${providerName}') to your app's ` +
-				`public origin, e.g. redirectUri: 'https://your-app.example.com/oauth' — the plugin appends ` +
+				`public origin plus '/oauth', e.g. redirectUri: 'https://your-app.example.com/oauth' — the plugin ` +
+				`appends '/${providerName}/callback'. See docs/configuration.md#understanding-redirects.`
+		);
+	}
+	// expandEnvVar leaves an unresolved `${VAR}` placeholder as-is when the
+	// variable is unset, so a config like `redirectUri: ${OAUTH_REDIRECT_URI}`
+	// (the pattern every doc example uses) would otherwise pass the blank
+	// check above as a non-empty string, match neither rewrite below, and get
+	// sent to the IdP verbatim. Fail closed here too (see HarperFast/oauth#208).
+	if (/^\$\{[^}]*\}$/.test(baseRedirectUri.trim())) {
+		throw new Error(
+			`OAuth provider '${providerName}' has an unresolved 'redirectUri' environment variable placeholder ` +
+				`(${JSON.stringify(baseRedirectUri)}) — the variable is unset. Set the plugin-level 'redirectUri' ` +
+				`option (or a per-provider 'redirectUri' on '${providerName}') to your app's public origin plus ` +
+				`'/oauth', e.g. redirectUri: 'https://your-app.example.com/oauth' — the plugin appends ` +
 				`'/${providerName}/callback'. See docs/configuration.md#understanding-redirects.`
 		);
 	}

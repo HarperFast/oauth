@@ -302,6 +302,28 @@ describe('OAuth Configuration', () => {
 			assert.throws(() => buildProviderConfig(providerConfig, 'myprovider', {}), /has no redirectUri configured/);
 		});
 
+		it('throws a configuration error when redirectUri is an unresolved env placeholder (per-provider, variable unset)', () => {
+			delete process.env.OAUTH_TEST_UNSET_REDIRECT_VAR;
+			const providerConfig = {
+				clientId: 'test-client',
+				clientSecret: 'test-secret',
+				authorizationUrl: 'https://auth.test.com/authorize',
+				tokenUrl: 'https://auth.test.com/token',
+				userInfoUrl: 'https://auth.test.com/userinfo',
+				redirectUri: '${OAUTH_TEST_UNSET_REDIRECT_VAR}',
+			};
+
+			assert.throws(
+				() => buildProviderConfig(providerConfig, 'myprovider', {}),
+				(error) => {
+					assert.match(error.message, /myprovider/);
+					assert.match(error.message, /redirectUri/);
+					assert.match(error.message, /unset/);
+					return true;
+				}
+			);
+		});
+
 		it('throws even when other required fields are also missing (redirectUri is checked regardless)', () => {
 			// A provider config missing everything (clientId, clientSecret, URLs) is normally
 			// skipped-with-a-warning by initializeProviders — but that's a downstream check;
@@ -918,6 +940,46 @@ describe('OAuth Configuration', () => {
 			// The redirectUri should use the expanded value from plugin defaults
 			assert.ok(providers.google.config.redirectUri.startsWith('https://test.com/oauth'));
 			assert.ok(providers.google.config.redirectUri.includes('google'));
+		});
+
+		it('should throw when the plugin-level redirectUri is an unresolved env placeholder (variable unset)', () => {
+			delete process.env.OAUTH_TEST_UNSET_PLUGIN_REDIRECT;
+			const options = {
+				redirectUri: '${OAUTH_TEST_UNSET_PLUGIN_REDIRECT}',
+				providers: {
+					github: {
+						clientId: 'github-client',
+						clientSecret: 'github-secret',
+						authorizationUrl: 'https://github.com/login/oauth/authorize',
+						tokenUrl: 'https://github.com/login/oauth/access_token',
+						userInfoUrl: 'https://api.github.com/user',
+					},
+				},
+			};
+
+			assert.throws(() => initializeProviders(options, mockLogger), /redirectUri/);
+		});
+
+		it('should not throw when a per-provider redirectUri is set even if the plugin-level one is an unresolved placeholder', () => {
+			delete process.env.OAUTH_TEST_UNSET_PLUGIN_REDIRECT_2;
+			const options = {
+				redirectUri: '${OAUTH_TEST_UNSET_PLUGIN_REDIRECT_2}',
+				providers: {
+					github: {
+						clientId: 'github-client',
+						clientSecret: 'github-secret',
+						authorizationUrl: 'https://github.com/login/oauth/authorize',
+						tokenUrl: 'https://github.com/login/oauth/access_token',
+						userInfoUrl: 'https://api.github.com/user',
+						redirectUri: 'https://app.test.com/oauth',
+					},
+				},
+			};
+
+			const providers = initializeProviders(options, mockLogger);
+
+			assert.ok(providers.github);
+			assert.equal(providers.github.config.redirectUri, 'https://app.test.com/oauth/github/callback');
 		});
 	});
 });
