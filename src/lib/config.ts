@@ -194,8 +194,8 @@ export function buildProviderConfig(
 		);
 	}
 	const redirectUri = baseRedirectUri
-		.replace('/oauth/callback', `/oauth/${providerName}/callback`)
-		.replace(/\/oauth$/, `/oauth/${providerName}/callback`);
+		.replace(/\/oauth\/callback\/?$/, `/oauth/${providerName}/callback`)
+		.replace(/\/oauth\/?$/, `/oauth/${providerName}/callback`);
 
 	// Merge configurations: plugin defaults -> preset -> options
 	const config: OAuthProviderConfig = {

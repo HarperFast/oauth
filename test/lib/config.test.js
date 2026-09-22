@@ -439,6 +439,36 @@ describe('OAuth Configuration', () => {
 			assert.equal(config.redirectUri, 'https://myapp.com/oauth/github/callback');
 		});
 
+		it('should tolerate a trailing slash on a redirect URI ending with /oauth/', () => {
+			const providerConfig = {
+				clientId: 'test',
+				clientSecret: 'test',
+				authorizationUrl: 'https://auth.test.com/authorize',
+				tokenUrl: 'https://auth.test.com/token',
+				userInfoUrl: 'https://auth.test.com/userinfo',
+				redirectUri: 'https://myapp.com/oauth/',
+			};
+
+			const config = buildProviderConfig(providerConfig, 'github', {});
+
+			assert.equal(config.redirectUri, 'https://myapp.com/oauth/github/callback');
+		});
+
+		it('should tolerate a trailing slash on a redirect URI ending with /oauth/callback/', () => {
+			const providerConfig = {
+				clientId: 'test',
+				clientSecret: 'test',
+				authorizationUrl: 'https://auth.test.com/authorize',
+				tokenUrl: 'https://auth.test.com/token',
+				userInfoUrl: 'https://auth.test.com/userinfo',
+				redirectUri: 'https://myapp.com/oauth/callback/',
+			};
+
+			const config = buildProviderConfig(providerConfig, 'github', {});
+
+			assert.equal(config.redirectUri, 'https://myapp.com/oauth/github/callback');
+		});
+
 		describe('Provider Presets', () => {
 			it('should apply GitHub preset', () => {
 				const providerConfig = {
