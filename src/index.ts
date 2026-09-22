@@ -279,11 +279,19 @@ export async function handleApplication(scope: Scope): Promise<void> {
 		// A pinned key's algorithm comes from its key material; warn when
 		// mcp.signingAlgorithm disagrees so the operator isn't surprised the
 		// config value is ignored. normalizeMcpSecurityConfig (above) already
-		// threw if signingKeyPem was declared but empty/unparseable, so a
+		// threw (when mcp.enabled) if signingKeyPem was declared but empty/unparseable; a
 		// present value here is guaranteed to parse.
 		if (mcpConfig?.signingKeyPem) {
-			const pinnedAlg = algFromPrivateKeyPem(mcpConfig.signingKeyPem);
-			if (mcpConfig.signingAlgorithm && pinnedAlg !== mcpConfig.signingAlgorithm) {
+			// Validation only runs when mcp.enabled is true, so a disabled block
+			// can still carry an unparseable pin here; never let this advisory
+			// check crash startup.
+			let pinnedAlg: string | undefined;
+			try {
+				pinnedAlg = algFromPrivateKeyPem(mcpConfig.signingKeyPem);
+			} catch {
+				pinnedAlg = undefined;
+			}
+			if (pinnedAlg && mcpConfig.signingAlgorithm && pinnedAlg !== mcpConfig.signingAlgorithm) {
 				logger?.warn?.(
 					`MCP: mcp.signingAlgorithm is "${mcpConfig.signingAlgorithm}" but the pinned mcp.signingKeyPem ` +
 						`is a ${pinnedAlg} key. The pinned key's algorithm (${pinnedAlg}) is used.`

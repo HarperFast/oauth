@@ -207,6 +207,10 @@ describe('OAuth Configuration', () => {
 				assert.doesNotThrow(() => normalizeMcpSecurityConfig({ signingKeyPem: '' }));
 			});
 
+			it('declared as undefined (JS config with an unset env lookup) counts as undeclared — no throw', () => {
+				assert.doesNotThrow(() => normalizeMcpSecurityConfig({ enabled: true, signingKeyPem: undefined }));
+			});
+
 			it('not declared at all leaves the config untouched — self-generation path unaffected', () => {
 				const cfg = { enabled: true };
 				normalizeMcpSecurityConfig(cfg);

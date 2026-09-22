@@ -122,7 +122,10 @@ function normalizeBooleanField(obj: Record<string, any>, field: string, path: st
  *   proceeds exactly as before.
  */
 function validateSigningKeyPem(mcpConfig: Record<string, any>): void {
-	if (!('signingKeyPem' in mcpConfig)) return;
+	// `undefined` is undeclared (a JS config doing `signingKeyPem: process.env.X`
+	// with X unset). YAML never yields undefined; an empty YAML value is null,
+	// which IS declared-and-empty and falls through to the checks below.
+	if (!('signingKeyPem' in mcpConfig) || mcpConfig.signingKeyPem === undefined) return;
 	const value = mcpConfig.signingKeyPem;
 	if (typeof value === 'string' && /^\$\{[^}]*\}$/.test(value.trim())) {
 		throw new Error(
