@@ -469,6 +469,51 @@ describe('OAuth Configuration', () => {
 			assert.equal(config.redirectUri, 'https://myapp.com/oauth/github/callback');
 		});
 
+		it('should keep a query string when appending the provider segment after /oauth/callback', () => {
+			const providerConfig = {
+				clientId: 'test',
+				clientSecret: 'test',
+				authorizationUrl: 'https://auth.test.com/authorize',
+				tokenUrl: 'https://auth.test.com/token',
+				userInfoUrl: 'https://auth.test.com/userinfo',
+				redirectUri: 'https://myapp.com/oauth/callback?tenant=acme',
+			};
+
+			const config = buildProviderConfig(providerConfig, 'github', {});
+
+			assert.equal(config.redirectUri, 'https://myapp.com/oauth/github/callback?tenant=acme');
+		});
+
+		it('should keep a query string when appending the provider segment after /oauth', () => {
+			const providerConfig = {
+				clientId: 'test',
+				clientSecret: 'test',
+				authorizationUrl: 'https://auth.test.com/authorize',
+				tokenUrl: 'https://auth.test.com/token',
+				userInfoUrl: 'https://auth.test.com/userinfo',
+				redirectUri: 'https://myapp.com/oauth?x=1',
+			};
+
+			const config = buildProviderConfig(providerConfig, 'github', {});
+
+			assert.equal(config.redirectUri, 'https://myapp.com/oauth/github/callback?x=1');
+		});
+
+		it('should keep a query string when the redirect URI has both a trailing slash and a query string', () => {
+			const providerConfig = {
+				clientId: 'test',
+				clientSecret: 'test',
+				authorizationUrl: 'https://auth.test.com/authorize',
+				tokenUrl: 'https://auth.test.com/token',
+				userInfoUrl: 'https://auth.test.com/userinfo',
+				redirectUri: 'https://myapp.com/oauth/?x=1',
+			};
+
+			const config = buildProviderConfig(providerConfig, 'github', {});
+
+			assert.equal(config.redirectUri, 'https://myapp.com/oauth/github/callback?x=1');
+		});
+
 		describe('Provider Presets', () => {
 			it('should apply GitHub preset', () => {
 				const providerConfig = {
