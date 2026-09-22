@@ -641,11 +641,25 @@ export type EmailProvenance = 'signed-oidc' | 'github-authenticated' | 'unauthen
 export interface OAuthAuthEvidence {
 	/** Normalized email source — see {@link EmailProvenance}. */
 	readonly emailProvenance: EmailProvenance;
-	/** The id token's JWKS signature was verified. */
+	/**
+	 * The id token's JWKS signature was verified. Describes the ID TOKEN only — it says
+	 * nothing about {@link email} or {@link emailVerified}, which may come from an unsigned
+	 * UserInfo response (e.g. `fetchEmail: true` with an id token lacking an `email` claim,
+	 * `preferIdToken: false`, or a custom `getUserInfo` adapter). Use {@link emailProvenance}
+	 * or {@link emailAuthenticated} to gate on the email itself.
+	 */
 	readonly signatureVerified: boolean;
-	/** An `iss` matched a configured issuer; the one that matched is {@link idTokenIssuer}. */
+	/**
+	 * An `iss` matched a configured issuer; the one that matched is {@link idTokenIssuer}.
+	 * Like {@link signatureVerified}, this describes the ID TOKEN only, not the email.
+	 */
 	readonly issuerValidated: boolean;
-	/** Provider `email_verified` for the standard email claim; `undefined` when unknown. */
+	/**
+	 * Provider `email_verified` for the standard email claim; `undefined` when unknown. This
+	 * is the same unauthenticated provider claim as `OAuthUser.emailVerified` — it is not
+	 * attested by {@link signatureVerified}/{@link issuerValidated} and can be `true` on an
+	 * unsigned UserInfo body.
+	 */
 	readonly emailVerified: boolean | undefined;
 	/**
 	 * Attests {@link email}: `true` only when a usable verified email came from an
@@ -689,8 +703,12 @@ export interface OAuthUser {
 	 * Plugin-computed authenticated-source evidence, attached only when an `onLogin`
 	 * hook is registered (non-enumerable, so it is not persisted into the session).
 	 * See {@link OAuthAuthEvidence}. A hook that adopts an existing account should gate
-	 * on `authEvidence.emailAuthenticated` (or a policy over the fields), never on
-	 * `emailVerified` alone; missing evidence means insufficient authentication.
+	 * on `authEvidence.emailAuthenticated`, never on `emailVerified` alone; missing
+	 * evidence means insufficient authentication. A custom policy over the individual
+	 * `authEvidence` fields must still require `emailProvenance !== 'unauthenticated'` —
+	 * `signatureVerified`/`issuerValidated` attest only the id token, not `email` or
+	 * `emailVerified`, so a policy built from those alone can re-create the
+	 * spoofable-email adoption bug this evidence exists to close.
 	 */
 	readonly authEvidence?: OAuthAuthEvidence;
 	name?: string;

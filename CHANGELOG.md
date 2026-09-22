@@ -6,7 +6,7 @@ All notable changes to `@harperfast/oauth` are documented here. The format is ba
 
 ### Added
 
-- **`onLogin` hooks receive authenticated-source evidence** (`oauthUser.authEvidence`): a frozen, hook-only snapshot exposing the plugin's own trust determination — `emailProvenance` (`'signed-oidc'` / `'github-authenticated'` / `'unauthenticated'`, normalized), `emailAuthenticated`, `signatureVerified`, `issuerValidated`, `emailVerified`, the verified `email`, and the validated `idTokenIssuer` / `idTokenSubject`. A hook that adopts an existing account should base the decision on `authEvidence` (resolve from `authEvidence.email`, or bind on the `idTokenIssuer`+`idTokenSubject` pair), not on the spoofable `emailVerified`. The new `OAuthAuthEvidence` and `EmailProvenance` types are exported. Does not change the built-in account-adoption gate.
+- **`onLogin` hooks receive authenticated-source evidence** (`oauthUser.authEvidence`): a frozen, hook-only snapshot exposing the plugin's own trust determination — `emailProvenance` (`'signed-oidc'` / `'github-authenticated'` / `'unauthenticated'`, normalized), `emailAuthenticated`, `signatureVerified`, `issuerValidated`, `emailVerified`, `email` (populated regardless of trust — verified only when `emailAuthenticated` is `true`), and the validated `idTokenIssuer` / `idTokenSubject`. A hook that adopts an existing account should base the decision on `authEvidence.emailAuthenticated` (resolve from `authEvidence.email`, or bind on the `idTokenIssuer`+`idTokenSubject` pair), not on the spoofable `emailVerified`. The new `OAuthAuthEvidence` and `EmailProvenance` types are exported. Does not change the built-in account-adoption gate.
 
 ## [2.6.0] - 2026-09-14
 
