@@ -41,7 +41,7 @@ function snapshotSessionData(session) {
 	for (const key of Object.keys(session)) {
 		if (key === 'update' || key === 'updateCalls') continue;
 		const value = session[key];
-		snapshot[key] = value && typeof value === 'object' ? { ...value } : value;
+		snapshot[key] = Array.isArray(value) ? [...value] : value && typeof value === 'object' ? { ...value } : value;
 	}
 	return snapshot;
 }
