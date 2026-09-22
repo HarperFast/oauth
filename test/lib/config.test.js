@@ -185,7 +185,10 @@ describe('OAuth Configuration', () => {
 			}
 
 			it('declared but resolved empty (e.g. unset/empty env var) throws, naming the field', () => {
-				assert.throws(() => normalizeMcpSecurityConfig({ enabled: true, signingKeyPem: '' }), /mcp\.signingKeyPem.*empty/s);
+				assert.throws(
+					() => normalizeMcpSecurityConfig({ enabled: true, signingKeyPem: '' }),
+					/mcp\.signingKeyPem.*empty/s
+				);
 			});
 
 			it('declared as an unresolved ${VAR} placeholder throws, naming the variable', () => {
@@ -203,7 +206,9 @@ describe('OAuth Configuration', () => {
 			});
 
 			it('mcp.enabled false (or absent) leaves a declared-but-bad pin INERT — the disabled block must not refuse boot (byte-identical-boot contract)', () => {
-				assert.doesNotThrow(() => normalizeMcpSecurityConfig({ enabled: false, signingKeyPem: '${FLAIR_MCP_SIGNING_KEY_PEM}' }));
+				assert.doesNotThrow(() =>
+					normalizeMcpSecurityConfig({ enabled: false, signingKeyPem: '${FLAIR_MCP_SIGNING_KEY_PEM}' })
+				);
 				assert.doesNotThrow(() => normalizeMcpSecurityConfig({ signingKeyPem: '' }));
 			});
 
