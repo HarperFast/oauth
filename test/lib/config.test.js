@@ -290,6 +290,18 @@ describe('OAuth Configuration', () => {
 			);
 		});
 
+		it('throws the same configuration error when redirectUri is a non-string (e.g. a YAML boolean)', () => {
+			const providerConfig = {
+				clientId: 'test-client',
+				clientSecret: 'test-secret',
+				authorizationUrl: 'https://auth.test.com/authorize',
+				tokenUrl: 'https://auth.test.com/token',
+				userInfoUrl: 'https://auth.test.com/userinfo',
+				redirectUri: true,
+			};
+			assert.throws(() => buildProviderConfig(providerConfig, 'myprovider', {}), /has no redirectUri configured/);
+		});
+
 		it('throws even when other required fields are also missing (redirectUri is checked regardless)', () => {
 			// A provider config missing everything (clientId, clientSecret, URLs) is normally
 			// skipped-with-a-warning by initializeProviders — but that's a downstream check;

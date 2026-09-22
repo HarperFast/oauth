@@ -185,7 +185,7 @@ export function buildProviderConfig(
 	// localhost:9926 instead of failing the login. Fail closed at config-resolution
 	// time instead (see HarperFast/oauth#208).
 	const baseRedirectUri = expandedOptions.redirectUri || pluginDefaults.redirectUri;
-	if (!baseRedirectUri) {
+	if (typeof baseRedirectUri !== 'string' || baseRedirectUri.trim() === '') {
 		throw new Error(
 			`OAuth provider '${providerName}' has no redirectUri configured. Set the plugin-level ` +
 				`'redirectUri' option (or a per-provider 'redirectUri' on '${providerName}') to your app's ` +
