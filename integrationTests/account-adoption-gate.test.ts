@@ -436,6 +436,22 @@ suite('account-adoption gate: verified claim adopts and inherits role', (ctx: Co
 			200,
 			`adopted super_user session must be permitted list_users; got ${status} ${JSON.stringify(body)}`
 		);
+
+		// The 200 above is also what the harness's local-superuser bypass would
+		// answer for an unauthenticated loopback call, so it alone can't prove the
+		// session actually resolved to the victim account. Pin the session's own
+		// identity via user_info.
+		const userInfo = await callOperationsWithSession(
+			ctx.harper.operationsAPIURL,
+			ctx.harper.hostname,
+			sessionCookiePair!,
+			{ operation: 'user_info' }
+		);
+		strictEqual(
+			userInfo.body.username,
+			VERIFIED_VICTIM_EMAIL,
+			`adopted session must identify as the victim account; got ${JSON.stringify(userInfo.body)}`
+		);
 	});
 });
 
@@ -508,6 +524,21 @@ suite('account-adoption gate: allowUnverifiedClaimInheritance escape hatch', (ct
 			status,
 			200,
 			`escape-hatch-adopted super_user session must be permitted list_users; got ${status} ${JSON.stringify(body)}`
+		);
+
+		// See the verified-path suite above: the 200 alone doesn't rule out the
+		// harness's local-superuser bypass answering for an unauthenticated
+		// loopback call. Pin the session's own identity via user_info.
+		const userInfo = await callOperationsWithSession(
+			ctx.harper.operationsAPIURL,
+			ctx.harper.hostname,
+			sessionCookiePair!,
+			{ operation: 'user_info' }
+		);
+		strictEqual(
+			userInfo.body.username,
+			ESCAPE_HATCH_VICTIM_EMAIL,
+			`escape-hatch-adopted session must identify as the victim account; got ${JSON.stringify(userInfo.body)}`
 		);
 	});
 });
