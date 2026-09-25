@@ -360,9 +360,12 @@ export type MCPPublicKeyRecord = Omit<MCPSigningKeyRecord, 'private_key_pem'>;
  * overwrites the hash; replay of a superseded token (hash mismatch) sets
  * `revoked`, which invalidates the whole family.
  *
- * `stamped` (#229) is set true only by this version's mint path. A family
- * minted before it has no such field, decodes as `false`, and is rejected +
- * retired on its next refresh — lazy, per-family migration, no startup sweep.
+ * Provenance (#229) is carried by `family_id` itself (see FAMILY_ID_PREFIX in
+ * refreshTokenStore.ts) rather than a separate field: rotation reuses the id,
+ * so a marker there survives any version's rotation write, while a mutable
+ * field does not. A family minted before this version has a bare-UUID id and
+ * is rejected + retired on its next refresh — lazy, per-family migration, no
+ * startup sweep.
  */
 export interface MCPRefreshFamilyRecord {
 	family_id: string;
@@ -373,7 +376,6 @@ export interface MCPRefreshFamilyRecord {
 	resource: string;
 	scope?: string;
 	expires_at: number;
-	stamped: boolean;
 }
 
 /**

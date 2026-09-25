@@ -86,7 +86,7 @@ type mcp_refresh_families @table(database: "oauth", expiration: 2592000) {
 	scope: String
 	created_at: Float @createdTime # Harper-assigned on insert; retained across rotation writes (epoch ms)
 	expires_at: Float # Unix seconds; refresh rejected once exceeded
-	stamped: Boolean # Provenance marker (#229), set true only by this version's mint path; a family minted before it reads back undefined — that absence is the pre-provenance signal, not a value to migrate.
+	# Provenance (#229) is carried by the family_id prefix, not a column here — see FAMILY_ID_PREFIX in refreshTokenStore.ts.
 }
 
 ## MCP client-assertion replay guard (RFC 7523 jti; #159/#160)

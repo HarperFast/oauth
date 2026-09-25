@@ -218,19 +218,19 @@ Refresh tokens rotate on use: presenting an already-used token from a family
 revokes the whole family (replay defense). Refresh families live for
 `refreshTokenTtl` (default 30 days).
 
-Refresh families minted by this version are stamped with a provenance marker;
-a family from before that (or replicated from an older node) is rejected with
-`invalid_grant` and retired the first time it is presented for refresh, so the
-client re-authorizes into a fresh, stamped family. This is a lazy, per-family
-check on the existing refresh path — no startup sweep.
+Refresh families minted by this version carry a provenance marker in the
+family id itself; a family from before that (or replicated from an older
+node) is rejected with `invalid_grant` and retired the first time it is
+presented for refresh, so the client re-authorizes into a fresh, provenanced
+family. This is a lazy, per-family check on the existing refresh path — no
+startup sweep. Because the marker lives in the id and rotation reuses the id,
+mixed-version rollouts are safe: an old worker or node rotating a family
+minted by this version leaves its provenance untouched.
 
 Real cost when upgrading: every MCP client holding a refresh token minted
-before this version re-authorizes once. During a rolling upgrade, a client
-whose refresh request lands on a not-yet-upgraded worker or node may have its
-provenance marker silently stripped on rotation and have to re-authorize a
-second time once it later hits upgraded code. Rolling back and re-upgrading
-repeats the mass re-auth. Nothing else to run — no manual step, no data
-migration.
+before this version re-authorizes once, at its next refresh. After a
+rollback, only families minted while rolled back re-authorize once after
+re-upgrading. Nothing else to run — no manual step, no data migration.
 
 By default any client whose registered `grant_types` include `refresh_token`
 receives a refresh token on the code exchange. The AS metadata advertises

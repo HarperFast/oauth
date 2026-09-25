@@ -12,6 +12,8 @@ import {
 	hashRefreshToken,
 	parseRefreshToken,
 	newFamilyId,
+	isProvenancedFamilyId,
+	FAMILY_ID_PREFIX,
 } from '../../../dist/lib/mcp/refreshTokenStore.js';
 
 function asTrackedObject(plain) {
@@ -50,6 +52,16 @@ describe('refresh-token helpers', () => {
 		assert.equal(parseRefreshToken('no-dot'), null);
 		assert.equal(parseRefreshToken('.leading'), null);
 		assert.equal(parseRefreshToken('trailing.'), null);
+	});
+
+	it('mints family ids carrying the provenance prefix (#229)', () => {
+		const familyId = newFamilyId();
+		assert.ok(familyId.startsWith(FAMILY_ID_PREFIX));
+	});
+
+	it('isProvenancedFamilyId is true for a prefixed id and false for a bare UUID', () => {
+		assert.equal(isProvenancedFamilyId(newFamilyId()), true);
+		assert.equal(isProvenancedFamilyId('550e8400-e29b-41d4-a716-446655440000'), false);
 	});
 });
 
@@ -96,7 +108,6 @@ describe('MCPRefreshFamilyStore', () => {
 		resource: 'https://app.example.com/mcp',
 		scope: 'mcp:read',
 		expires_at: 1700086400,
-		stamped: true,
 	};
 
 	it('persists and retrieves a family through the tracked-object Proxy', async () => {
@@ -111,7 +122,7 @@ describe('MCPRefreshFamilyStore', () => {
 		assert.equal(got.resource, 'https://app.example.com/mcp');
 		assert.equal(got.scope, 'mcp:read');
 		assert.equal(got.expires_at, 1700086400);
-		assert.equal(got.stamped, true);
+		assert.equal('stamped' in got, false, 'round-trip no longer carries a stamped field');
 	});
 
 	it('returns null for an unknown family', async () => {
@@ -124,14 +135,6 @@ describe('MCPRefreshFamilyStore', () => {
 		await store.set(withoutRevoked);
 		const got = await store.get('fam-1');
 		assert.equal(got.revoked, false);
-	});
-
-	it('decodes a missing stamped flag as false (#229 pre-provenance signal)', async () => {
-		const { stamped, ...withoutStamped } = sample;
-		void stamped;
-		await store.set(withoutStamped);
-		const got = await store.get('fam-1');
-		assert.equal(got.stamped, false);
 	});
 
 	it('propagates set() errors so the caller can fail the request', async () => {

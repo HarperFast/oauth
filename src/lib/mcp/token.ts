@@ -24,6 +24,7 @@ import { createRateLimiter, type RateLimiter } from './rateLimit.ts';
 import { getRequestHeader } from '../requestHeaders.ts';
 import {
 	hashRefreshToken,
+	isProvenancedFamilyId,
 	makeRefreshToken,
 	MCPRefreshFamilyStore,
 	newFamilyId,
@@ -337,7 +338,6 @@ async function mintTokenPair(
 			resource: grant.resource,
 			scope: grant.scope,
 			expires_at: now + refreshTtl,
-			stamped: true,
 		});
 		responseBody.refresh_token = refreshToken;
 	}
@@ -489,15 +489,17 @@ async function handleRefreshTokenGrant(
 
 	// Defense in depth (#229): a family minted before provenance stamping is
 	// retired the first time it is presented for refresh, rather than rotated.
-	// Lazy, per-family — no startup sweep. This does NOT converge cleanly
-	// across a rolling upgrade: `put` is a full-record replace, so a
-	// not-yet-upgraded node's `encodeRecord` (which has no `stamped` field)
-	// strips the marker off any family it rotates, and `mcp_refresh_families`
-	// replicates that loss to every other node. The next refresh on upgraded
-	// code then sees an unstamped family and retires it. Fails closed either
-	// way — the cost is an extra client re-authorization, never a bypass. The
-	// client re-authorizes into a fresh, stamped family per RFC 6749 §5.2.
-	if (!family.stamped) {
+	// Lazy, per-family — no startup sweep. Provenance lives in the family id
+	// itself (see FAMILY_ID_PREFIX in refreshTokenStore.ts), which rotation
+	// reuses (makeRefreshToken(family.family_id) below) and no `put` can
+	// change — so mixed-version rollouts are safe: an old worker or node
+	// rotating a family minted by this version leaves its id, and therefore
+	// its provenance, unchanged. The remaining cost is that every family
+	// minted before this upgrade (bare-UUID id) re-authorizes once at its
+	// next refresh, and after a rollback only families minted while rolled
+	// back re-authorize once after re-upgrading. The client re-authorizes
+	// into a fresh, provenanced family per RFC 6749 §5.2.
+	if (!isProvenancedFamilyId(family.family_id)) {
 		family.revoked = true;
 		try {
 			await familyStore.set(family);

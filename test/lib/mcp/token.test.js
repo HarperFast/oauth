@@ -6,14 +6,19 @@
 
 import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash, generateKeyPairSync, randomBytes, sign } from 'node:crypto';
+import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign } from 'node:crypto';
 import { handleToken, parseBasicAuth, _resetGrantRateLimiter } from '../../../dist/lib/mcp/token.js';
 import { resetMCPAssertionJtisTableCache } from '../../../dist/lib/mcp/assertionJtiStore.js';
 import { resetMCPAuthCodesTableCache } from '../../../dist/lib/mcp/authCodeStore.js';
 import { _clearCimdCache, _setDnsLookup, _setFetch } from '../../../dist/lib/mcp/cimd.js';
 import { resetMCPClientsTableCache } from '../../../dist/lib/mcp/clientStore.js';
 import { resetMCPKeysTableCache, SIGNING_KEY_ID } from '../../../dist/lib/mcp/keyStore.js';
-import { resetMCPRefreshFamiliesTableCache, makeRefreshToken } from '../../../dist/lib/mcp/refreshTokenStore.js';
+import {
+	resetMCPRefreshFamiliesTableCache,
+	makeRefreshToken,
+	isProvenancedFamilyId,
+	FAMILY_ID_PREFIX,
+} from '../../../dist/lib/mcp/refreshTokenStore.js';
 import { verifyAccessToken } from '../../../dist/lib/mcp/tokenIssuer.js';
 import { normalizeMcpSecurityConfig } from '../../../dist/lib/config.js';
 
@@ -222,7 +227,7 @@ describe('handleToken', () => {
 		assert.equal(codes.has('code-1'), false, 'code consumed (single-use)');
 		assert.equal(families.size, 1, 'refresh family persisted');
 		const [minted] = families.values();
-		assert.equal(minted.stamped, true, 'newly-minted family is stamped (#229)');
+		assert.ok(isProvenancedFamilyId(minted.family_id), 'newly-minted family id carries the provenance prefix (#229)');
 	});
 
 	it('sets no-store cache headers on a successful token response (RFC 6749 §5.1)', async () => {
@@ -667,7 +672,11 @@ describe('handleToken', () => {
 
 	// ---- refresh_token rotation ----
 
-	function seedFamily(familyId, overrides = {}) {
+	// `label` is prefixed with this version's provenance marker by default
+	// (#229); pass an explicit `family_id` override for a pre-provenance
+	// (bare-UUID-style) family.
+	function seedFamily(label, overrides = {}) {
+		const familyId = overrides.family_id ?? `${FAMILY_ID_PREFIX}${label}`;
 		const { token, hash } = makeRefreshToken(familyId);
 		families.set(familyId, {
 			family_id: familyId,
@@ -679,7 +688,6 @@ describe('handleToken', () => {
 			scope: 'mcp:read',
 			created_at: 1700000000,
 			expires_at: Math.floor(Date.now() / 1000) + 86400,
-			stamped: true, // minted-by-current-version by default; individual tests opt into pre-provenance
 			...overrides,
 		});
 		return token;
@@ -715,7 +723,7 @@ describe('handleToken', () => {
 			mcpConfig
 		);
 		assert.equal(replay.body.error, 'invalid_grant');
-		assert.equal(families.get('fam-1').revoked, true, 'family revoked on replay');
+		assert.equal(families.get(`${FAMILY_ID_PREFIX}fam-1`).revoked, true, 'family revoked on replay');
 
 		// The legitimate (rotated) token is now dead too — whole family is revoked.
 		const afterRevoke = await handleToken(
@@ -785,7 +793,7 @@ describe('handleToken', () => {
 
 	it('does not rotate the family when token signing fails (old token survives for retry)', async () => {
 		const token = seedFamily('fam-1');
-		const before = families.get('fam-1').current_token_hash;
+		const before = families.get(`${FAMILY_ID_PREFIX}fam-1`).current_token_hash;
 		// Corrupt the signing key so signAccessToken throws — this happens before
 		// the rotation is persisted, so the family must be left intact. The throw
 		// is caught by handleToken's top-level guard and surfaced as a structured
@@ -798,7 +806,11 @@ describe('handleToken', () => {
 		);
 		assert.equal(res.status, 500, 'signing failure → structured server_error, not a propagated throw');
 		assert.equal(res.body.error, 'server_error');
-		assert.equal(families.get('fam-1').current_token_hash, before, 'family not rotated when signing fails');
+		assert.equal(
+			families.get(`${FAMILY_ID_PREFIX}fam-1`).current_token_hash,
+			before,
+			'family not rotated when signing fails'
+		);
 	});
 
 	it('rejects a malformed refresh token', async () => {
@@ -810,10 +822,11 @@ describe('handleToken', () => {
 		assert.equal(res.body.error, 'invalid_grant');
 	});
 
-	// ---- #229: pre-provenance (unstamped) family rejection ----
+	// ---- #229: pre-provenance (bare-UUID family_id) rejection ----
 
-	it('rejects a refresh from an unstamped (pre-provenance) family and retires it', async () => {
-		const token = seedFamily('fam-legacy', { stamped: false });
+	it('retires a legacy (bare randomUUID family_id) family on refresh and persists revoked', async () => {
+		const legacyFamilyId = randomUUID();
+		const token = seedFamily('fam-legacy', { family_id: legacyFamilyId });
 		const res = await handleToken(
 			{ headers: {} },
 			{ grant_type: 'refresh_token', refresh_token: token, client_id: 'public-1' },
@@ -821,50 +834,37 @@ describe('handleToken', () => {
 		);
 		assert.equal(res.status, 400);
 		assert.equal(res.body.error, 'invalid_grant');
-		assert.equal(families.get('fam-legacy').revoked, true, 'unstamped family is retired on refresh');
+		assert.equal(families.get(legacyFamilyId).revoked, true, 'legacy family is retired on refresh');
 	});
 
-	it('rejects a legacy family record missing the stamped field entirely', async () => {
-		// Simulates a row written before #229 — no `stamped` key at all, not
-		// merely `stamped: false`. Must read back as unstamped, no migration.
-		const token = seedFamily('fam-pre-229');
-		const record = families.get('fam-pre-229');
-		delete record.stamped;
-		families.set('fam-pre-229', record);
+	it('rejects a legacy family presented with the wrong secret via the hash check, not retirement', async () => {
+		const legacyFamilyId = randomUUID();
+		const token = seedFamily('fam-legacy-2', { family_id: legacyFamilyId });
+		// Corrupt the stored hash so the presented token's secret no longer
+		// matches — this must hit the hash-mismatch (replay) branch, which
+		// runs BEFORE the provenance check, even though the family also
+		// predates provenance.
+		families.get(legacyFamilyId).current_token_hash = 'not-the-real-hash';
 		const res = await handleToken(
 			{ headers: {} },
 			{ grant_type: 'refresh_token', refresh_token: token, client_id: 'public-1' },
 			mcpConfig
 		);
 		assert.equal(res.body.error, 'invalid_grant');
-		assert.equal(families.get('fam-pre-229').revoked, true);
 	});
 
-	it('rejects even a replayed token on an unstamped family with invalid_grant (not a different failure mode)', async () => {
-		const oldToken = seedFamily('fam-legacy-2', { stamped: false });
-		// Replay path (hash mismatch) still returns invalid_grant for an
-		// already-rotated token even though this family also predates stamping.
-		families.get('fam-legacy-2').current_token_hash = 'not-the-real-hash';
-		const res = await handleToken(
-			{ headers: {} },
-			{ grant_type: 'refresh_token', refresh_token: oldToken, client_id: 'public-1' },
-			mcpConfig
-		);
-		assert.equal(res.body.error, 'invalid_grant');
-	});
-
-	it('does not retire a stamped family (control case for the rejection above)', async () => {
-		const token = seedFamily('fam-current', { stamped: true });
+	it('does not retire a provenanced family (control case for the rejection above)', async () => {
+		const token = seedFamily('fam-current');
 		const res = await handleToken(
 			{ headers: {} },
 			{ grant_type: 'refresh_token', refresh_token: token, client_id: 'public-1' },
 			mcpConfig
 		);
 		assert.equal(res.status, 200);
-		assert.equal(families.get('fam-current').revoked, false);
+		assert.equal(families.get(`${FAMILY_ID_PREFIX}fam-current`).revoked, false);
 	});
 
-	it('survives a second refresh on a rotated stamped family (stamp is not lost on rotation)', async () => {
+	it('survives a second refresh on a rotated provenanced family (family_id keeps its prefix across rotation)', async () => {
 		seedCode('code-1');
 		const minted = await handleToken(
 			{ headers: {} },
@@ -886,7 +886,10 @@ describe('handleToken', () => {
 			mcpConfig
 		);
 		assert.equal(first.status, 200);
-		assert.equal(families.get(familyId).stamped, true, 'stamp survives the first rotation');
+		assert.ok(
+			isProvenancedFamilyId(families.get(familyId).family_id),
+			'family_id still carries the prefix after the first rotation'
+		);
 
 		const second = await handleToken(
 			{ headers: {} },
@@ -896,7 +899,10 @@ describe('handleToken', () => {
 		assert.equal(second.status, 200, 'second refresh on the rotated token succeeds');
 		assert.ok(second.body.access_token);
 		assert.ok(second.body.refresh_token);
-		assert.equal(families.get(familyId).stamped, true, 'stamp survives the second rotation');
+		assert.ok(
+			isProvenancedFamilyId(families.get(familyId).family_id),
+			'family_id still carries the prefix after the second rotation'
+		);
 	});
 
 	describe('grant_types enforcement at token endpoint (RFC 6749 §5.2)', () => {

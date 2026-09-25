@@ -73,9 +73,22 @@ export function parseRefreshToken(token: unknown): { familyId: string } | null {
 	return { familyId: token.slice(0, dot) };
 }
 
-/** Generate a new, unique family id. */
+// Provenance marker (#229): prefixing the id itself (rather than a mutable
+// record field) survives rotation, since rotation reuses the family id
+// (makeRefreshToken(family.family_id)) and no `put` can touch it. A family
+// minted before this version has a bare-UUID id and reads back unprefixed —
+// that absence IS the pre-provenance signal. A future provenance bump changes
+// this prefix. Must not contain '.' — parseRefreshToken splits on the first dot.
+export const FAMILY_ID_PREFIX = 'p1-';
+
+/** Generate a new, unique family id, carrying the current provenance marker. */
 export function newFamilyId(): string {
-	return randomUUID();
+	return `${FAMILY_ID_PREFIX}${randomUUID()}`;
+}
+
+/** Whether a family id was minted by a version that stamps provenance (#229). */
+export function isProvenancedFamilyId(id: string): boolean {
+	return id.startsWith(FAMILY_ID_PREFIX);
 }
 
 function encodeRecord(record: MCPRefreshFamilyRecord): Record<string, any> {
@@ -88,7 +101,6 @@ function encodeRecord(record: MCPRefreshFamilyRecord): Record<string, any> {
 		resource: record.resource,
 		scope: record.scope,
 		expires_at: record.expires_at,
-		stamped: record.stamped,
 	};
 }
 
@@ -102,9 +114,6 @@ function decodeRecord(raw: Record<string, any>): MCPRefreshFamilyRecord {
 		resource: raw.resource,
 		scope: raw.scope ?? undefined,
 		expires_at: raw.expires_at,
-		// Missing on any row minted before #229 (or replicated from an older
-		// node) — that absence IS the pre-provenance signal, not backfilled.
-		stamped: raw.stamped === true,
 	};
 }
 
