@@ -2,6 +2,12 @@
 
 All notable changes to `@harperfast/oauth` are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Entries prior to 2.2.0 were backfilled from the [GitHub release notes](https://github.com/HarperFast/oauth/releases).
 
+## [Unreleased]
+
+### Changed
+
+- **`redirectUri` is required; the `http://localhost:9926/oauth` fallback is removed** (#208): a missing, empty, or unresolved-`${VAR}` `redirectUri` (plugin-level or per-provider) now fails at startup naming the key, instead of silently sending a loopback redirect that some IdPs accept and that would hand the authorization code to whatever is listening on the end user's own machine. The provider segment is appended for `…/oauth`, `…/oauth/callback` (with or without a trailing slash) and a query string is preserved. **Upgrade note:** any app that relied on the default, including local-dev setups, must set `redirectUri` to its public origin plus `/oauth` before the plugin will load.
+
 ## [2.6.0] - 2026-09-14
 
 ### Security
