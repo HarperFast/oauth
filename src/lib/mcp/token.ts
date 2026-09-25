@@ -511,13 +511,14 @@ async function handleRefreshTokenGrant(
 				error instanceof Error ? error.message : String(error)
 			);
 		}
-		logger?.warn?.(`MCP token: rejected refresh for pre-provenance family ${family.family_id}; retired`);
-		// Only audit the retirement once it is actually persisted — an
-		// unpersisted "retired" event would claim state the store doesn't
-		// hold, and the legacy family stays live for a pre-upgrade node to
-		// rotate. The response is invalid_grant regardless; the next
-		// presentation retries the retirement (and, if it persists, the audit).
+		// Only log/audit the retirement once it is actually persisted — an
+		// unpersisted "retired" claim would misstate what the store holds, and
+		// the legacy family stays live for a pre-upgrade node to rotate. The
+		// response is invalid_grant regardless; the next presentation retries
+		// the retirement (and, if it persists, the log/audit). The catch above
+		// already records the failure case.
 		if (persisted) {
+			logger?.warn?.(`MCP token: rejected refresh for pre-provenance family ${family.family_id}; retired`);
 			emitMCPAuditEvent({
 				event: 'oauth.mcp.token.retired',
 				client_id: family.client_id,

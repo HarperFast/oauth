@@ -116,7 +116,9 @@ export type MCPAuditPayload = MCPTokenIssuedAuditPayload | MCPTokenRejectedAudit
  * not throw.
  *
  * SECURITY: payload must never include token strings (access_token,
- * refresh_token, client_secret). Only the jti (token identifier) is included.
+ * refresh_token, client_secret). A minted token's payload carries only its
+ * jti (token identifier); a retired payload — no token is minted on that
+ * path — carries family_id instead.
  */
 export function emitMCPAuditEvent(payload: MCPAuditPayload): void {
 	// Fire-and-forget: a logging failure MUST NOT propagate. Callers emit AFTER
