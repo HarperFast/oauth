@@ -92,10 +92,10 @@ export interface MCPTokenRetiredAuditPayload {
 	event: 'oauth.mcp.token.retired';
 	/** Registered MCP client identifier the family was issued to. */
 	client_id: string;
-	/** The Harper user the family was issued to. */
-	user: string;
-	/** Resource URI the family is bound to. */
-	resource: string;
+	/** Subject claim — the Harper user the family was issued to. */
+	sub: string;
+	/** Audience claim — the resource URI the family is bound to. */
+	aud: string;
 	/** OAuth scope string (may be undefined for unscoped families). */
 	scope?: string;
 	/** Refresh-token family identifier that was retired. */

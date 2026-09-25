@@ -521,8 +521,8 @@ async function handleRefreshTokenGrant(
 			emitMCPAuditEvent({
 				event: 'oauth.mcp.token.retired',
 				client_id: family.client_id,
-				user: family.user,
-				resource: family.resource,
+				sub: family.user,
+				aud: family.resource,
 				scope: family.scope,
 				family_id: family.family_id,
 				reason: 'pre_provenance',

@@ -855,8 +855,8 @@ describe('handleToken', () => {
 			assert.equal(parsed.family_id, legacyFamilyId);
 			assert.equal(parsed.reason, 'pre_provenance');
 			assert.equal(parsed.client_id, 'public-1');
-			assert.equal(parsed.user, 'alice@example.com');
-			assert.equal(parsed.resource, RESOURCE);
+			assert.equal(parsed.sub, 'alice@example.com');
+			assert.equal(parsed.aud, RESOURCE);
 		}));
 
 	it('rejects a legacy family presented with the wrong secret via the hash check, not retirement — and does not emit retired', () =>
