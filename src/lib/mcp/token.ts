@@ -510,6 +510,16 @@ async function handleRefreshTokenGrant(
 			);
 		}
 		logger?.warn?.(`MCP token: rejected refresh for pre-provenance family ${family.family_id}; retired`);
+		emitMCPAuditEvent({
+			event: 'oauth.mcp.token.retired',
+			client_id: family.client_id,
+			user: family.user,
+			resource: family.resource,
+			scope: family.scope,
+			family_id: family.family_id,
+			reason: 'pre_provenance',
+			timestamp: new Date().toISOString(),
+		});
 		return errorResponse(
 			400,
 			'invalid_grant',

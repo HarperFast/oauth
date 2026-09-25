@@ -399,16 +399,18 @@ Token lifecycle events are written to Harper's structured log (`hdb.log`) at
 MCP audit: {"event":"oauth.mcp.token.issued","client_id":"…","sub":"…","aud":"https://my-app.example.com/mcp","scope":"…","jti":"…","timestamp":"2026-06-29T17:00:00.000Z"}
 ```
 
-| `event`                     | When                                                  |
-| --------------------------- | ----------------------------------------------------- |
-| `oauth.mcp.token.issued`    | An access token was minted (authorization-code grant) |
-| `oauth.mcp.token.refreshed` | A token pair was rotated (refresh-token grant)        |
-| `oauth.mcp.token.rejected`  | A bearer token was rejected by `withMCPAuth`          |
+| `event`                     | When                                                                  |
+| --------------------------- | --------------------------------------------------------------------- |
+| `oauth.mcp.token.issued`    | An access token was minted (authorization-code grant)                 |
+| `oauth.mcp.token.refreshed` | A token pair was rotated (refresh-token grant)                        |
+| `oauth.mcp.token.rejected`  | A bearer token was rejected by `withMCPAuth`                          |
+| `oauth.mcp.token.retired`   | A pre-provenance refresh family was retired instead of rotated (#229) |
 
-Payloads carry only the `jti` — never `access_token`, `refresh_token`, or
-`client_secret`. Filter your log aggregator on the `MCP audit:` prefix or the
-`event` value. Dynamic Client Registration attempts are logged separately by the
-`/register` handler.
+Payloads never carry `access_token`, `refresh_token`, or `client_secret`; a
+minted token's payload carries only its `jti`, and a `retired` payload (no
+token is minted on that path) carries `family_id` instead. Filter your log
+aggregator on the `MCP audit:` prefix or the `event` value. Dynamic Client
+Registration attempts are logged separately by the `/register` handler.
 
 ---
 

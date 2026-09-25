@@ -7,6 +7,7 @@
 import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign } from 'node:crypto';
+import { logger as harperMockLogger } from 'harper';
 import { handleToken, parseBasicAuth, _resetGrantRateLimiter } from '../../../dist/lib/mcp/token.js';
 import { resetMCPAssertionJtisTableCache } from '../../../dist/lib/mcp/assertionJtiStore.js';
 import { resetMCPAuthCodesTableCache } from '../../../dist/lib/mcp/authCodeStore.js';
@@ -824,34 +825,60 @@ describe('handleToken', () => {
 
 	// ---- #229: pre-provenance (bare-UUID family_id) rejection ----
 
-	it('retires a legacy (bare randomUUID family_id) family on refresh and persists revoked', async () => {
-		const legacyFamilyId = randomUUID();
-		const token = seedFamily('fam-legacy', { family_id: legacyFamilyId });
-		const res = await handleToken(
-			{ headers: {} },
-			{ grant_type: 'refresh_token', refresh_token: token, client_id: 'public-1' },
-			mcpConfig
-		);
-		assert.equal(res.status, 400);
-		assert.equal(res.body.error, 'invalid_grant');
-		assert.equal(families.get(legacyFamilyId).revoked, true, 'legacy family is retired on refresh');
-	});
+	function withAuditSpy(fn) {
+		const infoCalls = [];
+		const originalInfo = harperMockLogger.info;
+		harperMockLogger.info = (...args) => infoCalls.push(args);
+		return fn(infoCalls).finally(() => {
+			harperMockLogger.info = originalInfo;
+		});
+	}
 
-	it('rejects a legacy family presented with the wrong secret via the hash check, not retirement', async () => {
-		const legacyFamilyId = randomUUID();
-		const token = seedFamily('fam-legacy-2', { family_id: legacyFamilyId });
-		// Corrupt the stored hash so the presented token's secret no longer
-		// matches — this must hit the hash-mismatch (replay) branch, which
-		// runs BEFORE the provenance check, even though the family also
-		// predates provenance.
-		families.get(legacyFamilyId).current_token_hash = 'not-the-real-hash';
-		const res = await handleToken(
-			{ headers: {} },
-			{ grant_type: 'refresh_token', refresh_token: token, client_id: 'public-1' },
-			mcpConfig
-		);
-		assert.equal(res.body.error, 'invalid_grant');
-	});
+	it('retires a legacy (bare randomUUID family_id) family on refresh, persists revoked, and emits the retired audit event', () =>
+		withAuditSpy(async (infoCalls) => {
+			const legacyFamilyId = randomUUID();
+			const token = seedFamily('fam-legacy', { family_id: legacyFamilyId });
+			const res = await handleToken(
+				{ headers: {} },
+				{ grant_type: 'refresh_token', refresh_token: token, client_id: 'public-1' },
+				mcpConfig
+			);
+
+			assert.equal(res.status, 400);
+			assert.equal(res.body.error, 'invalid_grant');
+			assert.equal(families.get(legacyFamilyId).revoked, true, 'legacy family is retired on refresh');
+
+			const auditLog = infoCalls.find((args) => args[0]?.includes('oauth.mcp.token.retired'));
+			assert.ok(auditLog, 'retired audit event was emitted');
+			const parsed = JSON.parse(auditLog[0].replace(/^MCP audit: /, ''));
+			assert.equal(parsed.event, 'oauth.mcp.token.retired');
+			assert.equal(parsed.family_id, legacyFamilyId);
+			assert.equal(parsed.reason, 'pre_provenance');
+			assert.equal(parsed.client_id, 'public-1');
+			assert.equal(parsed.user, 'alice@example.com');
+			assert.equal(parsed.resource, RESOURCE);
+		}));
+
+	it('rejects a legacy family presented with the wrong secret via the hash check, not retirement — and does not emit retired', () =>
+		withAuditSpy(async (infoCalls) => {
+			const legacyFamilyId = randomUUID();
+			const token = seedFamily('fam-legacy-2', { family_id: legacyFamilyId });
+			// Corrupt the stored hash so the presented token's secret no longer
+			// matches — this must hit the hash-mismatch (replay) branch, which
+			// runs BEFORE the provenance check, even though the family also
+			// predates provenance.
+			families.get(legacyFamilyId).current_token_hash = 'not-the-real-hash';
+			const res = await handleToken(
+				{ headers: {} },
+				{ grant_type: 'refresh_token', refresh_token: token, client_id: 'public-1' },
+				mcpConfig
+			);
+
+			assert.equal(res.body.error, 'invalid_grant');
+			assert.equal(families.get(legacyFamilyId).revoked, true, 'family revoked via the hash-mismatch branch');
+			const auditLog = infoCalls.find((args) => args[0]?.includes('oauth.mcp.token.retired'));
+			assert.equal(auditLog, undefined, 'no retired event when a wrong secret is caught by the hash check first');
+		}));
 
 	it('does not retire a provenanced family (control case for the rejection above)', async () => {
 		const token = seedFamily('fam-current');

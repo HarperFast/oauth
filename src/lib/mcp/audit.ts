@@ -25,15 +25,22 @@
  * `info` is absent, not when it's a level-suppressed no-op — fully lazy logging
  * would need a logger-level check Harper doesn't expose to plugins here.
  *
- * Three event types: `issued` / `refreshed` (success path, from the token
- * endpoint — carry the verified claims) and `rejected` (from the withMCPAuth
- * guard when a presented bearer token fails validation). A rejected token has
- * NO verified claims, so its payload is a distinct shape (reason + resource).
+ * Four event types: `issued` / `refreshed` (success path, from the token
+ * endpoint — carry the verified claims), `rejected` (from the withMCPAuth
+ * guard when a presented bearer token fails validation), and `retired` (a
+ * pre-provenance refresh family retired instead of rotated, #229). A rejected
+ * token has NO verified claims, so its payload is a distinct shape (reason +
+ * resource). A retirement never signs a token, so it has no `jti` — it
+ * carries `family_id` instead.
  */
 
 import { logger as harperLogger } from 'harper';
 
-export type MCPAuditEventType = 'oauth.mcp.token.issued' | 'oauth.mcp.token.refreshed' | 'oauth.mcp.token.rejected';
+export type MCPAuditEventType =
+	| 'oauth.mcp.token.issued'
+	| 'oauth.mcp.token.refreshed'
+	| 'oauth.mcp.token.rejected'
+	| 'oauth.mcp.token.retired';
 
 /**
  * Audit record for a successfully issued or refreshed token. Carries the
@@ -75,7 +82,31 @@ export interface MCPTokenRejectedAuditPayload {
 	timestamp: string;
 }
 
-export type MCPAuditPayload = MCPTokenIssuedAuditPayload | MCPTokenRejectedAuditPayload;
+/**
+ * Audit record for a pre-provenance refresh family retired instead of
+ * rotated (#229). No access token is minted on this path, so there is no
+ * `jti` — `family_id` identifies the event instead.
+ */
+export interface MCPTokenRetiredAuditPayload {
+	/** Discriminator: a pre-provenance refresh family was retired. */
+	event: 'oauth.mcp.token.retired';
+	/** Registered MCP client identifier the family was issued to. */
+	client_id: string;
+	/** The Harper user the family was issued to. */
+	user: string;
+	/** Resource URI the family is bound to. */
+	resource: string;
+	/** OAuth scope string (may be undefined for unscoped families). */
+	scope?: string;
+	/** Refresh-token family identifier that was retired. */
+	family_id: string;
+	/** Always 'pre_provenance' — the only retirement reason on this path. */
+	reason: 'pre_provenance';
+	/** ISO-8601 UTC timestamp of the event. */
+	timestamp: string;
+}
+
+export type MCPAuditPayload = MCPTokenIssuedAuditPayload | MCPTokenRejectedAuditPayload | MCPTokenRetiredAuditPayload;
 
 /**
  * Emit a structured MCP audit event via Harper's global logger.
