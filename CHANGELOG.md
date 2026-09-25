@@ -2,6 +2,12 @@
 
 All notable changes to `@harperfast/oauth` are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Entries prior to 2.2.0 were backfilled from the [GitHub release notes](https://github.com/HarperFast/oauth/releases).
 
+## [Unreleased]
+
+### Changed
+
+- **MCP refresh-token families minted before this version are retired at their next refresh** (#229): a refresh presenting a valid token for a family created by an earlier version is rejected with `invalid_grant`, the family is revoked, and an `oauth.mcp.token.retired` audit event is emitted; the client re-authorizes once. New families carry their provenance in the `family_id` (`p1-` prefix), which rotation preserves, so a mixed-version rollout cannot strip it. Access tokens already issued keep working until they expire. **Upgrade note:** every MCP client holding a pre-upgrade refresh token re-authorizes once at its next refresh; after a rollback, only families minted while rolled back re-authorize after re-upgrading. Browser login sessions are unaffected.
+
 ## [2.6.0] - 2026-09-14
 
 ### Security
