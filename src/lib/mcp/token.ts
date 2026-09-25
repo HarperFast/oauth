@@ -501,8 +501,10 @@ async function handleRefreshTokenGrant(
 	// into a fresh, provenanced family per RFC 6749 §5.2.
 	if (!isProvenancedFamilyId(family.family_id)) {
 		family.revoked = true;
+		let persisted = false;
 		try {
 			await familyStore.set(family);
+			persisted = true;
 		} catch (error) {
 			logger?.error?.(
 				`MCP token: failed to persist retirement for pre-provenance family ${family.family_id}:`,
@@ -510,16 +512,23 @@ async function handleRefreshTokenGrant(
 			);
 		}
 		logger?.warn?.(`MCP token: rejected refresh for pre-provenance family ${family.family_id}; retired`);
-		emitMCPAuditEvent({
-			event: 'oauth.mcp.token.retired',
-			client_id: family.client_id,
-			user: family.user,
-			resource: family.resource,
-			scope: family.scope,
-			family_id: family.family_id,
-			reason: 'pre_provenance',
-			timestamp: new Date().toISOString(),
-		});
+		// Only audit the retirement once it is actually persisted — an
+		// unpersisted "retired" event would claim state the store doesn't
+		// hold, and the legacy family stays live for a pre-upgrade node to
+		// rotate. The response is invalid_grant regardless; the next
+		// presentation retries the retirement (and, if it persists, the audit).
+		if (persisted) {
+			emitMCPAuditEvent({
+				event: 'oauth.mcp.token.retired',
+				client_id: family.client_id,
+				user: family.user,
+				resource: family.resource,
+				scope: family.scope,
+				family_id: family.family_id,
+				reason: 'pre_provenance',
+				timestamp: new Date().toISOString(),
+			});
+		}
 		return errorResponse(
 			400,
 			'invalid_grant',

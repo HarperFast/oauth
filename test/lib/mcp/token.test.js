@@ -880,6 +880,35 @@ describe('handleToken', () => {
 			assert.equal(auditLog, undefined, 'no retired event when a wrong secret is caught by the hash check first');
 		}));
 
+	it('does not emit the retired audit event when persisting the retirement fails, and leaves the family unrevoked', () =>
+		withAuditSpy(async (infoCalls) => {
+			const legacyFamilyId = randomUUID();
+			const token = seedFamily('fam-legacy-3', { family_id: legacyFamilyId });
+			const originalPut = global.databases.oauth.mcp_refresh_families.put;
+			global.databases.oauth.mcp_refresh_families.put = async () => {
+				throw new Error('simulated storage failure');
+			};
+			try {
+				const res = await handleToken(
+					{ headers: {} },
+					{ grant_type: 'refresh_token', refresh_token: token, client_id: 'public-1' },
+					mcpConfig
+				);
+				assert.equal(res.status, 400);
+				assert.equal(res.body.error, 'invalid_grant');
+				assert.equal(
+					families.get(legacyFamilyId).revoked,
+					false,
+					'family is unchanged in storage since the persist failed'
+				);
+
+				const auditLog = infoCalls.find((args) => args[0]?.includes('oauth.mcp.token.retired'));
+				assert.equal(auditLog, undefined, 'no retired event when the retirement write did not persist');
+			} finally {
+				global.databases.oauth.mcp_refresh_families.put = originalPut;
+			}
+		}));
+
 	it('does not retire a provenanced family (control case for the rejection above)', async () => {
 		const token = seedFamily('fam-current');
 		const res = await handleToken(
