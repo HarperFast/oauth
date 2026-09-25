@@ -2,6 +2,12 @@
 
 All notable changes to `@harperfast/oauth` are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Entries prior to 2.2.0 were backfilled from the [GitHub release notes](https://github.com/HarperFast/oauth/releases).
 
+## [Unreleased]
+
+### Fixed
+
+- **A declared `mcp.signingKeyPem` that cannot be used now fails at startup** (#221): when `mcp.enabled` is true, an empty value, an unresolved `${VAR}` placeholder, an unparseable PEM, or an RSA key under 2048 bits (which `jsonwebtoken` refuses at signing time) throws naming the key, instead of silently self-generating a key or returning 500 at token mint. Omitting the key still self-generates, and removing it on a live config reload still switches to self-generation.
+
 ## [2.6.0] - 2026-09-14
 
 ### Security
