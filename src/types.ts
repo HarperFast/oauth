@@ -629,6 +629,64 @@ export interface GetUserInfoHelpers {
 }
 
 /**
+ * Normalized source of the email the plugin will trust:
+ *  - `signed-oidc`          — a JWKS-signature-verified id token whose issuer was validated.
+ *  - `github-authenticated` — GitHub's provider-authenticated `/user/emails` fetch.
+ *  - `unauthenticated`      — anything else (unsigned/decoded-only token, plain UserInfo).
+ * This is NORMALIZED: a decoded-but-unverified id token is reported `unauthenticated`, not
+ * `signed-oidc`, so consumers cannot over-trust it.
+ */
+export type EmailProvenance = 'signed-oidc' | 'github-authenticated' | 'unauthenticated';
+
+/**
+ * Plugin-computed evidence about how the login's email/identity was established,
+ * exposed to the `onLogin` hook (`oauthUser.authEvidence`) so a hook can decide whether
+ * to trust the login before adopting an existing Harper account. The built-in gate is
+ * unchanged and decides independently. Fields describe the values actually checked at
+ * callback time; the object is a frozen login-time snapshot (not refreshed).
+ */
+export interface OAuthAuthEvidence {
+	/** Normalized email source — see {@link EmailProvenance}. */
+	readonly emailProvenance: EmailProvenance;
+	/**
+	 * The id token's JWKS signature was verified. Describes the ID TOKEN only — it says
+	 * nothing about {@link email} or {@link emailVerified}, which may come from an unsigned
+	 * UserInfo response (e.g. `fetchEmail: true` with an id token lacking an `email` claim,
+	 * `preferIdToken: false`, or a custom `getUserInfo` adapter). Use {@link emailProvenance}
+	 * or {@link emailAuthenticated} to gate on the email itself.
+	 */
+	readonly signatureVerified: boolean;
+	/**
+	 * An `iss` matched a configured issuer; the one that matched is {@link idTokenIssuer}.
+	 * Like {@link signatureVerified}, this describes the ID TOKEN only, not the email.
+	 */
+	readonly issuerValidated: boolean;
+	/**
+	 * Provider `email_verified` for the standard email claim; `undefined` when unknown. This
+	 * is the same unauthenticated provider claim as `OAuthUser.emailVerified` — it is not
+	 * attested by {@link signatureVerified}/{@link issuerValidated} and can be `true` on an
+	 * unsigned UserInfo body.
+	 */
+	readonly emailVerified: boolean | undefined;
+	/**
+	 * Attests {@link email}: `true` only when a usable verified email came from an
+	 * authenticated source. It says nothing about `oauthUser.username`, which may be a
+	 * reassignable handle — adopt the account you resolve from `email` (or from the
+	 * `idTokenIssuer`+`idTokenSubject` pair), never from the username on this alone.
+	 */
+	readonly emailAuthenticated: boolean;
+	/**
+	 * The email this evidence describes — verified only when `emailAuthenticated` is `true`
+	 * (it is populated regardless of trust). Use it, not a later-mutated `oauthUser.email`.
+	 */
+	readonly email: string | undefined;
+	/** The validated id token issuer (`iss`) — pair with {@link idTokenSubject}; else `undefined`. */
+	readonly idTokenIssuer: string | undefined;
+	/** The verified id token subject (only when signature+issuer validated), else `undefined`. */
+	readonly idTokenSubject: string | undefined;
+}
+
+/**
  * OAuth User Object
  * Represents a user authenticated via OAuth
  */
@@ -648,6 +706,18 @@ export interface OAuthUser {
 	 * gate on `emailVerified === true`, never on "not false".
 	 */
 	emailVerified?: boolean;
+	/**
+	 * Plugin-computed authenticated-source evidence, attached only when an `onLogin`
+	 * hook is registered (non-enumerable, so it is not persisted into the session).
+	 * See {@link OAuthAuthEvidence}. A hook that adopts an existing account should gate
+	 * on `authEvidence.emailAuthenticated`, never on `emailVerified` alone; missing
+	 * evidence means insufficient authentication. A custom policy over the individual
+	 * `authEvidence` fields must still require `emailProvenance !== 'unauthenticated'` —
+	 * `signatureVerified`/`issuerValidated` attest only the id token, not `email` or
+	 * `emailVerified`, so a policy built from those alone can re-create the
+	 * spoofable-email adoption bug this evidence exists to close.
+	 */
+	readonly authEvidence?: OAuthAuthEvidence;
 	name?: string;
 	/** Additional provider-specific data */
 	metadata?: Record<string, any>;

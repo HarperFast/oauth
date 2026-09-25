@@ -1,0 +1,22 @@
+# Integration-test fixture for the account-adoption gate's positive path (#230).
+#
+# Configures a generic OAuth provider backed by a Node-owned stub IdP that can
+# issue a JWKS-signed, issuer-validated id token — the one authenticated
+# source the gate trusts to adopt an existing hdb_user. allowUnverifiedClaim
+# Inheritance is deliberately left unset (default off) so this instance can
+# only adopt via the trusted path — see adoption-escape-hatch-app for the
+# operator-opt-out path.
+rest: true
+
+'@harperfast/oauth':
+  package: '@harperfast/oauth'
+  providers:
+    stub:
+      provider: generic
+      clientId: stub-client-id
+      clientSecret: stub-client-secret
+      authorizationUrl: ${STUB_IDP_AUTHORIZE_URL}
+      tokenUrl: ${STUB_IDP_TOKEN_URL}
+      userInfoUrl: ${STUB_IDP_USERINFO_URL}
+      jwksUri: ${STUB_IDP_JWKS_URL}
+      issuer: ${STUB_IDP_ISSUER}
