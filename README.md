@@ -56,7 +56,7 @@ This has **two sides** — both are required:
 https://your-domain/oauth/github/callback
 ```
 
-> **Note:** `redirectUri` defaults to `http://localhost:9926/oauth/callback`. If you skip side 1 on a deployed app, the provider will send your users to `localhost` and login will never complete — with no configuration error to tell you why. See [Understanding Redirects](docs/configuration.md#understanding-redirects).
+> **Note:** `redirectUri` is required — there is no `localhost` default. If you skip side 1, the app fails to start with a configuration error naming the provider and the setting to fix, rather than silently sending your users to `localhost`. See [Understanding Redirects](docs/configuration.md#understanding-redirects).
 
 ### 4. (Optional) Register Lifecycle Hooks
 

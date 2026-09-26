@@ -28,6 +28,7 @@ describe('OAuth Plugin Options Watcher', () => {
 			options: {
 				_config: {
 					debug: false,
+					redirectUri: 'https://app.test.com/oauth',
 					providers: {
 						github: {
 							provider: 'github',
@@ -211,6 +212,7 @@ describe('OAuth Plugin Options Watcher', () => {
 		// Change configuration
 		scope.options._config = {
 			debug: true, // Enable debug mode
+			redirectUri: 'https://app.test.com/oauth',
 			providers: {
 				google: {
 					// Switch to google provider
@@ -275,6 +277,7 @@ describe('OAuth Plugin Options Watcher', () => {
 		// Start enabled with a valid provider so OAuthResource.mcpConfig is live.
 		scope.options._config = {
 			debug: false,
+			redirectUri: 'https://app.test.com/oauth',
 			providers: {
 				github: { provider: 'github', clientId: 'test-client-id', clientSecret: 'test-client-secret' },
 			},
@@ -304,6 +307,7 @@ describe('OAuth Plugin Options Watcher', () => {
 		// Add azure provider
 		scope.options._config = {
 			debug: false,
+			redirectUri: 'https://app.test.com/oauth',
 			providers: {
 				github: {
 					provider: 'github',
@@ -397,6 +401,7 @@ describe('OAuth Plugin Options Watcher', () => {
 	it('should handle invalid provider configuration', async () => {
 		scope.options._config = {
 			debug: false,
+			redirectUri: 'https://app.test.com/oauth',
 			providers: {
 				invalid: {
 					// Missing required fields

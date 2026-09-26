@@ -21,6 +21,7 @@ rest: true
 
 '@harperfast/oauth':
   package: '@harperfast/oauth'
+  redirectUri: 'http://localhost:9926/oauth' # integration-test loopback — opted in explicitly, no default
   providers:
     # Provider literally named "oauth" — present specifically as a decoy.
     # If parseRoute is broken and treats "oauth" as the providerName, this

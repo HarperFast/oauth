@@ -10,6 +10,7 @@ All notable changes to `@harperfast/oauth` are documented here. The format is ba
 
 ### Changed
 
+- **`redirectUri` is required; the `http://localhost:9926/oauth` fallback is removed** (#208): a missing, empty, or unresolved-`${VAR}` `redirectUri` (plugin-level or per-provider) now fails at startup naming the key, instead of silently sending a loopback redirect that some IdPs accept and that would hand the authorization code to whatever is listening on the end user's own machine. The provider segment is appended for `…/oauth`, `…/oauth/callback` (with or without a trailing slash) and a query string is preserved. **Upgrade note:** any app that relied on the default, including local-dev setups, must set `redirectUri` to its public origin plus `/oauth` before the plugin will load.
 - **MCP refresh-token families minted before this version are retired at their next refresh** (#229): a refresh presenting a valid token for a family created by an earlier version is rejected with `invalid_grant`, the family is revoked, and an `oauth.mcp.token.retired` audit event is emitted; the client re-authorizes once. New families carry their provenance in the `family_id` (`p1-` prefix), which rotation preserves, so a mixed-version rollout cannot strip it. Access tokens already issued keep working until they expire. **Upgrade note:** every MCP client holding a pre-upgrade refresh token re-authorizes once at its next refresh; after a rollback, only families minted while rolled back re-authorize after re-upgrading. Browser login sessions are unaffected.
 
 ### Fixed

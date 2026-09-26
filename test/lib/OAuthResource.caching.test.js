@@ -81,6 +81,7 @@ describe('OAuthResource - cacheDynamicProviders', () => {
 			userInfoUrl: 'https://api.github.com/user',
 			scope: 'user:email',
 			usernameClaim: 'login',
+			redirectUri: 'https://app.test.com/oauth',
 		};
 
 		it('should cache resolved provider when cache is enabled (true)', async () => {
