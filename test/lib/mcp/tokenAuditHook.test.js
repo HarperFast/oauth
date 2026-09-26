@@ -18,7 +18,11 @@ import { handleToken } from '../../../dist/lib/mcp/token.js';
 import { resetMCPAuthCodesTableCache } from '../../../dist/lib/mcp/authCodeStore.js';
 import { resetMCPClientsTableCache } from '../../../dist/lib/mcp/clientStore.js';
 import { resetMCPKeysTableCache, SIGNING_KEY_ID } from '../../../dist/lib/mcp/keyStore.js';
-import { resetMCPRefreshFamiliesTableCache, makeRefreshToken } from '../../../dist/lib/mcp/refreshTokenStore.js';
+import {
+	resetMCPRefreshFamiliesTableCache,
+	makeRefreshToken,
+	FAMILY_ID_PREFIX,
+} from '../../../dist/lib/mcp/refreshTokenStore.js';
 import { HookManager } from '../../../dist/lib/hookManager.js';
 import { createMockFn, createMockLogger } from '../../helpers/mockFn.js';
 
@@ -150,7 +154,10 @@ describe('handleToken — audit events and onMCPTokenIssued hook', () => {
 		});
 	}
 
-	function seedFamily(familyId, overrides = {}) {
+	function seedFamily(label, overrides = {}) {
+		// Prefixed by default (this version's provenance marker) — individual
+		// tests opt into a bare-UUID-style id via overrides.family_id.
+		const familyId = overrides.family_id ?? `${FAMILY_ID_PREFIX}${label}`;
 		const { token, hash } = makeRefreshToken(familyId);
 		families.set(familyId, {
 			family_id: familyId,

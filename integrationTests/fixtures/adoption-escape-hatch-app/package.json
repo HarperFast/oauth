@@ -1,0 +1,6 @@
+{
+	"name": "adoption-escape-hatch-app-fixture",
+	"private": true,
+	"type": "module",
+	"description": "Integration-test fixture for the account-adoption gate's allowUnverifiedClaimInheritance escape hatch (#230). The @harperfast/oauth dep is installed at test setup time via scripts/install-fixtures.js (npm pack + install)."
+}

@@ -32,6 +32,21 @@ function createMockProvider(overrides = {}) {
 }
 
 /**
+ * Shallow-snapshot the persistable fields of a mock session (excludes the
+ * `update` function and the `updateCalls` log itself), one level deep so
+ * nested objects like `oauth` are copied rather than referenced.
+ */
+function snapshotSessionData(session) {
+	const snapshot = {};
+	for (const key of Object.keys(session)) {
+		if (key === 'update' || key === 'updateCalls') continue;
+		const value = session[key];
+		snapshot[key] = Array.isArray(value) ? [...value] : value && typeof value === 'object' ? { ...value } : value;
+	}
+	return snapshot;
+}
+
+/**
  * Create a mock session that simulates HarperDB session behavior
  */
 function createMockSession(overrides = {}) {
@@ -55,22 +70,29 @@ function createMockSession(overrides = {}) {
 			lastRefreshed: Date.now() - 1000,
 		},
 		...overrides,
+		// Records every persisted snapshot, in call order, so tests can assert on
+		// what actually reached the (simulated) session store — not just on the
+		// in-memory object, which production code may have already mutated.
+		updateCalls: [],
 		// Simulate HarperDB session.update() which REPLACES entire session
 		update: async function (data) {
 			// HarperDB's session.update() accepts the session object itself
 			// In production, it serializes and replaces the entire session
 			// For testing, we need to handle when data === this (same object reference)
 			if (data === this) {
-				// Session is updating itself - this is the correct usage
-				// No-op since the session already has all the current values
+				// Session is updating itself - this is the correct usage.
+				// Snapshot what would be persisted, then no-op: the session already
+				// has all the current values.
+				this.updateCalls.push(snapshotSessionData(this));
 				return;
 			}
 
 			// Legacy path: when passed a plain object (old API usage)
+			this.updateCalls.push(snapshotSessionData(data));
 			// Clear all existing properties
 			const keys = Object.keys(this);
 			for (const key of keys) {
-				if (key !== 'update') {
+				if (key !== 'update' && key !== 'updateCalls') {
 					delete this[key];
 				}
 			}
@@ -431,13 +453,13 @@ test('should perform periodic validation for non-expiring tokens', async () => {
 	assert.ok(session.oauth.lastValidated > Date.now() - 100, 'lastValidated timestamp should be updated');
 });
 
-test('should update lastValidated on a read-only tracked session.oauth without throwing', async () => {
-	let validationCalled = false;
+test('persists rebuilt lastValidated via session.update on a read-only tracked session.oauth, and a reloaded session is throttled', async () => {
+	let validationCalled = 0;
 	const provider = createMockProvider({
 		config: {
 			...createMockProvider().config,
 			validateToken: async () => {
-				validationCalled = true;
+				validationCalled++;
 				return true;
 			},
 			tokenValidationInterval: 1000,
@@ -465,12 +487,14 @@ test('should update lastValidated on a read-only tracked session.oauth without t
 	}
 	Object.freeze(trackedOAuth);
 
-	const session = createMockSession({ oauth: trackedOAuth });
+	// A custom array field (e.g. set by an onLogin hook) must round-trip as an
+	// array through snapshotSessionData, not get flattened to a {0:…,1:…} object.
+	const session = createMockSession({ oauth: trackedOAuth, permissions: ['repo:read', 'repo:write'] });
 
 	const result = await validateAndRefreshSession({ session }, provider);
 
 	assert.strictEqual(result.valid, true);
-	assert.strictEqual(validationCalled, true, 'validateToken should have been called');
+	assert.strictEqual(validationCalled, 1, 'validateToken should have been called');
 	assert.ok(session.oauth.lastValidated > Date.now() - 100, 'lastValidated should advance (rebuilt, not mutated)');
 	assert.strictEqual(session.oauth.provider, 'github', 'provider preserved');
 	assert.strictEqual(session.oauth.providerConfigId, 'github', 'providerConfigId preserved');
@@ -479,6 +503,46 @@ test('should update lastValidated on a read-only tracked session.oauth without t
 	assert.strictEqual(session.oauth.scope, 'repo read:org', 'scope preserved');
 	assert.strictEqual(session.oauth.tokenType, 'bearer', 'tokenType preserved');
 	assert.strictEqual(session.oauth.lastRefreshed, lastRefreshed, 'lastRefreshed preserved');
+
+	// Persistence, not just the in-memory replacement: exactly one session.update()
+	// call, carrying the rebuilt metadata including the advanced lastValidated. A
+	// production regression that dropped `await session.update(session)` would leave
+	// the in-memory assertions above green while never persisting the new timestamp —
+	// this is the check that catches that.
+	assert.strictEqual(session.updateCalls.length, 1, 'session.update should be called exactly once');
+	const persisted = session.updateCalls[0];
+	assert.ok(persisted.oauth, 'persisted update carries oauth metadata');
+	assert.ok(persisted.oauth.lastValidated > Date.now() - 100, 'persisted lastValidated should be advanced');
+	assert.strictEqual(persisted.oauth.provider, 'github', 'persisted provider preserved');
+	assert.strictEqual(persisted.oauth.accessToken, 'github_token', 'persisted accessToken preserved');
+	assert.ok(Array.isArray(persisted.permissions), 'persisted array field stays an array, not a flattened object');
+	assert.deepStrictEqual(persisted.permissions, ['repo:read', 'repo:write'], 'persisted array field round-trips');
+
+	// Reload a second request from exactly what was persisted (a fresh session
+	// object, not the same reference) and confirm it is throttled: the persisted
+	// lastValidated is fresh, so periodic validation must be skipped, and all OAuth
+	// metadata must have survived the round trip through the store.
+	const reloadedSession = createMockSession({
+		user: persisted.user,
+		oauthUser: persisted.oauthUser,
+		oauth: { ...persisted.oauth },
+	});
+
+	const secondResult = await validateAndRefreshSession({ session: reloadedSession }, provider);
+
+	assert.strictEqual(secondResult.valid, true);
+	assert.strictEqual(
+		validationCalled,
+		1,
+		'validateToken should NOT be called again: the reloaded lastValidated is within the interval'
+	);
+	assert.strictEqual(reloadedSession.updateCalls.length, 0, 'a throttled validation should not persist again');
+	assert.strictEqual(reloadedSession.oauth.lastValidated, persisted.oauth.lastValidated);
+	assert.strictEqual(reloadedSession.oauth.provider, 'github');
+	assert.strictEqual(reloadedSession.oauth.accessToken, 'github_token');
+	assert.strictEqual(reloadedSession.oauth.scope, 'repo read:org');
+	assert.strictEqual(reloadedSession.oauth.tokenType, 'bearer');
+	assert.strictEqual(reloadedSession.oauth.lastRefreshed, lastRefreshed);
 });
 
 test('should skip validation when interval has not passed', async () => {

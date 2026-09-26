@@ -218,6 +218,20 @@ Refresh tokens rotate on use: presenting an already-used token from a family
 revokes the whole family (replay defense). Refresh families live for
 `refreshTokenTtl` (default 30 days).
 
+Refresh families minted by this version carry a provenance marker in the
+family id itself; a family from before that (or replicated from an older
+node) is rejected with `invalid_grant` and retired the first time it is
+presented for refresh, so the client re-authorizes into a fresh, provenanced
+family. This is a lazy, per-family check on the existing refresh path — no
+startup sweep. Because the marker lives in the id and rotation reuses the id,
+mixed-version rollouts are safe: an old worker or node rotating a family
+minted by this version leaves its provenance untouched.
+
+Real cost when upgrading: every MCP client holding a refresh token minted
+before this version re-authorizes once, at its next refresh. After a
+rollback, only families minted while rolled back re-authorize once after
+re-upgrading. Nothing else to run — no manual step, no data migration.
+
 By default any client whose registered `grant_types` include `refresh_token`
 receives a refresh token on the code exchange. The AS metadata advertises
 `offline_access` in `scopes_supported` (SEP-2207), so clients that want refresh
@@ -385,16 +399,18 @@ Token lifecycle events are written to Harper's structured log (`hdb.log`) at
 MCP audit: {"event":"oauth.mcp.token.issued","client_id":"…","sub":"…","aud":"https://my-app.example.com/mcp","scope":"…","jti":"…","timestamp":"2026-06-29T17:00:00.000Z"}
 ```
 
-| `event`                     | When                                                  |
-| --------------------------- | ----------------------------------------------------- |
-| `oauth.mcp.token.issued`    | An access token was minted (authorization-code grant) |
-| `oauth.mcp.token.refreshed` | A token pair was rotated (refresh-token grant)        |
-| `oauth.mcp.token.rejected`  | A bearer token was rejected by `withMCPAuth`          |
+| `event`                     | When                                                                  |
+| --------------------------- | --------------------------------------------------------------------- |
+| `oauth.mcp.token.issued`    | An access token was minted (authorization-code grant)                 |
+| `oauth.mcp.token.refreshed` | A token pair was rotated (refresh-token grant)                        |
+| `oauth.mcp.token.rejected`  | A bearer token was rejected by `withMCPAuth`                          |
+| `oauth.mcp.token.retired`   | A pre-provenance refresh family was retired instead of rotated (#229) |
 
-Payloads carry only the `jti` — never `access_token`, `refresh_token`, or
-`client_secret`. Filter your log aggregator on the `MCP audit:` prefix or the
-`event` value. Dynamic Client Registration attempts are logged separately by the
-`/register` handler.
+Payloads never carry `access_token`, `refresh_token`, or `client_secret`; a
+minted token's payload carries only its `jti`, and a `retired` payload (no
+token is minted on that path) carries `family_id` instead. Filter your log
+aggregator on the `MCP audit:` prefix or the `event` value. Dynamic Client
+Registration attempts are logged separately by the `/register` handler.
 
 ---
 
