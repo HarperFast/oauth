@@ -6,14 +6,20 @@
 
 import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash, generateKeyPairSync, randomBytes, sign } from 'node:crypto';
+import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign } from 'node:crypto';
+import { logger as harperMockLogger } from 'harper';
 import { handleToken, parseBasicAuth, _resetGrantRateLimiter } from '../../../dist/lib/mcp/token.js';
 import { resetMCPAssertionJtisTableCache } from '../../../dist/lib/mcp/assertionJtiStore.js';
 import { resetMCPAuthCodesTableCache } from '../../../dist/lib/mcp/authCodeStore.js';
 import { _clearCimdCache, _setDnsLookup, _setFetch } from '../../../dist/lib/mcp/cimd.js';
 import { resetMCPClientsTableCache } from '../../../dist/lib/mcp/clientStore.js';
 import { resetMCPKeysTableCache, SIGNING_KEY_ID } from '../../../dist/lib/mcp/keyStore.js';
-import { resetMCPRefreshFamiliesTableCache, makeRefreshToken } from '../../../dist/lib/mcp/refreshTokenStore.js';
+import {
+	resetMCPRefreshFamiliesTableCache,
+	makeRefreshToken,
+	isProvenancedFamilyId,
+	FAMILY_ID_PREFIX,
+} from '../../../dist/lib/mcp/refreshTokenStore.js';
 import { verifyAccessToken } from '../../../dist/lib/mcp/tokenIssuer.js';
 import { normalizeMcpSecurityConfig } from '../../../dist/lib/config.js';
 
@@ -221,6 +227,8 @@ describe('handleToken', () => {
 
 		assert.equal(codes.has('code-1'), false, 'code consumed (single-use)');
 		assert.equal(families.size, 1, 'refresh family persisted');
+		const [minted] = families.values();
+		assert.ok(isProvenancedFamilyId(minted.family_id), 'newly-minted family id carries the provenance prefix (#229)');
 	});
 
 	it('sets no-store cache headers on a successful token response (RFC 6749 §5.1)', async () => {
@@ -665,7 +673,11 @@ describe('handleToken', () => {
 
 	// ---- refresh_token rotation ----
 
-	function seedFamily(familyId, overrides = {}) {
+	// `label` is prefixed with this version's provenance marker by default
+	// (#229); pass an explicit `family_id` override for a pre-provenance
+	// (bare-UUID-style) family.
+	function seedFamily(label, overrides = {}) {
+		const familyId = overrides.family_id ?? `${FAMILY_ID_PREFIX}${label}`;
 		const { token, hash } = makeRefreshToken(familyId);
 		families.set(familyId, {
 			family_id: familyId,
@@ -712,7 +724,7 @@ describe('handleToken', () => {
 			mcpConfig
 		);
 		assert.equal(replay.body.error, 'invalid_grant');
-		assert.equal(families.get('fam-1').revoked, true, 'family revoked on replay');
+		assert.equal(families.get(`${FAMILY_ID_PREFIX}fam-1`).revoked, true, 'family revoked on replay');
 
 		// The legitimate (rotated) token is now dead too — whole family is revoked.
 		const afterRevoke = await handleToken(
@@ -782,7 +794,7 @@ describe('handleToken', () => {
 
 	it('does not rotate the family when token signing fails (old token survives for retry)', async () => {
 		const token = seedFamily('fam-1');
-		const before = families.get('fam-1').current_token_hash;
+		const before = families.get(`${FAMILY_ID_PREFIX}fam-1`).current_token_hash;
 		// Corrupt the signing key so signAccessToken throws — this happens before
 		// the rotation is persisted, so the family must be left intact. The throw
 		// is caught by handleToken's top-level guard and surfaced as a structured
@@ -795,7 +807,11 @@ describe('handleToken', () => {
 		);
 		assert.equal(res.status, 500, 'signing failure → structured server_error, not a propagated throw');
 		assert.equal(res.body.error, 'server_error');
-		assert.equal(families.get('fam-1').current_token_hash, before, 'family not rotated when signing fails');
+		assert.equal(
+			families.get(`${FAMILY_ID_PREFIX}fam-1`).current_token_hash,
+			before,
+			'family not rotated when signing fails'
+		);
 	});
 
 	it('rejects a malformed refresh token', async () => {
@@ -805,6 +821,144 @@ describe('handleToken', () => {
 			mcpConfig
 		);
 		assert.equal(res.body.error, 'invalid_grant');
+	});
+
+	// ---- #229: pre-provenance (bare-UUID family_id) rejection ----
+
+	function withAuditSpy(fn) {
+		const infoCalls = [];
+		const originalInfo = harperMockLogger.info;
+		harperMockLogger.info = (...args) => infoCalls.push(args);
+		return fn(infoCalls).finally(() => {
+			harperMockLogger.info = originalInfo;
+		});
+	}
+
+	it('retires a legacy (bare randomUUID family_id) family on refresh, persists revoked, and emits the retired audit event', () =>
+		withAuditSpy(async (infoCalls) => {
+			const legacyFamilyId = randomUUID();
+			const token = seedFamily('fam-legacy', { family_id: legacyFamilyId });
+			const res = await handleToken(
+				{ headers: {} },
+				{ grant_type: 'refresh_token', refresh_token: token, client_id: 'public-1' },
+				mcpConfig
+			);
+
+			assert.equal(res.status, 400);
+			assert.equal(res.body.error, 'invalid_grant');
+			assert.equal(families.get(legacyFamilyId).revoked, true, 'legacy family is retired on refresh');
+
+			const auditLog = infoCalls.find((args) => args[0]?.includes('oauth.mcp.token.retired'));
+			assert.ok(auditLog, 'retired audit event was emitted');
+			const parsed = JSON.parse(auditLog[0].replace(/^MCP audit: /, ''));
+			assert.equal(parsed.event, 'oauth.mcp.token.retired');
+			assert.equal(parsed.family_id, legacyFamilyId);
+			assert.equal(parsed.reason, 'pre_provenance');
+			assert.equal(parsed.client_id, 'public-1');
+			assert.equal(parsed.sub, 'alice@example.com');
+			assert.equal(parsed.aud, RESOURCE);
+		}));
+
+	it('rejects a legacy family presented with the wrong secret via the hash check, not retirement — and does not emit retired', () =>
+		withAuditSpy(async (infoCalls) => {
+			const legacyFamilyId = randomUUID();
+			const token = seedFamily('fam-legacy-2', { family_id: legacyFamilyId });
+			// Corrupt the stored hash so the presented token's secret no longer
+			// matches — this must hit the hash-mismatch (replay) branch, which
+			// runs BEFORE the provenance check, even though the family also
+			// predates provenance.
+			families.get(legacyFamilyId).current_token_hash = 'not-the-real-hash';
+			const res = await handleToken(
+				{ headers: {} },
+				{ grant_type: 'refresh_token', refresh_token: token, client_id: 'public-1' },
+				mcpConfig
+			);
+
+			assert.equal(res.body.error, 'invalid_grant');
+			assert.equal(families.get(legacyFamilyId).revoked, true, 'family revoked via the hash-mismatch branch');
+			const auditLog = infoCalls.find((args) => args[0]?.includes('oauth.mcp.token.retired'));
+			assert.equal(auditLog, undefined, 'no retired event when a wrong secret is caught by the hash check first');
+		}));
+
+	it('does not emit the retired audit event when persisting the retirement fails, and leaves the family unrevoked', () =>
+		withAuditSpy(async (infoCalls) => {
+			const legacyFamilyId = randomUUID();
+			const token = seedFamily('fam-legacy-3', { family_id: legacyFamilyId });
+			const originalPut = global.databases.oauth.mcp_refresh_families.put;
+			global.databases.oauth.mcp_refresh_families.put = async () => {
+				throw new Error('simulated storage failure');
+			};
+			try {
+				const res = await handleToken(
+					{ headers: {} },
+					{ grant_type: 'refresh_token', refresh_token: token, client_id: 'public-1' },
+					mcpConfig
+				);
+				assert.equal(res.status, 400);
+				assert.equal(res.body.error, 'invalid_grant');
+				assert.equal(
+					families.get(legacyFamilyId).revoked,
+					false,
+					'family is unchanged in storage since the persist failed'
+				);
+
+				const auditLog = infoCalls.find((args) => args[0]?.includes('oauth.mcp.token.retired'));
+				assert.equal(auditLog, undefined, 'no retired event when the retirement write did not persist');
+			} finally {
+				global.databases.oauth.mcp_refresh_families.put = originalPut;
+			}
+		}));
+
+	it('does not retire a provenanced family (control case for the rejection above)', async () => {
+		const token = seedFamily('fam-current');
+		const res = await handleToken(
+			{ headers: {} },
+			{ grant_type: 'refresh_token', refresh_token: token, client_id: 'public-1' },
+			mcpConfig
+		);
+		assert.equal(res.status, 200);
+		assert.equal(families.get(`${FAMILY_ID_PREFIX}fam-current`).revoked, false);
+	});
+
+	it('survives a second refresh on a rotated provenanced family (family_id keeps its prefix across rotation)', async () => {
+		seedCode('code-1');
+		const minted = await handleToken(
+			{ headers: {} },
+			{
+				grant_type: 'authorization_code',
+				code: 'code-1',
+				code_verifier: CODE_VERIFIER,
+				redirect_uri: REDIRECT,
+				client_id: 'public-1',
+			},
+			mcpConfig
+		);
+		assert.equal(minted.status, 200);
+		const [familyId] = families.keys();
+
+		const first = await handleToken(
+			{ headers: {} },
+			{ grant_type: 'refresh_token', refresh_token: minted.body.refresh_token, client_id: 'public-1' },
+			mcpConfig
+		);
+		assert.equal(first.status, 200);
+		assert.ok(
+			isProvenancedFamilyId(families.get(familyId).family_id),
+			'family_id still carries the prefix after the first rotation'
+		);
+
+		const second = await handleToken(
+			{ headers: {} },
+			{ grant_type: 'refresh_token', refresh_token: first.body.refresh_token, client_id: 'public-1' },
+			mcpConfig
+		);
+		assert.equal(second.status, 200, 'second refresh on the rotated token succeeds');
+		assert.ok(second.body.access_token);
+		assert.ok(second.body.refresh_token);
+		assert.ok(
+			isProvenancedFamilyId(families.get(familyId).family_id),
+			'family_id still carries the prefix after the second rotation'
+		);
 	});
 
 	describe('grant_types enforcement at token endpoint (RFC 6749 §5.2)', () => {

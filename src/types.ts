@@ -359,6 +359,13 @@ export type MCPPublicKeyRecord = Omit<MCPSigningKeyRecord, 'private_key_pem'>;
  * SHA-256 hash of the full value is persisted (`current_token_hash`). Rotation
  * overwrites the hash; replay of a superseded token (hash mismatch) sets
  * `revoked`, which invalidates the whole family.
+ *
+ * Provenance (#229) is carried by `family_id` itself (see FAMILY_ID_PREFIX in
+ * refreshTokenStore.ts) rather than a separate field: rotation reuses the id,
+ * so a marker there survives any version's rotation write, while a mutable
+ * field does not. A family minted before this version has a bare-UUID id and
+ * is rejected + retired on its next refresh — lazy, per-family migration, no
+ * startup sweep.
  */
 export interface MCPRefreshFamilyRecord {
 	family_id: string;

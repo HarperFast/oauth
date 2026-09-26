@@ -8,6 +8,10 @@ All notable changes to `@harperfast/oauth` are documented here. The format is ba
 
 - **`onLogin` hooks receive authenticated-source evidence** (`oauthUser.authEvidence`): a frozen, hook-only snapshot exposing the plugin's own trust determination — `emailProvenance` (`'signed-oidc'` / `'github-authenticated'` / `'unauthenticated'`, normalized), `emailAuthenticated`, `signatureVerified`, `issuerValidated`, `emailVerified`, `email` (populated regardless of trust — verified only when `emailAuthenticated` is `true`), and the validated `idTokenIssuer` / `idTokenSubject`. A hook that adopts an existing account should base the decision on `authEvidence.emailAuthenticated` (resolve from `authEvidence.email`, or bind on the `idTokenIssuer`+`idTokenSubject` pair), not on the spoofable `emailVerified`. The new `OAuthAuthEvidence` and `EmailProvenance` types are exported. Does not change the built-in account-adoption gate.
 
+### Changed
+
+- **MCP refresh-token families minted before this version are retired at their next refresh** (#229): a refresh presenting a valid token for a family created by an earlier version is rejected with `invalid_grant`, the family is revoked, and an `oauth.mcp.token.retired` audit event is emitted; the client re-authorizes once. New families carry their provenance in the `family_id` (`p1-` prefix), which rotation preserves, so a mixed-version rollout cannot strip it. Access tokens already issued keep working until they expire. **Upgrade note:** every MCP client holding a pre-upgrade refresh token re-authorizes once at its next refresh; after a rollback, only families minted while rolled back re-authorize after re-upgrading. Browser login sessions are unaffected.
+
 ## [2.6.0] - 2026-09-14
 
 ### Security
