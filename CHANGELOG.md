@@ -14,7 +14,7 @@ All notable changes to `@harperfast/oauth` are documented here. The format is ba
 
 ### Fixed
 
-- **A declared `mcp.signingKeyPem` that cannot be used now fails at startup** (#221): when `mcp.enabled` is true, an empty value, an unresolved `${VAR}` placeholder, an unparseable PEM, or an RSA key under 2048 bits (which `jsonwebtoken` refuses at signing time) throws naming the key, instead of silently self-generating a key or returning 500 at token mint. Omitting the key still self-generates, and removing it on a live config reload still switches to self-generation.
+- **A declared `mcp.signingKeyPem` that cannot be used now fails at startup** (#221): when `mcp.enabled` is true, an empty value, an unresolved `${VAR}` placeholder, an unparseable PEM, or an RSA key under 2048 bits (which `jsonwebtoken` refuses at signing time) throws naming the key, instead of silently self-generating a key or returning 500 at token mint. Omitting the key still self-generates, and removing it on a live config reload still switches to self-generation. **Upgrade note:** the startup throw stops the whole plugin from loading, so on an instance with an unusable declared key, browser OAuth login is down as well as MCP token grants until the key is fixed or removed (a bad value applied by live reload is rejected and the previous config keeps serving; only a restart with it fails).
 
 ## [2.6.0] - 2026-09-14
 
