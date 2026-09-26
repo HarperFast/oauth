@@ -4,6 +4,7 @@
 
 import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { generateKeyPairSync } from 'node:crypto';
 import {
 	buildProviderConfig,
 	extractPluginDefaults,
@@ -172,6 +173,80 @@ describe('OAuth Configuration', () => {
 				() => normalizeMcpSecurityConfig({ clientIdMetadataDocuments: { allowedHosts: [123] } }),
 				/allowedHosts must be/
 			);
+		});
+
+		describe('signingKeyPem (#221 — declared-but-empty must not silently self-generate)', () => {
+			function rsaPem() {
+				return generateKeyPairSync('rsa', {
+					modulusLength: 2048,
+					publicKeyEncoding: { type: 'spki', format: 'pem' },
+					privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+				}).privateKey;
+			}
+
+			it('declared but resolved empty (e.g. unset/empty env var) throws, naming the field', () => {
+				assert.throws(
+					() => normalizeMcpSecurityConfig({ enabled: true, signingKeyPem: '' }),
+					/mcp\.signingKeyPem.*empty/s
+				);
+			});
+
+			it('declared as an unresolved ${VAR} placeholder throws, naming the variable', () => {
+				assert.throws(
+					() => normalizeMcpSecurityConfig({ enabled: true, signingKeyPem: '${MY_SIGNING_KEY}' }),
+					/mcp\.signingKeyPem.*unresolved env placeholder.*MY_SIGNING_KEY/s
+				);
+			});
+
+			it('declared but unparseable throws (previously only warned, then 500s at first mint)', () => {
+				assert.throws(
+					() => normalizeMcpSecurityConfig({ enabled: true, signingKeyPem: 'not a pem' }),
+					/mcp\.signingKeyPem is not a supported signing key/
+				);
+			});
+
+			it('declared with an RSA key under 2048 bits throws at boot (jsonwebtoken refuses to sign with it)', () => {
+				const weakPem = generateKeyPairSync('rsa', {
+					modulusLength: 1024,
+					publicKeyEncoding: { type: 'spki', format: 'pem' },
+					privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+				}).privateKey;
+				assert.throws(
+					() => normalizeMcpSecurityConfig({ enabled: true, signingKeyPem: weakPem }),
+					/mcp\.signingKeyPem is not a supported signing key.*RSA key is 1024 bits/s
+				);
+			});
+
+			it('declared with a 2048-bit RSA key passes through unchanged', () => {
+				const pem = rsaPem();
+				const cfg = { enabled: true, signingKeyPem: pem };
+				normalizeMcpSecurityConfig(cfg);
+				assert.equal(cfg.signingKeyPem, pem);
+			});
+
+			it('mcp.enabled false (or absent) leaves a declared-but-bad pin INERT — the disabled block must not refuse boot (byte-identical-boot contract)', () => {
+				assert.doesNotThrow(() =>
+					normalizeMcpSecurityConfig({ enabled: false, signingKeyPem: '${FLAIR_MCP_SIGNING_KEY_PEM}' })
+				);
+				assert.doesNotThrow(() => normalizeMcpSecurityConfig({ signingKeyPem: '' }));
+			});
+
+			it('declared as undefined (live-reload removed the key; OptionsWatcher#merge sets it undefined) counts as undeclared — no throw', () => {
+				assert.doesNotThrow(() => normalizeMcpSecurityConfig({ enabled: true, signingKeyPem: undefined }));
+			});
+
+			it('not declared at all leaves the config untouched — self-generation path unaffected', () => {
+				const cfg = { enabled: true };
+				normalizeMcpSecurityConfig(cfg);
+				assert.equal('signingKeyPem' in cfg, false);
+			});
+
+			it('declared with a valid PEM passes through unchanged — pin mode', () => {
+				const pem = rsaPem();
+				const cfg = { enabled: true, signingKeyPem: pem };
+				normalizeMcpSecurityConfig(cfg);
+				assert.equal(cfg.signingKeyPem, pem);
+			});
 		});
 	});
 

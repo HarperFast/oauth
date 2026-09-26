@@ -24,6 +24,7 @@ import { createRateLimiter, type RateLimiter } from './rateLimit.ts';
 import { getRequestHeader } from '../requestHeaders.ts';
 import {
 	hashRefreshToken,
+	isProvenancedFamilyId,
 	makeRefreshToken,
 	MCPRefreshFamilyStore,
 	newFamilyId,
@@ -484,6 +485,56 @@ async function handleRefreshTokenGrant(
 		}
 		logger?.warn?.(`MCP token: refresh replay detected; revoked family ${family.family_id}`);
 		return errorResponse(400, 'invalid_grant', 'Refresh token has been superseded; family revoked');
+	}
+
+	// Defense in depth (#229): a family minted before provenance stamping is
+	// retired the first time it is presented for refresh, rather than rotated.
+	// Lazy, per-family — no startup sweep. Provenance lives in the family id
+	// itself (see FAMILY_ID_PREFIX in refreshTokenStore.ts), which rotation
+	// reuses (makeRefreshToken(family.family_id) below) and no `put` can
+	// change — so mixed-version rollouts are safe: an old worker or node
+	// rotating a family minted by this version leaves its id, and therefore
+	// its provenance, unchanged. The remaining cost is that every family
+	// minted before this upgrade (bare-UUID id) re-authorizes once at its
+	// next refresh, and after a rollback only families minted while rolled
+	// back re-authorize once after re-upgrading. The client re-authorizes
+	// into a fresh, provenanced family per RFC 6749 §5.2.
+	if (!isProvenancedFamilyId(family.family_id)) {
+		family.revoked = true;
+		let persisted = false;
+		try {
+			await familyStore.set(family);
+			persisted = true;
+		} catch (error) {
+			logger?.error?.(
+				`MCP token: failed to persist retirement for pre-provenance family ${family.family_id}:`,
+				error instanceof Error ? error.message : String(error)
+			);
+		}
+		// Only log/audit the retirement once it is actually persisted — an
+		// unpersisted "retired" claim would misstate what the store holds, and
+		// the legacy family stays live for a pre-upgrade node to rotate. The
+		// response is invalid_grant regardless; the next presentation retries
+		// the retirement (and, if it persists, the log/audit). The catch above
+		// already records the failure case.
+		if (persisted) {
+			logger?.warn?.(`MCP token: rejected refresh for pre-provenance family ${family.family_id}; retired`);
+			emitMCPAuditEvent({
+				event: 'oauth.mcp.token.retired',
+				client_id: family.client_id,
+				sub: family.user,
+				aud: family.resource,
+				scope: family.scope,
+				family_id: family.family_id,
+				reason: 'pre_provenance',
+				timestamp: new Date().toISOString(),
+			});
+		}
+		return errorResponse(
+			400,
+			'invalid_grant',
+			'Refresh token family predates provenance tracking; reauthorize to continue'
+		);
 	}
 
 	// Sign the access token BEFORE committing the rotation. If key fetch or

@@ -1051,6 +1051,14 @@ describe('signing-alg helpers', () => {
 		assert.throws(() => algFromPrivateKeyPem(makePems('ed25519', {}).privateKey), /unsupported signingKeyPem key type/);
 	});
 
+	it('algFromPrivateKeyPem: rejects an RSA key under 2048 bits, accepts 2048', () => {
+		assert.throws(
+			() => algFromPrivateKeyPem(makePems('rsa', { modulusLength: 1024 }).privateKey),
+			/RSA key is 1024 bits.*at least 2048 bits/s
+		);
+		assert.equal(algFromPrivateKeyPem(makePems('rsa', { modulusLength: 2048 }).privateKey), 'RS256');
+	});
+
 	it('resolveEffectiveAlg: configured alg without a pin, pin-derived alg with one', () => {
 		assert.equal(resolveEffectiveAlg(), 'RS256');
 		assert.equal(resolveEffectiveAlg({ signingAlgorithm: 'ES256' }), 'ES256');

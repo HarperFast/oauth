@@ -1,0 +1,6 @@
+{
+	"name": "adoption-verified-app-fixture",
+	"private": true,
+	"type": "module",
+	"description": "Integration-test fixture for the account-adoption gate's positive path (#230): a JWKS-signed, issuer-validated id token with a verified email claim. The @harperfast/oauth dep is installed at test setup time via scripts/install-fixtures.js (npm pack + install)."
+}
