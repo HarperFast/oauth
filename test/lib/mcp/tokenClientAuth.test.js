@@ -10,6 +10,7 @@ import { describe, it, before, after, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, generateKeyPairSync, randomBytes, sign } from 'node:crypto';
 import { handleToken } from '../../../dist/lib/mcp/token.js';
+import { MAX_ASSERTION_LENGTH } from '../../../dist/lib/mcp/clientAssertion.js';
 import { resetMCPAssertionJtisTableCache } from '../../../dist/lib/mcp/assertionJtiStore.js';
 import { resetMCPAuthCodesTableCache } from '../../../dist/lib/mcp/authCodeStore.js';
 import { _clearCimdCache, _setDnsLookup, _setFetch } from '../../../dist/lib/mcp/cimd.js';
@@ -668,6 +669,58 @@ describe('handleToken — shared client authenticator', () => {
 			const res = await refresh(cimdUpgraded, withAssertion({ redirect_uri: undefined }), MIXED);
 			assert.equal(res.status, 400);
 			assert.match(res.body.error_description, /bound to a different client authentication method/);
+		});
+	});
+
+	describe('conformance: rejected before any client lookup, and storage failures', () => {
+		const TYPE = 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer';
+		beforeEach(() => seedCode('code-1', ASSISTANT, ASSISTANT_REDIRECT, 'private_key_jwt'));
+
+		function oversized(length) {
+			// A payload whose sub names a real client, so an unbounded parse would look it up.
+			const real = signAssertion();
+			const [h, p] = real.split('.');
+			return `${h}.${p}.${'A'.repeat(length - h.length - p.length - 2)}`;
+		}
+
+		it('rejects an assertion over the verifier bound before parsing it or resolving any client', async () => {
+			for (const withClientId of [false, true]) {
+				const res = await exchange(
+					{
+						...(withClientId ? { client_id: ASSISTANT } : {}),
+						redirect_uri: ASSISTANT_REDIRECT,
+						client_assertion: oversized(MAX_ASSERTION_LENGTH + 1),
+						client_assertion_type: TYPE,
+					},
+					{ config: MIXED }
+				);
+				assertInvalidClient(res, /exceeds the maximum allowed length/);
+			}
+			assert.deepEqual(fetches, [], 'no document or key fetch');
+			assert.equal(codes.has('code-1'), true);
+		});
+
+		it('an assertion exactly at the bound still reaches client resolution', async () => {
+			const res = await exchange(
+				{
+					redirect_uri: ASSISTANT_REDIRECT,
+					client_assertion: oversized(MAX_ASSERTION_LENGTH),
+					client_assertion_type: TYPE,
+				},
+				{ config: MIXED }
+			);
+			assertInvalidClient(res);
+			assert.ok(fetches.includes(ASSISTANT), 'the subject was used to resolve the client');
+		});
+
+		it('rejects Basic credentials combined with a body client_secret as invalid_client', async () => {
+			seedCode('code-2', 'conf-1', REDIRECT, 'client_secret_basic');
+			const res = await exchange(
+				{ redirect_uri: REDIRECT, client_secret: 'conf-secret' },
+				{ headers: basic('conf-1', 'conf-secret'), code: 'code-2' }
+			);
+			assertInvalidClient(res, /Multiple client authentication methods/);
+			assert.equal(codes.has('code-2'), true);
 		});
 	});
 });

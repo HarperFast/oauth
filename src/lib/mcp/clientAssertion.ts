@@ -67,9 +67,10 @@ const MAX_JTI_LENGTH = 256;
  * Cap on the whole compact JWT before any split/decode work — a legitimate
  * assertion with our claim set (even with an RSA-4096 signature) is well
  * under 2KB, so 8KB is generous. Same defense-in-depth family as the repo's
- * 2048-char request-path cap.
+ * 2048-char request-path cap. The token endpoint applies it before any client
+ * lookup or unverified parse, too.
  */
-const MAX_ASSERTION_LENGTH = 8192;
+export const MAX_ASSERTION_LENGTH = 8192;
 /** Ed25519 signatures are always exactly 64 bytes (RFC 8032); ES256 JWS signatures are r||s, 64 bytes (RFC 7518 §3.4). */
 const FIXED_SIGNATURE_LENGTH: Partial<Record<AssertionAlgorithm, number>> = { EdDSA: 64, ES256: 64 };
 /** RFC 7518 §3.3: RSA keys used with RS256 must be at least 2048 bits. */

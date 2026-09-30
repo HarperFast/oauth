@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign } from 'node:crypto';
 import { logger as harperMockLogger } from 'harper';
 import { handleToken, parseBasicAuth, _resetGrantRateLimiter } from '../../../dist/lib/mcp/token.js';
+import { MAX_ASSERTION_LENGTH } from '../../../dist/lib/mcp/clientAssertion.js';
 import { resetMCPAssertionJtisTableCache } from '../../../dist/lib/mcp/assertionJtiStore.js';
 import { resetMCPAuthCodesTableCache } from '../../../dist/lib/mcp/authCodeStore.js';
 import { _clearCimdCache, _setDnsLookup, _setFetch } from '../../../dist/lib/mcp/cimd.js';
@@ -572,7 +573,7 @@ describe('handleToken', () => {
 		assert.equal(res.body.error, 'invalid_client');
 	});
 
-	it('rejects mixing Basic header with a body client_secret', async () => {
+	it('rejects mixing Basic header with a body client_secret as invalid_client (RFC 6749 §2.3)', async () => {
 		seedCode('code-1', { client_id: 'conf-1' });
 		const res = await handleToken(
 			{ headers: basicHeader('conf-1', CONF_SECRET) },
@@ -585,8 +586,9 @@ describe('handleToken', () => {
 			},
 			mcpConfig
 		);
-		assert.equal(res.status, 400);
-		assert.equal(res.body.error, 'invalid_request');
+		assert.equal(res.status, 401);
+		assert.equal(res.body.error, 'invalid_client');
+		assert.match(res.body.error_description, /Multiple client authentication methods/);
 	});
 
 	it('authenticates client_secret_basic when headers use the Harper `.asObject` wrapper (runtime shape)', async () => {
@@ -1331,6 +1333,34 @@ describe('handleToken — client_credentials grant (#162)', () => {
 		);
 		assert.equal(lowercase.status, 400);
 		assert.equal(lowercase.body.error, 'invalid_request');
+	});
+
+	it('rejects an assertion over the verifier bound before resolving the client', async () => {
+		let lookups = 0;
+		_setDnsLookup(async () => {
+			lookups += 1;
+			return [{ address: '93.184.216.34', family: 4 }];
+		});
+		const real = signAssertion();
+		const [h, p] = real.split('.');
+		const at = (length) => `${h}.${p}.${'A'.repeat(length - h.length - p.length - 2)}`;
+		const over = await handleToken(
+			{ headers: {} },
+			grantBody({ client_assertion: at(MAX_ASSERTION_LENGTH + 1) }),
+			ccConfig
+		);
+		assert.equal(over.status, 401);
+		assert.equal(over.body.error, 'invalid_client');
+		assert.match(over.body.error_description, /exceeds the maximum allowed length/);
+		assert.equal(lookups, 0, 'no document resolution');
+		// At the bound, the request proceeds to resolution (and then fails verification).
+		const atBound = await handleToken(
+			{ headers: {} },
+			grantBody({ client_assertion: at(MAX_ASSERTION_LENGTH) }),
+			ccConfig
+		);
+		assert.equal(atBound.status, 401);
+		assert.equal(lookups, 1);
 	});
 
 	it('rejects a stored (DCR) client on this grant', async () => {

@@ -29,7 +29,12 @@ import {
 	isInteractiveCimdClient,
 	permittedAuthMethod,
 } from './clientAuthMethod.ts';
-import { type AudienceForm, CLIENT_ASSERTION_TYPE_JWT_BEARER, verifyClientAssertion } from './clientAssertion.ts';
+import {
+	type AudienceForm,
+	CLIENT_ASSERTION_TYPE_JWT_BEARER,
+	MAX_ASSERTION_LENGTH,
+	verifyClientAssertion,
+} from './clientAssertion.ts';
 import { getClientJwks } from './jwksFetcher.ts';
 import { MCPKeyStore } from './keyStore.ts';
 import { createRateLimiter, type RateLimiter } from './rateLimit.ts';
@@ -261,6 +266,9 @@ type ClientAuthResult =
 	| { client: MCPClientRecord; method: ClientAuthMethod; audienceForm?: AudienceForm }
 	| { error: TokenResponse };
 
+/** The verifier's wording for an over-length assertion, reused where the token endpoint rejects one early. */
+const ASSERTION_TOO_LONG = 'client_assertion verification failed: client_assertion exceeds the maximum allowed length';
+
 function invalidClient(description: string): { error: TokenResponse } {
 	return { error: errorResponse(401, 'invalid_client', description) };
 }
@@ -296,10 +304,11 @@ function methodMismatch(
  * - nothing (or an empty-secret Basic header carrying only the client_id, as
  *   some public clients send) → none; PKCE is the proof.
  *
- * Rejected before any lookup: a partial assertion pair, an empty or repeated
- * credential parameter, malformed Basic credentials, and more than one
- * mechanism (RFC 6749 §2.3, RFC 7521 §4.2.1) — an empty-secret Basic header
- * never accompanies an assertion.
+ * Rejected with invalid_client before any lookup: a partial assertion pair, an
+ * empty or repeated credential parameter, malformed Basic credentials, more
+ * than one mechanism (RFC 6749 §2.3, RFC 7521 §4.2.1) — an empty-secret Basic
+ * header never accompanies an assertion — and an assertion longer than the
+ * verifier accepts.
  */
 async function authenticateClient(
 	request: Request | undefined,
@@ -337,10 +346,11 @@ async function authenticateClient(
 			return invalidClient(`client_assertion_type must be ${CLIENT_ASSERTION_TYPE_JWT_BEARER}`);
 		}
 		if (hasBasic || secret !== undefined) return invalidClient('Multiple client authentication methods');
+		// The verifier's length bound, applied before the assertion is parsed for a
+		// client_id candidate or any client lookup begins.
+		if (assertion.length > MAX_ASSERTION_LENGTH) return invalidClient(ASSERTION_TOO_LONG);
 	}
-	if (hasBasic && secret !== undefined) {
-		return { error: errorResponse(400, 'invalid_request', 'Multiple client authentication methods') };
-	}
+	if (hasBasic && secret !== undefined) return invalidClient('Multiple client authentication methods');
 	if (hasBasic && clientIdParam.value !== undefined && clientIdParam.value !== basic.clientId) {
 		return { error: errorResponse(400, 'invalid_request', 'client_id mismatch between header and body') };
 	}
@@ -883,6 +893,9 @@ async function handleClientCredentialsGrant(
 	}
 	if (!assertion) {
 		return errorResponse(400, 'invalid_request', 'client_assertion is required');
+	}
+	if (assertion.length > MAX_ASSERTION_LENGTH) {
+		return errorResponse(401, 'invalid_client', ASSERTION_TOO_LONG);
 	}
 	// Proof of key possession is the ONLY accepted authentication for this
 	// grant — a Basic header or client_secret must not ride along (#159 req 6:
