@@ -381,6 +381,13 @@ export interface MCPAuthorizeState {
 	 * lib/mcp/consentBinding.ts and handlers.ts).
 	 */
 	browserNonceHash?: string;
+	/**
+	 * The token-endpoint authentication method permitted for this client when
+	 * authorization began. Carried into the authorization code and the refresh
+	 * family; a flow state without it predates the binding and is rejected at
+	 * the callback.
+	 */
+	clientAuthMethod?: string;
 }
 
 /**
@@ -397,6 +404,12 @@ export interface MCPAuthCodeRecord {
 	code_challenge_method: string;
 	redirect_uri: string;
 	scope?: string;
+	/**
+	 * Token-endpoint authentication method bound at authorization; the
+	 * exchange must use exactly this method. A code without it predates the
+	 * binding and is rejected.
+	 */
+	client_auth_method?: string;
 }
 
 /**
@@ -445,6 +458,12 @@ export interface MCPRefreshFamilyRecord {
 	resource: string;
 	scope?: string;
 	expires_at: number;
+	/**
+	 * Token-endpoint authentication method bound to this family (copied from
+	 * the authorization code). Present on bound families (`p2-` ids); every
+	 * refresh must use exactly this method.
+	 */
+	client_auth_method?: string;
 }
 
 /**

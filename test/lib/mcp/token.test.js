@@ -170,7 +170,12 @@ describe('handleToken', () => {
 		};
 	});
 
+	// Codes carry the client-authentication binding captured at authorize: the
+	// method each fixture client is registered with.
+	const BOUND_METHOD = { 'conf-1': 'client_secret_basic', 'post-1': 'client_secret_post' };
+
 	function seedCode(code, overrides = {}) {
+		const clientId = overrides.client_id ?? 'public-1';
 		codes.set(code, {
 			code,
 			client_id: 'public-1',
@@ -181,6 +186,7 @@ describe('handleToken', () => {
 			redirect_uri: REDIRECT,
 			scope: 'mcp:read',
 			created_at: 1700000000,
+			client_auth_method: BOUND_METHOD[clientId] ?? 'none',
 			...overrides,
 		});
 	}

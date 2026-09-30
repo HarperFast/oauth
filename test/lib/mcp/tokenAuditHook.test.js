@@ -150,6 +150,7 @@ describe('handleToken — audit events and onMCPTokenIssued hook', () => {
 			redirect_uri: REDIRECT,
 			scope: 'mcp:read',
 			created_at: 1700000000,
+			client_auth_method: 'none',
 			...overrides,
 		});
 	}

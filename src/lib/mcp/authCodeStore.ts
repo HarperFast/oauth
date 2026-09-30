@@ -49,6 +49,7 @@ function encodeRecord(record: MCPAuthCodeRecord): Record<string, any> {
 		code_challenge_method: record.code_challenge_method,
 		redirect_uri: record.redirect_uri,
 		scope: record.scope,
+		client_auth_method: record.client_auth_method,
 	};
 }
 
@@ -62,6 +63,7 @@ function decodeRecord(raw: Record<string, any>): MCPAuthCodeRecord {
 		code_challenge_method: raw.code_challenge_method,
 		redirect_uri: raw.redirect_uri,
 		scope: raw.scope ?? undefined,
+		client_auth_method: raw.client_auth_method ?? undefined,
 	};
 }
 

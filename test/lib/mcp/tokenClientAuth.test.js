@@ -16,7 +16,12 @@ import { _clearCimdCache, _setDnsLookup, _setFetch } from '../../../dist/lib/mcp
 import { resetMCPClientsTableCache } from '../../../dist/lib/mcp/clientStore.js';
 import { _clearJwksCache, _setJwksNow } from '../../../dist/lib/mcp/jwksFetcher.js';
 import { resetMCPKeysTableCache, SIGNING_KEY_ID } from '../../../dist/lib/mcp/keyStore.js';
-import { resetMCPRefreshFamiliesTableCache } from '../../../dist/lib/mcp/refreshTokenStore.js';
+import {
+	resetMCPRefreshFamiliesTableCache,
+	makeRefreshToken,
+	FAMILY_ID_PREFIX,
+	BOUND_FAMILY_ID_PREFIX,
+} from '../../../dist/lib/mcp/refreshTokenStore.js';
 
 const ISSUER = 'https://as.example.com';
 const TOKEN_ENDPOINT = `${ISSUER}/oauth/mcp/token`;
@@ -129,6 +134,7 @@ describe('handleToken — shared client authenticator', () => {
 	let originalDatabases;
 	let clients;
 	let codes;
+	let families;
 	let jtis;
 	let served;
 	let fetches;
@@ -174,6 +180,7 @@ describe('handleToken — shared client authenticator', () => {
 			],
 		]);
 		codes = new Map();
+		families = new Map();
 		jtis = new Map();
 		jtiCreate = async (record, context) => {
 			if (jtis.has(record.id)) {
@@ -187,7 +194,7 @@ describe('handleToken — shared client authenticator', () => {
 			oauth: {
 				harper_oauth_mcp_clients: makeTable(clients, 'client_id'),
 				mcp_auth_codes: makeTable(codes, 'code'),
-				mcp_refresh_families: makeTable(new Map(), 'family_id'),
+				mcp_refresh_families: makeTable(families, 'family_id'),
 				harper_oauth_mcp_keys: makeTable(
 					new Map([
 						[
@@ -527,6 +534,117 @@ describe('handleToken — shared client authenticator', () => {
 			});
 			assert.equal(res.status, 400);
 			assert.equal(res.body.error, 'invalid_grant');
+		});
+	});
+
+	describe('grant binding: codes and refresh families keep the method bound at authorization', () => {
+		const TYPE = 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer';
+		const withAssertion = (extra = {}) => ({
+			client_id: ASSISTANT,
+			redirect_uri: ASSISTANT_REDIRECT,
+			client_assertion: signAssertion(),
+			client_assertion_type: TYPE,
+			...extra,
+		});
+		const asPublic = { client_id: ASSISTANT, redirect_uri: ASSISTANT_REDIRECT };
+
+		function refresh(refreshToken, body, config) {
+			return handleToken(
+				{ headers: {} },
+				{ grant_type: 'refresh_token', refresh_token: refreshToken, ...body },
+				config,
+				undefined,
+				logger
+			);
+		}
+
+		function seedFamily(familyId, clientId, method) {
+			const { token, hash } = makeRefreshToken(familyId);
+			families.set(familyId, {
+				family_id: familyId,
+				current_token_hash: hash,
+				revoked: false,
+				client_id: clientId,
+				user: 'alice',
+				resource: RESOURCE,
+				expires_at: Math.floor(Date.now() / 1000) + 3600,
+				...(method === undefined ? {} : { client_auth_method: method }),
+			});
+			return token;
+		}
+
+		it('rejects an unbound (pre-activation) code before consuming it', async () => {
+			seedCode('code-1', 'public-1', REDIRECT, undefined);
+			const res = await exchange({ client_id: 'public-1', redirect_uri: REDIRECT });
+			assert.equal(res.status, 400);
+			assert.equal(res.body.error, 'invalid_grant');
+			assert.match(res.body.error_description, /predates client authentication binding/);
+			assert.equal(codes.has('code-1'), true);
+		});
+
+		it('refuses a code bound to private_key_jwt once the configuration only permits none', async () => {
+			// Authorized on a server advertising private_key_jwt; exchanged after it stopped.
+			seedCode('code-1', ASSISTANT, ASSISTANT_REDIRECT, 'private_key_jwt');
+			const res = await exchange(asPublic, { config: DEFAULT });
+			assert.equal(res.status, 400);
+			assert.equal(res.body.error, 'invalid_grant');
+			assert.match(res.body.error_description, /bound to a different client authentication method/);
+			assert.equal(codes.has('code-1'), true);
+		});
+
+		it('refuses a code bound to none once private_key_jwt becomes the permitted method', async () => {
+			seedCode('code-1', ASSISTANT, ASSISTANT_REDIRECT, 'none');
+			const res = await exchange(withAssertion(), { config: MIXED });
+			assert.equal(res.status, 400);
+			assert.match(res.body.error_description, /bound to a different client authentication method/);
+			assert.equal(codes.has('code-1'), true);
+		});
+
+		it('copies the binding into a bound family and requires the same method on every refresh', async () => {
+			seedCode('code-1', ASSISTANT, ASSISTANT_REDIRECT, 'private_key_jwt');
+			const minted = await exchange(withAssertion(), { config: MIXED });
+			assert.equal(minted.status, 200, JSON.stringify(minted.body));
+			const [family] = families.values();
+			assert.ok(family.family_id.startsWith(BOUND_FAMILY_ID_PREFIX));
+			assert.equal(family.client_auth_method, 'private_key_jwt');
+
+			const first = await refresh(minted.body.refresh_token, withAssertion({ redirect_uri: undefined }), MIXED);
+			assert.equal(first.status, 200, JSON.stringify(first.body));
+			assert.equal(families.get(family.family_id).client_auth_method, 'private_key_jwt', 'binding survives rotation');
+
+			// The document drops private_key_jwt: the client is now permitted (and presents) none.
+			served[ASSISTANT] = {
+				...ASSISTANT_DOC,
+				token_endpoint_auth_method: 'none',
+				token_endpoint_auth_methods_supported: ['none'],
+			};
+			_clearCimdCache();
+			const before = families.get(family.family_id).current_token_hash;
+			const weakened = await refresh(first.body.refresh_token, { client_id: ASSISTANT }, MIXED);
+			assert.equal(weakened.status, 400);
+			assert.equal(weakened.body.error, 'invalid_grant');
+			assert.match(weakened.body.error_description, /bound to a different client authentication method/);
+			assert.equal(families.get(family.family_id).current_token_hash, before, 'no rotation on a binding mismatch');
+		});
+
+		it('rejects a bound family whose binding an older writer dropped', async () => {
+			const token = seedFamily(`${BOUND_FAMILY_ID_PREFIX}stripped`, 'public-1', undefined);
+			const res = await refresh(token, { client_id: 'public-1' }, DEFAULT);
+			assert.equal(res.status, 400);
+			assert.match(res.body.error_description, /no client authentication binding/);
+		});
+
+		it('binds legacy families to the method clients used before the binding existed', async () => {
+			// Stored clients: their registered method; CIMD clients: none.
+			const stored = seedFamily(`${FAMILY_ID_PREFIX}legacy-dcr`, 'public-1', undefined);
+			assert.equal((await refresh(stored, { client_id: 'public-1' }, DEFAULT)).status, 200);
+			const cimdPublic = seedFamily(`${FAMILY_ID_PREFIX}legacy-cimd`, ASSISTANT, undefined);
+			assert.equal((await refresh(cimdPublic, asPublic, DEFAULT)).status, 200);
+			// The same legacy link cannot continue once private_key_jwt is required: reauthorize.
+			const cimdUpgraded = seedFamily(`${FAMILY_ID_PREFIX}legacy-cimd-2`, ASSISTANT, undefined);
+			const res = await refresh(cimdUpgraded, withAssertion({ redirect_uri: undefined }), MIXED);
+			assert.equal(res.status, 400);
+			assert.match(res.body.error_description, /bound to a different client authentication method/);
 		});
 	});
 });

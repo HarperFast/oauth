@@ -24,6 +24,7 @@ import {
 	headlessAssertionPolicy,
 	interactiveAssertionPolicy,
 	interactiveKeyIssue,
+	isClientAuthMethod,
 	isHeadlessCimdClient,
 	isInteractiveCimdClient,
 	permittedAuthMethod,
@@ -35,6 +36,7 @@ import { createRateLimiter, type RateLimiter } from './rateLimit.ts';
 import { getRequestHeader } from '../requestHeaders.ts';
 import {
 	hashRefreshToken,
+	isBoundFamilyId,
 	isProvenancedFamilyId,
 	makeRefreshToken,
 	MCPRefreshFamilyStore,
@@ -492,6 +494,8 @@ async function mintTokenPair(
 		accessTtl?: number;
 		/** Hook event type; defaults to 'access' (authorization_code). */
 		hookType?: 'access' | 'client_credentials';
+		/** Token-endpoint authentication method bound to the refresh family. */
+		clientAuthMethod?: ClientAuthMethod;
 	},
 	hookManager?: HookManager,
 	logger?: Logger
@@ -535,6 +539,7 @@ async function mintTokenPair(
 			resource: grant.resource,
 			scope: grant.scope,
 			expires_at: now + refreshTtl,
+			client_auth_method: grant.clientAuthMethod,
 		});
 		responseBody.refresh_token = refreshToken;
 	}
@@ -575,6 +580,7 @@ async function handleAuthorizationCodeGrant(
 	request: Request | undefined,
 	body: any,
 	client: MCPClientRecord,
+	clientAuthMethod: ClientAuthMethod,
 	mcpConfig: MCPConfig,
 	hookManager?: HookManager,
 	logger?: Logger
@@ -604,6 +610,23 @@ async function handleAuthorizationCodeGrant(
 	if (record.client_id !== client.client_id) {
 		return errorResponse(400, 'invalid_grant', 'Authorization code was issued to a different client');
 	}
+	// Client-authentication binding, checked before the code is consumed: the
+	// exchange must use exactly the method bound at authorization. A code
+	// without a binding predates it; both cases require reauthorization.
+	if (!isClientAuthMethod(record.client_auth_method)) {
+		return errorResponse(
+			400,
+			'invalid_grant',
+			'Authorization code predates client authentication binding; reauthorize'
+		);
+	}
+	if (record.client_auth_method !== clientAuthMethod) {
+		return errorResponse(
+			400,
+			'invalid_grant',
+			'Authorization code is bound to a different client authentication method; reauthorize'
+		);
+	}
 	if (record.redirect_uri !== redirectUri) {
 		return errorResponse(400, 'invalid_grant', 'redirect_uri does not match the authorization request');
 	}
@@ -632,6 +655,7 @@ async function handleAuthorizationCodeGrant(
 			scope: record.scope,
 			clientId: client.client_id,
 			issueRefresh: shouldIssueRefresh(client, record.scope, mcpConfig),
+			clientAuthMethod,
 		},
 		hookManager,
 		logger
@@ -642,6 +666,7 @@ async function handleRefreshTokenGrant(
 	request: Request | undefined,
 	body: any,
 	client: MCPClientRecord,
+	clientAuthMethod: ClientAuthMethod,
 	mcpConfig: MCPConfig,
 	hookManager?: HookManager,
 	logger?: Logger
@@ -731,6 +756,33 @@ async function handleRefreshTokenGrant(
 			400,
 			'invalid_grant',
 			'Refresh token family predates provenance tracking; reauthorize to continue'
+		);
+	}
+
+	// Client-authentication binding, checked before rotation: the refresh must
+	// use exactly the method bound to the family. A bound (`p2-`) family
+	// without its binding was rewritten by an older writer and is rejected.
+	// A legacy (`p1-`) family was issued when CIMD clients authenticated as
+	// public clients and stored clients by their registered method, so that
+	// is its binding. Any mismatch fails closed and requires reauthorization.
+	let boundMethod: string | undefined;
+	if (isBoundFamilyId(family.family_id)) {
+		boundMethod = family.client_auth_method;
+		if (!isClientAuthMethod(boundMethod)) {
+			return errorResponse(
+				400,
+				'invalid_grant',
+				'Refresh token family has no client authentication binding; reauthorize'
+			);
+		}
+	} else {
+		boundMethod = client._cimd ? 'none' : (client.token_endpoint_auth_method ?? 'none');
+	}
+	if (boundMethod !== clientAuthMethod) {
+		return errorResponse(
+			400,
+			'invalid_grant',
+			'Refresh token is bound to a different client authentication method; reauthorize'
 		);
 	}
 
@@ -989,9 +1041,17 @@ export async function handleToken(
 		}
 
 		if (grantType === 'authorization_code') {
-			return await handleAuthorizationCodeGrant(request, body, auth.client, mcpConfig, hookManager, logger);
+			return await handleAuthorizationCodeGrant(
+				request,
+				body,
+				auth.client,
+				auth.method,
+				mcpConfig,
+				hookManager,
+				logger
+			);
 		}
-		return await handleRefreshTokenGrant(request, body, auth.client, mcpConfig, hookManager, logger);
+		return await handleRefreshTokenGrant(request, body, auth.client, auth.method, mcpConfig, hookManager, logger);
 	} catch (error) {
 		logger?.error?.(
 			'MCP token: unexpected error during token issuance:',

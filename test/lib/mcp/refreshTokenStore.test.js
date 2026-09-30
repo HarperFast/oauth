@@ -14,6 +14,8 @@ import {
 	newFamilyId,
 	isProvenancedFamilyId,
 	FAMILY_ID_PREFIX,
+	BOUND_FAMILY_ID_PREFIX,
+	isBoundFamilyId,
 } from '../../../dist/lib/mcp/refreshTokenStore.js';
 
 function asTrackedObject(plain) {
@@ -54,9 +56,13 @@ describe('refresh-token helpers', () => {
 		assert.equal(parseRefreshToken('trailing.'), null);
 	});
 
-	it('mints family ids carrying the provenance prefix (#229)', () => {
+	it('mints bound family ids (p2-) that still count as provenanced (#229)', () => {
 		const familyId = newFamilyId();
-		assert.ok(familyId.startsWith(FAMILY_ID_PREFIX));
+		assert.ok(familyId.startsWith(BOUND_FAMILY_ID_PREFIX));
+		assert.equal(isProvenancedFamilyId(familyId), true);
+		assert.equal(isBoundFamilyId(familyId), true);
+		assert.equal(isBoundFamilyId(`${FAMILY_ID_PREFIX}legacy`), false);
+		assert.equal(isProvenancedFamilyId(`${FAMILY_ID_PREFIX}legacy`), true);
 	});
 
 	it('isProvenancedFamilyId is true for a prefixed id and false for a bare UUID', () => {

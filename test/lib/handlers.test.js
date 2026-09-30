@@ -1501,6 +1501,7 @@ describe('OAuth Handlers', () => {
 					clientId: 'mcp-client',
 					redirectUri: 'https://mcp-client.test/callback',
 					clientState: 'mcp-state-123',
+					clientAuthMethod: 'none',
 					browserNonceHash: 'will-be-matched',
 				},
 			}));
@@ -1517,6 +1518,7 @@ describe('OAuth Handlers', () => {
 					clientId: 'mcp-client',
 					redirectUri: 'https://mcp-client.test/callback',
 					clientState: 'mcp-state-123',
+					clientAuthMethod: 'none',
 					browserNonceHash: hash,
 				},
 			}));
@@ -2283,6 +2285,7 @@ describe('OAuth Handlers', () => {
 			redirectUri: 'https://mcp-client.example.com/cb',
 			scope: 'mcp:read',
 			clientState: 'mcp-state-xyz',
+			clientAuthMethod: 'none',
 		};
 
 		const MCP_CONFIG = {
@@ -2323,6 +2326,33 @@ describe('OAuth Handlers', () => {
 		// doesn't pollute later tests in this describe block.
 		afterEach(() => {
 			global.databases = originalDatabases;
+		});
+
+		it('rejects a flow state created before client-authentication binding, before any upstream exchange', async () => {
+			const unbound = { ...MCP_STATE, browserNonceHash: hashBrowserSecret(MCP_SECRET) };
+			delete unbound.clientAuthMethod;
+			mockProvider.verifyCSRFToken = createMockFn(async () => ({
+				timestamp: Date.now(),
+				providerName: 'test-provider',
+				mcp: unbound,
+			}));
+			const exchangesBefore = mockProvider.exchangeCodeForToken.mock.calls.length;
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				{ mcpConfig: MCP_CONFIG, logger: mockLogger }
+			);
+			assert.equal(result.status, 302);
+			const url = new URL(result.headers.Location);
+			assert.equal(url.origin + url.pathname, MCP_STATE.redirectUri);
+			assert.equal(url.searchParams.get('error'), 'invalid_request');
+			assert.match(url.searchParams.get('error_description'), /predates client authentication binding/);
+			assert.equal(mockProvider.exchangeCodeForToken.mock.calls.length, exchangesBefore, 'no upstream exchange');
+			assert.equal(storedAuthCodes.size, 0, 'no code minted');
 		});
 
 		it('on success, mints auth code and redirects to MCP client redirect_uri', async () => {

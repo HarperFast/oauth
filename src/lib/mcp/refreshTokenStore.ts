@@ -77,18 +77,32 @@ export function parseRefreshToken(token: unknown): { familyId: string } | null {
 // record field) survives rotation, since rotation reuses the family id
 // (makeRefreshToken(family.family_id)) and no `put` can touch it. A family
 // minted before this version has a bare-UUID id and reads back unprefixed —
-// that absence IS the pre-provenance signal. A future provenance bump changes
-// this prefix. Must not contain '.' — parseRefreshToken splits on the first dot.
+// that absence IS the pre-provenance signal. Must not contain '.' —
+// parseRefreshToken splits on the first dot.
+//
+// `p1-` families predate the client-authentication binding (legacy). `p2-`
+// families are minted with a bound `client_auth_method`; a `p2-` family whose
+// binding is missing (e.g. rewritten by an older node, whose full-record put
+// drops unknown fields) is rejected rather than treated as legacy. Version
+// 2.7.x treats `p2-` ids as pre-provenance and retires them, so a rollback to
+// 2.7 fails closed for bound families; versions before 2.7 have no such check,
+// so bound grants must never be served by them.
 export const FAMILY_ID_PREFIX = 'p1-';
+export const BOUND_FAMILY_ID_PREFIX = 'p2-';
 
-/** Generate a new, unique family id, carrying the current provenance marker. */
+/** Generate a new, unique family id, carrying the current (bound) marker. */
 export function newFamilyId(): string {
-	return `${FAMILY_ID_PREFIX}${randomUUID()}`;
+	return `${BOUND_FAMILY_ID_PREFIX}${randomUUID()}`;
 }
 
 /** Whether a family id was minted by a version that stamps provenance (#229). */
 export function isProvenancedFamilyId(id: string): boolean {
-	return id.startsWith(FAMILY_ID_PREFIX);
+	return id.startsWith(FAMILY_ID_PREFIX) || id.startsWith(BOUND_FAMILY_ID_PREFIX);
+}
+
+/** Whether a family id was minted with a client-authentication binding. */
+export function isBoundFamilyId(id: string): boolean {
+	return id.startsWith(BOUND_FAMILY_ID_PREFIX);
 }
 
 function encodeRecord(record: MCPRefreshFamilyRecord): Record<string, any> {
@@ -101,6 +115,7 @@ function encodeRecord(record: MCPRefreshFamilyRecord): Record<string, any> {
 		resource: record.resource,
 		scope: record.scope,
 		expires_at: record.expires_at,
+		client_auth_method: record.client_auth_method,
 	};
 }
 
@@ -114,6 +129,7 @@ function decodeRecord(raw: Record<string, any>): MCPRefreshFamilyRecord {
 		resource: raw.resource,
 		scope: raw.scope ?? undefined,
 		expires_at: raw.expires_at,
+		client_auth_method: raw.client_auth_method ?? undefined,
 	};
 }
 

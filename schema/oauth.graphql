@@ -48,6 +48,7 @@ type mcp_auth_codes @table(database: "oauth", expiration: 300) {
 	code_challenge_method: String # Always "S256"
 	redirect_uri: String # Bound at issuance; /token must match
 	scope: String # Space-separated; may be empty
+	client_auth_method: String # Token-endpoint auth method bound at authorization; /token must present exactly this
 	created_at: Float @createdTime # Harper-assigned on insert (epoch ms)
 }
 
@@ -86,7 +87,8 @@ type mcp_refresh_families @table(database: "oauth", expiration: 2592000) {
 	scope: String
 	created_at: Float @createdTime # Harper-assigned on insert; retained across rotation writes (epoch ms)
 	expires_at: Float # Unix seconds; refresh rejected once exceeded
-	# Provenance (#229) is carried by the family_id prefix, not a column here — see FAMILY_ID_PREFIX in refreshTokenStore.ts.
+	client_auth_method: String # Token-endpoint auth method bound to the family (bound families, `p2-` ids)
+	# Provenance (#229) and the binding version are carried by the family_id prefix — see refreshTokenStore.ts.
 }
 
 ## MCP client-assertion replay guard (RFC 7523 jti; #159/#160)

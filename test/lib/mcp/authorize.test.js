@@ -19,6 +19,7 @@ import {
 	buildBrowserSecretCookie,
 	hashBrowserSecret,
 } from '../../../dist/lib/mcp/consentBinding.js';
+import { CHATGPT_CIMD_DOCUMENT, CHATGPT_CLIENT_ID, CHATGPT_REDIRECT_URI } from '../../helpers/cimdFixtures.js';
 
 /**
  * Minimal RequestTarget stub for the existing target.get?.() pattern.
@@ -485,6 +486,7 @@ describe('handleAuthorize', () => {
 			assert.equal(metadata.mcp.redirectUri, BASE_QUERY.redirect_uri);
 			assert.equal(metadata.mcp.scope, BASE_QUERY.scope);
 			assert.equal(metadata.mcp.clientState, BASE_QUERY.state);
+			assert.equal(metadata.mcp.clientAuthMethod, 'none', 'the permitted method is bound into the flow state');
 		});
 
 		it('binds the upstream state to the initiating browser session (#181)', async () => {
@@ -852,6 +854,38 @@ describe('handleAuthorize — CIMD interstitial', () => {
 
 		assert.equal(response.status, 200);
 		assert.match(response.body, /Warning|loopback/i);
+	});
+
+	describe('client-authentication binding', () => {
+		const CHATGPT_QUERY = { ...CIMD_QUERY, client_id: CHATGPT_CLIENT_ID, redirect_uri: CHATGPT_REDIRECT_URI };
+
+		it('captures none for ChatGPT where private_key_jwt is not advertised', async () => {
+			_setFetch(makeCimdFetch(CHATGPT_CIMD_DOCUMENT));
+			const { entries, harnesses } = makeProviderRegistry('github');
+			const response = await handleAuthorize(makeRequest(), makeTarget(CHATGPT_QUERY), { enabled: true }, entries);
+			assert.equal(response.status, 200);
+			assert.equal(harnesses.github.generatedTokens[0].mcp.clientAuthMethod, 'none');
+		});
+
+		it('captures private_key_jwt for ChatGPT where it is advertised', async () => {
+			_setFetch(makeCimdFetch(CHATGPT_CIMD_DOCUMENT));
+			const { entries, harnesses } = makeProviderRegistry('github');
+			const config = { enabled: true, clientCredentials: { enabled: true } };
+			const response = await handleAuthorize(makeRequest(), makeTarget(CHATGPT_QUERY), config, entries);
+			assert.equal(response.status, 200);
+			assert.equal(harnesses.github.generatedTokens[0].mcp.clientAuthMethod, 'private_key_jwt');
+		});
+
+		it('redirects unauthorized_client when no method can be permitted for the client', async () => {
+			_setFetch(makeCimdFetch(makeCimdDoc(CIMD_CLIENT_ID, { token_endpoint_auth_method: 'private_key_jwt' })));
+			const { entries, harnesses } = makeProviderRegistry('github');
+			const response = await handleAuthorize(makeRequest(), makeTarget(CIMD_QUERY), { enabled: true }, entries);
+			assert.equal(response.status, 302);
+			const params = new URL(response.headers.Location).searchParams;
+			assert.equal(params.get('error'), 'unauthorized_client');
+			assert.match(params.get('error_description'), /no token endpoint authentication method/);
+			assert.equal(harnesses.github.generatedTokens.length, 0, 'no flow state minted');
+		});
 	});
 
 	it('stored/DCR clients bypass the interstitial and redirect directly (302)', async () => {
