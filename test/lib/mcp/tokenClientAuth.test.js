@@ -722,5 +722,65 @@ describe('handleToken — shared client authenticator', () => {
 			assertInvalidClient(res, /Multiple client authentication methods/);
 			assert.equal(codes.has('code-2'), true);
 		});
+
+		it('answers server_error, not an authentication or grant error, when a store read fails', async () => {
+			const failingGet = async () => {
+				throw new Error('storage unavailable');
+			};
+			seedCode('code-2', 'public-1', REDIRECT, 'none');
+			const table = global.databases.oauth;
+
+			const realClients = table.harper_oauth_mcp_clients.get;
+			table.harper_oauth_mcp_clients.get = failingGet;
+			const client = await exchange({ client_id: 'public-1', redirect_uri: REDIRECT }, { code: 'code-2' });
+			assert.equal(client.status, 500, JSON.stringify(client.body));
+			assert.equal(client.body.error, 'server_error');
+			table.harper_oauth_mcp_clients.get = realClients;
+
+			const realCodes = table.mcp_auth_codes.get;
+			table.mcp_auth_codes.get = failingGet;
+			const code = await exchange({ client_id: 'public-1', redirect_uri: REDIRECT }, { code: 'code-2' });
+			assert.equal(code.status, 500, JSON.stringify(code.body));
+			assert.equal(code.body.error, 'server_error');
+			table.mcp_auth_codes.get = realCodes;
+			assert.equal(codes.has('code-2'), true, 'the code is not consumed');
+
+			const minted = await exchange({ client_id: 'public-1', redirect_uri: REDIRECT }, { code: 'code-2' });
+			assert.equal(minted.status, 200, JSON.stringify(minted.body));
+			const [family] = families.values();
+			const hashBefore = family.current_token_hash;
+			table.mcp_refresh_families.get = failingGet;
+			const refreshed = await handleToken(
+				{ headers: {} },
+				{ grant_type: 'refresh_token', refresh_token: minted.body.refresh_token, client_id: 'public-1' },
+				DEFAULT,
+				undefined,
+				logger
+			);
+			assert.equal(refreshed.status, 500, JSON.stringify(refreshed.body));
+			assert.equal(refreshed.body.error, 'server_error');
+			assert.equal(families.get(family.family_id).current_token_hash, hashBefore, 'no rotation');
+			assert.equal(families.get(family.family_id).revoked, false, 'no revocation');
+		});
+
+		it('still reports a missing client, code or family as a client or grant error', async () => {
+			assertInvalidClient(await exchange({ client_id: 'nobody', redirect_uri: REDIRECT }), /Unknown client/);
+			const noCode = await exchange({ client_id: 'public-1', redirect_uri: REDIRECT }, { code: 'no-such-code' });
+			assert.equal(noCode.status, 400);
+			assert.equal(noCode.body.error, 'invalid_grant');
+			const noFamily = await handleToken(
+				{ headers: {} },
+				{
+					grant_type: 'refresh_token',
+					refresh_token: `${BOUND_FAMILY_ID_PREFIX}missing.secret`,
+					client_id: 'public-1',
+				},
+				DEFAULT,
+				undefined,
+				logger
+			);
+			assert.equal(noFamily.status, 400);
+			assert.equal(noFamily.body.error, 'invalid_grant');
+		});
 	});
 });

@@ -150,18 +150,24 @@ export class MCPRefreshFamilyStore {
 		}
 	}
 
+	/**
+	 * Returns null when no such family is stored. A read failure is logged
+	 * and rethrown, so the token endpoint answers server_error rather than
+	 * invalid_grant.
+	 */
 	async get(familyId: string): Promise<MCPRefreshFamilyRecord | null> {
 		const table = getFamiliesTable();
+		let raw;
 		try {
-			const raw = await table.get(familyId);
-			if (!raw || !raw.family_id) {
-				return null;
-			}
-			return decodeRecord(raw);
+			raw = await table.get(familyId);
 		} catch (error) {
 			this.logger?.error?.('Failed to retrieve MCP refresh family:', error);
+			throw error;
+		}
+		if (!raw || !raw.family_id) {
 			return null;
 		}
+		return decodeRecord(raw);
 	}
 
 	async delete(familyId: string): Promise<void> {

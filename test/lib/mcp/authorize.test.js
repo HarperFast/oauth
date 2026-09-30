@@ -246,6 +246,17 @@ describe('handleAuthorize', () => {
 			const response = await handleAuthorize(makeRequest(), target, validConfig, entries);
 			assert.equal(response.status, 400);
 		});
+
+		it('answers 500 server_error, not invalid_client, when the client store read fails', async () => {
+			const { entries, harnesses } = newRegistry();
+			global.databases.oauth.harper_oauth_mcp_clients.get = async () => {
+				throw new Error('storage unavailable');
+			};
+			const response = await handleAuthorize(makeRequest(), makeTarget(BASE_QUERY), validConfig, entries);
+			assert.equal(response.status, 500);
+			assert.equal(response.body.error, 'server_error');
+			assert.equal(harnesses.github.generatedTokens.length, 0, 'no flow state is issued');
+		});
 	});
 
 	describe('phase 2 — post-validation redirect to client redirect_uri with error', () => {

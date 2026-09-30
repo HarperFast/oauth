@@ -135,6 +135,13 @@ describe('MCPRefreshFamilyStore', () => {
 		assert.equal(await store.get('nope'), null);
 	});
 
+	it('propagates get() errors, so a read failure is never reported as a missing family', async () => {
+		global.databases.oauth.mcp_refresh_families.get = async () => {
+			throw new Error('db read failure');
+		};
+		await assert.rejects(() => store.get('fam-1'), /db read failure/);
+	});
+
 	it('decodes a missing revoked flag as false', async () => {
 		const { revoked, ...withoutRevoked } = sample;
 		void revoked;
