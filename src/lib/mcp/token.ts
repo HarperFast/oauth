@@ -719,7 +719,7 @@ async function handleClientCredentialsGrant(
 	// LAST: consuming the jti is the one irreversible step before minting.
 	// Single-use is best-effort under concurrency — see the bound documented in
 	// assertionJtiStore.ts and docs/mcp-oauth.md (atomic reserve: harper#1745).
-	const fresh = await new MCPAssertionJtiStore(logger).checkAndRecord(clientId, result.claims.jti);
+	const fresh = await new MCPAssertionJtiStore(logger).checkAndRecord(clientId, result.claims.jti, result.claims.exp);
 	if (!fresh) {
 		return errorResponse(400, 'invalid_grant', 'client_assertion jti has already been used');
 	}

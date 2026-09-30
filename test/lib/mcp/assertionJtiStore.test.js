@@ -16,6 +16,8 @@ import {
 	MCPAssertionJtiStore,
 	jtiKey,
 	resetMCPAssertionJtisTableCache,
+	replayRetentionExpiresAt,
+	REPLAY_RETENTION_MARGIN_SECONDS,
 } from '../../../dist/lib/mcp/assertionJtiStore.js';
 
 function conflictError() {
@@ -124,5 +126,85 @@ describe('MCPAssertionJtiStore', () => {
 		global.databases = { oauth: {} };
 		resetMCPAssertionJtisTableCache();
 		await assert.rejects(() => store.checkAndRecord('client-1', 'jti-abc'), /mcp_assertion_jtis/);
+	});
+});
+
+describe('MCPAssertionJtiStore — explicit per-record retention', () => {
+	let originalDatabases;
+	let rows;
+	let clockMs;
+	let lastCreate;
+
+	// The verifier's clock tolerance (clientAssertion.ts default).
+	const CLOCK_TOLERANCE_SECONDS = 5;
+
+	before(() => {
+		originalDatabases = global.databases;
+	});
+	after(() => {
+		global.databases = originalDatabases;
+	});
+
+	beforeEach(() => {
+		resetMCPAssertionJtisTableCache();
+		rows = new Map();
+		clockMs = Date.now();
+		lastCreate = undefined;
+		// A table that honours per-record expiry the way Harper's sweep does in
+		// the worst case: a row is gone as soon as its expiresAt has passed.
+		global.databases = {
+			oauth: {
+				mcp_assertion_jtis: {
+					create: async (record, context) => {
+						lastCreate = { record, context };
+						const existing = rows.get(record.id);
+						if (existing && existing.expiresAt > clockMs) throw conflictError();
+						rows.set(record.id, { record, expiresAt: context?.expiresAt ?? clockMs + 120_000 });
+					},
+				},
+			},
+		};
+	});
+
+	it('writes the expiry into the create context and mirrors it in expires_at', async () => {
+		const exp = Math.floor(Date.now() / 1000) + 300;
+		assert.equal(await new MCPAssertionJtiStore().checkAndRecord('client-1', 'jti-1', exp), true);
+		const expected = (exp + REPLAY_RETENTION_MARGIN_SECONDS) * 1000;
+		assert.equal(lastCreate.context.expiresAt, expected);
+		assert.equal(lastCreate.record.expires_at, expected);
+	});
+
+	it('rejects a replay at the expiry boundary while the assertion is still acceptable', async () => {
+		const store = new MCPAssertionJtiStore();
+		const exp = Math.floor(Date.now() / 1000) + 300; // an interactive assertion's maximum window
+		assert.equal(await store.checkAndRecord('client-1', 'jti-edge', exp), true);
+		// The verifier still accepts this assertion until exp + tolerance.
+		clockMs = (exp + CLOCK_TOLERANCE_SECONDS) * 1000 - 1;
+		assert.equal(await store.checkAndRecord('client-1', 'jti-edge', exp), false, 'replay still inside the window');
+		// Only once the assertion can no longer be accepted may the row lapse.
+		clockMs = (exp + REPLAY_RETENTION_MARGIN_SECONDS) * 1000 + 1;
+		assert.equal(await store.checkAndRecord('client-1', 'jti-edge', exp), true);
+	});
+
+	it('retention follows each assertion exp, so a window change after writing cannot shorten it', () => {
+		const nowMs = Date.parse('2026-09-30T00:00:00Z');
+		const now = nowMs / 1000;
+		// Written under a 60 s window, then under a 300 s window: each row covers
+		// its own assertion's acceptance (exp + tolerance) regardless of the
+		// setting in force when it is checked later.
+		for (const exp of [now + 60, now + 300, now + 305]) {
+			const expiresAt = replayRetentionExpiresAt(exp, nowMs);
+			assert.ok(expiresAt > (exp + CLOCK_TOLERANCE_SECONDS) * 1000, `exp ${exp - now}s covered`);
+		}
+		// A fixed 120 s table expiry would not cover a 300 s assertion.
+		assert.ok(nowMs + 120_000 < (now + 300 + CLOCK_TOLERANCE_SECONDS) * 1000);
+	});
+
+	it('falls back to now + 120 s when no usable exp is supplied', () => {
+		const nowMs = Date.parse('2026-09-30T00:00:00Z');
+		assert.equal(replayRetentionExpiresAt(undefined, nowMs), nowMs + 120_000);
+		assert.equal(replayRetentionExpiresAt(Number.NaN, nowMs), nowMs + 120_000);
+		// An exp already in the past still retains from now.
+		assert.equal(replayRetentionExpiresAt(nowMs / 1000 - 10, nowMs), nowMs + REPLAY_RETENTION_MARGIN_SECONDS * 1000);
 	});
 });
