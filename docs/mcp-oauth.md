@@ -699,13 +699,29 @@ a verification path for it is enabled:
 enabled paths accept: `RS256`, `ES256`, `EdDSA` whenever the interactive path is
 active, and `EdDSA` alone only if CIMD resolution is off.
 
-The ChatGPT-shaped test document resolves to …; live ChatGPT compatibility remains subject to the planned exchange and refresh capture.
+**Recorded ChatGPT behaviour.** In one session recorded against a test
+authorization server that advertised both `none` and `private_key_jwt`, ChatGPT
+authenticated its code exchange and four refreshes with `private_key_jwt`:
+`RS256` with a 2048-bit key from its same-origin `jwks_uri`, header `typ` `JWT`,
+a 60-second lifetime, and the token endpoint URL as the single `aud`. In a
+second session, offered only `none`, it used `none`. This server's issuer-only
+audience policy refuses those assertions unless the audience exception below
+lists ChatGPT's client ID and has not expired. The recording was not made against this plugin; it
+covers one session per case, shows no key rotation, and does not show whether
+each refresh presented the refresh token returned by the previous one.
 
-| Server configuration                              | Resolves to                                             |
-| ------------------------------------------------- | ------------------------------------------------------- |
-| neither setting (default)                         | `none` (PKCE, no client authentication)                 |
-| `clientCredentials.enabled` only                  | `private_key_jwt`, with the assertion verified as below |
-| `clientIdMetadataDocuments.privateKeyJwt.enabled` | `private_key_jwt`, with the assertion verified as below |
+| Configuration                                                              | `private_key_jwt` advertised | `token_endpoint_auth_signing_alg_values_supported` | ChatGPT is permitted | ChatGPT's recorded request shape                                  |
+| -------------------------------------------------------------------------- | ---------------------------- | -------------------------------------------------- | -------------------- | ----------------------------------------------------------------- |
+| CIMD on, `privateKeyJwt.enabled` absent or `false`, headless off (default) | no                           | omitted                                            | `none`               | the `none` form is accepted                                       |
+| CIMD on, `privateKeyJwt.enabled: true`                                     | yes                          | `RS256`, `ES256`, `EdDSA`                          | `private_key_jwt`    | refused (`invalid_client`) unless an unexpired exception lists it |
+| CIMD on, headless on, `privateKeyJwt.enabled` any value                    | yes                          | `RS256`, `ES256`, `EdDSA`                          | `private_key_jwt`    | refused (`invalid_client`) unless an unexpired exception lists it |
+| CIMD off, headless off, `privateKeyJwt.enabled` absent or `false`          | no                           | omitted                                            | not resolved         | —                                                                 |
+| CIMD off with headless on, or with `privateKeyJwt.enabled: true`           | startup error                | —                                                  | —                    | —                                                                 |
+
+Enabling or disabling Dynamic Client Registration does not change these arrays:
+stored clients keep authenticating with their registered secrets, so the secret
+methods stay listed. The audience exception changes neither the metadata nor the
+method a client is permitted.
 
 **Document rules.** The document is rejected with `invalid_client` when:
 
@@ -784,6 +800,39 @@ mcp:
 `privateKeyJwt.enabled` requires CIMD resolution and an `https:` issuer (loopback
 `http:` is allowed for development).
 
+#### ChatGPT on a server with headless agents
+
+Enabling `mcp.clientCredentials` advertises `private_key_jwt` and activates the
+interactive verifier, so ChatGPT, which prefers `private_key_jwt`, must present a
+verified assertion on every code exchange and refresh once its host is admitted. Setting
+`privateKeyJwt.enabled: false` does not change that, and ChatGPT's recorded
+assertions use the token endpoint as `aud`, which the issuer-only policy
+refuses. To keep ChatGPT working on such a server, before the cutover:
+
+1. Configure the exact-ID exception with an expiry you choose, as a date-time
+   with an explicit timezone:
+
+   ```yaml
+   mcp:
+     clientIdMetadataDocuments:
+       privateKeyJwt:
+         tokenEndpointAudience:
+           clientIds:
+             - https://chatgpt.com/oauth/client.json
+           expiresAt: '${CHATGPT_AUDIENCE_EXCEPTION_EXPIRES_AT}' # for example 2027-01-31T00:00:00Z
+   ```
+
+   An unset variable leaves the placeholder unparseable, and startup fails.
+
+2. Add `chatgpt.com` to `clientIdMetadataDocuments.allowedHosts`, which headless
+   agents require, and to `dynamicClientRegistration.allowedRedirectUriHosts` if
+   that is set, keeping the existing entries.
+3. Reauthorize ChatGPT links whose grants are bound to `none`; the exception
+   cannot change a grant's binding.
+
+Once `expiresAt` passes, ChatGPT's token-endpoint-audience assertions are
+refused (`invalid_client`) until the exception is renewed.
+
 ### Presented client authentication at the token endpoint
 
 These rules apply to every client on `authorization_code` and `refresh_token`:
@@ -793,15 +842,20 @@ These rules apply to every client on `authorization_code` and `refresh_token`:
   `client_secret_basic`, and a body `client_secret` presents
   `client_secret_post`. Nothing, or an empty-secret `Basic` header carrying only
   the `client_id`, presents `none`.
-- These are rejected with `invalid_client` (401): half an assertion pair, an
-  empty or repeated credential parameter, an unknown `client_assertion_type`,
-  malformed `Basic` credentials, and an assertion alongside a secret or any
-  `Basic` header. A repeated `client_id` is `invalid_request`.
+- These are rejected with `invalid_client` (401) before any client lookup: half
+  an assertion pair, an empty or repeated credential parameter, an unknown
+  `client_assertion_type`, malformed `Basic` credentials, a `Basic` header with a
+  secret alongside a body `client_secret`, an assertion alongside a secret or any
+  `Basic` header, and an assertion longer than 8192 characters. A repeated
+  `client_id` is `invalid_request`.
 - A presentation that differs from the permitted method is `invalid_client`. A
   client permitted `none` that sends assertion parameters is rejected rather
   than having them ignored.
 - With an assertion, `client_id` may be omitted; the client is identified by the
   assertion's `sub` and verified in full.
+- A storage failure while reading the client, the authorization code or the
+  refresh family returns `server_error` (500); a record that does not exist
+  returns `invalid_client` or `invalid_grant`.
 
 ### Grant binding
 
@@ -826,6 +880,27 @@ Migration and rollback:
 - Drain older nodes before issuing bound grants, and never route bound grants to
   them: 2.7.x retires `p2-` families (fail closed), but versions before 2.7 do
   not check them.
+- This version binds every new authorization code and refresh family, whether or
+  not `private_key_jwt` is advertised, so the drain applies before it serves any
+  grant. Versions before
+  this one neither write nor read a code's binding, so they do not check it when
+  redeeming a code, and a family rotated by a version before 2.7 loses its
+  binding, after which this version refuses it.
+
+**Refresh bursts.** In the recorded session ChatGPT refreshed four times within
+6.6 seconds of the code exchange, each time with a new assertion. A grant bound
+to `private_key_jwt` needs a new assertion on every refresh, and every refresh
+must present the refresh token returned by the previous one; there is no minimum
+interval between refreshes and no grace period for a superseded token. The same
+assertion presented again is `invalid_client` and rotates nothing; a superseded
+refresh token is `invalid_grant` and revokes the family.
+
+**Concurrency.** Neither the replay record nor the refresh rotation is atomic on
+Harper. More than one concurrent presentation of one assertion can be accepted.
+Concurrent refreshes of one token are not serialized: depending on timing, more
+than one can rotate it, after which only the last-written token works and
+presenting any other revokes the family; or the later requests see a superseded
+token and revoke the family at once, and the client reauthorizes.
 
 ### Stored/DCR registration and method selection remain; the stricter token-request parser and grant binding also apply to stored clients.
 
