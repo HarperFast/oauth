@@ -2,6 +2,32 @@
 
 All notable changes to `@harperfast/oauth` are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Entries prior to 2.2.0 were backfilled from the [GitHub release notes](https://github.com/HarperFast/oauth/releases).
 
+## [Unreleased]
+
+### Added
+
+- **Interactive CIMD clients can authenticate with `private_key_jwt`**: the token endpoint verifies client assertions from interactive Client ID Metadata Document clients.
+  - Algorithms: RS256, ES256 or EdDSA, narrowed to the document's `token_endpoint_auth_signing_alg`.
+  - Keys come from inline `jwks` or from `jwks_uri`. A `jwks_uri` is fetched with the same controls as the document (validated and pinned addresses, no redirects, size and time limits) and must be on the client ID's origin unless `mcp.clientIdMetadataDocuments.privateKeyJwt.jwksUriAllowedOrigins` admits another. Only key material is cached, per client.
+  - The server permits one method per client: the document's preference when this server advertises it. On a server that advertises `private_key_jwt` (headless agents enabled, or the new, off-by-default `mcp.clientIdMetadataDocuments.privateKeyJwt.enabled`), a document such as ChatGPT's resolves to `private_key_jwt`; otherwise it resolves to `none`.
+  - The interactive assertion audience is the issuer. `privateKeyJwt.tokenEndpointAudience` is an opt-in exception with a required expiry that also accepts the advertised token endpoint for listed client IDs.
+- **The client-authentication method is bound to the grant**: the method permitted at `/oauth/mcp/authorize` must be used for the code exchange and for every refresh of that grant; a mismatch is `invalid_grant` and the client reauthorizes.
+
+### Changed
+
+- **Client credentials presented at the token endpoint are verified or rejected** (`authorization_code` and `refresh_token`). Half an assertion pair, an empty or repeated credential parameter, malformed `Basic` credentials, or an assertion alongside another mechanism is rejected with `invalid_client`. A client permitted `none` that sends assertion parameters is rejected. **Compatibility:** assertion parameters that were previously ignored now cause `invalid_client`.
+- **Interactive CIMD documents are validated for their declared authentication.** A document is rejected with `invalid_client` when:
+  - `token_endpoint_auth_method` is present but not a string;
+  - `token_endpoint_auth_methods_supported` is not an array of strings, or omits the singular value;
+  - it declares `client_secret_basic`, `client_secret_post` or `client_secret_jwt`;
+  - it has both `jwks` and `jwks_uri`, or inline keys with private key material.
+- **`client_credentials` assertions also accept the issuer as `aud`.** The token endpoint URL stays accepted unless `mcp.clientCredentials.acceptTokenEndpointAudience` is `false`. `typ: client-authentication+jwt` is accepted, and `jku`, `jwk`, `x5u` and `x5c` headers are rejected.
+- **Client-assertion replay records carry an explicit per-record expiry** (the assertion's `exp` plus 60 seconds) instead of the table's fixed 120 seconds.
+- **Upgrade note:**
+  - Flow states and authorization codes created before this version are rejected; the client restarts authorization.
+  - New refresh families use `p2-` ids and carry the binding; `p1-` families stay bound to the method used when they were issued.
+  - Drain older nodes before issuing bound grants and never route bound grants to versions before 2.7. Version 2.7.x retires `p2-` families.
+
 ## [2.7.0] - 2026-09-25
 
 ### Added
