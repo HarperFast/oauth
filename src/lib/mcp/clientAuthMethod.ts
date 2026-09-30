@@ -15,9 +15,8 @@
  *   else `[token_endpoint_auth_method]`, else `["none"]` (a provisional
  *   default for documents declaring neither);
  * - intersection = declared ∩ advertised ∩ permitted-for-this-client, where
- *   `private_key_jwt` is permitted only when the client's keys are usable
- *   (inline `jwks`, or a `jwks_uri` allowed by the location policy) and its
- *   `token_endpoint_auth_signing_alg`, when pinned, is supported;
+ *   `private_key_jwt` is permitted subject to the client's keys.
+ *   Selection checks the inline key set or the `jwks_uri` location policy and any signing-algorithm pin. For `jwks_uri`, the fetched keys are validated during token exchange.
  * - the singular preference if it is in the intersection; otherwise the sole
  *   member; otherwise `private_key_jwt` when it is a member (the policy
  *   prefers it); otherwise the client is refused;

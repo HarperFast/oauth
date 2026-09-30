@@ -5,8 +5,8 @@
  * Harper table so a captured assertion cannot be redeemed twice (#159 security
  * req 1 — a timestamp-only window is insufficient).
  *
- * Retention is explicit per record: each row expires at the assertion's own
- * `exp` plus REPLAY_RETENTION_MARGIN_SECONDS, written as Harper's per-record
+ * Retention is explicit per record. Expires at the later of assertion `exp` and insertion time, plus 60 seconds.
+ * The margin is REPLAY_RETENTION_MARGIN_SECONDS, written as Harper's per-record
  * `expiresAt` (and mirrored in `expires_at`). Because it derives from the
  * accepted `exp` rather than from configuration, a row always outlives the
  * window in which its assertion could still be accepted, whatever the window

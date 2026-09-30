@@ -9,9 +9,9 @@ All notable changes to `@harperfast/oauth` are documented here. The format is ba
 - **Interactive CIMD clients can authenticate with `private_key_jwt`**: the token endpoint verifies client assertions from interactive Client ID Metadata Document clients.
   - Algorithms: RS256, ES256 or EdDSA, narrowed to the document's `token_endpoint_auth_signing_alg`.
   - Keys come from inline `jwks` or from `jwks_uri`. A `jwks_uri` is fetched with the same controls as the document (validated and pinned addresses, no redirects, size and time limits) and must be on the client ID's origin unless `mcp.clientIdMetadataDocuments.privateKeyJwt.jwksUriAllowedOrigins` admits another. Only key material is cached, per client.
-  - The server permits one method per client: the document's preference when this server advertises it. On a server that advertises `private_key_jwt` (headless agents enabled, or the new, off-by-default `mcp.clientIdMetadataDocuments.privateKeyJwt.enabled`), a document such as ChatGPT's resolves to `private_key_jwt`; otherwise it resolves to `none`.
+  - The server permits one method per client: the document's preference when this server advertises it. Selection checks the inline key set or the `jwks_uri` location policy and any signing-algorithm pin. For `jwks_uri`, the fetched keys are validated during token exchange. The ChatGPT-shaped test document resolves to `private_key_jwt` on a server that advertises `private_key_jwt` (headless agents enabled, or the new, off-by-default `mcp.clientIdMetadataDocuments.privateKeyJwt.enabled`), and to `none` otherwise; live ChatGPT compatibility remains subject to the planned exchange and refresh capture.
   - The interactive assertion audience is the issuer. `privateKeyJwt.tokenEndpointAudience` is an opt-in exception with a required expiry that also accepts the advertised token endpoint for listed client IDs.
-- **The client-authentication method is bound to the grant**: the method permitted at `/oauth/mcp/authorize` must be used for the code exchange and for every refresh of that grant; a mismatch is `invalid_grant` and the client reauthorizes.
+- **The client-authentication method is bound to the grant**: the method permitted at `/oauth/mcp/authorize` must be used for the code exchange and for every refresh of that grant. A request that authenticates under current policy but conflicts with a bound code or family returns `invalid_grant`; a currently unpermitted presentation returns `invalid_client` before grant lookup. The client then reauthorizes.
 
 ### Changed
 
@@ -23,7 +23,8 @@ All notable changes to `@harperfast/oauth` are documented here. The format is ba
   - it has both `jwks` and `jwks_uri`, or inline keys with private key material.
 - **Advertised signing algorithms are the union of what the enabled verification paths accept.** A server with `client_credentials` enabled now lists `RS256`, `ES256` and `EdDSA` in `token_endpoint_auth_signing_alg_values_supported` (previously `EdDSA` only), because interactive CIMD assertions are verified there as well.
 - **`client_credentials` assertions also accept the issuer as `aud`.** The token endpoint URL stays accepted unless `mcp.clientCredentials.acceptTokenEndpointAudience` is `false`. `typ: client-authentication+jwt` is accepted, and `jku`, `jwk`, `x5u` and `x5c` headers are rejected.
-- **Client-assertion replay records carry an explicit per-record expiry** (the assertion's `exp` plus 60 seconds) instead of the table's fixed 120 seconds.
+- **Fetched documents' media type is compared exactly.** The response media type, excluding parameters, must be exactly `application/json` or `application/jwk-set+json`. CIMD documents accept `application/json` only; a type that merely contains it, such as `text/plain; x=application/json`, is rejected.
+- **Client-assertion replay records carry an explicit per-record expiry** instead of the table's fixed 120 seconds. Expires at the later of assertion `exp` and insertion time, plus 60 seconds.
 - **Upgrade note:**
   - Flow states and authorization codes created before this version are rejected; the client restarts authorization.
   - New refresh families use `p2-` ids and carry the binding; `p1-` families stay bound to the method used when they were issued.

@@ -675,8 +675,9 @@ the intersection of:
 - the methods the document declares: `token_endpoint_auth_methods_supported`
   when present, else `token_endpoint_auth_method`, else `none`;
 - the methods this server advertises in `token_endpoint_auth_methods_supported`;
-- the methods usable for this client: `none`, and `private_key_jwt` when the
-  client's keys are usable (below).
+- the methods usable for this client: `none`, and `private_key_jwt` subject to
+  the client's keys.
+  Selection checks the inline key set or the `jwks_uri` location policy and any signing-algorithm pin. For `jwks_uri`, the fetched keys are validated during token exchange.
 
 The document's singular `token_endpoint_auth_method` wins if it is in the
 intersection; otherwise the sole member; otherwise `private_key_jwt` if it is a
@@ -696,9 +697,11 @@ a verification path for it is enabled:
 
 `token_endpoint_auth_signing_alg_values_supported` is the union of what the
 enabled paths accept: `RS256`, `ES256`, `EdDSA` whenever the interactive path is
-active, and `EdDSA` alone only if CIMD resolution is off. So:
+active, and `EdDSA` alone only if CIMD resolution is off.
 
-| Server configuration                              | ChatGPT's document resolves to                          |
+The ChatGPT-shaped test document resolves to …; live ChatGPT compatibility remains subject to the planned exchange and refresh capture.
+
+| Server configuration                              | Resolves to                                             |
 | ------------------------------------------------- | ------------------------------------------------------- |
 | neither setting (default)                         | `none` (PKCE, no client authentication)                 |
 | `clientCredentials.enabled` only                  | `private_key_jwt`, with the assertion verified as below |
@@ -724,14 +727,14 @@ policy, or a `token_endpoint_auth_signing_alg` other than `RS256`, `ES256` or
   the client ID's exact origin. `privateKeyJwt.jwksUriAllowedOrigins` admits
   other exact origins. The policy is re-checked on every use.
 - It is fetched like the document: all resolved addresses validated, connection
-  pinned, no redirects, `fetchTimeoutMs` and `maxDocumentBytes` limits, and
-  `application/json` or `application/jwk-set+json`.
+  pinned, no redirects, `fetchTimeoutMs` and `maxDocumentBytes` limits.
+  The response media type, excluding parameters, must be exactly `application/json` or `application/jwk-set+json`.
 - Only key material of public signature keys is cached: RSA (2048 to 8192 bits),
-  EC P-256 and Ed25519. The cache is per client and URL and honours
-  `Cache-Control` within 60 to 3600 seconds (default 300).
+  EC P-256 and Ed25519. The cache is per client and URL.
+  Obeys `no-store` and `no-cache`; an explicit `max-age` is capped at 3600 seconds, and an absent caching directive defaults to 300 seconds.
 - Concurrent misses share one fetch; in-flight fetches are capped at 8 per
-  worker; attempts are limited to 10 per minute per client and URL. An unknown
-  `kid` triggers at most one refetch per minute.
+  worker; attempts are limited to 10 per minute per client and URL.
+  An unknown `kid` can trigger a refetch only after the previous unknown-`kid` attempt’s one-minute interval, including when that attempt failed.
 
 **Assertion checks** (`private_key_jwt` on `authorization_code` and
 `refresh_token`):
@@ -739,14 +742,15 @@ policy, or a `token_endpoint_auth_signing_alg` other than `RS256`, `ES256` or
 - `alg` is `RS256`, `ES256` or `EdDSA`, narrowed to the document's
   `token_endpoint_auth_signing_alg` when present. The key's type, and its JWK
   `alg` when present, must match. `use` must be `sig` when present.
-- `typ` is absent, `JWT` or `client-authentication+jwt`. `crit`, `jku`, `jwk`,
-  `x5u` and `x5c` headers are rejected.
+- `typ` may be absent, or may be `JWT` or `client-authentication+jwt`, compared case-insensitively with an optional `application/` prefix.
+  `crit`, `jku`, `jwk`, `x5u` and `x5c` headers are rejected.
 - `iss` and `sub` equal the client ID. `aud` is the issuer, as a string or a
   one-element array.
 - `exp` and `iat` are required, with a lifetime of at most 300 seconds and 5
   seconds of clock skew. `nbf` is honoured.
-- `jti` is required and single-use. Each replay record is kept until the
-  assertion's `exp` plus 60 seconds.
+- `jti` is required.
+  Recorded replays are rejected; simultaneous presentations can both pass until Harper provides atomic reservation.
+  - Replay records: Expires at the later of assertion `exp` and insertion time, plus 60 seconds.
 
 **Audience exception (opt-in, expiring).** `privateKeyJwt.tokenEndpointAudience`
 also accepts the exact advertised token endpoint URL as the sole `aud`:
@@ -802,8 +806,9 @@ These rules apply to every client on `authorization_code` and `refresh_token`:
 The permitted method is captured at `/authorize`, carried through the flow
 state into the authorization code, and copied into the refresh family. The
 exchange and every refresh must use exactly that method; the check runs before
-the code is consumed or the family rotated. A mismatch is `invalid_grant` and
-the client reauthorizes. A later document or configuration change therefore
+the code is consumed or the family rotated.
+A request that authenticates under current policy but conflicts with a bound code or family returns `invalid_grant`; a currently unpermitted presentation returns `invalid_client` before grant lookup.
+The client then reauthorizes. A later document or configuration change therefore
 never weakens a live grant.
 
 Migration and rollback:
@@ -820,7 +825,7 @@ Migration and rollback:
   them: 2.7.x retires `p2-` families (fail closed), but versions before 2.7 do
   not check them.
 
-### Stored/DCR clients are unchanged
+### Stored/DCR registration and method selection remain; the stricter token-request parser and grant binding also apply to stored clients.
 
 CIMD resolution only applies to URL-shaped client IDs. Any `client_id` that does
 not parse as an HTTPS URL with a non-root path goes directly to the DCR store as
@@ -896,9 +901,9 @@ the issuer, or the token endpoint URL exactly unless
 `mcp.clientCredentials.acceptTokenEndpointAudience` is `false` (move signers to
 the issuer, which RFC 7523bis requires); `typ` absent, `JWT` or
 `client-authentication+jwt`; no `jku`, `jwk`, `x5u` or `x5c` header; `exp`
-within 60 s of now; `jti` required and single-use (a replay is rejected via the
-shared `mcp_assertion_jtis` table, whose rows are kept until the assertion's
-`exp` plus 60 s).
+within 60 s of now; `jti` required, recorded in the shared
+`mcp_assertion_jtis` table.
+Recorded replays are rejected; simultaneous presentations can both pass until Harper provides atomic reservation.
 A `Basic` header or `client_secret` alongside the assertion is rejected — proof
 of key possession is the only accepted authentication for this grant.
 
