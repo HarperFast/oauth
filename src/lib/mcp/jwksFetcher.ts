@@ -76,11 +76,57 @@ export function _clearJwksCache(): void {
 	fetchLimiter._reset();
 }
 
-/** An `Age` value in seconds (RFC 9111 §5.1); an absent or invalid value counts as 0. */
-function ageHeaderSeconds(value: string | null): number {
-	if (!value) return 0;
-	const first = value.split(',')[0].trim();
-	return /^\d+$/.test(first) ? Math.min(Number(first), 2 ** 31) : 0;
+/**
+ * An `Age` field in seconds (RFC 9111 §5.1). The whole field must be one
+ * delta-seconds value; an absent or invalid field (a list, a sign, a fraction,
+ * anything but digits) counts as 0. Kept exact as a bigint, so no value overflows.
+ */
+function ageHeaderSeconds(value: string | null): bigint {
+	return value && /^\d+$/.test(value) ? BigInt(value) : 0n;
+}
+
+const HTTP_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const MONTH = `(${HTTP_MONTHS.join('|')})`;
+const TIME = '(\\d{2}):(\\d{2}):(\\d{2})';
+const IMF_FIXDATE = new RegExp(`^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), (\\d{2}) ${MONTH} (\\d{4}) ${TIME} GMT$`);
+const RFC850_DATE = new RegExp(`^(?:Mon|Tues|Wednes|Thurs|Fri|Satur|Sun)day, (\\d{2})-${MONTH}-(\\d{2}) ${TIME} GMT$`);
+const ASCTIME_DATE = new RegExp(`^(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) ${MONTH} (\\d{2}| \\d) ${TIME} (\\d{4})$`);
+
+/** UTC ms for the given fields; NaN when a field is out of range (31 Feb, 24:00:00). */
+function utcMs(year: number, month: string, day: string, time: string[]): number {
+	const [hour, minute, second] = time.map(Number);
+	if (hour > 23 || minute > 59 || second > 60) return Number.NaN; // 60: a leap second
+	const monthIndex = HTTP_MONTHS.indexOf(month);
+	const date = new Date(0);
+	date.setUTCFullYear(year, monthIndex, Number(day));
+	if (date.getUTCDate() !== Number(day)) return Number.NaN; // 31 Feb or day 00 rolls over
+	return date.setUTCHours(hour, minute, second);
+}
+
+/**
+ * An HTTP-date in ms (RFC 9110 §5.6.7): IMF-fixdate, or the obsolete
+ * rfc850-date and asctime-date forms a recipient must also accept. Anything
+ * else is NaN, including the looser forms `Date.parse` accepts. A two-digit
+ * rfc850 year is read so the timestamp is at most 50 years after `receivedMs`.
+ */
+function httpDateMs(value: string, receivedMs: number): number {
+	let match = IMF_FIXDATE.exec(value);
+	if (match) return utcMs(Number(match[3]), match[2], match[1], match.slice(4, 7));
+	match = ASCTIME_DATE.exec(value);
+	if (match) return utcMs(Number(match[6]), match[1], match[2], match.slice(3, 6));
+	match = RFC850_DATE.exec(value);
+	if (!match) return Number.NaN;
+	const limit = new Date(receivedMs);
+	limit.setUTCFullYear(limit.getUTCFullYear() + 50);
+	const latestYear = limit.getUTCFullYear();
+	const year = latestYear - ((latestYear - Number(match[3])) % 100);
+	const ms = utcMs(year, match[2], match[1], match.slice(4, 7));
+	return ms > limit.getTime() ? utcMs(year - 100, match[2], match[1], match.slice(4, 7)) : ms;
+}
+
+/** Whole milliseconds as a bigint (the clock reads whole milliseconds). */
+function wholeMs(ms: number): bigint {
+	return BigInt(Math.ceil(ms));
 }
 
 /**
@@ -89,6 +135,7 @@ function ageHeaderSeconds(value: string | null): number {
  * response_delay; corrected_initial_age = max(apparent_age,
  * corrected_age_value); current_age = corrected_initial_age + resident_time.
  * An absent or invalid `Age` or `Date` contributes nothing; never negative.
+ * Returned as exact milliseconds (a bigint).
  */
 export function httpCurrentAgeMs(input: {
 	age: string | null;
@@ -96,30 +143,32 @@ export function httpCurrentAgeMs(input: {
 	requestTimeMs: number;
 	responseTimeMs: number;
 	nowMs: number;
-}): number {
-	const dateMs = input.date ? Date.parse(input.date) : Number.NaN;
-	const apparentAge = Number.isFinite(dateMs) ? Math.max(0, input.responseTimeMs - dateMs) : 0;
+}): bigint {
+	const dateMs = input.date ? httpDateMs(input.date, input.responseTimeMs) : Number.NaN;
+	const apparentAge = wholeMs(Number.isFinite(dateMs) ? Math.max(0, input.responseTimeMs - dateMs) : 0);
 	const responseDelay = Math.max(0, input.responseTimeMs - input.requestTimeMs);
-	const correctedAgeValue = ageHeaderSeconds(input.age) * 1000 + responseDelay;
-	const correctedInitialAge = Math.max(apparentAge, correctedAgeValue);
+	const correctedAgeValue = ageHeaderSeconds(input.age) * 1000n + wholeMs(responseDelay);
+	const correctedInitialAge = apparentAge > correctedAgeValue ? apparentAge : correctedAgeValue;
 	const residentTime = Math.max(0, input.nowMs - input.responseTimeMs);
-	return Math.max(0, correctedInitialAge + residentTime);
+	return correctedInitialAge + wholeMs(residentTime);
 }
 
 /**
  * Cache lifetime (ms) for a fetched JWK Set, 0 meaning "do not store".
  * Obeys `no-store` and `no-cache`. An explicit `max-age` counts from the
  * response's current age: the remaining lifetime is capped at 3600 seconds and
- * never extended, and nothing is stored once it is exhausted. An absent
+ * never extended, and nothing is stored once it is exhausted. `max-age` and
+ * the current age are compared exactly, whatever their size. An absent
  * caching directive defaults to 300 seconds.
  */
-export function jwksCacheLifetimeMs(header: string | null, currentAgeMs = 0): number {
+export function jwksCacheLifetimeMs(header: string | null, currentAgeMs = 0n): number {
 	if (!header) return JWKS_CACHE_DEFAULT_TTL_S * 1000;
 	if (/\bno-store\b|\bno-cache\b/i.test(header)) return 0;
 	const match = /\bmax-age\s*=\s*(\d+)/i.exec(header);
 	if (!match) return JWKS_CACHE_DEFAULT_TTL_S * 1000;
-	const remainingMs = parseInt(match[1], 10) * 1000 - currentAgeMs;
-	return remainingMs > 0 ? Math.min(JWKS_CACHE_MAX_TTL_S * 1000, remainingMs) : 0;
+	const remainingMs = BigInt(match[1]) * 1000n - currentAgeMs;
+	if (remainingMs <= 0n) return 0;
+	return remainingMs < BigInt(JWKS_CACHE_MAX_TTL_S * 1000) ? Number(remainingMs) : JWKS_CACHE_MAX_TTL_S * 1000;
 }
 
 /** Length-prefixed cache key: the component boundary is unambiguous for any client_id. */

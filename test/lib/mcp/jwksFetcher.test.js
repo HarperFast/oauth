@@ -403,16 +403,16 @@ describe('getClientJwks', () => {
 		}
 
 		it('computes the lifetime and current age directly', () => {
-			assert.equal(jwksCacheLifetimeMs('max-age=10', 4_000), 6_000);
-			assert.equal(jwksCacheLifetimeMs('max-age=10', 10_000), 0, 'exhausted: 0, never negative');
-			assert.equal(jwksCacheLifetimeMs('max-age=10', 15_000), 0, 'exhausted: 0, never negative');
-			assert.equal(jwksCacheLifetimeMs('max-age=7200', 100_000), 3_600_000);
-			assert.equal(jwksCacheLifetimeMs('no-store', 0), 0);
-			assert.equal(jwksCacheLifetimeMs(null, 999_000), 300_000, 'the 300 s default applies without max-age');
+			assert.equal(jwksCacheLifetimeMs('max-age=10', 4_000n), 6_000);
+			assert.equal(jwksCacheLifetimeMs('max-age=10', 10_000n), 0, 'exhausted: 0, never negative');
+			assert.equal(jwksCacheLifetimeMs('max-age=10', 15_000n), 0, 'exhausted: 0, never negative');
+			assert.equal(jwksCacheLifetimeMs('max-age=7200', 100_000n), 3_600_000);
+			assert.equal(jwksCacheLifetimeMs('no-store', 0n), 0);
+			assert.equal(jwksCacheLifetimeMs(null, 999_000n), 300_000, 'the 300 s default applies without max-age');
 			const t = START;
 			assert.equal(
 				httpCurrentAgeMs({ age: '30', date: null, requestTimeMs: t, responseTimeMs: t + 2_000, nowMs: t + 5_000 }),
-				35_000
+				35_000n
 			);
 			assert.equal(
 				httpCurrentAgeMs({
@@ -422,7 +422,7 @@ describe('getClientJwks', () => {
 					responseTimeMs: t,
 					nowMs: t,
 				}),
-				60_000
+				60_000n
 			);
 			assert.equal(
 				httpCurrentAgeMs({
@@ -432,9 +432,44 @@ describe('getClientJwks', () => {
 					responseTimeMs: t,
 					nowMs: t,
 				}),
-				0,
+				0n,
 				'a Date in the future adds nothing'
 			);
+		});
+
+		it('reads Date only as an HTTP-date (RFC 9110 §5.6.7)', () => {
+			const t = START;
+			const dateAge = (date) => httpCurrentAgeMs({ age: null, date, requestTimeMs: t, responseTimeMs: t, nowMs: t });
+			const before = (iso) => BigInt(t - Date.parse(iso));
+			assert.equal(dateAge('Tue, 29 Sep 2026 23:59:00 GMT'), 60_000n, 'IMF-fixdate');
+			assert.equal(dateAge('Tuesday, 29-Sep-26 23:59:00 GMT'), 60_000n, 'rfc850-date');
+			assert.equal(dateAge('Tue Sep 29 23:59:00 2026'), 60_000n, 'asctime-date');
+			assert.equal(dateAge('Tue Sep  1 00:00:00 2026'), before('2026-09-01T00:00:00Z'), 'asctime-date, one-digit day');
+			assert.equal(dateAge('Mon, 28 Sep 2026 23:59:60 GMT'), before('2026-09-29T00:00:00Z'), 'a leap second');
+			// A two-digit year more than 50 years ahead is the most recent past year with those digits.
+			assert.equal(dateAge('Sunday, 06-Nov-94 08:49:37 GMT'), before('1994-11-06T08:49:37Z'));
+			assert.equal(dateAge('Wednesday, 30-Sep-76 00:00:00 GMT'), 0n, 'exactly 50 years ahead: 2076');
+			assert.equal(dateAge('Wednesday, 30-Sep-76 00:00:01 GMT'), before('1976-09-30T00:00:01Z'), 'beyond: 1976');
+			// None of these is an HTTP-date, though Date.parse accepts several; each counts as absent.
+			for (const date of [
+				'1',
+				'2026-09-01T00:00:00Z',
+				'tue, 01 sep 2026 00:00:00 gmt',
+				'Tue, 01 Sep 2026 00:00:00 +0000',
+				' Tue, 01 Sep 2026 00:00:00 GMT',
+				'Tue, 01 Sep 2026 00:00:00 GMT x',
+				'x Tuesday, 01-Sep-26 00:00:00 GMT',
+				'Tuesday, 01-Sep-26 00:00:00 GMT x',
+				'x Tue Sep  1 00:00:00 2026',
+				'Tue Sep  1 00:00:00 2026 x',
+				'Tue, 01 Sep 2026 24:00:00 GMT',
+				'Tue, 01 Sep 2026 23:60:00 GMT',
+				'Tue, 01 Sep 2026 23:59:61 GMT',
+				'Tue, 31 Feb 2026 00:00:00 GMT',
+				'Tue, 00 Sep 2026 00:00:00 GMT',
+			]) {
+				assert.equal(dateAge(date), 0n, `${JSON.stringify(date)} is ignored`);
+			}
 		});
 
 		it('a nearly expired intermediary response is cached only for its remaining freshness', async () => {
@@ -466,12 +501,34 @@ describe('getClientJwks', () => {
 			assert.equal(await probe.at(6_000), 2);
 		});
 
+		it('compares a large Age with max-age exactly, and caps only the remaining lifetime', async () => {
+			const exhausted = await lifetimeOf(() =>
+				response({ keys: [KEY_1] }, { cacheControl: 'max-age=3000000000', age: '3000000000' })
+			);
+			assert.equal(_jwksCacheSize(), 0, 'Age equal to a large max-age: nothing stored');
+			assert.equal(await exhausted.at(0), 2, 'the next request refetched');
+			const oneLeft = await lifetimeOf(() =>
+				response({ keys: [KEY_1] }, { cacheControl: 'max-age=9007199254740993', age: '9007199254740992' })
+			);
+			assert.equal(await oneLeft.at(999), 1, 'beyond 2^53, exactly one second is left');
+			assert.equal(await oneLeft.at(1_000), 2);
+			const capped = await lifetimeOf(() =>
+				response({ keys: [KEY_1] }, { cacheControl: 'max-age=3000000000', age: '2999990000' })
+			);
+			assert.equal(await capped.at(3_599_999), 1, '10000 s left, capped at 3600 s');
+			assert.equal(await capped.at(3_600_000), 2);
+		});
+
 		it('ignores an invalid Age or Date, and caps the remaining lifetime at 3600 s', async () => {
-			for (const age of ['soon', '1e3', '-5', '10.5']) {
+			for (const age of ['soon', '1e3', '-5', '10.5', '1, 2']) {
 				const invalid = await lifetimeOf(() =>
 					response({ keys: [KEY_1] }, { cacheControl: 'max-age=600', age, date: 'not a date' })
 				);
 				assert.equal(await invalid.at(599_999), 1, `Age ${age}: full max-age when Age and Date are unusable`);
+			}
+			for (const date of ['1', 'Tue, 01 Sep 2026 00:00:00 +0000']) {
+				const invalid = await lifetimeOf(() => response({ keys: [KEY_1] }, { cacheControl: 'max-age=600', date }));
+				assert.equal(await invalid.at(599_999), 1, `Date ${date}: full max-age when Date is not an HTTP-date`);
 			}
 			const capped = await lifetimeOf(() => response({ keys: [KEY_1] }, { cacheControl: 'max-age=7200', age: '100' }));
 			assert.equal(await capped.at(3_599_999), 1);
