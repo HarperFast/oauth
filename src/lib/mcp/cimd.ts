@@ -627,6 +627,17 @@ function validateCimdDocument(
 		);
 	}
 
+	// No shared secret can be established with a CIMD client (CIMD §4.1), so a
+	// document carrying `client_secret` or `client_secret_expires_at` (any
+	// `client_secret*` member) is rejected, whatever its shape.
+	const secretField = Object.keys(d).find((name) => name.startsWith('client_secret'));
+	if (secretField !== undefined) {
+		throw new CimdClientError(
+			'invalid_client',
+			`CIMD document: ${JSON.stringify(secretField.slice(0, 64))} is not permitted; CIMD clients have no client secret`
+		);
+	}
+
 	// Required fields.
 	if (typeof d.client_name !== 'string' || !d.client_name) {
 		throw new CimdClientError('invalid_client', 'CIMD document missing required field: client_name');

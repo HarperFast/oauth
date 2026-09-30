@@ -786,6 +786,11 @@ describe('resolveCimdClient — client_credentials documents (#161)', () => {
 		await rejects({ ...CREDENTIALS_DOC, jwks: { keys: new Array(9).fill(AGENT_JWK) } }, /between 1 and 8/);
 	});
 
+	it('rejects client_secret members in a credentials document too', async () => {
+		await rejects({ ...CREDENTIALS_DOC, client_secret: 'x' }, /"client_secret" is not permitted/);
+		await rejects({ ...CREDENTIALS_DOC, client_secret_expires_at: 0 }, /"client_secret_expires_at" is not permitted/);
+	});
+
 	it('rejects private key material and non-Ed25519 keys', async () => {
 		await rejects({ ...CREDENTIALS_DOC, jwks: { keys: [{ ...AGENT_JWK, d: 'B'.repeat(43) }] } }, /PUBLIC keys/);
 		await rejects({ ...CREDENTIALS_DOC, jwks: { keys: [{ kty: 'RSA', n: 'x', e: 'AQAB' }] } }, /OKP\/Ed25519/);
@@ -1150,6 +1155,25 @@ describe('resolveCimdClient — interactive authentication declarations and key 
 			_clearCimdCache();
 			await refuses({ ...VALID_DOC, token_endpoint_auth_method: method }, /shared-secret method/);
 		}
+	});
+
+	it('refuses client_secret and client_secret_expires_at members (CIMD §4.1), even beside none', async () => {
+		for (const member of ['client_secret', 'client_secret_expires_at', 'client_secret_issued_at']) {
+			for (const value of ['s3cr3t', 0, null]) {
+				_clearCimdCache();
+				await refuses({ ...VALID_DOC, [member]: value }, new RegExp(`"${member}" is not permitted`));
+			}
+		}
+		_clearCimdCache();
+		await refuses(
+			{ ...CHATGPT_CIMD_DOCUMENT, client_secret: 'x' },
+			/"client_secret" is not permitted/,
+			CHATGPT_CLIENT_ID
+		);
+		// A member that merely contains the word is not a secret field.
+		_clearCimdCache();
+		setupOk({ ...VALID_DOC, software_statement_client_secret_note: 'n/a' });
+		assert.ok(await resolveCimdClient(VALID_URL, undefined));
 	});
 
 	it('refuses inline keys carrying private material, and keeps only key material otherwise', async () => {
