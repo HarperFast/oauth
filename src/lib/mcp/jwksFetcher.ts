@@ -13,6 +13,7 @@
  *   (client_id, jwks_uri) pair — keys fetched for one client are never served
  *   to another, even when both name the same URL.
  * - Obeys `no-store` and `no-cache`; an explicit `max-age` is capped at 3600 seconds, and an absent caching directive defaults to 300 seconds.
+ *   An explicit `max-age` counts from the response's HTTP current age (RFC 9111 §4.2.3: from `Age`, and from the response time against `Date`), so a response already stale on arrival is not stored.
  *   Errors and invalid sets are never cached.
  * - Concurrent misses for one key share a single fetch; total in-flight
  *   fetches are capped; fetch attempts per (client, uri) are rate-limited.
@@ -75,19 +76,50 @@ export function _clearJwksCache(): void {
 	fetchLimiter._reset();
 }
 
+/** An `Age` value in seconds (RFC 9111 §5.1); an absent or invalid value counts as 0. */
+function ageHeaderSeconds(value: string | null): number {
+	if (!value) return 0;
+	const first = value.split(',')[0].trim();
+	return /^\d+$/.test(first) ? Math.min(Number(first), 2 ** 31) : 0;
+}
+
 /**
- * Cache lifetime (seconds) for a fetched JWK Set, 0 meaning "do not store".
- * Obeys `no-store` and `no-cache`; an explicit `max-age` is capped at 3600
- * seconds and never extended; an absent caching directive defaults to 300
- * seconds.
+ * HTTP current age of a response in ms at `nowMs` (RFC 9111 §4.2.3):
+ * apparent_age = max(0, response_time - Date); corrected_age_value = Age +
+ * response_delay; corrected_initial_age = max(apparent_age,
+ * corrected_age_value); current_age = corrected_initial_age + resident_time.
+ * An absent or invalid `Age` or `Date` contributes nothing; never negative.
  */
-export function jwksCacheTtlSeconds(header: string | null): number {
-	if (!header) return JWKS_CACHE_DEFAULT_TTL_S;
+export function httpCurrentAgeMs(input: {
+	age: string | null;
+	date: string | null;
+	requestTimeMs: number;
+	responseTimeMs: number;
+	nowMs: number;
+}): number {
+	const dateMs = input.date ? Date.parse(input.date) : Number.NaN;
+	const apparentAge = Number.isFinite(dateMs) ? Math.max(0, input.responseTimeMs - dateMs) : 0;
+	const responseDelay = Math.max(0, input.responseTimeMs - input.requestTimeMs);
+	const correctedAgeValue = ageHeaderSeconds(input.age) * 1000 + responseDelay;
+	const correctedInitialAge = Math.max(apparentAge, correctedAgeValue);
+	const residentTime = Math.max(0, input.nowMs - input.responseTimeMs);
+	return Math.max(0, correctedInitialAge + residentTime);
+}
+
+/**
+ * Cache lifetime (ms) for a fetched JWK Set, 0 meaning "do not store".
+ * Obeys `no-store` and `no-cache`. An explicit `max-age` counts from the
+ * response's current age: the remaining lifetime is capped at 3600 seconds and
+ * never extended, and nothing is stored once it is exhausted. An absent
+ * caching directive defaults to 300 seconds.
+ */
+export function jwksCacheLifetimeMs(header: string | null, currentAgeMs = 0): number {
+	if (!header) return JWKS_CACHE_DEFAULT_TTL_S * 1000;
 	if (/\bno-store\b|\bno-cache\b/i.test(header)) return 0;
 	const match = /\bmax-age\s*=\s*(\d+)/i.exec(header);
-	if (!match) return JWKS_CACHE_DEFAULT_TTL_S;
-	// max-age=0 yields 0: not stored.
-	return Math.min(JWKS_CACHE_MAX_TTL_S, parseInt(match[1], 10));
+	if (!match) return JWKS_CACHE_DEFAULT_TTL_S * 1000;
+	const remainingMs = parseInt(match[1], 10) * 1000 - currentAgeMs;
+	return remainingMs > 0 ? Math.min(JWKS_CACHE_MAX_TTL_S * 1000, remainingMs) : 0;
 }
 
 /** Length-prefixed cache key: the component boundary is unambiguous for any client_id. */
@@ -170,7 +202,8 @@ async function fetchAndCache(
 	logger?: Logger
 ): Promise<Record<string, unknown>[]> {
 	try {
-		const { body, cacheControl } = await fetchPinnedBoundedJson(jwksUri, {
+		const requestTimeMs = _now();
+		const { body, cacheControl, age, date } = await fetchPinnedBoundedJson(jwksUri, {
 			label: 'JWKS document',
 			tag: 'JWKS',
 			accept: 'application/jwk-set+json, application/json',
@@ -179,6 +212,7 @@ async function fetchAndCache(
 			maxBytes: toFinitePositive(cimdConfig?.maxDocumentBytes, DEFAULT_MAX_DOCUMENT_BYTES),
 			logger,
 		});
+		const responseTimeMs = _now();
 		let doc: unknown;
 		try {
 			doc = JSON.parse(body);
@@ -192,15 +226,18 @@ async function fetchAndCache(
 			const oldest = jwksCache.keys().next().value;
 			if (oldest !== undefined) jwksCache.delete(oldest);
 		}
-		const ttlSeconds = jwksCacheTtlSeconds(cacheControl);
 		const now = _now();
+		const lifetimeMs = jwksCacheLifetimeMs(
+			cacheControl,
+			httpCurrentAgeMs({ age, date, requestTimeMs, responseTimeMs, nowMs: now })
+		);
 		jwksCache.delete(key);
-		// no-store, no-cache and zero-age responses are not stored.
-		if (ttlSeconds > 0) {
-			jwksCache.set(key, { keys: keySet.keys, expiresAt: now + ttlSeconds * 1000, fetchedAt: now });
+		// no-store, no-cache, zero-age and already-stale responses are not stored.
+		if (lifetimeMs > 0) {
+			jwksCache.set(key, { keys: keySet.keys, expiresAt: now + lifetimeMs, fetchedAt: now });
 		}
 		logger?.info?.(
-			`JWKS: fetched ${keySet.keys.length} key(s) for client ${JSON.stringify(clientId)} (cached for ${ttlSeconds}s)`
+			`JWKS: fetched ${keySet.keys.length} key(s) for client ${JSON.stringify(clientId)} (cached for ${Math.floor(lifetimeMs / 1000)}s)`
 		);
 		return keySet.keys;
 	} catch (err) {

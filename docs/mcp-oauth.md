@@ -732,6 +732,7 @@ policy, or a `token_endpoint_auth_signing_alg` other than `RS256`, `ES256` or
 - Only key material of public signature keys is cached: RSA (2048 to 8192 bits),
   EC P-256 and Ed25519. The cache is per client and URL.
   Obeys `no-store` and `no-cache`; an explicit `max-age` is capped at 3600 seconds, and an absent caching directive defaults to 300 seconds.
+  An explicit `max-age` counts from the response's HTTP current age (RFC 9111 §4.2.3: from `Age`, and from the response time against `Date`), so a response already stale on arrival is not stored.
 - Concurrent misses share one fetch; in-flight fetches are capped at 8 per
   worker; attempts are limited to 10 per minute per client and URL.
   An unknown `kid` can trigger a refetch only after the previous unknown-`kid` attempt’s one-minute interval, including when that attempt failed.

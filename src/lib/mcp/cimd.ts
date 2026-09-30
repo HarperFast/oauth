@@ -1035,6 +1035,10 @@ export async function resolveCimdClient(
 export interface BoundedJsonFetchResult {
 	body: string;
 	cacheControl: string | null;
+	/** The response's `Age` header, for callers that compute freshness (RFC 9111 §4.2.3). */
+	age: string | null;
+	/** The response's `Date` header, for callers that compute freshness (RFC 9111 §4.2.3). */
+	date: string | null;
 }
 
 /** Options for {@link fetchPinnedBoundedJson}. */
@@ -1111,6 +1115,8 @@ export async function fetchPinnedBoundedJson(
 		}
 
 		const cacheControl = response.headers.get('cache-control');
+		const age = response.headers.get('age');
+		const date = response.headers.get('date');
 
 		// Enforce size cap.
 		const clHeader = response.headers.get('content-length');
@@ -1140,7 +1146,7 @@ export async function fetchPinnedBoundedJson(
 				chunks.push(value);
 			}
 		}
-		return { body: Buffer.concat(chunks).toString('utf8'), cacheControl };
+		return { body: Buffer.concat(chunks).toString('utf8'), cacheControl, age, date };
 	} catch (error) {
 		// A rejection between headers and the full body read must tear down
 		// the pinned socket — the deadline timer is cleared below, so nothing
