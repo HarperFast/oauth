@@ -745,22 +745,58 @@ describe('handleToken', () => {
 
 	it('still rejects a replayed token when persisting the revocation fails', async () => {
 		const oldToken = seedFamily('fam-1');
-		await handleToken(
+		const rotated = await handleToken(
 			{ headers: {} },
 			{ grant_type: 'refresh_token', refresh_token: oldToken, client_id: 'public-1' },
 			mcpConfig
 		); // rotate, superseding oldToken
+		assert.equal(rotated.status, 200);
+		const familyId = `${FAMILY_ID_PREFIX}fam-1`;
+		const hashBefore = families.get(familyId).current_token_hash;
+		const realPut = global.databases.oauth.mcp_refresh_families.put;
 		// A write failure during revocation must not turn the rejection into a 500.
 		global.databases.oauth.mcp_refresh_families.put = async () => {
-			throw new Error('write failed');
+			throw new Error(`write failed ${'x'.repeat(500)}`);
 		};
+		const lines = [];
+		const capture = (...args) => lines.push(args.join(' '));
+		const logger = { error: capture, warn: capture, info: capture, debug: capture };
 		const res = await handleToken(
+			{ headers: {} },
+			{ grant_type: 'refresh_token', refresh_token: oldToken, client_id: 'public-1' },
+			mcpConfig,
+			undefined,
+			logger
+		);
+		assert.equal(res.status, 400);
+		assert.equal(res.body.error, 'invalid_grant', 'replay rejected even though revoke persist failed');
+		assert.equal(res.body.access_token, undefined, 'nothing issued');
+		assert.equal(res.body.refresh_token, undefined, 'nothing issued');
+		assert.doesNotMatch(res.body.error_description, /revoked/, 'the response claims no revocation');
+		assert.equal(families.get(familyId).revoked, false, 'the store still holds the live family');
+		assert.equal(families.get(familyId).current_token_hash, hashBefore, 'no rotation');
+		// Every captured line, the store's own write-error line included.
+		assert.ok(!lines.some((l) => /revoked family/.test(l)), 'no line claims the revocation');
+		assert.ok(!lines.some((l) => l.includes(oldToken)), 'no line carries the presented token');
+		assert.deepEqual(
+			lines.filter((l) => l.startsWith('MCP token:')),
+			[
+				'MCP token: refresh replay detected, but the family revocation could not be persisted; the request was refused with invalid_grant and the family stays live',
+			],
+			'the handler logs one fixed line, without the error text'
+		);
+
+		// Once the store accepts writes, the same presentation revokes the family.
+		global.databases.oauth.mcp_refresh_families.put = realPut;
+		const retried = await handleToken(
 			{ headers: {} },
 			{ grant_type: 'refresh_token', refresh_token: oldToken, client_id: 'public-1' },
 			mcpConfig
 		);
-		assert.equal(res.status, 400);
-		assert.equal(res.body.error, 'invalid_grant', 'replay rejected even though revoke persist failed');
+		assert.equal(retried.status, 400);
+		assert.equal(retried.body.error, 'invalid_grant');
+		assert.match(retried.body.error_description, /superseded; family revoked/);
+		assert.equal(families.get(familyId).revoked, true);
 	});
 
 	it('rejects a refresh token presented by a different client', async () => {

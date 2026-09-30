@@ -93,6 +93,14 @@ function cimdErrorResponse(err: CimdClientError): TokenResponse {
 	return response;
 }
 
+/**
+ * The handler's line when a superseded family's revocation cannot be written:
+ * fixed and single-line, without the error text or the token. The store's own
+ * write-error log still carries the underlying error.
+ */
+const REVOCATION_NOT_PERSISTED_LOG =
+	'MCP token: refresh replay detected, but the family revocation could not be persisted; the request was refused with invalid_grant and the family stays live';
+
 function nowSeconds(): number {
 	return Math.floor(Date.now() / 1000);
 }
@@ -707,17 +715,19 @@ async function handleRefreshTokenGrant(
 	if (!safeEqual(hashRefreshToken(presented), family.current_token_hash)) {
 		// A superseded (already-rotated) token was replayed — revoke the family.
 		// Rejecting the replay must not depend on the revoke write succeeding: a
-		// hash mismatch NEVER reissues, and we still try to persist the
-		// revocation (logging if that fails) so a transient write error can't
-		// leave the family live for a retry.
+		// hash mismatch NEVER reissues, and a failed write still answers
+		// invalid_grant. Only a persisted revocation is claimed, in the response
+		// and in this handler's log line. After a failed write the handler logs
+		// one fixed line naming the failure, without the error text or the token
+		// (the store's own write-error log still carries the error), and the
+		// family stays live until a later presentation retires or revokes it, or
+		// it expires.
 		family.revoked = true;
 		try {
 			await familyStore.set(family);
-		} catch (error) {
-			logger?.error?.(
-				`MCP token: failed to persist revocation for family ${family.family_id}:`,
-				error instanceof Error ? error.message : String(error)
-			);
+		} catch {
+			logger?.error?.(REVOCATION_NOT_PERSISTED_LOG);
+			return errorResponse(400, 'invalid_grant', 'Refresh token has been superseded');
 		}
 		logger?.warn?.(`MCP token: refresh replay detected; revoked family ${family.family_id}`);
 		return errorResponse(400, 'invalid_grant', 'Refresh token has been superseded; family revoked');

@@ -214,15 +214,24 @@ JWKS rather than assuming a fixed key id. Claims:
 | `iat`/`exp` | Issued-at / expiry (`exp` = `iat` + `accessTokenTtl`, default 1 hour)                                                                                                                                                                                                                                                     |
 | `jti`       | Unique token id (used in audit events; safe to log)                                                                                                                                                                                                                                                                       |
 
-Refresh tokens rotate on use: presenting an already-used token from a family
-revokes the whole family (replay defense). Refresh families live for
-`refreshTokenTtl` (default 30 days).
+Refresh tokens rotate on use: a superseded (already-used) refresh token is
+refused with `invalid_grant` and revokes the whole family (replay defense). If
+the revocation write fails, the token is still refused with `invalid_grant` and
+nothing is issued. The response does not claim the revocation; the token
+endpoint's handler logs one fixed line naming the failure, without the error
+text or the token, and claims no revocation; the refresh-family store's own
+write-error log still carries the underlying error. The family stays live until
+a later presentation retires or revokes it, or it expires. Refresh families
+live for `refreshTokenTtl` (default 30 days).
 
 Refresh families minted by this version carry a provenance marker in the
 family id itself; a family from before that (or replicated from an older
 node) is rejected with `invalid_grant` and retired the first time it is
 presented for refresh, so the client re-authorizes into a fresh, provenanced
-family. This is a lazy, per-family check on the existing refresh path — no
+family. If the retirement write fails, the request is still rejected with
+`invalid_grant`, the failure is logged, and the family stays live until a later
+presentation retires or revokes it, or it expires.
+This is a lazy, per-family check on the existing refresh path — no
 startup sweep. Because the marker lives in the id and rotation reuses the id,
 mixed-version rollouts are safe: an old worker or node rotating a family
 minted by this version leaves its provenance untouched.
@@ -893,14 +902,19 @@ to `private_key_jwt` needs a new assertion on every refresh, and every refresh
 must present the refresh token returned by the previous one; there is no minimum
 interval between refreshes and no grace period for a superseded token. The same
 assertion presented again is `invalid_client` and rotates nothing; a superseded
-refresh token is `invalid_grant` and revokes the family.
+refresh token is `invalid_grant` and revokes the family, and if the revocation
+cannot be written it is still `invalid_grant`, without claiming the revocation,
+with nothing issued and the family left live until a later presentation retires
+or revokes it, or it expires.
 
 **Concurrency.** Neither the replay record nor the refresh rotation is atomic on
 Harper. More than one concurrent presentation of one assertion can be accepted.
 Concurrent refreshes of one token are not serialized: depending on timing, more
 than one can rotate it, after which only the last-written token works and
 presenting any other revokes the family; or the later requests see a superseded
-token and revoke the family at once, and the client reauthorizes.
+token and revoke the family at once, and the client reauthorizes. A revocation
+whose write fails still answers `invalid_grant`, without claiming the
+revocation, and leaves the family live.
 
 ### Stored/DCR registration and method selection remain; the stricter token-request parser and grant binding also apply to stored clients.
 
