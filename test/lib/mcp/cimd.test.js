@@ -498,6 +498,12 @@ describe('resolveCimdClient — document validation', () => {
 		);
 	});
 
+	it('rejects a deceptive content-type whose parameters mention application/json', async () => {
+		_setDnsLookup(makeDnsOk());
+		_setFetch(makeOkFetch(JSON.stringify(VALID_DOC), { contentType: 'text/plain; x=application/json' }));
+		await assert.rejects(() => resolveCimdClient(VALID_URL, undefined), /non-JSON content-type/);
+	});
+
 	it('rejects oversized responses (content-length check)', async () => {
 		_setDnsLookup(makeDnsOk());
 		// Build a fake response with a very large content-length header.

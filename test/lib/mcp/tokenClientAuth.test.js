@@ -314,6 +314,8 @@ describe('handleToken — shared client authenticator', () => {
 
 		it('rejects malformed Basic credentials instead of ignoring them', async () => {
 			for (const authorization of [
+				'Basic',
+				'basic',
 				'Basic !!!',
 				`Basic ${Buffer.from('no-colon').toString('base64')}`,
 				`Basic ${Buffer.from(':secret').toString('base64')}`,
@@ -625,6 +627,27 @@ describe('handleToken — shared client authenticator', () => {
 			assert.equal(weakened.body.error, 'invalid_grant');
 			assert.match(weakened.body.error_description, /bound to a different client authentication method/);
 			assert.equal(families.get(family.family_id).current_token_hash, before, 'no rotation on a binding mismatch');
+		});
+
+		it('rejects a bare Basic scheme on refresh as malformed', async () => {
+			const token = seedFamily(`${FAMILY_ID_PREFIX}bare-basic`, 'public-1', undefined);
+			const res = await handleToken(
+				{ headers: { authorization: 'Basic' } },
+				{ grant_type: 'refresh_token', refresh_token: token, client_id: 'public-1' },
+				DEFAULT,
+				undefined,
+				logger
+			);
+			assertInvalidClient(res, /Malformed Basic/);
+			// The same request without the header refreshes: the header alone was refused.
+			const ok = await handleToken(
+				{ headers: {} },
+				{ grant_type: 'refresh_token', refresh_token: token, client_id: 'public-1' },
+				DEFAULT,
+				undefined,
+				logger
+			);
+			assert.equal(ok.status, 200, JSON.stringify(ok.body));
 		});
 
 		it('rejects a bound family whose binding an older writer dropped', async () => {

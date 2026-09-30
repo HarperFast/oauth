@@ -1045,7 +1045,7 @@ export interface BoundedJsonFetchOptions {
 	tag: string;
 	/** `Accept` request header. */
 	accept: string;
-	/** The response content-type must contain one of these media types. */
+	/** Accepted response media types, compared exactly after removing parameters. */
 	contentTypes: string[];
 	/** One deadline covering DNS, connect, headers and body (ms). */
 	timeoutMs: number;
@@ -1057,8 +1057,10 @@ export interface BoundedJsonFetchOptions {
 /**
  * Fetch a JSON document over HTTPS under the resolver's SSRF controls: every
  * resolved address is validated and the connection is PINNED to them, no
- * redirects are followed (only 200 is accepted), the content-type must match,
- * and one deadline plus a byte cap bound the whole exchange. Shared by CIMD
+ * redirects are followed (only 200 is accepted), and one deadline plus a byte
+ * cap bound the whole exchange.
+ * The response media type, excluding parameters, must be exactly `application/json` or `application/jwk-set+json`.
+ * (The CIMD document path accepts `application/json` only.) Shared by CIMD
  * document resolution and `jwks_uri` key fetching. Rejections are
  * `CimdClientError`s; transport failures are plain `Error`s.
  */
@@ -1098,9 +1100,10 @@ export async function fetchPinnedBoundedJson(
 			throw new CimdClientError('invalid_client', `${label} fetch returned status ${response.status}`);
 		}
 
-		// Reject a content-type outside the accepted JSON media types.
+		// The media type, excluding parameters, must exactly match an accepted type.
 		const contentType = response.headers.get('content-type') ?? '';
-		if (!contentTypes.some((type) => contentType.includes(type))) {
+		const mediaType = contentType.split(';')[0].trim().toLowerCase();
+		if (!contentTypes.includes(mediaType)) {
 			throw new CimdClientError(
 				'invalid_client',
 				`${label} has non-JSON content-type: ${JSON.stringify(contentType.slice(0, 100))}`

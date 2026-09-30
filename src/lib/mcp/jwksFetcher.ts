@@ -12,13 +12,12 @@
  * - Only key material is cached (see `publicKeySetFromDocument`), keyed by the
  *   (client_id, jwks_uri) pair — keys fetched for one client are never served
  *   to another, even when both name the same URL.
- * - Cache lifetime honours `Cache-Control` within [60 s, 3600 s], default
- *   300 s. Errors and invalid sets are never cached.
+ * - Obeys `no-store` and `no-cache`; an explicit `max-age` is capped at 3600 seconds, and an absent caching directive defaults to 300 seconds.
+ *   Errors and invalid sets are never cached.
  * - Concurrent misses for one key share a single fetch; total in-flight
  *   fetches are capped; fetch attempts per (client, uri) are rate-limited.
- * - An unknown `kid` may trigger at most one refetch per (client, uri) per
- *   KID_MISS_REFETCH_INTERVAL_MS, so assertions carrying random `kid`s cannot
- *   drive fetches.
+ * - An unknown `kid` can trigger a refetch only after the previous unknown-`kid` attempt’s one-minute interval, including when that attempt failed.
+ *   Assertions carrying random `kid`s therefore cannot drive fetches.
  *
  * Caches and limiters are per worker thread, like the CIMD document cache.
  */
@@ -28,14 +27,12 @@ import {
 	CimdClientError,
 	DEFAULT_FETCH_TIMEOUT_MS,
 	DEFAULT_MAX_DOCUMENT_BYTES,
-	cacheTtlSeconds,
 	fetchPinnedBoundedJson,
 	toFinitePositive,
 } from './cimd.ts';
 import { jwksUriIssue, publicKeySetFromDocument } from './clientKeySet.ts';
 import { createRateLimiter } from './rateLimit.ts';
 
-const JWKS_CACHE_MIN_TTL_S = 60;
 const JWKS_CACHE_MAX_TTL_S = 3_600;
 const JWKS_CACHE_DEFAULT_TTL_S = 300;
 const JWKS_CACHE_MAX_ENTRIES = 1_000;
@@ -46,7 +43,13 @@ export const JWKS_FETCH_ATTEMPTS_PER_MINUTE = 10;
 /** Minimum spacing between unknown-kid refetches for one (client, jwks_uri). */
 export const KID_MISS_REFETCH_INTERVAL_MS = 60_000;
 
-type CacheEntry = { keys: Record<string, unknown>[]; expiresAt: number; fetchedAt: number };
+type CacheEntry = {
+	keys: Record<string, unknown>[];
+	expiresAt: number;
+	fetchedAt: number;
+	/** When the last unknown-kid refetch was attempted for this entry, whatever its outcome. */
+	kidMissAttemptAt?: number;
+};
 
 const jwksCache = new Map<string, CacheEntry>();
 const inFlight = new Map<string, Promise<Record<string, unknown>[]>>();
@@ -61,11 +64,30 @@ let _now: () => number = () => Date.now();
 export function _setJwksNow(fn: (() => number) | null): void {
 	_now = fn ?? (() => Date.now());
 }
+/** Number of stored key sets (tests only). @internal */
+export function _jwksCacheSize(): number {
+	return jwksCache.size;
+}
 /** Clear the key cache, in-flight map and fetch limiter (tests only). @internal */
 export function _clearJwksCache(): void {
 	jwksCache.clear();
 	inFlight.clear();
 	fetchLimiter._reset();
+}
+
+/**
+ * Cache lifetime (seconds) for a fetched JWK Set, 0 meaning "do not store".
+ * Obeys `no-store` and `no-cache`; an explicit `max-age` is capped at 3600
+ * seconds and never extended; an absent caching directive defaults to 300
+ * seconds.
+ */
+export function jwksCacheTtlSeconds(header: string | null): number {
+	if (!header) return JWKS_CACHE_DEFAULT_TTL_S;
+	if (/\bno-store\b|\bno-cache\b/i.test(header)) return 0;
+	const match = /\bmax-age\s*=\s*(\d+)/i.exec(header);
+	if (!match) return JWKS_CACHE_DEFAULT_TTL_S;
+	// max-age=0 yields 0: not stored.
+	return Math.min(JWKS_CACHE_MAX_TTL_S, parseInt(match[1], 10));
 }
 
 /** Length-prefixed cache key: the component boundary is unambiguous for any client_id. */
@@ -103,13 +125,18 @@ export async function getClientJwks(
 	const fresh = cached && cached.expiresAt > now ? cached : undefined;
 
 	if (fresh) {
-		const refetchAllowed = options.refetchForUnknownKid && now - fresh.fetchedAt >= KID_MISS_REFETCH_INTERVAL_MS;
+		// Spacing runs from the later of the last fetch and the last
+		// unknown-kid attempt, so a failed refetch is spaced too.
+		const lastAttempt = Math.max(fresh.fetchedAt, fresh.kidMissAttemptAt ?? 0);
+		const refetchAllowed = options.refetchForUnknownKid && now - lastAttempt >= KID_MISS_REFETCH_INTERVAL_MS;
 		if (!refetchAllowed) {
 			// LRU refresh: re-insert so eviction targets the least recently used.
 			jwksCache.delete(key);
 			jwksCache.set(key, fresh);
 			return fresh.keys;
 		}
+		// Record the attempt before awaiting, whatever its outcome.
+		fresh.kidMissAttemptAt = now;
 	}
 
 	const existing = inFlight.get(key);
@@ -165,15 +192,13 @@ async function fetchAndCache(
 			const oldest = jwksCache.keys().next().value;
 			if (oldest !== undefined) jwksCache.delete(oldest);
 		}
-		const ttlSeconds = cacheTtlSeconds(
-			cacheControl,
-			JWKS_CACHE_MIN_TTL_S,
-			JWKS_CACHE_MAX_TTL_S,
-			JWKS_CACHE_DEFAULT_TTL_S
-		);
+		const ttlSeconds = jwksCacheTtlSeconds(cacheControl);
 		const now = _now();
 		jwksCache.delete(key);
-		jwksCache.set(key, { keys: keySet.keys, expiresAt: now + ttlSeconds * 1000, fetchedAt: now });
+		// no-store, no-cache and zero-age responses are not stored.
+		if (ttlSeconds > 0) {
+			jwksCache.set(key, { keys: keySet.keys, expiresAt: now + ttlSeconds * 1000, fetchedAt: now });
+		}
 		logger?.info?.(
 			`JWKS: fetched ${keySet.keys.length} key(s) for client ${JSON.stringify(clientId)} (cached for ${ttlSeconds}s)`
 		);

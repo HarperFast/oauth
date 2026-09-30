@@ -14,6 +14,7 @@ import {
 	getClientJwks,
 	_clearJwksCache,
 	_setJwksNow,
+	_jwksCacheSize,
 	MAX_CONCURRENT_JWKS_FETCHES,
 	JWKS_FETCH_ATTEMPTS_PER_MINUTE,
 	KID_MISS_REFETCH_INTERVAL_MS,
@@ -170,6 +171,24 @@ describe('getClientJwks', () => {
 		await assert.rejects(() => getClientJwks(CLIENT_A, JWKS_A, undefined), /non-JSON content-type/);
 	});
 
+	it('compares the media type exactly, excluding parameters', async () => {
+		for (const contentType of ['application/json; charset=utf-8', 'Application/JWK-Set+JSON']) {
+			_clearJwksCache();
+			_setFetch(recordingFetch(() => response({ keys: [KEY_1] }, { contentType })));
+			assert.equal((await getClientJwks(CLIENT_A, JWKS_A, undefined)).length, 1, contentType);
+		}
+		for (const contentType of [
+			'text/plain; x=application/json',
+			'application/json-seq',
+			'application/jsonx',
+			'text/application/json',
+		]) {
+			_clearJwksCache();
+			_setFetch(recordingFetch(() => response({ keys: [KEY_1] }, { contentType })));
+			await assert.rejects(() => getClientJwks(CLIENT_A, JWKS_A, undefined), /non-JSON content-type/, contentType);
+		}
+	});
+
 	it('refuses redirects and never caches the failure', async () => {
 		const fetch = recordingFetch(() => response('', { status: 302 }));
 		_setFetch(fetch);
@@ -287,18 +306,99 @@ describe('getClientJwks', () => {
 		assert.equal(fetch.calls.length, 2);
 	});
 
-	it('honours Cache-Control within bounds and refetches after expiry', async () => {
+	it('obeys no-store, no-cache and a zero max-age: nothing is stored', async () => {
+		for (const cacheControl of ['no-store', 'no-cache', 'max-age=0', 'public, no-store, max-age=600']) {
+			_clearJwksCache();
+			const fetch = recordingFetch(() => response({ keys: [KEY_1] }, { cacheControl }));
+			_setFetch(fetch);
+			await getClientJwks(CLIENT_A, JWKS_A, undefined);
+			assert.equal(_jwksCacheSize(), 0, `${cacheControl}: no key material kept`);
+			await getClientJwks(CLIENT_A, JWKS_A, undefined);
+			assert.equal(fetch.calls.length, 2, `${cacheControl}: each request fetched`);
+		}
+	});
+
+	it('drops a cached set when a refetch answers no-store', async () => {
+		let now = Date.parse('2026-09-30T00:00:00Z');
+		_setJwksNow(() => now);
+		let cacheControl = 'max-age=3600';
+		let served = KEY_1;
+		const fetch = recordingFetch(() => response({ keys: [served] }, { cacheControl }));
+		_setFetch(fetch);
+		await getClientJwks(CLIENT_A, JWKS_A, undefined);
+		assert.equal(_jwksCacheSize(), 1);
+		now += KID_MISS_REFETCH_INTERVAL_MS;
+		cacheControl = 'no-store';
+		served = KEY_2;
+		const refetched = await getClientJwks(CLIENT_A, JWKS_A, undefined, { refetchForUnknownKid: true });
+		assert.equal(refetched[0].kid, 'key-2');
+		assert.equal(_jwksCacheSize(), 0, 'the earlier set is not kept');
+		const next = await getClientJwks(CLIENT_A, JWKS_A, undefined);
+		assert.equal(next[0].kid, 'key-2', 'the withdrawn key is not served from cache');
+		assert.equal(fetch.calls.length, 3);
+	});
+
+	it('never extends an explicit max-age', async () => {
 		let now = Date.parse('2026-09-30T00:00:00Z');
 		_setJwksNow(() => now);
 		const fetch = recordingFetch(() => response({ keys: [KEY_1] }, { cacheControl: 'max-age=5' }));
 		_setFetch(fetch);
 		await getClientJwks(CLIENT_A, JWKS_A, undefined);
-		now += 59_000; // max-age=5 is floored to 60 s
+		now += 4_000;
 		await getClientJwks(CLIENT_A, JWKS_A, undefined);
-		assert.equal(fetch.calls.length, 1);
+		assert.equal(fetch.calls.length, 1, 'cached within max-age');
 		now += 2_000;
 		await getClientJwks(CLIENT_A, JWKS_A, undefined);
+		assert.equal(fetch.calls.length, 2, 'refetched once max-age passed');
+	});
+
+	it('caps an explicit max-age at 3600 s and defaults to 300 s without a caching directive', async () => {
+		const start = Date.parse('2026-09-30T00:00:00Z');
+		for (const [cacheControl, seconds] of [
+			['max-age=7200', 3600],
+			[undefined, 300],
+			['public', 300],
+		]) {
+			_clearJwksCache();
+			let now = start;
+			_setJwksNow(() => now);
+			const fetch = recordingFetch(() => response({ keys: [KEY_1] }, { cacheControl }));
+			_setFetch(fetch);
+			await getClientJwks(CLIENT_A, JWKS_A, undefined);
+			now = start + seconds * 1000 - 1;
+			await getClientJwks(CLIENT_A, JWKS_A, undefined);
+			assert.equal(fetch.calls.length, 1, `${cacheControl}: cached for ${seconds}s`);
+			now = start + seconds * 1000;
+			await getClientJwks(CLIENT_A, JWKS_A, undefined);
+			assert.equal(fetch.calls.length, 2, `${cacheControl}: expired after ${seconds}s`);
+		}
+	});
+
+	it('spaces an unknown-kid refetch from the previous attempt even when that attempt failed', async () => {
+		let now = Date.parse('2026-09-30T00:00:00Z');
+		_setJwksNow(() => now);
+		let fail = false;
+		const fetch = recordingFetch(() =>
+			fail ? response('', { status: 500 }) : response({ keys: [KEY_1] }, { cacheControl: 'max-age=3600' })
+		);
+		_setFetch(fetch);
+		await getClientJwks(CLIENT_A, JWKS_A, undefined);
+		now += KID_MISS_REFETCH_INTERVAL_MS;
+		fail = true;
+		await assert.rejects(
+			() => getClientJwks(CLIENT_A, JWKS_A, undefined, { refetchForUnknownKid: true }),
+			/status 500/
+		);
 		assert.equal(fetch.calls.length, 2);
+		// An immediate second unknown kid: no fetch, the cached keys are returned.
+		const again = await getClientJwks(CLIENT_A, JWKS_A, undefined, { refetchForUnknownKid: true });
+		assert.equal(again[0].kid, 'key-1');
+		assert.equal(fetch.calls.length, 2, 'a failed attempt is spaced like a successful one');
+		// One interval after the failed attempt, a refetch is allowed again.
+		now += KID_MISS_REFETCH_INTERVAL_MS;
+		fail = false;
+		await getClientJwks(CLIENT_A, JWKS_A, undefined, { refetchForUnknownKid: true });
+		assert.equal(fetch.calls.length, 3);
 	});
 
 	it('re-checks the location policy on every use, even for cached keys', async () => {

@@ -194,13 +194,17 @@ type BasicAuth = { absent: true } | { malformed: true } | { clientId: string; cl
 
 /**
  * Read an `Authorization: Basic` header: absent when there is no header or it
- * uses another scheme; malformed when the Basic credentials don't decode to a
- * non-empty client_id and a secret (possibly empty) separated by `:`.
+ * uses another scheme; malformed when the Basic scheme carries no credentials,
+ * or credentials that don't decode to a non-empty client_id and a secret
+ * (possibly empty) separated by `:`.
  */
 function readBasicAuth(authHeader: string | undefined): BasicAuth {
+	if (!authHeader) return { absent: true };
+	// A bare `Basic` scheme with no credentials is malformed, not absent.
+	if (/^basic$/i.test(authHeader.trim())) return { malformed: true };
 	// Scheme name is case-insensitive (RFC 9110 §11.1) — matches the `/^basic\s/i`
 	// check on the client_credentials path.
-	if (!authHeader || !/^basic\s/i.test(authHeader)) return { absent: true };
+	if (!/^basic\s/i.test(authHeader)) return { absent: true };
 	const encoded = authHeader.slice('Basic '.length).trim();
 	if (!BASIC_CREDENTIALS_PATTERN.test(encoded)) return { malformed: true };
 	const decoded = Buffer.from(encoded, 'base64').toString('utf8');
