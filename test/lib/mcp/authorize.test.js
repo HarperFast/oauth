@@ -257,6 +257,17 @@ describe('handleAuthorize', () => {
 			assert.equal(response.body.error, 'server_error');
 			assert.equal(harnesses.github.generatedTokens.length, 0, 'no flow state is issued');
 		});
+
+		it('still authorizes a stored client after registration is disabled', async () => {
+			const { entries } = newRegistry();
+			const response = await handleAuthorize(
+				makeRequest(),
+				makeTarget(BASE_QUERY),
+				{ ...validConfig, dynamicClientRegistration: { enabled: false } },
+				entries
+			);
+			assert.equal(response.status, 302);
+		});
 	});
 
 	describe('phase 2 — post-validation redirect to client redirect_uri with error', () => {

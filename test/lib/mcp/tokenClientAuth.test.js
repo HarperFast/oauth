@@ -36,6 +36,14 @@ import {
 	captureRefreshForm,
 	createCaptureSigner,
 } from '../../helpers/cimdAuthCaptureFixtures.js';
+import {
+	UPSTREAM_FAMILY_ID_PREFIX,
+	upstreamInteractiveDocumentMethod,
+	upstreamCodeRedeemable,
+	upstreamEncodeCode,
+	upstreamEncodeFamily,
+	upstreamRefreshOutcome,
+} from '../../helpers/upstreamGrantFormats.js';
 
 const ISSUER = 'https://as.example.com';
 const TOKEN_ENDPOINT = `${ISSUER}/oauth/mcp/token`;
@@ -1043,6 +1051,222 @@ describe('handleToken — shared client authenticator', () => {
 					assert.deepEqual(outcomes, [recorded, issuerAud, noneOnly]);
 				});
 			}
+		});
+	});
+
+	describe('migration: grant formats against 2.7.0 writers and readers', () => {
+		const TYPE = 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer';
+		// Declares both methods without a singular preference: 2.6.0 and 2.7.0
+		// resolve it as a public client, this version permits private_key_jwt
+		// wherever it is advertised.
+		const DUAL = 'https://dual.example.com/oauth/client.json';
+		const DUAL_REDIRECT = 'https://dual.example.com/cb';
+		const DUAL_DOC = {
+			client_id: DUAL,
+			client_name: 'Dual',
+			redirect_uris: [DUAL_REDIRECT],
+			grant_types: ['authorization_code', 'refresh_token'],
+			token_endpoint_auth_methods_supported: ['none', 'private_key_jwt'],
+			jwks_uri: 'https://dual.example.com/oauth/jwks.json',
+		};
+		const dualAssertion = () => signAssertion({ claims: { iss: DUAL, sub: DUAL } });
+		const withAssertion = (extra = {}) => ({
+			client_id: DUAL,
+			client_assertion: dualAssertion(),
+			client_assertion_type: TYPE,
+			...extra,
+		});
+		const refresh = (refreshToken, body, config) =>
+			handleToken(
+				{ headers: {} },
+				{ grant_type: 'refresh_token', refresh_token: refreshToken, ...body },
+				config,
+				undefined,
+				logger
+			);
+		const hashOf = (token) => createHash('sha256').update(token).digest('base64url');
+
+		beforeEach(() => {
+			served[DUAL] = DUAL_DOC;
+			served[DUAL_DOC.jwks_uri] = { keys: [KEY_1.jwk] };
+		});
+
+		async function boundFamily() {
+			seedCode('code-1', DUAL, DUAL_REDIRECT, 'private_key_jwt');
+			const minted = await exchange(withAssertion({ redirect_uri: DUAL_REDIRECT }), { config: MIXED });
+			assert.equal(minted.status, 200, JSON.stringify(minted.body));
+			const [family] = families.values();
+			assert.ok(family.family_id.startsWith(BOUND_FAMILY_ID_PREFIX));
+			assert.equal(family.client_auth_method, 'private_key_jwt');
+			return { token: minted.body.refresh_token, familyId: family.family_id };
+		}
+
+		it('documents whose singular method is private_key_jwt do not resolve on 2.6.0 or 2.7.0', () => {
+			assert.equal(upstreamInteractiveDocumentMethod(ASSISTANT_DOC), null, 'requests routed there fail closed');
+			assert.equal(upstreamInteractiveDocumentMethod(CHATGPT_CIMD_DOCUMENT), null);
+			assert.equal(upstreamInteractiveDocumentMethod(DUAL_DOC), 'none', 'this one resolves there as public');
+		});
+
+		it('refuses a bound family after a binding-unaware node rotated it and dropped the binding', async () => {
+			const { token, familyId } = await boundFamily();
+			const { token: next, hash } = makeRefreshToken(familyId);
+			const family = families.get(familyId);
+			assert.equal(
+				upstreamRefreshOutcome(family, { clientId: DUAL, presentedHash: hashOf(token), provenanceReader: false }),
+				'rotate',
+				'a 2.6.0 node rotates it'
+			);
+			families.set(familyId, upstreamEncodeFamily({ ...family, current_token_hash: hash }));
+			assert.equal('client_auth_method' in families.get(familyId), false, 'its full-record put dropped the binding');
+			const res = await refresh(next, withAssertion(), MIXED);
+			assert.equal(res.status, 400);
+			assert.match(res.body.error_description, /no client authentication binding/);
+		});
+
+		it('rolling back to 2.7.0 retires bound families (its reader accepts only p1- ids)', async () => {
+			const { token, familyId } = await boundFamily();
+			assert.equal(
+				upstreamRefreshOutcome(families.get(familyId), { clientId: DUAL, presentedHash: hashOf(token) }),
+				'retire'
+			);
+		});
+
+		it('routing a bound grant to a binding-unaware node is unsafe: it accepts a weaker method', async () => {
+			const { token, familyId } = await boundFamily();
+			assert.equal(upstreamInteractiveDocumentMethod(DUAL_DOC), 'none', 'the bound method was private_key_jwt');
+			assert.equal(
+				upstreamRefreshOutcome(families.get(familyId), {
+					clientId: DUAL,
+					presentedHash: hashOf(token),
+					provenanceReader: false,
+				}),
+				'rotate',
+				'a 2.6.0 node rotates the family for a public-client request'
+			);
+			seedCode('code-9', DUAL, DUAL_REDIRECT, 'private_key_jwt');
+			assert.equal(
+				upstreamCodeRedeemable(upstreamEncodeCode(codes.get('code-9')), {
+					clientId: DUAL,
+					redirectUri: DUAL_REDIRECT,
+				}),
+				true,
+				'a 2.6.0 or 2.7.0 node redeems a code bound to private_key_jwt without the assertion'
+			);
+		});
+
+		it('a code written by a 2.7.0 node has no binding and is refused before it is consumed', async () => {
+			codes.set(
+				'code-old',
+				upstreamEncodeCode({
+					code: 'code-old',
+					client_id: 'public-1',
+					user: 'alice',
+					resource: RESOURCE,
+					code_challenge: CODE_CHALLENGE,
+					code_challenge_method: 'S256',
+					redirect_uri: REDIRECT,
+					client_auth_method: 'none',
+				})
+			);
+			const res = await exchange({ client_id: 'public-1', redirect_uri: REDIRECT }, { code: 'code-old' });
+			assert.equal(res.status, 400);
+			assert.match(res.body.error_description, /predates client authentication binding/);
+			assert.equal(codes.has('code-old'), true);
+		});
+
+		it('families written by 2.7.0 keep its policy; unknown formats are retired, never read as bound', async () => {
+			const legacy = (familyId, clientId) => {
+				const { token, hash } = makeRefreshToken(familyId);
+				families.set(
+					familyId,
+					upstreamEncodeFamily({
+						family_id: familyId,
+						current_token_hash: hash,
+						revoked: false,
+						client_id: clientId,
+						user: 'alice',
+						resource: RESOURCE,
+						expires_at: Math.floor(Date.now() / 1000) + 3600,
+					})
+				);
+				return token;
+			};
+			assert.equal(
+				(await refresh(legacy(`${UPSTREAM_FAMILY_ID_PREFIX}dcr`, 'public-1'), { client_id: 'public-1' }, DEFAULT))
+					.status,
+				200
+			);
+			assert.equal(
+				(await refresh(legacy(`${UPSTREAM_FAMILY_ID_PREFIX}cimd`, DUAL), { client_id: DUAL }, DEFAULT)).status,
+				200,
+				'a CIMD family from 2.7.0 stays bound to none'
+			);
+			const upgraded = await refresh(legacy(`${UPSTREAM_FAMILY_ID_PREFIX}cimd-2`, DUAL), withAssertion(), MIXED);
+			assert.equal(upgraded.status, 400, 'once private_key_jwt is permitted, that link reauthorizes');
+			assert.match(upgraded.body.error_description, /bound to a different client authentication method/);
+			for (const unknown of ['p3-future', 'bare-uuid-family']) {
+				const res = await refresh(legacy(unknown, 'public-1'), { client_id: 'public-1' }, DEFAULT);
+				assert.equal(res.status, 400);
+				assert.match(res.body.error_description, /predates provenance tracking/);
+				assert.equal(families.get(unknown).revoked, true);
+			}
+		});
+
+		it('ChatGPT grants bound to none need reauthorization once private_key_jwt is permitted', async () => {
+			served[CHATGPT_CLIENT_ID] = CHATGPT_CIMD_DOCUMENT;
+			const { token, hash } = makeRefreshToken(`${BOUND_FAMILY_ID_PREFIX}chatgpt-none`);
+			families.set(`${BOUND_FAMILY_ID_PREFIX}chatgpt-none`, {
+				family_id: `${BOUND_FAMILY_ID_PREFIX}chatgpt-none`,
+				current_token_hash: hash,
+				revoked: false,
+				client_id: CHATGPT_CLIENT_ID,
+				user: 'alice',
+				resource: RESOURCE,
+				expires_at: Math.floor(Date.now() / 1000) + 3600,
+				client_auth_method: 'none',
+			});
+			// Permitted private_key_jwt now: presenting none is an authentication error...
+			assertInvalidClient(await refresh(token, { client_id: CHATGPT_CLIENT_ID }, SETTING_ON), /client_assertion/);
+			// ...and presenting the assertion does not satisfy the grant's binding.
+			served[CHATGPT_JWKS_URI] = { keys: [KEY_1.jwk] };
+			const withKey = await refresh(
+				token,
+				{
+					client_id: CHATGPT_CLIENT_ID,
+					client_assertion: signAssertion({ claims: { iss: CHATGPT_CLIENT_ID, sub: CHATGPT_CLIENT_ID } }),
+					client_assertion_type: TYPE,
+				},
+				SETTING_ON
+			);
+			assert.equal(withKey.status, 400);
+			assert.match(withKey.body.error_description, /bound to a different client authentication method/);
+			// Under the configuration it was issued with, it still refreshes.
+			assert.equal((await refresh(token, { client_id: CHATGPT_CLIENT_ID }, DEFAULT)).status, 200);
+		});
+
+		it('a stored secret client still authenticates after registration is disabled; discovery agrees', async () => {
+			const noDcr = { ...DEFAULT, dynamicClientRegistration: { enabled: false } };
+			const withDcr = { ...DEFAULT, dynamicClientRegistration: {} };
+			seedCode('code-conf', 'conf-1', REDIRECT, 'client_secret_basic');
+			const minted = await exchange(
+				{ redirect_uri: REDIRECT },
+				{ headers: basic('conf-1', 'conf-secret'), config: noDcr, code: 'code-conf' }
+			);
+			assert.equal(minted.status, 200, JSON.stringify(minted.body));
+			const refreshed = await handleToken(
+				{ headers: basic('conf-1', 'conf-secret') },
+				{ grant_type: 'refresh_token', refresh_token: minted.body.refresh_token },
+				noDcr,
+				undefined,
+				logger
+			);
+			assert.equal(refreshed.status, 200, JSON.stringify(refreshed.body));
+			const off = await buildAuthorizationServerMetadata({ headers: {} }, noDcr);
+			const on = await buildAuthorizationServerMetadata({ headers: {} }, withDcr);
+			assert.ok(off.token_endpoint_auth_methods_supported.includes('client_secret_basic'));
+			assert.deepEqual(off.token_endpoint_auth_methods_supported, on.token_endpoint_auth_methods_supported);
+			assert.equal(off.registration_endpoint, undefined);
+			assert.ok(on.registration_endpoint);
 		});
 	});
 });
