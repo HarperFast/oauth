@@ -164,6 +164,13 @@ export interface MCPClientCredentialsConfig {
 	 * requests get 429 + `error: "slow_down"` + `Retry-After`.
 	 */
 	rateLimit?: number | false;
+	/**
+	 * Keep accepting the token-endpoint URL as an assertion `aud` for this
+	 * grant, alongside the issuer. Default: true, so existing agents keep
+	 * working while their signers move to the issuer; set false to accept the
+	 * issuer only (RFC 7523bis).
+	 */
+	acceptTokenEndpointAudience?: boolean;
 }
 
 /**
@@ -276,8 +283,42 @@ export interface MCPClientIdMetadataDocumentsConfig {
 	allowedHosts?: string[];
 	/** Fetch timeout in milliseconds. Default: 5000. */
 	fetchTimeoutMs?: number;
-	/** Maximum document size in bytes. Default: 65536 (64 KB). */
+	/** Maximum document size in bytes. Default: 65536 (64 KB). Also bounds fetched `jwks_uri` documents. */
 	maxDocumentBytes?: number;
+	/** `private_key_jwt` for interactive CIMD clients. See docs/mcp-oauth.md. */
+	privateKeyJwt?: MCPCimdPrivateKeyJwtConfig;
+}
+
+/**
+ * `private_key_jwt` settings for interactive CIMD clients.
+ */
+export interface MCPCimdPrivateKeyJwtConfig {
+	/**
+	 * Advertise `private_key_jwt` (and the interactive signing algorithms) in
+	 * the authorization server metadata, so interactive CIMD clients that
+	 * declare it are resolved to it. Default: false. A server that enables the
+	 * client_credentials grant already advertises `private_key_jwt`; there, an
+	 * interactive client's assertion is verified whatever this setting is.
+	 */
+	enabled?: boolean;
+	/**
+	 * Additional https origins (beyond the client ID's own origin) from which a
+	 * `jwks_uri` may be fetched. Normalized at startup to exact origins.
+	 */
+	jwksUriAllowedOrigins?: string[];
+	/**
+	 * Opt-in, expiring interoperability exception: also accept the advertised
+	 * token-endpoint URL as a client assertion's sole `aud` for the listed
+	 * interactive CIMD client IDs (authorization_code and refresh_token only),
+	 * when their keys come from the client ID's own origin. Departs from
+	 * RFC 7523bis; see docs/mcp-oauth.md.
+	 */
+	tokenEndpointAudience?: {
+		/** Exact CIMD client IDs (https URLs) eligible for the exception. */
+		clientIds: string[];
+		/** When the exception stops applying: an ISO 8601 date-time, normalized at startup to epoch ms. */
+		expiresAt: string | number;
+	};
 }
 
 /**

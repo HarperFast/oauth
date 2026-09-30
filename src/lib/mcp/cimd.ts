@@ -88,8 +88,8 @@ import {
 	validateStringArray,
 } from './clientValidator.ts';
 
-const DEFAULT_FETCH_TIMEOUT_MS = 5_000;
-const DEFAULT_MAX_DOCUMENT_BYTES = 64 * 1024; // 64 KB
+export const DEFAULT_FETCH_TIMEOUT_MS = 5_000;
+export const DEFAULT_MAX_DOCUMENT_BYTES = 64 * 1024; // 64 KB
 const CACHE_MIN_TTL_S = 60;
 const CACHE_MAX_TTL_S = 86_400;
 const CACHE_DEFAULT_TTL_S = 3_600;
@@ -536,16 +536,29 @@ export function isCimdClientId(clientId: string): boolean {
 
 // --- Cache helpers ---
 
-function parseCacheControlMaxAge(header: string | null): number {
-	if (!header) return CACHE_DEFAULT_TTL_S;
-	// `no-store`/`no-cache` are honored as the minimum TTL, not literally —
-	// the floor is deliberate DoS protection (see module header).
-	if (/\bno-store\b|\bno-cache\b/i.test(header)) return CACHE_MIN_TTL_S;
+/**
+ * Cache lifetime (seconds) from a `Cache-Control` header, clamped to
+ * [minSeconds, maxSeconds]; `defaultSeconds` when absent or unparseable.
+ * `no-store`/`no-cache` are honored as the minimum, not literally — the floor
+ * is deliberate DoS protection (see module header).
+ */
+export function cacheTtlSeconds(
+	header: string | null,
+	minSeconds: number,
+	maxSeconds: number,
+	defaultSeconds: number
+): number {
+	if (!header) return defaultSeconds;
+	if (/\bno-store\b|\bno-cache\b/i.test(header)) return minSeconds;
 	const match = /\bmax-age\s*=\s*(\d+)/i.exec(header);
-	if (!match) return CACHE_DEFAULT_TTL_S;
+	if (!match) return defaultSeconds;
 	const seconds = parseInt(match[1], 10);
-	if (isNaN(seconds)) return CACHE_DEFAULT_TTL_S;
-	return Math.max(CACHE_MIN_TTL_S, Math.min(CACHE_MAX_TTL_S, seconds));
+	if (isNaN(seconds)) return defaultSeconds;
+	return Math.max(minSeconds, Math.min(maxSeconds, seconds));
+}
+
+function parseCacheControlMaxAge(header: string | null): number {
+	return cacheTtlSeconds(header, CACHE_MIN_TTL_S, CACHE_MAX_TTL_S, CACHE_DEFAULT_TTL_S);
 }
 
 /**
@@ -554,7 +567,7 @@ function parseCacheControlMaxAge(header: string | null): number {
  * `NaN`/`Infinity` would silently disable the `>` comparisons the size and
  * time caps rely on — fail closed to the default instead.
  */
-function toFinitePositive(value: unknown, fallback: number): number {
+export function toFinitePositive(value: unknown, fallback: number): number {
 	const n = typeof value === 'string' && value.trim() !== '' ? Number(value) : value;
 	return typeof n === 'number' && Number.isFinite(n) && n > 0 ? n : fallback;
 }
@@ -908,6 +921,124 @@ export async function resolveCimdClient(
 	return pending;
 }
 
+/** Result of a pinned, bounded HTTPS fetch of a JSON document. */
+export interface BoundedJsonFetchResult {
+	body: string;
+	cacheControl: string | null;
+}
+
+/** Options for {@link fetchPinnedBoundedJson}. */
+export interface BoundedJsonFetchOptions {
+	/** Client-facing name of the document in error messages, e.g. "CIMD document". */
+	label: string;
+	/** Short tag for the DNS-timeout message, e.g. "CIMD". */
+	tag: string;
+	/** `Accept` request header. */
+	accept: string;
+	/** The response content-type must contain one of these media types. */
+	contentTypes: string[];
+	/** One deadline covering DNS, connect, headers and body (ms). */
+	timeoutMs: number;
+	/** Maximum body size (bytes). */
+	maxBytes: number;
+	logger?: Logger;
+}
+
+/**
+ * Fetch a JSON document over HTTPS under the resolver's SSRF controls: every
+ * resolved address is validated and the connection is PINNED to them, no
+ * redirects are followed (only 200 is accepted), the content-type must match,
+ * and one deadline plus a byte cap bound the whole exchange. Shared by CIMD
+ * document resolution and `jwks_uri` key fetching. Rejections are
+ * `CimdClientError`s; transport failures are plain `Error`s.
+ */
+export async function fetchPinnedBoundedJson(
+	url: string,
+	options: BoundedJsonFetchOptions
+): Promise<BoundedJsonFetchResult> {
+	const { label, tag, accept, contentTypes, timeoutMs, maxBytes, logger } = options;
+	const parsedUrl = new URL(url);
+
+	// One deadline across DNS gate, connect, headers, AND body read — a
+	// hostile server must not be able to hold a connection open past the
+	// timeout by trickling headers or body bytes.
+	const controller = new AbortController();
+	const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+	try {
+		// SSRF gate: resolve + validate before connecting (raced against the
+		// deadline; dns.lookup does not take an AbortSignal). The returned
+		// addresses are PINNED into the fetch so the connection can't race a
+		// rebind to a fresh, unvalidated resolution.
+		const validatedAddresses = await withAbort(
+			checkHostSsrf(parsedUrl.hostname, logger),
+			controller.signal,
+			`${tag} DNS lookup timed out`
+		);
+
+		const response = await _fetch(url, {
+			headers: { Accept: accept },
+			signal: controller.signal,
+			pinnedAddresses: validatedAddresses,
+		});
+
+		// Only 200 is acceptable — no redirects (https.request never follows
+		// them) and no error bodies; a 404/500 with a JSON body is not a document.
+		if (response.status !== 200) {
+			throw new CimdClientError('invalid_client', `${label} fetch returned status ${response.status}`);
+		}
+
+		// Reject a content-type outside the accepted JSON media types.
+		const contentType = response.headers.get('content-type') ?? '';
+		if (!contentTypes.some((type) => contentType.includes(type))) {
+			throw new CimdClientError(
+				'invalid_client',
+				`${label} has non-JSON content-type: ${JSON.stringify(contentType.slice(0, 100))}`
+			);
+		}
+
+		const cacheControl = response.headers.get('cache-control');
+
+		// Enforce size cap.
+		const clHeader = response.headers.get('content-length');
+		if (clHeader && parseInt(clHeader, 10) > maxBytes) {
+			throw new CimdClientError(
+				'invalid_client',
+				`${label} content-length (${JSON.stringify(clHeader.slice(0, 20))}) exceeds limit (${maxBytes})`
+			);
+		}
+
+		// Read up to maxBytes (reader.read() rejects when the deadline aborts).
+		const chunks: Uint8Array[] = [];
+		let total = 0;
+		const reader = response.body?.getReader();
+		if (!reader) {
+			throw new Error(`${tag} fetch: response body is not readable`);
+		}
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			if (value) {
+				total += value.length;
+				if (total > maxBytes) {
+					reader.cancel();
+					throw new CimdClientError('invalid_client', `${label} exceeds size limit (${maxBytes} bytes)`);
+				}
+				chunks.push(value);
+			}
+		}
+		return { body: Buffer.concat(chunks).toString('utf8'), cacheControl };
+	} catch (error) {
+		// A rejection between headers and the full body read must tear down
+		// the pinned socket — the deadline timer is cleared below, so nothing
+		// else would ever abort a connection the server holds open.
+		controller.abort();
+		throw error;
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
 /** Fetch + validate + cache a CIMD document (the deduped, network-bound half of
  * `resolveCimdClient`). */
 async function fetchAndValidateCimd(
@@ -918,87 +1049,15 @@ async function fetchAndValidateCimd(
 ): Promise<MCPClientRecord | null> {
 	let record: MCPClientRecord;
 	try {
-		const parsedUrl = new URL(clientId);
-		const fetchTimeout = toFinitePositive(cimdConfig?.fetchTimeoutMs, DEFAULT_FETCH_TIMEOUT_MS);
-		const maxBytes = toFinitePositive(cimdConfig?.maxDocumentBytes, DEFAULT_MAX_DOCUMENT_BYTES);
-
-		// One deadline across DNS gate, connect, headers, AND body read — a
-		// hostile server must not be able to hold a connection open past the
-		// timeout by trickling headers or body bytes.
-		const controller = new AbortController();
-		const timer = setTimeout(() => controller.abort(), fetchTimeout);
-
-		let body: string;
-		let cacheControlHeader: string | null = null;
-		try {
-			// SSRF gate: resolve + validate before connecting (raced against the
-			// deadline; dns.lookup does not take an AbortSignal). The returned
-			// addresses are PINNED into the fetch so the connection can't race a
-			// rebind to a fresh, unvalidated resolution.
-			const validatedAddresses = await withAbort(
-				checkHostSsrf(parsedUrl.hostname, logger),
-				controller.signal,
-				'CIMD DNS lookup timed out'
-			);
-
-			const response = await _fetch(clientId, {
-				headers: { Accept: 'application/json' },
-				signal: controller.signal,
-				pinnedAddresses: validatedAddresses,
-			});
-
-			// Only 200 is acceptable — the CIMD draft requires the document to be
-			// served with 200 OK; a 404/500 with a JSON body is not a client.
-			if (response.status !== 200) {
-				throw new CimdClientError('invalid_client', `CIMD document fetch returned status ${response.status}`);
-			}
-
-			// Reject non-JSON content-type.
-			const contentType = response.headers.get('content-type') ?? '';
-			if (!contentType.includes('application/json')) {
-				throw new CimdClientError('invalid_client', `CIMD document has non-JSON content-type: ${contentType}`);
-			}
-
-			cacheControlHeader = response.headers.get('cache-control');
-
-			// Enforce size cap.
-			const clHeader = response.headers.get('content-length');
-			if (clHeader && parseInt(clHeader, 10) > maxBytes) {
-				throw new CimdClientError(
-					'invalid_client',
-					`CIMD document content-length (${clHeader}) exceeds limit (${maxBytes})`
-				);
-			}
-
-			// Read up to maxBytes (reader.read() rejects when the deadline aborts).
-			const chunks: Uint8Array[] = [];
-			let total = 0;
-			const reader = response.body?.getReader();
-			if (!reader) {
-				throw new Error('CIMD fetch: response body is not readable');
-			}
-			while (true) {
-				const { done, value } = await reader.read();
-				if (done) break;
-				if (value) {
-					total += value.length;
-					if (total > maxBytes) {
-						reader.cancel();
-						throw new CimdClientError('invalid_client', `CIMD document exceeds size limit (${maxBytes} bytes)`);
-					}
-					chunks.push(value);
-				}
-			}
-			body = Buffer.concat(chunks).toString('utf8');
-		} catch (error) {
-			// A rejection between headers and the full body read must tear down
-			// the pinned socket — the deadline timer is cleared below, so nothing
-			// else would ever abort a connection the server holds open.
-			controller.abort();
-			throw error;
-		} finally {
-			clearTimeout(timer);
-		}
+		const { body, cacheControl: cacheControlHeader } = await fetchPinnedBoundedJson(clientId, {
+			label: 'CIMD document',
+			tag: 'CIMD',
+			accept: 'application/json',
+			contentTypes: ['application/json'],
+			timeoutMs: toFinitePositive(cimdConfig?.fetchTimeoutMs, DEFAULT_FETCH_TIMEOUT_MS),
+			maxBytes: toFinitePositive(cimdConfig?.maxDocumentBytes, DEFAULT_MAX_DOCUMENT_BYTES),
+			logger,
+		});
 
 		let doc: unknown;
 		try {
