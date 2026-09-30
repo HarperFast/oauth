@@ -18,8 +18,18 @@ import { MCPAssertionJtiStore } from './assertionJtiStore.ts';
 import { MCPAuthCodeStore } from './authCodeStore.ts';
 import { CimdClientError, MAX_CLIENT_ID_LENGTH, resolveClient } from './cimd.ts';
 import { allowsGrant } from './clientValidator.ts';
-import { permittedAuthMethod } from './clientAuthMethod.ts';
-import { CLIENT_ASSERTION_TYPE_JWT_BEARER, verifyClientAssertion } from './clientAssertion.ts';
+import {
+	type AssertionPolicy,
+	type ClientAuthMethod,
+	headlessAssertionPolicy,
+	interactiveAssertionPolicy,
+	interactiveKeyIssue,
+	isHeadlessCimdClient,
+	isInteractiveCimdClient,
+	permittedAuthMethod,
+} from './clientAuthMethod.ts';
+import { type AudienceForm, CLIENT_ASSERTION_TYPE_JWT_BEARER, verifyClientAssertion } from './clientAssertion.ts';
+import { getClientJwks } from './jwksFetcher.ts';
 import { MCPKeyStore } from './keyStore.ts';
 import { createRateLimiter, type RateLimiter } from './rateLimit.ts';
 import { getRequestHeader } from '../requestHeaders.ts';
@@ -32,7 +42,7 @@ import {
 	parseRefreshToken,
 } from './refreshTokenStore.ts';
 import { signAccessToken } from './tokenIssuer.ts';
-import { resolveIssuer, resolveResource } from './wellKnown.ts';
+import { resolveIssuer, resolveResource, tokenEndpointUrl } from './wellKnown.ts';
 
 const DEFAULT_ACCESS_TOKEN_TTL = 3600; // 1 hour
 const DEFAULT_REFRESH_TOKEN_TTL = 2592000; // 30 days
@@ -175,36 +185,115 @@ function formUrlDecode(field: string): string | null {
 	}
 }
 
-/** @internal — exported for tests. */
-export function parseBasicAuth(authHeader: string | undefined): { clientId: string; clientSecret: string } | null {
+/** Strict base64 (standard alphabet, optional padding) for Basic credentials. */
+const BASIC_CREDENTIALS_PATTERN = /^[A-Za-z0-9+/]+={0,2}$/;
+
+type BasicAuth = { absent: true } | { malformed: true } | { clientId: string; clientSecret: string };
+
+/**
+ * Read an `Authorization: Basic` header: absent when there is no header or it
+ * uses another scheme; malformed when the Basic credentials don't decode to a
+ * non-empty client_id and a secret (possibly empty) separated by `:`.
+ */
+function readBasicAuth(authHeader: string | undefined): BasicAuth {
 	// Scheme name is case-insensitive (RFC 9110 §11.1) — matches the `/^basic\s/i`
 	// check on the client_credentials path.
-	if (!authHeader || !/^basic\s/i.test(authHeader)) return null;
-	let decoded: string;
-	try {
-		decoded = Buffer.from(authHeader.slice('Basic '.length).trim(), 'base64').toString('utf8');
-	} catch {
-		return null;
-	}
+	if (!authHeader || !/^basic\s/i.test(authHeader)) return { absent: true };
+	const encoded = authHeader.slice('Basic '.length).trim();
+	if (!BASIC_CREDENTIALS_PATTERN.test(encoded)) return { malformed: true };
+	const decoded = Buffer.from(encoded, 'base64').toString('utf8');
 	// RFC 6749 §2.3.1: each field is form-urlencoded before base64, so the first
 	// literal `:` separates them (a `:` inside a field is `%3A`). Split there,
 	// then form-decode both — otherwise a URL-shaped CIMD client_id is looked up
 	// with its `%3A`/`%2F` literal, or an unencoded one splits at its scheme colon.
 	const sep = decoded.indexOf(':');
-	if (sep < 0) return null;
+	if (sep < 0) return { malformed: true };
 	const clientId = formUrlDecode(decoded.slice(0, sep));
 	const clientSecret = formUrlDecode(decoded.slice(sep + 1));
-	if (clientId === null || clientSecret === null) return null;
+	if (clientId === null || clientSecret === null || clientId.length === 0) return { malformed: true };
 	return { clientId, clientSecret };
 }
 
-type ClientAuthResult = { client: MCPClientRecord } | { error: TokenResponse };
+/** @internal — exported for tests. Null when absent or malformed. */
+export function parseBasicAuth(authHeader: string | undefined): { clientId: string; clientSecret: string } | null {
+	const basic = readBasicAuth(authHeader);
+	return 'clientId' in basic ? basic : null;
+}
 
 /**
- * Authenticate the client per its registered `token_endpoint_auth_method`.
- * Credentials come from the Authorization: Basic header (client_secret_basic)
- * or the body (client_secret_post); public clients (`none`) present only a
- * client_id and rely on PKCE. Mixing methods is rejected (RFC 6749 §2.3).
+ * One body parameter's value: `{}` when absent, `{ value }` for a single
+ * non-empty string, `{ invalid: true }` when present but empty or repeated
+ * (a repeated form field arrives as an array).
+ */
+function singleParameter(body: any, name: string): { value?: string } | { invalid: true } {
+	const raw = body?.[name];
+	if (raw === undefined) return {};
+	if (typeof raw !== 'string' || raw.length === 0) return { invalid: true };
+	return { value: raw };
+}
+
+/** The client's identity from an assertion's unverified `sub`, when no client_id was sent (RFC 7521 §4.2). */
+function unverifiedAssertionSubject(assertion: string): string | undefined {
+	const payloadSegment = assertion.split('.')[1];
+	if (!payloadSegment || !/^[A-Za-z0-9_-]+$/.test(payloadSegment)) return undefined;
+	try {
+		const payload = JSON.parse(Buffer.from(payloadSegment, 'base64url').toString('utf8'));
+		const sub = payload?.sub;
+		return typeof sub === 'string' && sub.length > 0 && sub.length <= MAX_CLIENT_ID_LENGTH ? sub : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+type PresentedCredentials =
+	| { method: 'none' }
+	| { method: 'client_secret_basic'; secret: string }
+	| { method: 'client_secret_post'; secret: string }
+	| { method: 'private_key_jwt'; assertion: string };
+
+type ClientAuthResult =
+	| { client: MCPClientRecord; method: ClientAuthMethod; audienceForm?: AudienceForm }
+	| { error: TokenResponse };
+
+function invalidClient(description: string): { error: TokenResponse } {
+	return { error: errorResponse(401, 'invalid_client', description) };
+}
+
+/** The error for a presentation that differs from the permitted method. */
+function methodMismatch(
+	permitted: ClientAuthMethod,
+	presented: PresentedCredentials['method']
+): { error: TokenResponse } {
+	if (permitted === 'none') {
+		return invalidClient(
+			presented === 'private_key_jwt'
+				? 'Public client must not present a client assertion'
+				: 'Public client must not present a secret'
+		);
+	}
+	if (permitted === 'client_secret_basic') return invalidClient('client_secret_basic requires Authorization: Basic');
+	if (permitted === 'client_secret_post') return invalidClient('client_secret_post requires client_secret in body');
+	return invalidClient('This client must authenticate with a client_assertion (private_key_jwt)');
+}
+
+/**
+ * Authenticate the client at the token endpoint (authorization_code and
+ * refresh_token grants). The client presents at most one mechanism; the
+ * server computes the one method it permits for this client
+ * (`permittedAuthMethod`) and rejects any other presentation:
+ *
+ * - `client_assertion` + `client_assertion_type` → private_key_jwt, which is
+ *   verified or rejected, never ignored (OAuth 2.1 §3.2.2 "authenticate the
+ *   client if client authentication is included").
+ * - `Authorization: Basic` with a non-empty secret → client_secret_basic;
+ *   body `client_secret` → client_secret_post.
+ * - nothing (or an empty-secret Basic header carrying only the client_id, as
+ *   some public clients send) → none; PKCE is the proof.
+ *
+ * Rejected before any lookup: a partial assertion pair, an empty or repeated
+ * credential parameter, malformed Basic credentials, and more than one
+ * mechanism (RFC 6749 §2.3, RFC 7521 §4.2.1) — an empty-secret Basic header
+ * never accompanies an assertion.
  */
 async function authenticateClient(
 	request: Request | undefined,
@@ -212,21 +301,60 @@ async function authenticateClient(
 	mcpConfig: MCPConfig | undefined,
 	logger?: Logger
 ): Promise<ClientAuthResult> {
-	const basic = parseBasicAuth(getRequestHeader(request?.headers, 'authorization'));
-	const bodyClientId = typeof body?.client_id === 'string' ? body.client_id : undefined;
-	const bodyClientSecret = typeof body?.client_secret === 'string' ? body.client_secret : undefined;
+	const basic = readBasicAuth(getRequestHeader(request?.headers, 'authorization'));
+	if ('malformed' in basic) return invalidClient('Malformed Basic client credentials');
 
-	if (basic && bodyClientSecret) {
+	const clientIdParam = singleParameter(body, 'client_id');
+	if ('invalid' in clientIdParam) {
+		return { error: errorResponse(400, 'invalid_request', 'client_id must be a single non-empty value') };
+	}
+	const secretParam = singleParameter(body, 'client_secret');
+	const assertionParam = singleParameter(body, 'client_assertion');
+	const assertionTypeParam = singleParameter(body, 'client_assertion_type');
+	for (const [name, param] of [
+		['client_secret', secretParam],
+		['client_assertion', assertionParam],
+		['client_assertion_type', assertionTypeParam],
+	] as const) {
+		if ('invalid' in param) return invalidClient(`${name} must be a single non-empty value`);
+	}
+	const secret = (secretParam as { value?: string }).value;
+	const assertion = (assertionParam as { value?: string }).value;
+	const assertionType = (assertionTypeParam as { value?: string }).value;
+	const hasBasic = 'clientId' in basic;
+
+	if (assertion !== undefined || assertionType !== undefined) {
+		if (assertion === undefined || assertionType === undefined) {
+			return invalidClient('client_assertion and client_assertion_type must be presented together');
+		}
+		if (assertionType !== CLIENT_ASSERTION_TYPE_JWT_BEARER) {
+			return invalidClient(`client_assertion_type must be ${CLIENT_ASSERTION_TYPE_JWT_BEARER}`);
+		}
+		if (hasBasic || secret !== undefined) return invalidClient('Multiple client authentication methods');
+	}
+	if (hasBasic && secret !== undefined) {
 		return { error: errorResponse(400, 'invalid_request', 'Multiple client authentication methods') };
 	}
-	if (basic && bodyClientId && bodyClientId !== basic.clientId) {
+	if (hasBasic && clientIdParam.value !== undefined && clientIdParam.value !== basic.clientId) {
 		return { error: errorResponse(400, 'invalid_request', 'client_id mismatch between header and body') };
 	}
 
-	const clientId = basic?.clientId ?? bodyClientId;
+	const clientId =
+		(hasBasic ? basic.clientId : undefined) ??
+		clientIdParam.value ??
+		(assertion !== undefined ? unverifiedAssertionSubject(assertion) : undefined);
 	if (!clientId) {
 		return { error: errorResponse(400, 'invalid_request', 'client_id is required') };
 	}
+
+	const presented: PresentedCredentials =
+		assertion !== undefined
+			? { method: 'private_key_jwt', assertion }
+			: hasBasic && basic.clientSecret
+				? { method: 'client_secret_basic', secret: basic.clientSecret }
+				: secret !== undefined
+					? { method: 'client_secret_post', secret }
+					: { method: 'none' };
 
 	let client;
 	try {
@@ -239,46 +367,110 @@ async function authenticateClient(
 		return { error: errorResponse(500, 'server_error', 'Client lookup failed') };
 	}
 	if (!client) {
-		return { error: errorResponse(401, 'invalid_client', 'Unknown client') };
+		return invalidClient('Unknown client');
 	}
 
 	const permitted = permittedAuthMethod(client, mcpConfig);
-	if ('error' in permitted) {
-		return { error: errorResponse(401, 'invalid_client', permitted.error) };
-	}
-	const method = permitted.method;
+	if ('error' in permitted) return invalidClient(permitted.error);
+	if (presented.method !== permitted.method) return methodMismatch(permitted.method, presented.method);
 
-	if (method === 'none') {
-		// Public client: PKCE is the proof. A presented *non-empty* secret signals
-		// misuse and is rejected. An empty Basic secret — `Authorization: Basic
-		// base64("<client_id>:")` — carries only the client_id and is how some
-		// clients convey it; tolerate it as "no secret presented" so those public
-		// clients aren't rejected. (Empty values are falsy here.)
-		if (basic?.clientSecret || bodyClientSecret) {
-			return { error: errorResponse(401, 'invalid_client', 'Public client must not present a secret') };
-		}
-		return { client };
+	if (presented.method === 'none') return { client, method: 'none' };
+	if (presented.method === 'private_key_jwt') {
+		const verified = await verifyPresentedAssertion(client, presented.assertion, request, mcpConfig, logger);
+		if ('error' in verified) return verified;
+		return { client, method: 'private_key_jwt', audienceForm: verified.audienceForm };
 	}
+	if (!client.client_secret || !safeEqual(presented.secret, client.client_secret)) {
+		return invalidClient('Invalid client credentials');
+	}
+	return { client, method: presented.method };
+}
 
-	let presentedSecret: string | undefined;
-	if (method === 'client_secret_basic') {
-		if (!basic) {
-			return { error: errorResponse(401, 'invalid_client', 'client_secret_basic requires Authorization: Basic') };
-		}
-		presentedSecret = basic.clientSecret;
-	} else if (method === 'client_secret_post') {
-		if (!bodyClientSecret) {
-			return { error: errorResponse(401, 'invalid_client', 'client_secret_post requires client_secret in body') };
-		}
-		presentedSecret = bodyClientSecret;
+/**
+ * Verify a private_key_jwt assertion presented on the authorization_code or
+ * refresh_token grant, then record its jti. Headless records use their
+ * client_credentials policy (EdDSA, inline keys); interactive CIMD records
+ * use theirs (RS256/ES256/EdDSA narrowed by the document's pin, inline `jwks`
+ * or `jwks_uri`, issuer audience plus the opt-in exception). A stored (DCR)
+ * record never authenticates this way.
+ */
+async function verifyPresentedAssertion(
+	client: MCPClientRecord,
+	assertion: string,
+	request: Request | undefined,
+	mcpConfig: MCPConfig | undefined,
+	logger?: Logger
+): Promise<{ audienceForm: AudienceForm } | { error: TokenResponse }> {
+	const issuer = resolveIssuer(request as any, mcpConfig ?? {});
+	const tokenEndpoint = tokenEndpointUrl(issuer);
+	let policy: AssertionPolicy;
+	if (isHeadlessCimdClient(client)) {
+		policy = headlessAssertionPolicy(mcpConfig, issuer, tokenEndpoint);
+	} else if (isInteractiveCimdClient(client)) {
+		const keyIssue = interactiveKeyIssue(client, mcpConfig);
+		if (keyIssue) return invalidClient(`client keys are unusable: ${keyIssue}`);
+		policy = interactiveAssertionPolicy(client, mcpConfig, issuer, tokenEndpoint);
 	} else {
-		return { error: errorResponse(401, 'invalid_client', 'Unsupported token endpoint auth method') };
+		return invalidClient('private_key_jwt is supported only for CIMD clients');
 	}
 
-	if (!presentedSecret || !client.client_secret || !safeEqual(presentedSecret, client.client_secret)) {
-		return { error: errorResponse(401, 'invalid_client', 'Invalid client credentials') };
+	const loadKeys = async (
+		refetchForUnknownKid: boolean
+	): Promise<Record<string, unknown>[] | { error: TokenResponse }> => {
+		if (client.jwks_uri === undefined) return client.jwks?.keys ?? [];
+		try {
+			return await getClientJwks(
+				client.client_id,
+				client.jwks_uri,
+				mcpConfig?.clientIdMetadataDocuments,
+				{ refetchForUnknownKid },
+				logger
+			);
+		} catch (err) {
+			if (err instanceof CimdClientError) return { error: cimdErrorResponse(err) };
+			logger?.error?.('MCP token: client key retrieval failed:', err instanceof Error ? err.message : String(err));
+			return { error: errorResponse(500, 'server_error', 'Client key retrieval failed') };
+		}
+	};
+
+	let keys = await loadKeys(false);
+	if (!Array.isArray(keys)) return keys;
+	const verify = (jwks: Record<string, unknown>[]) =>
+		verifyClientAssertion({
+			assertion,
+			clientId: client.client_id,
+			audiences: policy.audiences,
+			jwks,
+			allowedAlgorithms: policy.algorithms,
+			maxExpiresInSeconds: policy.maxLifetimeSeconds,
+		});
+	let result = verify(keys);
+	if (!result.valid && result.unknownKid && client.jwks_uri !== undefined) {
+		// An unknown kid may mean the client rotated: refetch at most once (rate-limited).
+		keys = await loadKeys(true);
+		if (!Array.isArray(keys)) return keys;
+		result = verify(keys);
 	}
-	return { client };
+	if (!result.valid) {
+		logger?.warn?.(`MCP token: client_assertion rejected for ${JSON.stringify(client.client_id)}: ${result.reason}`);
+		return invalidClient(`client_assertion verification failed: ${result.reason}`);
+	}
+
+	// Replay guard: a storage failure THROWS to the top-level 500 handler —
+	// "could not check" must never degrade to "not seen" (fail closed).
+	const fresh = await new MCPAssertionJtiStore(logger).checkAndRecord(
+		client.client_id,
+		result.claims.jti,
+		result.claims.exp
+	);
+	if (!fresh) return invalidClient('client_assertion jti has already been used');
+
+	// Record which audience form was accepted; never the assertion itself.
+	logger?.info?.(
+		`MCP token: client ${JSON.stringify(client.client_id)} authenticated with private_key_jwt ` +
+			`(alg ${result.alg}, aud form ${result.audienceForm})`
+	);
+	return { audienceForm: result.audienceForm };
 }
 
 /** PKCE S256: base64url(sha256(code_verifier)) must equal the stored challenge. */
@@ -681,11 +873,16 @@ async function handleClientCredentialsGrant(
 
 	const issuer = resolveIssuer(request as any, mcpConfig);
 	const keys = Array.isArray(client.jwks?.keys) ? client.jwks.keys : [];
+	// EdDSA with inline keys; the issuer is accepted, and the token-endpoint
+	// URL too unless clientCredentials.acceptTokenEndpointAudience is false.
+	const policy = headlessAssertionPolicy(mcpConfig, issuer, tokenEndpointUrl(issuer));
 	const result = verifyClientAssertion({
 		assertion,
 		clientId,
-		tokenEndpoint: `${issuer}/oauth/mcp/token`,
+		audiences: policy.audiences,
 		jwks: keys,
+		allowedAlgorithms: policy.algorithms,
+		maxExpiresInSeconds: policy.maxLifetimeSeconds,
 	});
 	if (!result.valid) {
 		logger?.warn?.(`MCP token: client_assertion rejected for ${clientId}: ${result.reason}`);

@@ -91,6 +91,11 @@ export function resolveIssuer(request: HarperRequest, mcpConfig: MCPConfig): str
 	return `${scheme}://${host}`;
 }
 
+/** The token endpoint URL for `issuer` — the exact value advertised in AS metadata. */
+export function tokenEndpointUrl(issuer: string): string {
+	return `${issuer}/oauth/mcp/token`;
+}
+
 /**
  * Resolve the canonical resource URI (the MCP endpoint clients talk to).
  * Configured value wins; otherwise derive as `<issuer>/mcp`.
@@ -179,7 +184,7 @@ export async function buildAuthorizationServerMetadata(
 	return {
 		issuer,
 		authorization_endpoint: `${issuer}/oauth/mcp/authorize`,
-		token_endpoint: `${issuer}/oauth/mcp/token`,
+		token_endpoint: tokenEndpointUrl(issuer),
 		// Advertised under the same predicate the handler enforces (#182):
 		// metadata must not point clients at an endpoint that 404s.
 		...(dcrEnabled(mcpConfig) ? { registration_endpoint: `${issuer}/oauth/mcp/register` } : {}),

@@ -1176,6 +1176,33 @@ describe('handleToken — client_credentials grant (#162)', () => {
 		});
 	});
 
+	it('accepts the issuer and, by default, the token endpoint as the assertion audience', async () => {
+		for (const aud of [ISSUER, TOKEN_ENDPOINT]) {
+			const res = await handleToken({ headers: {} }, grantBody({ client_assertion: signAssertion({ aud }) }), ccConfig);
+			assert.equal(res.status, 200, `${aud}: ${JSON.stringify(res.body)}`);
+		}
+	});
+
+	it('accepts only the issuer once acceptTokenEndpointAudience is false', async () => {
+		const issuerOnly = {
+			...ccConfig,
+			clientCredentials: { ...ccConfig.clientCredentials, acceptTokenEndpointAudience: false },
+		};
+		const viaEndpoint = await handleToken(
+			{ headers: {} },
+			grantBody({ client_assertion: signAssertion({ aud: TOKEN_ENDPOINT }) }),
+			issuerOnly
+		);
+		assert.equal(viaEndpoint.status, 401);
+		assert.match(viaEndpoint.body.error_description, /aud does not match/);
+		const viaIssuer = await handleToken(
+			{ headers: {} },
+			grantBody({ client_assertion: signAssertion({ aud: ISSUER }) }),
+			issuerOnly
+		);
+		assert.equal(viaIssuer.status, 200, JSON.stringify(viaIssuer.body));
+	});
+
 	it('issues a short-TTL token with no refresh token (sub = client identity)', async () => {
 		const res = await handleToken({ headers: {} }, grantBody(), ccConfig, hookManager);
 		assert.equal(res.status, 200, JSON.stringify(res.body));

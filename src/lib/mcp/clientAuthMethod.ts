@@ -33,8 +33,8 @@
  */
 
 import type { MCPClientRecord, MCPConfig } from '../../types.ts';
-import { ASSERTION_ALGORITHMS, type AssertionAlgorithm } from './clientAssertion.ts';
-import { jwksUriIssue } from './clientKeySet.ts';
+import { ASSERTION_ALGORITHMS, type AcceptedAudience, type AssertionAlgorithm } from './clientAssertion.ts';
+import { isJwksUriOnClientOrigin, jwksUriIssue } from './clientKeySet.ts';
 
 export type ClientAuthMethod = 'none' | 'client_secret_basic' | 'client_secret_post' | 'private_key_jwt';
 
@@ -162,4 +162,85 @@ export function permittedAuthMethod(client: MCPClientRecord, mcpConfig: MCPConfi
 /** The algorithms `private_key_jwt` accepts, ever (for validation of pins). */
 export function isAssertionAlgorithm(value: unknown): value is AssertionAlgorithm {
 	return typeof value === 'string' && (ASSERTION_ALGORITHMS as readonly string[]).includes(value);
+}
+
+// --- Assertion policy per client shape -------------------------------------
+
+/** Longest accepted interactive assertion lifetime (`exp` − now and `exp` − `iat`). */
+export const INTERACTIVE_MAX_ASSERTION_LIFETIME_SECONDS = 300;
+/** Longest accepted headless (client_credentials) assertion lifetime. */
+export const HEADLESS_MAX_ASSERTION_LIFETIME_SECONDS = 60;
+
+/** What a client's assertion may use: algorithms, audiences and lifetime. */
+export interface AssertionPolicy {
+	algorithms: AssertionAlgorithm[];
+	audiences: AcceptedAudience[];
+	maxLifetimeSeconds: number;
+}
+
+/**
+ * Headless agents: EdDSA with inline keys; the issuer is accepted, and the
+ * token-endpoint URL too until `clientCredentials.acceptTokenEndpointAudience`
+ * is set false (existing signers move to the issuer first).
+ */
+export function headlessAssertionPolicy(
+	mcpConfig: MCPConfig | undefined,
+	issuer: string,
+	tokenEndpoint: string
+): AssertionPolicy {
+	const audiences: AcceptedAudience[] = [{ value: issuer, form: 'issuer' }];
+	if (mcpConfig?.clientCredentials?.acceptTokenEndpointAudience !== false) {
+		audiences.push({ value: tokenEndpoint, form: 'token_endpoint' });
+	}
+	return {
+		algorithms: [...HEADLESS_ASSERTION_ALGORITHMS],
+		audiences,
+		maxLifetimeSeconds: HEADLESS_MAX_ASSERTION_LIFETIME_SECONDS,
+	};
+}
+
+/**
+ * Does the opt-in token-endpoint audience exception apply to this client on
+ * this request? Only for interactive CIMD clients whose independently
+ * fetched and validated client ID is listed exactly, while the configured
+ * expiry lies in the future, and only when the keys stay on that client ID's
+ * own origin (inline `jwks`, or a same-origin `jwks_uri` — never one admitted
+ * by the origin allowlist). Eligibility never comes from an unverified claim.
+ */
+export function tokenEndpointAudienceExceptionApplies(
+	client: MCPClientRecord,
+	mcpConfig: MCPConfig | undefined,
+	nowMs: number = Date.now()
+): boolean {
+	const exception = mcpConfig?.clientIdMetadataDocuments?.privateKeyJwt?.tokenEndpointAudience;
+	if (!exception || !isInteractiveCimdClient(client)) return false;
+	const expiresAt = typeof exception.expiresAt === 'number' ? exception.expiresAt : Date.parse(exception.expiresAt);
+	if (!Number.isFinite(expiresAt) || nowMs >= expiresAt) return false;
+	if (!Array.isArray(exception.clientIds) || !exception.clientIds.includes(client.client_id)) return false;
+	if (client.jwks_uri !== undefined && !isJwksUriOnClientOrigin(client.jwks_uri, client.client_id)) return false;
+	return true;
+}
+
+/**
+ * Interactive CIMD clients: RS256, ES256 or EdDSA narrowed by the document's
+ * pin; the issuer as the sole audience (RFC 7523bis §4), plus the exact
+ * advertised token-endpoint URL while the opt-in exception applies; a
+ * 300-second lifetime cap.
+ */
+export function interactiveAssertionPolicy(
+	client: MCPClientRecord,
+	mcpConfig: MCPConfig | undefined,
+	issuer: string,
+	tokenEndpoint: string,
+	nowMs: number = Date.now()
+): AssertionPolicy {
+	const audiences: AcceptedAudience[] = [{ value: issuer, form: 'issuer' }];
+	if (tokenEndpointAudienceExceptionApplies(client, mcpConfig, nowMs)) {
+		audiences.push({ value: tokenEndpoint, form: 'token_endpoint' });
+	}
+	return {
+		algorithms: interactiveAllowedAlgorithms(client),
+		audiences,
+		maxLifetimeSeconds: INTERACTIVE_MAX_ASSERTION_LIFETIME_SECONDS,
+	};
 }
