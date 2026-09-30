@@ -11,6 +11,7 @@ import assert from 'node:assert/strict';
 import { createHash, generateKeyPairSync, randomBytes, sign } from 'node:crypto';
 import { handleToken } from '../../../dist/lib/mcp/token.js';
 import { MAX_ASSERTION_LENGTH } from '../../../dist/lib/mcp/clientAssertion.js';
+import { buildAuthorizationServerMetadata } from '../../../dist/lib/mcp/wellKnown.js';
 import { resetMCPAssertionJtisTableCache } from '../../../dist/lib/mcp/assertionJtiStore.js';
 import { resetMCPAuthCodesTableCache } from '../../../dist/lib/mcp/authCodeStore.js';
 import { _clearCimdCache, _setDnsLookup, _setFetch } from '../../../dist/lib/mcp/cimd.js';
@@ -23,6 +24,18 @@ import {
 	FAMILY_ID_PREFIX,
 	BOUND_FAMILY_ID_PREFIX,
 } from '../../../dist/lib/mcp/refreshTokenStore.js';
+import {
+	CAPTURE_REFRESH_OFFSETS_MS,
+	CAPTURE_REQUEST_HEADERS,
+	CHATGPT_CIMD_DOCUMENT,
+	CHATGPT_CLIENT_ID,
+	CHATGPT_JWKS_URI,
+	CHATGPT_REDIRECT_URI,
+	captureAssertion,
+	captureCodeForm,
+	captureRefreshForm,
+	createCaptureSigner,
+} from '../../helpers/cimdAuthCaptureFixtures.js';
 
 const ISSUER = 'https://as.example.com';
 const TOKEN_ENDPOINT = `${ISSUER}/oauth/mcp/token`;
@@ -781,6 +794,255 @@ describe('handleToken — shared client authenticator', () => {
 			);
 			assert.equal(noFamily.status, 400);
 			assert.equal(noFamily.body.error, 'invalid_grant');
+		});
+	});
+
+	describe('ChatGPT requests in the recorded shape', () => {
+		const signer = createCaptureSigner();
+		const SCOPE = 'echo';
+		const exceptionOn = (base, expiresAt = Date.now() + 86_400_000) => ({
+			...base,
+			clientIdMetadataDocuments: {
+				...base.clientIdMetadataDocuments,
+				privateKeyJwt: {
+					...base.clientIdMetadataDocuments?.privateKeyJwt,
+					tokenEndpointAudience: { clientIds: [CHATGPT_CLIENT_ID], expiresAt },
+				},
+			},
+		});
+		const interactiveOff = (base) => ({
+			...base,
+			clientIdMetadataDocuments: { ...base.clientIdMetadataDocuments, privateKeyJwt: { enabled: false } },
+		});
+
+		beforeEach(() => {
+			served[CHATGPT_CLIENT_ID] = CHATGPT_CIMD_DOCUMENT;
+			served[CHATGPT_JWKS_URI] = signer.jwks;
+		});
+
+		function seedChatGPTCode(code, method) {
+			codes.set(code, {
+				code,
+				client_id: CHATGPT_CLIENT_ID,
+				user: 'alice',
+				resource: RESOURCE,
+				scope: SCOPE,
+				code_challenge: CODE_CHALLENGE,
+				code_challenge_method: 'S256',
+				redirect_uri: CHATGPT_REDIRECT_URI,
+				client_auth_method: method,
+			});
+		}
+
+		const post = (form, config) => handleToken({ headers: CAPTURE_REQUEST_HEADERS }, form, config, undefined, logger);
+
+		/** Run `fn` with Date.now() pinned to `ms`. */
+		async function atTime(ms, fn) {
+			const realNow = Date.now;
+			Date.now = () => ms;
+			try {
+				return await fn();
+			} finally {
+				Date.now = realNow;
+			}
+		}
+
+		function claimsOf(jwt) {
+			return JSON.parse(Buffer.from(jwt.split('.')[1], 'base64url').toString('utf8'));
+		}
+
+		function exchangeForm(code, assertion) {
+			return captureCodeForm({ assertion, resource: RESOURCE, code, codeVerifier: CODE_VERIFIER });
+		}
+
+		for (const [variant, audience, config] of [
+			['the recorded token-endpoint audience, with the exact-ID exception', TOKEN_ENDPOINT, exceptionOn(SETTING_ON)],
+			['the issuer audience, under the default issuer-only policy', ISSUER, SETTING_ON],
+			[
+				'the recorded audience on a mixed server whose headless issuance limit is 2 per minute',
+				TOKEN_ENDPOINT,
+				exceptionOn({ ...MIXED, clientCredentials: { enabled: true, rateLimit: 2 } }),
+			],
+		]) {
+			it(`chains the recorded burst: code exchange, then refreshes at 0.8, 3.6, 5.4 and 6.6 s (${variant})`, async () => {
+				seedChatGPTCode('code-burst', 'private_key_jwt');
+				const t0 = Date.now();
+				const assertionAt = (ms) => captureAssertion(signer, { audience, nowMs: ms });
+				const minted = await atTime(t0, () => post(exchangeForm('code-burst', assertionAt(t0)), config));
+				assert.equal(minted.status, 200, JSON.stringify(minted.body));
+				assert.equal(claimsOf(minted.body.access_token).aud, RESOURCE, 'the code-bound resource');
+				const [family] = families.values();
+				const original = { ...families.get(family.family_id) };
+				assert.equal(original.client_auth_method, 'private_key_jwt');
+
+				let current = minted.body.refresh_token;
+				const presented = [current];
+				for (const offset of CAPTURE_REFRESH_OFFSETS_MS) {
+					const at = t0 + offset;
+					const res = await atTime(at, () =>
+						post(captureRefreshForm({ assertion: assertionAt(at), resource: RESOURCE, refreshToken: current }), config)
+					);
+					assert.equal(res.status, 200, `refresh at +${offset} ms: ${JSON.stringify(res.body)}`);
+					assert.notEqual(res.body.refresh_token, current);
+					assert.equal(claimsOf(res.body.access_token).aud, RESOURCE);
+					current = res.body.refresh_token;
+					presented.push(current);
+				}
+				const after = families.get(family.family_id);
+				assert.equal(after.expires_at, original.expires_at, 'the family keeps its original expiry');
+				assert.equal(after.resource, RESOURCE);
+				assert.equal(after.scope, SCOPE);
+				assert.equal(after.client_auth_method, 'private_key_jwt');
+				assert.equal(after.revoked, false);
+				assert.equal(fetches.filter((u) => u === CHATGPT_JWKS_URI).length, 1, 'keys fetched once for the burst');
+				assert.equal(jtis.size, 5, 'five distinct assertions recorded');
+				for (const { record, context } of jtis.values()) {
+					assert.equal(record.expires_at, context.expiresAt);
+				}
+			});
+		}
+
+		it('refuses the same assertion presented again (invalid_client) without rotating', async () => {
+			const config = exceptionOn(SETTING_ON);
+			seedChatGPTCode('code-replay', 'private_key_jwt');
+			const minted = await post(
+				exchangeForm('code-replay', captureAssertion(signer, { audience: TOKEN_ENDPOINT })),
+				config
+			);
+			assert.equal(minted.status, 200, JSON.stringify(minted.body));
+			const assertion = captureAssertion(signer, { audience: TOKEN_ENDPOINT });
+			const first = await post(
+				captureRefreshForm({ assertion, resource: RESOURCE, refreshToken: minted.body.refresh_token }),
+				config
+			);
+			assert.equal(first.status, 200, JSON.stringify(first.body));
+			const [family] = families.values();
+			const hash = families.get(family.family_id).current_token_hash;
+			const replay = await post(
+				captureRefreshForm({ assertion, resource: RESOURCE, refreshToken: first.body.refresh_token }),
+				config
+			);
+			assertInvalidClient(replay, /jti has already been used/);
+			assert.equal(families.get(family.family_id).current_token_hash, hash, 'no rotation');
+			const fresh = await post(
+				captureRefreshForm({
+					assertion: captureAssertion(signer, { audience: TOKEN_ENDPOINT }),
+					resource: RESOURCE,
+					refreshToken: first.body.refresh_token,
+				}),
+				config
+			);
+			assert.equal(fresh.status, 200, 'the current token still refreshes with a fresh assertion');
+		});
+
+		it('refuses a superseded refresh token with a fresh assertion (invalid_grant) and revokes the family', async () => {
+			const config = exceptionOn(SETTING_ON);
+			seedChatGPTCode('code-superseded', 'private_key_jwt');
+			const minted = await post(
+				exchangeForm('code-superseded', captureAssertion(signer, { audience: TOKEN_ENDPOINT })),
+				config
+			);
+			const rotated = await post(
+				captureRefreshForm({
+					assertion: captureAssertion(signer, { audience: TOKEN_ENDPOINT }),
+					resource: RESOURCE,
+					refreshToken: minted.body.refresh_token,
+				}),
+				config
+			);
+			assert.equal(rotated.status, 200, JSON.stringify(rotated.body));
+			const superseded = await post(
+				captureRefreshForm({
+					assertion: captureAssertion(signer, { audience: TOKEN_ENDPOINT }),
+					resource: RESOURCE,
+					refreshToken: minted.body.refresh_token,
+				}),
+				config
+			);
+			assert.equal(superseded.status, 400);
+			assert.equal(superseded.body.error, 'invalid_grant');
+			assert.match(superseded.body.error_description, /superseded; family revoked/);
+			const [family] = families.values();
+			assert.equal(families.get(family.family_id).revoked, true);
+			const latest = await post(
+				captureRefreshForm({
+					assertion: captureAssertion(signer, { audience: TOKEN_ENDPOINT }),
+					resource: RESOURCE,
+					refreshToken: rotated.body.refresh_token,
+				}),
+				config
+			);
+			assert.equal(latest.status, 400, 'the latest token dies with its family');
+			assert.equal(latest.body.error, 'invalid_grant');
+		});
+
+		it('never treats the resource form field as the assertion audience', async () => {
+			seedChatGPTCode('code-resource', 'private_key_jwt');
+			const res = await post(
+				exchangeForm('code-resource', captureAssertion(signer, { audience: RESOURCE })),
+				exceptionOn(SETTING_ON)
+			);
+			assertInvalidClient(res, /aud does not match/);
+			assert.equal(codes.has('code-resource'), true);
+		});
+
+		it('never trusts the unverified subject: an assertion-only request with a forged signature is refused', async () => {
+			seedChatGPTCode('code-forged', 'private_key_jwt');
+			const forger = createCaptureSigner({ kid: signer.kid });
+			const form = exchangeForm('code-forged', captureAssertion(forger, { audience: ISSUER }));
+			delete form.client_id;
+			assertInvalidClient(await post(form, SETTING_ON), /signature/);
+			assert.equal(codes.has('code-forged'), true);
+		});
+
+		describe('mixed-server matrix: what the metadata advertises is what the token endpoint accepts', () => {
+			// advertises: private_key_jwt in the metadata (and so the method ChatGPT is permitted).
+			// Outcomes: the recorded request (token-endpoint aud), its issuer-audience variant, the none-only form.
+			const MATRIX = [
+				['CIMD on, interactive setting absent, headless off', DEFAULT, false, [401, 401, 200]],
+				['interactive setting false, headless off', interactiveOff(DEFAULT), false, [401, 401, 200]],
+				['interactive setting true', SETTING_ON, true, [401, 200, 401]],
+				['headless on, interactive setting absent', MIXED, true, [401, 200, 401]],
+				['headless on, interactive setting false', interactiveOff(MIXED), true, [401, 200, 401]],
+				['interactive setting true, exact-ID exception', exceptionOn(SETTING_ON), true, [200, 200, 401]],
+				[
+					'headless on, interactive setting false, exact-ID exception',
+					exceptionOn(interactiveOff(MIXED)),
+					true,
+					[200, 200, 401],
+				],
+				['interactive setting true, expired exception', exceptionOn(SETTING_ON, Date.now() - 1), true, [401, 200, 401]],
+				[
+					'interactive setting absent, exception configured (it enables nothing)',
+					exceptionOn(DEFAULT),
+					false,
+					[401, 401, 200],
+				],
+			];
+
+			for (const [name, config, advertises, [recorded, issuerAud, noneOnly]] of MATRIX) {
+				it(name, async () => {
+					const metadata = await buildAuthorizationServerMetadata({ headers: {} }, config);
+					assert.equal(metadata.token_endpoint_auth_methods_supported.includes('private_key_jwt'), advertises);
+					assert.equal((metadata.token_endpoint_auth_signing_alg_values_supported ?? []).includes('RS256'), advertises);
+					const bound = advertises ? 'private_key_jwt' : 'none';
+					const outcomes = [];
+					for (const [code, assertion] of [
+						['code-recorded', captureAssertion(signer, { audience: TOKEN_ENDPOINT })],
+						['code-issuer', captureAssertion(signer, { audience: ISSUER })],
+						['code-none', undefined],
+					]) {
+						seedChatGPTCode(code, bound);
+						const res = await post(exchangeForm(code, assertion), config);
+						outcomes.push(res.status);
+						if (res.status !== 200) {
+							assert.equal(res.body.error, 'invalid_client', `${code}: ${JSON.stringify(res.body)}`);
+							assert.equal(codes.has(code), true, `${code}: no code consumed`);
+						}
+					}
+					assert.deepEqual(outcomes, [recorded, issuerAud, noneOnly]);
+				});
+			}
 		});
 	});
 });
