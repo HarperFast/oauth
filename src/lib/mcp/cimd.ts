@@ -63,8 +63,12 @@
  *   immediately instead of after cache expiry (up to 24 h).
  *
  * Document shapes:
- * - Interactive (redirect-based) documents: `token_endpoint_auth_method:
- *   none` (public clients + PKCE), redirect_uris required.
+ * - Interactive (redirect-based) documents: redirect_uris required. The
+ *   declared token-endpoint authentication (`token_endpoint_auth_method`,
+ *   `token_endpoint_auth_methods_supported`) and key source (`jwks` or
+ *   `jwks_uri`, never both) are parsed here; the one method the server
+ *   permits is computed per request (clientAuthMethod.ts), since it depends
+ *   on configuration.
  * - Headless client_credentials documents (#161): grant_types exactly
  *   ["client_credentials"], `token_endpoint_auth_method: private_key_jwt`,
  *   an inline public Ed25519 JWK Set (`jwks_uri` rejected — no second SSRF
@@ -76,13 +80,23 @@
 import { lookup } from 'node:dns/promises';
 import { request as httpsRequest } from 'node:https';
 import { Readable } from 'node:stream';
-import type { Logger, MCPClientIdMetadataDocumentsConfig, MCPClientRecord, MCPConfig } from '../../types.ts';
+import type {
+	Logger,
+	MCPCimdAuthDeclaration,
+	MCPClientIdMetadataDocumentsConfig,
+	MCPClientRecord,
+	MCPConfig,
+} from '../../types.ts';
+import { algorithmForKeyType, type AssertionAlgorithm } from './clientAssertion.ts';
+import { isAssertionAlgorithm } from './clientAuthMethod.ts';
+import { publicKeySetFromDocument } from './clientKeySet.ts';
 import { MCPClientStore } from './clientStore.ts';
 import { createRateLimiter } from './rateLimit.ts';
 import {
 	LEGACY_DEFAULT_GRANT_TYPES,
 	filterGrantTypes,
 	validateGrantTypes,
+	validateOptionalString,
 	validateRedirectUri,
 	validateResponseTypes,
 	validateStringArray,
@@ -663,15 +677,10 @@ function validateCimdDocument(
 	const responseErr = validateResponseTypes(responseTypes);
 	if (responseErr) throw new CimdClientError('invalid_client', `CIMD document: ${responseErr}`);
 
-	// token_endpoint_auth_method: interactive CIMD clients are public clients
-	// ('none' + PKCE); 'private_key_jwt' exists only in the credentials shape.
-	const authMethod = typeof d.token_endpoint_auth_method === 'string' ? d.token_endpoint_auth_method : 'none';
-	if (authMethod !== 'none') {
-		throw new CimdClientError(
-			'invalid_client',
-			`token_endpoint_auth_method '${authMethod}' is not supported for interactive CIMD clients; use 'none'`
-		);
-	}
+	// Declared token-endpoint authentication and key source. The permitted
+	// method depends on configuration, so it is computed per request
+	// (clientAuthMethod.ts), not fixed here.
+	const { auth, jwks, jwksUri } = parseInteractiveAuthDeclaration(d);
 
 	return {
 		client_id: clientId,
@@ -682,14 +691,115 @@ function validateCimdDocument(
 		contacts: Array.isArray(d.contacts) ? (d.contacts as string[]) : undefined,
 		grant_types: grantTypes,
 		response_types: responseTypes,
-		token_endpoint_auth_method: authMethod,
 		application_type: typeof d.application_type === 'string' ? d.application_type : 'web',
 		software_id: typeof d.software_id === 'string' ? d.software_id : undefined,
 		software_version: typeof d.software_version === 'string' ? d.software_version : undefined,
 		redirect_uris: d.redirect_uris as string[],
+		...(jwks ? { jwks } : {}),
+		...(jwksUri !== undefined ? { jwks_uri: jwksUri } : {}),
 		client_id_issued_at: 0, // CIMD records are not persisted; no issued-at timestamp.
 		_cimd: true,
+		_cimdAuth: auth,
 	};
+}
+
+/** Methods built on a shared symmetric secret, which a CIMD document must never
+ * declare: there is no way to establish a shared secret with one (CIMD §4.1). */
+const SHARED_SECRET_AUTH_METHODS = new Set(['client_secret_basic', 'client_secret_post', 'client_secret_jwt']);
+
+/**
+ * Parse an interactive document's token-endpoint authentication declaration
+ * and key source. Malformed or forbidden declarations reject the document;
+ * keys that are merely unusable (no usable signature key, an unsupported
+ * signing-alg pin) are recorded so the method selection excludes
+ * `private_key_jwt` for this client.
+ *
+ * - `token_endpoint_auth_method`, when present, must be a string (RFC 7591 §2).
+ * - `token_endpoint_auth_methods_supported`, when present, must be an array of
+ *   strings containing the singular value, if any (RP Metadata Choices §2).
+ * - No shared-secret method may be declared (CIMD §4.1).
+ * - `jwks` and `jwks_uri` must not both be present (RFC 7591 §2); an inline
+ *   set carrying private or symmetric key material rejects the document
+ *   (CIMD §4.1). A `jwks_uri`'s location policy is checked per use.
+ * - `token_endpoint_auth_signing_alg`, when present, must be a string.
+ */
+function parseInteractiveAuthDeclaration(d: Record<string, unknown>): {
+	auth: MCPCimdAuthDeclaration;
+	jwks?: { keys: Record<string, unknown>[] };
+	jwksUri?: string;
+} {
+	const singularErr = validateOptionalString(d.token_endpoint_auth_method, 'token_endpoint_auth_method');
+	if (singularErr) throw new CimdClientError('invalid_client', `CIMD document: ${singularErr}`);
+	const preferred = d.token_endpoint_auth_method as string | undefined;
+
+	let declared: string[];
+	if (d.token_endpoint_auth_methods_supported !== undefined) {
+		const arrayErr = validateStringArray(
+			d.token_endpoint_auth_methods_supported,
+			'token_endpoint_auth_methods_supported'
+		);
+		if (arrayErr) throw new CimdClientError('invalid_client', `CIMD document: ${arrayErr}`);
+		declared = [...(d.token_endpoint_auth_methods_supported as string[])];
+		if (preferred !== undefined && !declared.includes(preferred)) {
+			throw new CimdClientError(
+				'invalid_client',
+				`CIMD document: token_endpoint_auth_method ${JSON.stringify(preferred)} must be one of token_endpoint_auth_methods_supported`
+			);
+		}
+	} else {
+		declared = preferred !== undefined ? [preferred] : ['none'];
+	}
+	const sharedSecret = declared.find((method) => SHARED_SECRET_AUTH_METHODS.has(method));
+	if (sharedSecret) {
+		throw new CimdClientError(
+			'invalid_client',
+			`CIMD document: the shared-secret method ${JSON.stringify(sharedSecret)} is not permitted for CIMD clients`
+		);
+	}
+
+	if (d.jwks !== undefined && d.jwks_uri !== undefined) {
+		throw new CimdClientError('invalid_client', 'CIMD document: jwks and jwks_uri must not both be present');
+	}
+	let keyIssue: string | undefined;
+	let jwks: { keys: Record<string, unknown>[] } | undefined;
+	let jwksUri: string | undefined;
+	if (d.jwks !== undefined) {
+		const keySet = publicKeySetFromDocument(d.jwks);
+		if ('error' in keySet) {
+			if (keySet.privateMaterial) throw new CimdClientError('invalid_client', `CIMD document: jwks: ${keySet.error}`);
+			keyIssue = `jwks: ${keySet.error}`;
+		} else {
+			jwks = { keys: keySet.keys };
+		}
+	} else if (d.jwks_uri !== undefined) {
+		if (typeof d.jwks_uri !== 'string') {
+			throw new CimdClientError('invalid_client', 'CIMD document: jwks_uri must be a string');
+		}
+		jwksUri = d.jwks_uri;
+	}
+
+	const algErr = validateOptionalString(d.token_endpoint_auth_signing_alg, 'token_endpoint_auth_signing_alg');
+	if (algErr) throw new CimdClientError('invalid_client', `CIMD document: ${algErr}`);
+	let signingAlg: AssertionAlgorithm | undefined;
+	let signingAlgIssue: string | undefined;
+	if (d.token_endpoint_auth_signing_alg !== undefined) {
+		const pin = d.token_endpoint_auth_signing_alg as string;
+		if (isAssertionAlgorithm(pin)) {
+			signingAlg = pin;
+		} else {
+			signingAlgIssue = `token_endpoint_auth_signing_alg ${JSON.stringify(pin.slice(0, 40))} is not supported`;
+		}
+	}
+	if (signingAlg && jwks && !jwks.keys.some((key) => algorithmForKeyType(key) === signingAlg)) {
+		keyIssue = `jwks holds no key for token_endpoint_auth_signing_alg ${signingAlg}`;
+	}
+
+	const auth: MCPCimdAuthDeclaration = { declared };
+	if (preferred !== undefined) auth.preferred = preferred;
+	if (signingAlg) auth.signingAlg = signingAlg;
+	if (signingAlgIssue) auth.signingAlgIssue = signingAlgIssue;
+	if (keyIssue) auth.keyIssue = keyIssue;
+	return { auth, jwks, jwksUri };
 }
 
 /** Cap on registered assertion keys per client — bounds per-assertion verify

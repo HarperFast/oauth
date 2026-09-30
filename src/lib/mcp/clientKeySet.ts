@@ -75,7 +75,9 @@ export function isJwksUriOnClientOrigin(jwksUri: string, clientId: string): bool
  * Validate a JWK Set document and return only the usable public keys' key
  * material, or the reason the set is unusable.
  */
-export function publicKeySetFromDocument(doc: unknown): { keys: Record<string, unknown>[] } | { error: string } {
+export function publicKeySetFromDocument(
+	doc: unknown
+): { keys: Record<string, unknown>[] } | { error: string; privateMaterial?: true } {
 	if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return { error: 'JWK Set must be a JSON object' };
 	const keys = (doc as { keys?: unknown }).keys;
 	if (!Array.isArray(keys)) return { error: 'JWK Set must contain a keys array' };
@@ -88,7 +90,10 @@ export function publicKeySetFromDocument(doc: unknown): { keys: Record<string, u
 			return { error: 'every JWK Set entry must be an object' };
 		const k = key as Record<string, unknown>;
 		if (PRIVATE_JWK_MEMBERS.some((member) => member in k)) {
-			return { error: 'JWK Set must contain only public keys (found private or symmetric key material)' };
+			return {
+				error: 'JWK Set must contain only public keys (found private or symmetric key material)',
+				privateMaterial: true,
+			};
 		}
 		// Keys for another use or of an unsupported type are never trusted for signatures.
 		if (publicSigningKeyIssue(k) !== null) continue;

@@ -13,6 +13,7 @@
 
 import { describe, it, before, after, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { generateKeyPairSync } from 'node:crypto';
 import {
 	isCimdClientId,
 	resolveCimdClient,
@@ -23,6 +24,8 @@ import {
 	_clearCimdCache,
 } from '../../../dist/lib/mcp/cimd.js';
 import { resetMCPClientsTableCache } from '../../../dist/lib/mcp/clientStore.js';
+import { permittedAuthMethod } from '../../../dist/lib/mcp/clientAuthMethod.js';
+import { CHATGPT_CIMD_DOCUMENT, CHATGPT_CLIENT_ID, CHATGPT_REDIRECT_URI } from '../../helpers/cimdFixtures.js';
 
 // Helpers
 function makeOkFetch(body, options = {}) {
@@ -593,36 +596,36 @@ describe('resolveCimdClient — document validation', () => {
 		await assert.rejects(() => resolveCimdClient(VALID_URL, { fetchTimeoutMs: 50 }), /body read aborted/);
 	});
 
-	it('rejects unsupported token_endpoint_auth_method for interactive CIMD clients', async () => {
+	it('a singular private_key_jwt without keys resolves, but no method is permitted for it', async () => {
+		// The permitted method depends on configuration, so resolution records
+		// the declaration and the per-request selection refuses the client.
 		setupOk({ ...VALID_DOC, token_endpoint_auth_method: 'private_key_jwt' });
-		await assert.rejects(
-			() => resolveCimdClient(VALID_URL, undefined),
-			(err) => {
-				assert.ok(err instanceof CimdClientError);
-				assert.match(err.message, /not supported for interactive CIMD clients/);
-				assert.equal(err.oauthError, 'invalid_client');
-				return true;
-			}
+		const record = await resolveCimdClient(VALID_URL, undefined);
+		assert.deepEqual(record._cimdAuth.declared, ['private_key_jwt']);
+		assert.equal(record.token_endpoint_auth_method, undefined, 'no fixed method on interactive records');
+		assert.match(permittedAuthMethod(record, { enabled: true }).error, /no token endpoint authentication method/);
+		assert.match(
+			permittedAuthMethod(record, { enabled: true, clientIdMetadataDocuments: { privateKeyJwt: { enabled: true } } })
+				.error,
+			/prefers private_key_jwt but its keys are unusable/
 		);
 	});
 
-	it('accepts none token_endpoint_auth_method', async () => {
+	it('a none document resolves to the none method', async () => {
 		setupOk({ ...VALID_DOC, token_endpoint_auth_method: 'none' });
 		const record = await resolveCimdClient(VALID_URL, undefined);
 		assert.ok(record);
-		assert.equal(record.token_endpoint_auth_method, 'none');
+		assert.equal(permittedAuthMethod(record, { enabled: true }).method, 'none');
 		assert.equal(record._cimd, true);
 	});
 
-	it('interactive documents do not carry jwks fields (only credentials documents do)', async () => {
+	it('refuses a document that declares both jwks and jwks_uri (RFC 7591 §2)', async () => {
 		setupOk({
 			...VALID_DOC,
 			jwks_uri: 'https://example.com/.well-known/jwks.json',
 			jwks: { keys: [] },
 		});
-		const record = await resolveCimdClient(VALID_URL, undefined);
-		assert.equal(record.jwks_uri, undefined);
-		assert.equal(record.jwks, undefined);
+		await assert.rejects(() => resolveCimdClient(VALID_URL, undefined), /jwks and jwks_uri must not both be present/);
 	});
 
 	it('accepts the exact claude.ai metadata shape (authorization_code + refresh_token + jwt-bearer)', async () => {
@@ -1058,5 +1061,124 @@ describe('resolveClient — routing', () => {
 			clientIdMetadataDocuments: { enabled: false },
 		});
 		assert.equal(result, null);
+	});
+});
+
+describe('resolveCimdClient — interactive authentication declarations and key sources', () => {
+	beforeEach(() => _clearCimdCache());
+	afterEach(() => {
+		_setDnsLookup(null);
+		_setFetch(null);
+	});
+
+	function setupOk(doc) {
+		_setDnsLookup(makeDnsOk());
+		_setFetch(makeOkFetch(doc));
+	}
+
+	async function refuses(doc, pattern, url = VALID_URL) {
+		setupOk(doc);
+		await assert.rejects(
+			() => resolveCimdClient(url, undefined),
+			(err) => {
+				assert.ok(err instanceof CimdClientError);
+				assert.equal(err.oauthError, 'invalid_client');
+				assert.match(err.message, pattern);
+				return true;
+			}
+		);
+	}
+
+	function rsaJwk(extra = {}) {
+		const { publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+		return { ...publicKey.export({ format: 'jwk' }), ...extra };
+	}
+
+	it('records the ChatGPT declaration: both methods, the private_key_jwt preference, RS256 and its jwks_uri', async () => {
+		setupOk(CHATGPT_CIMD_DOCUMENT);
+		const record = await resolveCimdClient(CHATGPT_CLIENT_ID, undefined);
+		assert.deepEqual(record._cimdAuth, {
+			declared: ['none', 'private_key_jwt'],
+			preferred: 'private_key_jwt',
+			signingAlg: 'RS256',
+		});
+		assert.equal(record.jwks_uri, 'https://chatgpt.com/oauth/jwks.json');
+		assert.equal(record.jwks, undefined);
+		assert.deepEqual(record.redirect_uris, [CHATGPT_REDIRECT_URI]);
+	});
+
+	it('treats a document declaring neither field as ["none"]', async () => {
+		setupOk(VALID_DOC);
+		const record = await resolveCimdClient(VALID_URL, undefined);
+		assert.deepEqual(record._cimdAuth, { declared: ['none'] });
+	});
+
+	it('refuses a present, non-string token_endpoint_auth_method', async () => {
+		for (const value of [true, 0, ['none'], { method: 'none' }, null]) {
+			_clearCimdCache();
+			await refuses({ ...VALID_DOC, token_endpoint_auth_method: value }, /token_endpoint_auth_method must be a string/);
+		}
+	});
+
+	it('refuses a malformed plural list and a singular value missing from it', async () => {
+		await refuses(
+			{ ...VALID_DOC, token_endpoint_auth_methods_supported: 'none' },
+			/token_endpoint_auth_methods_supported must be an array of strings/
+		);
+		_clearCimdCache();
+		await refuses(
+			{ ...VALID_DOC, token_endpoint_auth_methods_supported: ['none', 1] },
+			/token_endpoint_auth_methods_supported must be an array of strings/
+		);
+		_clearCimdCache();
+		await refuses(
+			{ ...VALID_DOC, token_endpoint_auth_method: 'private_key_jwt', token_endpoint_auth_methods_supported: ['none'] },
+			/must be one of token_endpoint_auth_methods_supported/
+		);
+	});
+
+	it('refuses each shared-secret method, singular or listed (CIMD §4.1)', async () => {
+		for (const method of ['client_secret_basic', 'client_secret_post', 'client_secret_jwt']) {
+			_clearCimdCache();
+			await refuses({ ...VALID_DOC, token_endpoint_auth_methods_supported: ['none', method] }, /shared-secret method/);
+			_clearCimdCache();
+			await refuses({ ...VALID_DOC, token_endpoint_auth_method: method }, /shared-secret method/);
+		}
+	});
+
+	it('refuses inline keys carrying private material, and keeps only key material otherwise', async () => {
+		const key = rsaJwk({ kid: 'k1', x5c: ['MIIB'] });
+		await refuses({ ...VALID_DOC, jwks: { keys: [{ ...key, d: 'AAAA' }] } }, /private or symmetric key material/);
+		_clearCimdCache();
+		setupOk({ ...VALID_DOC, token_endpoint_auth_method: 'private_key_jwt', jwks: { keys: [key] } });
+		const record = await resolveCimdClient(VALID_URL, undefined);
+		assert.equal(record.jwks.keys.length, 1);
+		assert.equal(record.jwks.keys[0].x5c, undefined);
+		assert.equal(record._cimdAuth.keyIssue, undefined);
+	});
+
+	it('records unusable keys and unsupported signing-alg pins instead of trusting them', async () => {
+		setupOk({ ...VALID_DOC, jwks: { keys: [rsaJwk({ use: 'enc' })] } });
+		assert.match((await resolveCimdClient(VALID_URL, undefined))._cimdAuth.keyIssue, /no usable public signature key/);
+		_clearCimdCache();
+		setupOk({ ...VALID_DOC, token_endpoint_auth_signing_alg: 'PS256', jwks_uri: 'https://example.com/jwks.json' });
+		assert.match((await resolveCimdClient(VALID_URL, undefined))._cimdAuth.signingAlgIssue, /"PS256" is not supported/);
+		_clearCimdCache();
+		const { publicKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' });
+		setupOk({
+			...VALID_DOC,
+			token_endpoint_auth_signing_alg: 'RS256',
+			jwks: { keys: [publicKey.export({ format: 'jwk' })] },
+		});
+		assert.match((await resolveCimdClient(VALID_URL, undefined))._cimdAuth.keyIssue, /no key for .* RS256/);
+	});
+
+	it('refuses non-string jwks_uri and token_endpoint_auth_signing_alg values', async () => {
+		await refuses({ ...VALID_DOC, jwks_uri: 42 }, /jwks_uri must be a string/);
+		_clearCimdCache();
+		await refuses(
+			{ ...VALID_DOC, token_endpoint_auth_signing_alg: ['RS256'] },
+			/token_endpoint_auth_signing_alg must be a string/
+		);
 	});
 });

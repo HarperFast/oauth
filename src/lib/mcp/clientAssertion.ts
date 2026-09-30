@@ -174,7 +174,7 @@ function decodeSegment(segment: string): Record<string, unknown> | null {
 }
 
 /** The algorithm a JWK's key type implies, or null for unsupported key types. */
-function algorithmForKeyType(jwk: Record<string, unknown>): AssertionAlgorithm | null {
+export function algorithmForKeyType(jwk: Record<string, unknown>): AssertionAlgorithm | null {
 	if (jwk.kty === 'RSA') return 'RS256';
 	if (jwk.kty === 'EC' && jwk.crv === 'P-256') return 'ES256';
 	if (jwk.kty === 'OKP' && jwk.crv === 'Ed25519') return 'EdDSA';

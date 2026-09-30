@@ -236,6 +236,28 @@ export interface MCPClientMetadata {
 	 * resolution (OKP/Ed25519, public keys only, bounded count).
 	 */
 	jwks?: { keys: Record<string, unknown>[] };
+	/**
+	 * URL of the client's JWK Set (interactive CIMD clients only). Its location
+	 * policy is checked on every use; see clientKeySet.ts.
+	 */
+	jwks_uri?: string;
+}
+
+/**
+ * An interactive CIMD client's declared token-endpoint authentication, as
+ * parsed from its document (internal; see clientAuthMethod.ts).
+ */
+export interface MCPCimdAuthDeclaration {
+	/** Declared methods, in document order: the plural list, else the singular value, else ["none"]. */
+	declared: string[];
+	/** The singular `token_endpoint_auth_method` (the client's preference), when present. */
+	preferred?: string;
+	/** The document's `token_endpoint_auth_signing_alg`, when present and supported. */
+	signingAlg?: 'RS256' | 'ES256' | 'EdDSA';
+	/** Why the pinned signing algorithm cannot be used, when it is unsupported. */
+	signingAlgIssue?: string;
+	/** Why the inline `jwks` cannot be used (configuration-independent), when it cannot. */
+	keyIssue?: string;
 }
 
 /**
@@ -258,6 +280,12 @@ export interface MCPClientRecord extends MCPClientMetadata {
 	 * @internal
 	 */
 	_cimd?: boolean;
+	/**
+	 * Declared token-endpoint authentication of an interactive CIMD client
+	 * (not persisted). The permitted method is computed from it per request.
+	 * @internal
+	 */
+	_cimdAuth?: MCPCimdAuthDeclaration;
 }
 
 /**

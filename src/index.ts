@@ -257,6 +257,27 @@ export async function handleApplication(scope: Scope): Promise<void> {
 				);
 			}
 		}
+		// Interactive private_key_jwt (advertised to every CIMD client once
+		// enabled) carries signed assertions to the token endpoint: it needs
+		// CIMD resolution and, like client_credentials, a TLS issuer outside
+		// loopback development.
+		if (mcpConfig?.enabled && mcpConfig.clientIdMetadataDocuments?.privateKeyJwt?.enabled === true) {
+			if (mcpConfig.clientIdMetadataDocuments?.enabled === false) {
+				throw new Error(
+					'mcp.clientIdMetadataDocuments.privateKeyJwt.enabled requires CIMD resolution ' +
+						'(mcp.clientIdMetadataDocuments.enabled must not be false).'
+				);
+			}
+			const issuerUrl = new URL(mcpConfig.issuer!);
+			const loopback =
+				issuerUrl.hostname === 'localhost' || issuerUrl.hostname === '127.0.0.1' || issuerUrl.hostname === '[::1]';
+			if (issuerUrl.protocol !== 'https:' && !loopback) {
+				throw new Error(
+					'mcp.clientIdMetadataDocuments.privateKeyJwt.enabled requires an https: mcp.issuer; http: is only ' +
+						'permitted for loopback development issuers.'
+				);
+			}
+		}
 		// Warn when the operator sets both a pinned key and a rotation interval —
 		// pin wins and rotation is silently skipped, which could surprise them.
 		if (mcpConfig?.signingKeyPem && mcpConfig?.keyRotationInterval) {

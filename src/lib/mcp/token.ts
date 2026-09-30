@@ -18,6 +18,7 @@ import { MCPAssertionJtiStore } from './assertionJtiStore.ts';
 import { MCPAuthCodeStore } from './authCodeStore.ts';
 import { CimdClientError, MAX_CLIENT_ID_LENGTH, resolveClient } from './cimd.ts';
 import { allowsGrant } from './clientValidator.ts';
+import { permittedAuthMethod } from './clientAuthMethod.ts';
 import { CLIENT_ASSERTION_TYPE_JWT_BEARER, verifyClientAssertion } from './clientAssertion.ts';
 import { MCPKeyStore } from './keyStore.ts';
 import { createRateLimiter, type RateLimiter } from './rateLimit.ts';
@@ -241,7 +242,11 @@ async function authenticateClient(
 		return { error: errorResponse(401, 'invalid_client', 'Unknown client') };
 	}
 
-	const method = client.token_endpoint_auth_method ?? 'none';
+	const permitted = permittedAuthMethod(client, mcpConfig);
+	if ('error' in permitted) {
+		return { error: errorResponse(401, 'invalid_client', permitted.error) };
+	}
+	const method = permitted.method;
 
 	if (method === 'none') {
 		// Public client: PKCE is the proof. A presented *non-empty* secret signals

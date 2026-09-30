@@ -169,6 +169,22 @@ describe('MCP well-known: AS metadata document (RFC 8414)', () => {
 		}
 	});
 
+	it('advertises interactive private_key_jwt and its algorithms only when the setting is on', async () => {
+		const off = await buildAuthorizationServerMetadata(makeRequest(), {
+			enabled: true,
+			clientIdMetadataDocuments: { privateKeyJwt: { enabled: false } },
+		});
+		assert.deepEqual(off.token_endpoint_auth_methods_supported, ['none', 'client_secret_basic', 'client_secret_post']);
+		assert.equal(off.token_endpoint_auth_signing_alg_values_supported, undefined);
+		const on = await buildAuthorizationServerMetadata(makeRequest(), {
+			enabled: true,
+			clientIdMetadataDocuments: { privateKeyJwt: { enabled: true } },
+		});
+		assert.ok(on.token_endpoint_auth_methods_supported.includes('private_key_jwt'));
+		assert.deepEqual(on.token_endpoint_auth_signing_alg_values_supported, ['RS256', 'ES256', 'EdDSA']);
+		assert.ok(!on.grant_types_supported.includes('client_credentials'), 'the headless grant stays off');
+	});
+
 	it('advertises only `code` response type', async () => {
 		const doc = await buildAuthorizationServerMetadata(makeRequest(), { enabled: true });
 		assert.deepEqual(doc.response_types_supported, ['code']);

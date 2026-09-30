@@ -23,6 +23,7 @@
  */
 
 import type { Logger, MCPConfig } from '../../types.ts';
+import { advertisedAssertionSigningAlgorithms, advertisedTokenEndpointAuthMethods } from './clientAuthMethod.ts';
 import { getRequestHeader } from '../requestHeaders.ts';
 import { dcrEnabled } from './dcr.ts';
 import { MCPKeyStore, resolveEffectiveAlg } from './keyStore.ts';
@@ -174,6 +175,7 @@ export async function buildAuthorizationServerMetadata(
 	const cimdEnabled = mcpConfig.clientIdMetadataDocuments?.enabled !== false;
 	// client_credentials is explicit opt-in (#162); advertised only when enabled.
 	const clientCredentialsEnabled = mcpConfig.clientCredentials?.enabled === true;
+	const signingAlgs = advertisedAssertionSigningAlgorithms(mcpConfig);
 	return {
 		issuer,
 		authorization_endpoint: `${issuer}/oauth/mcp/authorize`,
@@ -195,14 +197,14 @@ export async function buildAuthorizationServerMetadata(
 		// permits a partial list; upstream-provider scopes are opaque
 		// pass-through and are deliberately not enumerated.
 		scopes_supported: ['offline_access'],
-		token_endpoint_auth_methods_supported: [
-			'none',
-			'client_secret_basic',
-			'client_secret_post',
-			...(clientCredentialsEnabled ? ['private_key_jwt'] : []),
-		],
-		// EdDSA is the only assertion alg the client_credentials grant verifies.
-		...(clientCredentialsEnabled ? { token_endpoint_auth_signing_alg_values_supported: ['EdDSA'] } : {}),
+		// Every method the token endpoint verifies across registration
+		// mechanisms. private_key_jwt appears when the client_credentials grant
+		// or interactive private_key_jwt is enabled (clientAuthMethod.ts).
+		token_endpoint_auth_methods_supported: advertisedTokenEndpointAuthMethods(mcpConfig),
+		// RFC 8414: required whenever private_key_jwt is listed. EdDSA for the
+		// headless path; RS256, ES256 and EdDSA once interactive private_key_jwt
+		// is enabled.
+		...(signingAlgs ? { token_endpoint_auth_signing_alg_values_supported: signingAlgs } : {}),
 		// Effective alg first, then any other alg still live in the key set (see
 		// advertisedAlgs above). Per-key algs are published in the JWKS; EdDSA is
 		// deferred (#127).
