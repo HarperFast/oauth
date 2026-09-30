@@ -25,11 +25,14 @@
  *   but whose keys are unusable is refused rather than resolved to `none`
  *   (no silent downgrade).
  *
- * Advertisement: `private_key_jwt` is advertised when the client_credentials
- * grant is enabled (headless agents; EdDSA) or when
- * `clientIdMetadataDocuments.privateKeyJwt.enabled` is set (interactive
- * clients; RS256, ES256, EdDSA). With neither, interactive CIMD clients
- * resolve to `none`.
+ * Advertisement: `private_key_jwt` is advertised when a verification path
+ * for it is enabled — the headless client_credentials path (EdDSA), or the
+ * interactive CIMD path (RS256, ES256, EdDSA). The interactive path is active
+ * whenever `private_key_jwt` is advertised to CIMD clients: by
+ * `clientIdMetadataDocuments.privateKeyJwt.enabled`, or by the headless grant,
+ * whose advertisement steers interactive clients too. The advertised signing
+ * algorithms are exactly the union of what the enabled paths accept. With
+ * neither enabled, interactive CIMD clients resolve to `none`.
  */
 
 import type { MCPClientRecord, MCPConfig } from '../../types.ts';
@@ -59,29 +62,55 @@ export function interactivePrivateKeyJwtEnabled(mcpConfig: MCPConfig | undefined
 	return mcpConfig?.clientIdMetadataDocuments?.privateKeyJwt?.enabled === true;
 }
 
+/** Is the headless (client_credentials) `private_key_jwt` verification path enabled? */
+export function headlessPrivateKeyJwtActive(mcpConfig: MCPConfig | undefined): boolean {
+	return mcpConfig?.clientCredentials?.enabled === true;
+}
+
+/**
+ * Is the interactive CIMD `private_key_jwt` verification path active? It is
+ * whenever CIMD resolution is on and `private_key_jwt` is advertised to CIMD
+ * clients: by the interactive setting, or by the headless grant, whose
+ * advertisement steers interactive clients that declare `private_key_jwt`.
+ */
+export function interactivePrivateKeyJwtActive(mcpConfig: MCPConfig | undefined): boolean {
+	return (
+		mcpConfig?.clientIdMetadataDocuments?.enabled !== false &&
+		(headlessPrivateKeyJwtActive(mcpConfig) || interactivePrivateKeyJwtEnabled(mcpConfig))
+	);
+}
+
 /**
  * RFC 8414 `token_endpoint_auth_methods_supported`: every method the token
- * endpoint verifies across registration mechanisms.
+ * endpoint verifies across registration mechanisms. `private_key_jwt` is
+ * listed exactly when a verification path for it is enabled.
  */
 export function advertisedTokenEndpointAuthMethods(mcpConfig: MCPConfig | undefined): ClientAuthMethod[] {
 	const methods: ClientAuthMethod[] = ['none', 'client_secret_basic', 'client_secret_post'];
-	if (mcpConfig?.clientCredentials?.enabled === true || interactivePrivateKeyJwtEnabled(mcpConfig)) {
+	if (headlessPrivateKeyJwtActive(mcpConfig) || interactivePrivateKeyJwtActive(mcpConfig)) {
 		methods.push('private_key_jwt');
 	}
 	return methods;
 }
 
 /**
- * RFC 8414 `token_endpoint_auth_signing_alg_values_supported`, present only
- * when `private_key_jwt` is advertised. Without the interactive setting it
- * stays EdDSA (the headless path), as before.
+ * RFC 8414 `token_endpoint_auth_signing_alg_values_supported`: exactly the
+ * union of the algorithms every enabled `private_key_jwt` verification path
+ * accepts (headless: EdDSA; interactive, when active: RS256, ES256, EdDSA),
+ * in a fixed order. Absent when no path is enabled.
  */
 export function advertisedAssertionSigningAlgorithms(
 	mcpConfig: MCPConfig | undefined
 ): AssertionAlgorithm[] | undefined {
-	if (interactivePrivateKeyJwtEnabled(mcpConfig)) return [...INTERACTIVE_ASSERTION_ALGORITHMS];
-	if (mcpConfig?.clientCredentials?.enabled === true) return [...HEADLESS_ASSERTION_ALGORITHMS];
-	return undefined;
+	const accepted = new Set<AssertionAlgorithm>();
+	if (headlessPrivateKeyJwtActive(mcpConfig)) {
+		for (const alg of HEADLESS_ASSERTION_ALGORITHMS) accepted.add(alg);
+	}
+	if (interactivePrivateKeyJwtActive(mcpConfig)) {
+		for (const alg of INTERACTIVE_ASSERTION_ALGORITHMS) accepted.add(alg);
+	}
+	if (accepted.size === 0) return undefined;
+	return ASSERTION_ALGORITHMS.filter((alg) => accepted.has(alg));
 }
 
 /** Is this a headless (client_credentials) CIMD record? */

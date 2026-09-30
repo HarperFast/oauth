@@ -21,6 +21,7 @@ All notable changes to `@harperfast/oauth` are documented here. The format is ba
   - `token_endpoint_auth_methods_supported` is not an array of strings, or omits the singular value;
   - it declares `client_secret_basic`, `client_secret_post` or `client_secret_jwt`;
   - it has both `jwks` and `jwks_uri`, or inline keys with private key material.
+- **Advertised signing algorithms are the union of what the enabled verification paths accept.** A server with `client_credentials` enabled now lists `RS256`, `ES256` and `EdDSA` in `token_endpoint_auth_signing_alg_values_supported` (previously `EdDSA` only), because interactive CIMD assertions are verified there as well.
 - **`client_credentials` assertions also accept the issuer as `aud`.** The token endpoint URL stays accepted unless `mcp.clientCredentials.acceptTokenEndpointAudience` is `false`. `typ: client-authentication+jwt` is accepted, and `jku`, `jwk`, `x5u` and `x5c` headers are rejected.
 - **Client-assertion replay records carry an explicit per-record expiry** (the assertion's `exp` plus 60 seconds) instead of the table's fixed 120 seconds.
 - **Upgrade note:**

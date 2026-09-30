@@ -15,6 +15,9 @@ import {
 	permittedAuthMethod,
 	interactiveAllowedAlgorithms,
 	isClientAuthMethod,
+	headlessPrivateKeyJwtActive,
+	interactivePrivateKeyJwtActive,
+	headlessAssertionPolicy,
 } from '../../../dist/lib/mcp/clientAuthMethod.js';
 import { CHATGPT_CLIENT_ID } from '../../helpers/cimdFixtures.js';
 
@@ -34,6 +37,14 @@ function interactive(auth, extra = {}) {
 	};
 }
 
+// An interactive client with no signing-alg pin: accepts every interactive algorithm.
+const interactive_unpinned = {
+	client_id: 'https://unpinned.example.com/client.json',
+	_cimd: true,
+	grant_types: ['authorization_code'],
+	_cimdAuth: { declared: ['private_key_jwt'] },
+};
+
 const CHATGPT = interactive(
 	{ declared: ['none', 'private_key_jwt'], preferred: 'private_key_jwt', signingAlg: 'RS256' },
 	{ jwks_uri: 'https://chatgpt.com/oauth/jwks.json' }
@@ -49,9 +60,46 @@ describe('advertised methods and algorithms', () => {
 		assert.equal(advertisedAssertionSigningAlgorithms(DEFAULT), undefined);
 	});
 
-	it('adds private_key_jwt with EdDSA for headless agents', () => {
+	it('adds private_key_jwt for headless agents, with the interactive algorithms they steer to', () => {
 		assert.ok(advertisedTokenEndpointAuthMethods(MIXED).includes('private_key_jwt'));
-		assert.deepEqual(advertisedAssertionSigningAlgorithms(MIXED), ['EdDSA']);
+		assert.deepEqual(advertisedAssertionSigningAlgorithms(MIXED), ['RS256', 'ES256', 'EdDSA']);
+	});
+
+	it('advertises exactly the union of the algorithms each enabled verification path accepts', () => {
+		const HEADLESS_ONLY = { ...MIXED, clientIdMetadataDocuments: { enabled: false } };
+		const BOTH = { ...MIXED, clientIdMetadataDocuments: { privateKeyJwt: { enabled: true } } };
+		const SETTING_CIMD_OFF = {
+			enabled: true,
+			clientIdMetadataDocuments: { enabled: false, privateKeyJwt: { enabled: true } },
+		};
+		const cases = [
+			[DEFAULT, false, false],
+			[HEADLESS_ONLY, true, false],
+			[MIXED, true, true],
+			[BOTH, true, true],
+			[SETTING_ON, false, true],
+			[SETTING_CIMD_OFF, false, false],
+		];
+		for (const [config, headless, interactive] of cases) {
+			assert.equal(headlessPrivateKeyJwtActive(config), headless, JSON.stringify(config));
+			assert.equal(interactivePrivateKeyJwtActive(config), interactive, JSON.stringify(config));
+			// The union of what the enabled paths' own policies accept.
+			const expected = new Set([
+				...(headless
+					? headlessAssertionPolicy(config, 'https://as.example.com', 'https://as.example.com/t').algorithms
+					: []),
+				...(interactive ? interactiveAllowedAlgorithms(interactive_unpinned) : []),
+			]);
+			const advertised = advertisedAssertionSigningAlgorithms(config);
+			if (expected.size === 0) {
+				assert.equal(advertised, undefined, JSON.stringify(config));
+				assert.ok(!advertisedTokenEndpointAuthMethods(config).includes('private_key_jwt'));
+			} else {
+				assert.deepEqual(new Set(advertised), expected, JSON.stringify(config));
+				assert.equal(advertised.length, expected.size, 'no duplicates');
+				assert.ok(advertisedTokenEndpointAuthMethods(config).includes('private_key_jwt'));
+			}
+		}
 	});
 
 	it('adds private_key_jwt with RS256, ES256 and EdDSA when interactive private_key_jwt is on', () => {

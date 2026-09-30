@@ -203,12 +203,12 @@ export async function buildAuthorizationServerMetadata(
 		// pass-through and are deliberately not enumerated.
 		scopes_supported: ['offline_access'],
 		// Every method the token endpoint verifies across registration
-		// mechanisms. private_key_jwt appears when the client_credentials grant
-		// or interactive private_key_jwt is enabled (clientAuthMethod.ts).
+		// mechanisms. private_key_jwt appears exactly when a verification path
+		// for it is enabled (clientAuthMethod.ts).
 		token_endpoint_auth_methods_supported: advertisedTokenEndpointAuthMethods(mcpConfig),
-		// RFC 8414: required whenever private_key_jwt is listed. EdDSA for the
-		// headless path; RS256, ES256 and EdDSA once interactive private_key_jwt
-		// is enabled.
+		// RFC 8414: required whenever private_key_jwt is listed. Exactly the
+		// union of the algorithms the enabled verification paths accept
+		// (headless: EdDSA; interactive, when active: RS256, ES256, EdDSA).
 		...(signingAlgs ? { token_endpoint_auth_signing_alg_values_supported: signingAlgs } : {}),
 		// Effective alg first, then any other alg still live in the key set (see
 		// advertisedAlgs above). Per-key algs are published in the JWKS; EdDSA is

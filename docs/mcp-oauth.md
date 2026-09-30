@@ -685,10 +685,18 @@ member. An empty intersection refuses the client (`unauthorized_client` at
 `private_key_jwt`, which this server advertises, but whose keys are unusable is
 refused rather than resolved to `none`.
 
-**What is advertised.** `private_key_jwt` appears in the metadata when
-`mcp.clientCredentials.enabled` is on (headless agents; the signing-algorithm
-list stays `EdDSA`) or when `mcp.clientIdMetadataDocuments.privateKeyJwt.enabled`
-is on (the signing-algorithm list becomes `RS256`, `ES256`, `EdDSA`). So:
+**What is advertised.** `private_key_jwt` appears in the metadata exactly when
+a verification path for it is enabled:
+
+- the headless path, `mcp.clientCredentials.enabled`, accepts `EdDSA`;
+- the interactive CIMD path accepts `RS256`, `ES256` and `EdDSA`. It is active
+  whenever CIMD resolution is on and `private_key_jwt` is advertised: by
+  `mcp.clientIdMetadataDocuments.privateKeyJwt.enabled`, or by the headless
+  grant, whose advertisement steers interactive clients too.
+
+`token_endpoint_auth_signing_alg_values_supported` is the union of what the
+enabled paths accept: `RS256`, `ES256`, `EdDSA` whenever the interactive path is
+active, and `EdDSA` alone only if CIMD resolution is off. So:
 
 | Server configuration                              | ChatGPT's document resolves to                          |
 | ------------------------------------------------- | ------------------------------------------------------- |

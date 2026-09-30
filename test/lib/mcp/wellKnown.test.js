@@ -150,14 +150,59 @@ describe('MCP well-known: AS metadata document (RFC 8414)', () => {
 		assert.deepEqual(doc.grant_types_supported, ['authorization_code', 'refresh_token']);
 	});
 
-	it('advertises client_credentials + private_key_jwt + EdDSA only when the grant is enabled', async () => {
+	it('advertises client_credentials + private_key_jwt when the grant is enabled', async () => {
 		const doc = await buildAuthorizationServerMetadata(makeRequest(), {
 			enabled: true,
 			clientCredentials: { enabled: true },
 		});
 		assert.ok(doc.grant_types_supported.includes('client_credentials'));
 		assert.ok(doc.token_endpoint_auth_methods_supported.includes('private_key_jwt'));
-		assert.deepEqual(doc.token_endpoint_auth_signing_alg_values_supported, ['EdDSA']);
+		// Interactive CIMD verification is active there too (the advertisement
+		// steers interactive clients), so its algorithms are advertised as well.
+		assert.deepEqual(doc.token_endpoint_auth_signing_alg_values_supported, ['RS256', 'ES256', 'EdDSA']);
+	});
+
+	describe('signing algorithms = the union of what the enabled verification paths accept', () => {
+		const metadata = (config) => buildAuthorizationServerMetadata(makeRequest(), { enabled: true, ...config });
+
+		it('nothing enabled: no private_key_jwt and no signing algorithms', async () => {
+			const doc = await metadata({});
+			assert.ok(!doc.token_endpoint_auth_methods_supported.includes('private_key_jwt'));
+			assert.equal(doc.token_endpoint_auth_signing_alg_values_supported, undefined);
+		});
+
+		it('headless only (interactive CIMD resolution off): EdDSA', async () => {
+			const doc = await metadata({
+				clientCredentials: { enabled: true },
+				clientIdMetadataDocuments: { enabled: false },
+			});
+			assert.ok(doc.token_endpoint_auth_methods_supported.includes('private_key_jwt'));
+			assert.deepEqual(doc.token_endpoint_auth_signing_alg_values_supported, ['EdDSA']);
+		});
+
+		it('headless with interactive verification active: RS256, ES256, EdDSA', async () => {
+			for (const config of [
+				{ clientCredentials: { enabled: true } },
+				{ clientCredentials: { enabled: true }, clientIdMetadataDocuments: { privateKeyJwt: { enabled: true } } },
+			]) {
+				const doc = await metadata(config);
+				assert.ok(doc.token_endpoint_auth_methods_supported.includes('private_key_jwt'));
+				assert.deepEqual(doc.token_endpoint_auth_signing_alg_values_supported, ['RS256', 'ES256', 'EdDSA']);
+			}
+		});
+
+		it('interactive setting without headless: RS256, ES256, EdDSA', async () => {
+			const doc = await metadata({ clientIdMetadataDocuments: { privateKeyJwt: { enabled: true } } });
+			assert.ok(doc.token_endpoint_auth_methods_supported.includes('private_key_jwt'));
+			assert.deepEqual(doc.token_endpoint_auth_signing_alg_values_supported, ['RS256', 'ES256', 'EdDSA']);
+			assert.ok(!doc.grant_types_supported.includes('client_credentials'));
+		});
+
+		it('interactive setting with CIMD resolution off: no path is enabled, nothing is advertised', async () => {
+			const doc = await metadata({ clientIdMetadataDocuments: { enabled: false, privateKeyJwt: { enabled: true } } });
+			assert.ok(!doc.token_endpoint_auth_methods_supported.includes('private_key_jwt'));
+			assert.equal(doc.token_endpoint_auth_signing_alg_values_supported, undefined);
+		});
 	});
 
 	it('omits client_credentials discovery when the grant is disabled or unset', async () => {
