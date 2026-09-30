@@ -107,7 +107,10 @@ function utcMs(year: number, month: string, day: string, time: string[]): number
  * An HTTP-date in ms (RFC 9110 §5.6.7): IMF-fixdate, or the obsolete
  * rfc850-date and asctime-date forms a recipient must also accept. Anything
  * else is NaN, including the looser forms `Date.parse` accepts. A two-digit
- * rfc850 year is read so the timestamp is at most 50 years after `receivedMs`.
+ * rfc850 year takes the later of its two candidate centuries when that gives a
+ * valid date at most 50 years after `receivedMs`, and otherwise the earlier one
+ * (a leap day may exist in only one of them); NaN if the selected reading does
+ * not exist.
  */
 function httpDateMs(value: string, receivedMs: number): number {
 	let match = IMF_FIXDATE.exec(value);
@@ -121,7 +124,7 @@ function httpDateMs(value: string, receivedMs: number): number {
 	const latestYear = limit.getUTCFullYear();
 	const year = latestYear - ((latestYear - Number(match[3])) % 100);
 	const ms = utcMs(year, match[2], match[1], match.slice(4, 7));
-	return ms > limit.getTime() ? utcMs(year - 100, match[2], match[1], match.slice(4, 7)) : ms;
+	return ms <= limit.getTime() ? ms : utcMs(year - 100, match[2], match[1], match.slice(4, 7));
 }
 
 /** Whole milliseconds as a bigint (the clock reads whole milliseconds). */

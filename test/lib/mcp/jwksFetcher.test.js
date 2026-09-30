@@ -381,9 +381,9 @@ describe('getClientJwks', () => {
 	describe('max-age counts from the response current age (RFC 9111 §4.2.3)', () => {
 		const START = Date.parse('2026-09-30T00:00:00Z');
 
-		async function lifetimeOf(respond, { advanceDuringFetch = 0 } = {}) {
+		async function lifetimeOf(respond, { advanceDuringFetch = 0, start = START } = {}) {
 			_clearJwksCache();
-			let now = START;
+			let now = start;
 			_setJwksNow(() => now);
 			const fetch = recordingFetch(() => {
 				now += advanceDuringFetch;
@@ -450,6 +450,23 @@ describe('getClientJwks', () => {
 			assert.equal(dateAge('Sunday, 06-Nov-94 08:49:37 GMT'), before('1994-11-06T08:49:37Z'));
 			assert.equal(dateAge('Wednesday, 30-Sep-76 00:00:00 GMT'), 0n, 'exactly 50 years ahead: 2076');
 			assert.equal(dateAge('Wednesday, 30-Sep-76 00:00:01 GMT'), before('1976-09-30T00:00:01Z'), 'beyond: 1976');
+			// The later century is read if it gives a valid date no more than 50 years ahead, else the
+			// earlier century; Date is invalid if the selected reading does not exist.
+			const ageAt = (receivedIso, date) => {
+				const r = Date.parse(receivedIso);
+				return httpCurrentAgeMs({ age: null, date, requestTimeMs: r, responseTimeMs: r, nowMs: r });
+			};
+			const span = (fromIso, toIso) => BigInt(Date.parse(toIso) - Date.parse(fromIso));
+			assert.equal(
+				ageAt('2050-01-01T00:00:00Z', 'Tuesday, 29-Feb-00 00:00:00 GMT'),
+				span('2000-02-29T00:00:00Z', '2050-01-01T00:00:00Z'),
+				'2100 has no 29 Feb: 2000'
+			);
+			assert.equal(
+				ageAt('2400-03-01T00:00:00Z', 'Tuesday, 29-Feb-00 00:00:00 GMT'),
+				span('2400-02-29T00:00:00Z', '2400-03-01T00:00:00Z'),
+				'2300 has no 29 Feb: 2400, the later century'
+			);
 			// None of these is an HTTP-date, though Date.parse accepts several; each counts as absent.
 			for (const date of [
 				'1',
@@ -491,6 +508,16 @@ describe('getClientJwks', () => {
 			const probe = await lifetimeOf(() => response({ keys: [KEY_1] }, { cacheControl: 'max-age=600', date }));
 			assert.equal(await probe.at(9_999), 1);
 			assert.equal(await probe.at(10_000), 2);
+		});
+
+		it('reads rfc850 29-Feb-00 at a 2050 response time as 2000-02-29 (2100 has no 29 Feb)', async () => {
+			for (const date of ['Tuesday, 29-Feb-00 00:00:00 GMT', 'Tue, 29 Feb 2000 00:00:00 GMT']) {
+				const probe = await lifetimeOf(() => response({ keys: [KEY_1] }, { cacheControl: 'max-age=600', date }), {
+					start: Date.parse('2050-01-01T00:00:00Z'),
+				});
+				assert.equal(_jwksCacheSize(), 0, `${date}: 2000-02-29, stale on arrival, nothing stored`);
+				assert.equal(await probe.at(0), 2, `${date}: the next request refetched`);
+			}
 		});
 
 		it('counts the response delay (Age is corrected by it)', async () => {
