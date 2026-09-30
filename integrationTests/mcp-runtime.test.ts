@@ -22,16 +22,26 @@
 import { suite, test, before, after } from 'node:test';
 import { strictEqual, ok } from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { createRequire } from 'node:module';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { setupHarperWithFixture, teardownHarper, type ContextWithHarper } from '@harperfast/integration-testing';
+
+const require = createRequire(import.meta.url);
+
+function getHarperBinPath(): string {
+	return join(dirname(require.resolve('harper')), 'bin', 'harper.js');
+}
 
 const fixturePath = join(import.meta.dirname, 'fixtures', 'mcp-runtime-app');
 const CLIENT_ID = 'runtime-public-client';
 
 suite('MCP runtime: replay retention and concurrent refresh', (ctx: ContextWithHarper) => {
 	before(async () => {
-		await setupHarperWithFixture(ctx, fixturePath, { config: { logging: { stdStreams: true } } });
+		await setupHarperWithFixture(ctx, fixturePath, {
+			harperBinPath: getHarperBinPath(),
+			config: { logging: { stdStreams: true } },
+		});
 	});
 
 	after(async () => {
