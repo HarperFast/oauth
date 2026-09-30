@@ -502,6 +502,17 @@ describe('verifyClientAssertion — per-algorithm verification', () => {
 		assert.match(result.reason, /not a public RSA key/);
 	});
 
+	it('never uses a key as another type: an EC key carrying RSA members cannot verify RS256', () => {
+		const ec = makeAlgKeyPair('ES256');
+		const rsa = makeAlgKeyPair('RS256');
+		// Validates as EC (its kty), but also carries RSA n/e from another key.
+		const hybrid = { ...ec.jwk, n: rsa.jwk.n, e: rsa.jwk.e };
+		assert.equal(publicSigningKeyIssue(hybrid), null, 'the key validates as EC');
+		const result = verifyAlg(makeAlgAssertion('RS256', { privateKey: rsa.privateKey }), [hybrid]);
+		assert.equal(result.valid, false);
+		assert.match(result.reason, /not a public RSA key/);
+	});
+
 	it('rejects RSA keys shorter than 2048 bits', () => {
 		const small = makeAlgKeyPair('RS256', { modulusLength: 1024 });
 		const result = verifyAlg(makeAlgAssertion('RS256', { privateKey: small.privateKey }), [small.jwk]);
@@ -617,6 +628,19 @@ describe('verifyClientAssertion — audiences and windows', () => {
 		]);
 		assert.equal(result.valid, false);
 		assert.equal(result.unknownKid, true);
+	});
+
+	it('caps exp relative to now even when the declared lifetime is within the window', () => {
+		// iat at the skew edge keeps exp - iat inside the window; only the
+		// now-relative cap rejects this far exp.
+		const now = nowSeconds();
+		const assertion = makeAlgAssertion('ES256', {
+			payload: { iat: now + 5, exp: now + 67 },
+			privateKey: pair.privateKey,
+		});
+		const result = verifyAlg(assertion, [pair.jwk]);
+		assert.equal(result.valid, false);
+		assert.match(result.reason, /^client_assertion exp exceeds the maximum window/);
 	});
 
 	it('honours a longer interactive window without widening the default', () => {

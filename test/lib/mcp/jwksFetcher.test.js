@@ -89,6 +89,11 @@ describe('jwksUriIssue', () => {
 
 	it('refuses non-https, userinfo, fragments, IP literals and non-strings', () => {
 		assert.match(jwksUriIssue('http://client-a.example.com/jwks.json', CLIENT_A), /https/);
+		assert.match(
+			jwksUriIssue('HTTPS://client-a.example.com/jwks.json', CLIENT_A),
+			/https/,
+			'canonical lowercase scheme only'
+		);
 		assert.match(jwksUriIssue('https://u:p@client-a.example.com/jwks.json', CLIENT_A), /userinfo/);
 		assert.match(jwksUriIssue('https://client-a.example.com/jwks.json#k', CLIENT_A), /fragment/);
 		assert.match(jwksUriIssue('https://93.184.216.34/jwks.json', 'https://93.184.216.34/client.json'), /IP literal/);
