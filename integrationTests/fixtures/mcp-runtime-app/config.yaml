@@ -1,0 +1,28 @@
+# Integration-test fixture: runtime characterization of the MCP replay guard
+# and refresh rotation against a booted Harper.
+#
+# Loads the OAuth plugin with MCP enabled and a pinned issuer/resource, plus
+# runtime-app.js, which exposes TEST-ONLY routes under /mcp-test that call the
+# plugin's own stores (never deploy this fixture). A provider is configured so
+# the plugin configures itself; the test never contacts it.
+
+rest: true
+
+'@harperfast/oauth':
+  package: '@harperfast/oauth'
+  redirectUri: 'http://localhost:9926/oauth' # integration-test loopback — opted in explicitly, no default
+  providers:
+    test:
+      provider: generic
+      clientId: test-client
+      clientSecret: test-secret
+      authorizationUrl: 'http://idp.test/authorize'
+      tokenUrl: 'http://idp.test/token'
+      userInfoUrl: 'http://idp.test/userinfo'
+  mcp:
+    enabled: true
+    issuer: 'https://mcp.test'
+    resource: 'https://mcp.test/mcp'
+
+jsResource:
+  files: 'runtime-app.js'
