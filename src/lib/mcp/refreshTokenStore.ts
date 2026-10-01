@@ -7,17 +7,19 @@
  * refresh the hash is overwritten (rotation); a presented token whose hash no
  * longer matches is a replay of a superseded token, which revokes the family.
  *
- * This keeps replay revocation O(1) with a get/put-only table abstraction: we
- * store family state, not individual tokens, so it stays correct even after
- * old tokens age out of any per-token store. Tokens are never stored in the
+ * This keeps replay revocation O(1): we store family state, not individual
+ * tokens, so it stays correct even after old tokens age out of any per-token
+ * store. Tokens are never stored in the
  * clear.
  *
- * Rotation is not atomic (no compare-and-set on the table, same constraint as
- * authCodeStore.consume): two concurrent refreshes of the same current token
- * both pass the hash check before either write lands, so one of the two new
- * tokens is orphaned (last write wins). The orphan fails safe — its next use is
- * a hash mismatch, which revokes the family. Benign under the real
- * single-client-per-refresh pattern; accepted for v1.
+ * Rotation and revocation are partial updates (`rotate`, `revoke`): each
+ * writes only its own field, so a revocation committed by one request
+ * survives a concurrent rotation by another. Rotation is not atomic (no
+ * compare-and-set on the table, same constraint as authCodeStore.consume):
+ * two concurrent refreshes of the same current token both pass the hash check
+ * before either write lands, so one of the two new tokens is orphaned (last
+ * write wins). The orphan fails safe — its next use is a hash mismatch, which
+ * revokes the family.
  *
  * Explicit field access on encode/decode (no `{ ...raw }`) — Harper
  * tracked-object Proxies return empty own-keys. See CLAUDE.md gotcha.
@@ -146,6 +148,29 @@ export class MCPRefreshFamilyStore {
 			await table.put(encodeRecord(record));
 		} catch (error) {
 			this.logger?.error?.('Failed to store MCP refresh family:', error);
+			throw error;
+		}
+	}
+
+	/**
+	 * Point the family at a new token hash, leaving every other field as
+	 * stored. Write errors are logged and rethrown.
+	 */
+	async rotate(familyId: string, currentTokenHash: string): Promise<void> {
+		await this.patch(familyId, { current_token_hash: currentTokenHash });
+	}
+
+	/** Mark the family revoked, leaving every other field as stored. Write errors are logged and rethrown. */
+	async revoke(familyId: string): Promise<void> {
+		await this.patch(familyId, { revoked: true });
+	}
+
+	private async patch(familyId: string, update: Record<string, unknown>): Promise<void> {
+		const table = getFamiliesTable();
+		try {
+			await table.patch(familyId, update);
+		} catch (error) {
+			this.logger?.error?.('Failed to update MCP refresh family:', error);
 			throw error;
 		}
 	}

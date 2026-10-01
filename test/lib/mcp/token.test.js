@@ -44,6 +44,14 @@ function makeTable(map, pkField) {
 		put: async (rec) => {
 			map.set(rec[pkField], rec);
 		},
+		// Harper's partial update: only the given fields, on top of the stored record.
+		patch: async (id, update) => {
+			const next = { ...map.get(id) };
+			for (const [name, value] of Object.entries(update)) {
+				next[name] = value?.__op__ === 'add' ? (Number(next[name]) || 0) + value.value : value;
+			}
+			map.set(id, next);
+		},
 		delete: async (id) => {
 			map.delete(id);
 		},
@@ -743,6 +751,46 @@ describe('handleToken', () => {
 		assert.equal(afterRevoke.body.error, 'invalid_grant');
 	});
 
+	it('keeps a revocation committed while a concurrent refresh is rotating the family', async () => {
+		const oldToken = seedFamily('fam-1');
+		const rotated = await handleToken(
+			{ headers: {} },
+			{ grant_type: 'refresh_token', refresh_token: oldToken, client_id: 'public-1' },
+			mcpConfig
+		);
+		const currentToken = rotated.body.refresh_token;
+		const familyId = `${FAMILY_ID_PREFIX}fam-1`;
+		const table = global.databases.oauth.mcp_refresh_families;
+		const realGet = table.get;
+		let replay;
+		// Request A reads the family; before A writes, request B presents the
+		// superseded token and its revocation commits.
+		table.get = async (id) => {
+			const snapshot = await realGet(id);
+			table.get = realGet;
+			replay = await handleToken(
+				{ headers: {} },
+				{ grant_type: 'refresh_token', refresh_token: oldToken, client_id: 'public-1' },
+				mcpConfig
+			);
+			return snapshot;
+		};
+		const raced = await handleToken(
+			{ headers: {} },
+			{ grant_type: 'refresh_token', refresh_token: currentToken, client_id: 'public-1' },
+			mcpConfig
+		);
+		assert.match(replay.body.error_description, /superseded; family revoked/);
+		assert.equal(raced.status, 200, 'A had read the family before the revocation');
+		assert.equal(families.get(familyId).revoked, true, "A's rotation does not undo B's revocation");
+		const next = await handleToken(
+			{ headers: {} },
+			{ grant_type: 'refresh_token', refresh_token: raced.body.refresh_token, client_id: 'public-1' },
+			mcpConfig
+		);
+		assert.equal(next.body.error, 'invalid_grant', 'the token A received refreshes nothing');
+	});
+
 	it('still rejects a replayed token when persisting the revocation fails', async () => {
 		const oldToken = seedFamily('fam-1');
 		const rotated = await handleToken(
@@ -753,9 +801,9 @@ describe('handleToken', () => {
 		assert.equal(rotated.status, 200);
 		const familyId = `${FAMILY_ID_PREFIX}fam-1`;
 		const hashBefore = families.get(familyId).current_token_hash;
-		const realPut = global.databases.oauth.mcp_refresh_families.put;
+		const realPatch = global.databases.oauth.mcp_refresh_families.patch;
 		// A write failure during revocation must not turn the rejection into a 500.
-		global.databases.oauth.mcp_refresh_families.put = async () => {
+		global.databases.oauth.mcp_refresh_families.patch = async () => {
 			throw new Error(`write failed ${'x'.repeat(500)}`);
 		};
 		const lines = [];
@@ -787,7 +835,7 @@ describe('handleToken', () => {
 		);
 
 		// Once the store accepts writes, the same presentation revokes the family.
-		global.databases.oauth.mcp_refresh_families.put = realPut;
+		global.databases.oauth.mcp_refresh_families.patch = realPatch;
 		const retried = await handleToken(
 			{ headers: {} },
 			{ grant_type: 'refresh_token', refresh_token: oldToken, client_id: 'public-1' },
@@ -928,8 +976,8 @@ describe('handleToken', () => {
 		withAuditSpy(async (infoCalls) => {
 			const legacyFamilyId = randomUUID();
 			const token = seedFamily('fam-legacy-3', { family_id: legacyFamilyId });
-			const originalPut = global.databases.oauth.mcp_refresh_families.put;
-			global.databases.oauth.mcp_refresh_families.put = async () => {
+			const originalPatch = global.databases.oauth.mcp_refresh_families.patch;
+			global.databases.oauth.mcp_refresh_families.patch = async () => {
 				throw new Error('simulated storage failure');
 			};
 			try {
@@ -949,7 +997,7 @@ describe('handleToken', () => {
 				const auditLog = infoCalls.find((args) => args[0]?.includes('oauth.mcp.token.retired'));
 				assert.equal(auditLog, undefined, 'no retired event when the retirement write did not persist');
 			} finally {
-				global.databases.oauth.mcp_refresh_families.put = originalPut;
+				global.databases.oauth.mcp_refresh_families.patch = originalPatch;
 			}
 		}));
 

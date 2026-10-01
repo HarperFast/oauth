@@ -722,9 +722,8 @@ async function handleRefreshTokenGrant(
 		// (the store's own write-error log still carries the error), and the
 		// family stays live until a later presentation retires or revokes it, or
 		// it expires.
-		family.revoked = true;
 		try {
-			await familyStore.set(family);
+			await familyStore.revoke(family.family_id);
 		} catch {
 			logger?.error?.(REVOCATION_NOT_PERSISTED_LOG);
 			return errorResponse(400, 'invalid_grant', 'Refresh token has been superseded');
@@ -746,10 +745,9 @@ async function handleRefreshTokenGrant(
 	// back re-authorize once after re-upgrading. The client re-authorizes
 	// into a fresh, provenanced family per RFC 6749 §5.2.
 	if (!isProvenancedFamilyId(family.family_id)) {
-		family.revoked = true;
 		let persisted = false;
 		try {
-			await familyStore.set(family);
+			await familyStore.revoke(family.family_id);
 			persisted = true;
 		} catch (error) {
 			logger?.error?.(
@@ -829,10 +827,11 @@ async function handleRefreshTokenGrant(
 		key
 	);
 
-	// Rotate only once the new access token is in hand (keep the original expiry).
+	// Rotate only once the new access token is in hand. Only the hash is
+	// written, so a revocation committed meanwhile by a concurrent request
+	// stays in force.
 	const { token: newRefreshToken, hash: newHash } = makeRefreshToken(family.family_id);
-	family.current_token_hash = newHash;
-	await familyStore.set(family);
+	await familyStore.rotate(family.family_id, newHash);
 
 	// Emit audit event + fire hook after the token is signed and rotation is
 	// committed. Failures are fire-and-forget: must not block the response.

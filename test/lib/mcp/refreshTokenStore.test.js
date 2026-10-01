@@ -97,6 +97,9 @@ describe('MCPRefreshFamilyStore', () => {
 					put: async (rec) => {
 						stored.set(rec.family_id, rec);
 					},
+					patch: async (id, update) => {
+						stored.set(id, { ...stored.get(id), ...update });
+					},
 					delete: async (id) => {
 						stored.delete(id);
 					},
@@ -148,6 +151,27 @@ describe('MCPRefreshFamilyStore', () => {
 		await store.set(withoutRevoked);
 		const got = await store.get('fam-1');
 		assert.equal(got.revoked, false);
+	});
+
+	it('rotate() and revoke() are partial updates of their own field', async () => {
+		const calls = [];
+		global.databases.oauth.mcp_refresh_families.patch = async (id, update) => {
+			calls.push([id, update]);
+		};
+		await store.rotate('fam-1', 'hash-next');
+		await store.revoke('fam-1');
+		assert.deepEqual(calls, [
+			['fam-1', { current_token_hash: 'hash-next' }],
+			['fam-1', { revoked: true }],
+		]);
+	});
+
+	it('propagates rotate() and revoke() errors', async () => {
+		global.databases.oauth.mcp_refresh_families.patch = async () => {
+			throw new Error('db write failure');
+		};
+		await assert.rejects(() => store.rotate('fam-1', 'hash-next'), /db write failure/);
+		await assert.rejects(() => store.revoke('fam-1'), /db write failure/);
 	});
 
 	it('propagates set() errors so the caller can fail the request', async () => {

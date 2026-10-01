@@ -918,6 +918,14 @@ export interface Table {
 	 * default.
 	 */
 	create(record: any, context?: { expiresAt?: number }): Promise<any>;
+	/**
+	 * Partial update: writes only the given fields, applied at commit on top of
+	 * the record as then stored, so fields written by a concurrent request
+	 * survive. A field value of `{ __op__: 'add', value: n }` adds `n` to the
+	 * stored number (a missing field counts as 0). The optional context's
+	 * `expiresAt` (epoch ms) sets the record's expiry.
+	 */
+	patch(id: string, update: Record<string, any>, context?: { expiresAt?: number }): Promise<void>;
 	delete(id: string): Promise<void>;
 	/**
 	 * Enumerate records matching a query. An empty query (`{}`) returns all rows.

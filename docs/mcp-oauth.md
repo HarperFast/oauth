@@ -912,9 +912,10 @@ Harper. More than one concurrent presentation of one assertion can be accepted.
 Concurrent refreshes of one token are not serialized: depending on timing, more
 than one can rotate it, after which only the last-written token works and
 presenting any other revokes the family; or the later requests see a superseded
-token and revoke the family at once, and the client reauthorizes. A revocation
-whose write fails still answers `invalid_grant`, without claiming the
-revocation, and leaves the family live.
+token and revoke the family at once, and the client reauthorizes. A rotation
+writes only the token hash, so it does not undo a revocation committed by a
+concurrent request. A revocation whose write fails still answers
+`invalid_grant`, without claiming the revocation, and leaves the family live.
 
 ### Stored/DCR registration and method selection remain; the stricter token-request parser and grant binding also apply to stored clients.
 
