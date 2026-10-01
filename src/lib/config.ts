@@ -224,9 +224,8 @@ export function normalizeMcpSecurityConfig(mcpConfig: Record<string, any>, logge
 /**
  * Shallow-copy an object, dropping keys whose value is `undefined`. `null` and
  * `''` are explicit values and are kept as-is — only `undefined` means "not
- * specified". Used wherever caller-supplied overrides are spread onto a
- * preset/default object, so a passed-through unset field (e.g. `scope: row.scope`
- * from a database row with no override) can't clobber the default (#243, #248).
+ * specified", so a passed-through unset field can't clobber a preset/default
+ * it's spread onto.
  */
 export function skipUndefined(source: Record<string, any> | null | undefined): Record<string, any> {
 	const result: Record<string, any> = {};
