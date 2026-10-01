@@ -5,6 +5,7 @@
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { handleLogin, handleCallback, handleLogout, handleUserInfo, handleTestPage } from '../../dist/lib/handlers.js';
+import { buildProviderConfig } from '../../dist/lib/config.js';
 import { createMockFn, createMockLogger } from '../helpers/mockFn.js';
 
 describe('OAuth Handlers', () => {
@@ -441,6 +442,38 @@ describe('OAuth Handlers', () => {
 			assert.equal(e.emailProvenance, 'github-authenticated');
 			assert.equal(e.emailAuthenticated, true);
 			assert.equal(e.signatureVerified, false);
+		});
+
+		it('authEvidence: a mixed-case "GitHub" config still yields github-authenticated provenance (#242)', async () => {
+			// Preset resolution (getProvider) is case-insensitive, so a config built
+			// with provider: 'GitHub' must normalize to the same 'github' that this
+			// evidence path compares config.provider against.
+			const githubCasedConfig = buildProviderConfig(
+				{
+					provider: 'GitHub',
+					clientId: 'github-client',
+					clientSecret: 'github-secret',
+					redirectUri: 'https://app.test.com/oauth',
+				},
+				'test-provider',
+				{}
+			);
+			assert.equal(githubCasedConfig.provider, 'github');
+
+			mockProvider.exchangeCodeForToken = createMockFn(async () => ({ access_token: 'at' }));
+			mockProvider.getUserInfo = createMockFn(async () => ({
+				email: 'user@example.com',
+				_emailProvenance: 'github-authenticated',
+			}));
+			stubEmail();
+
+			await handleCallback(mockRequest, mockTarget, mockProvider, githubCasedConfig, mockHookManager, 'test-provider', {
+				logger: mockLogger,
+			});
+
+			const e = evidenceFromHook();
+			assert.equal(e.emailProvenance, 'github-authenticated');
+			assert.equal(e.emailAuthenticated, true);
 		});
 
 		it('authEvidence: plain userinfo with emailVerified true is still emailAuthenticated false', async () => {

@@ -644,6 +644,23 @@ describe('OAuth Configuration', () => {
 				assert.equal(config.scope, 'openid profile email');
 			});
 
+			it('should normalize a mixed-case provider field to lowercase (#242)', () => {
+				const providerConfig = {
+					provider: 'GitHub',
+					clientId: 'github-client',
+					clientSecret: 'github-secret',
+					redirectUri: 'https://app.test.com/oauth',
+				};
+
+				const config = buildProviderConfig(providerConfig, 'github', {});
+
+				// Preset is still resolved case-insensitively...
+				assert.equal(config.authorizationUrl, 'https://github.com/login/oauth/authorize');
+				// ...and the stored provider field is normalized to the same lowercase
+				// value every `config.provider === 'github'` comparison downstream expects.
+				assert.equal(config.provider, 'github');
+			});
+
 			it('should configure Azure with tenant', () => {
 				const tenantId = '12345678-1234-1234-1234-123456789012';
 				const providerConfig = {

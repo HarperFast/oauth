@@ -242,9 +242,17 @@ export function buildProviderConfig(
 		expandedOptions.jwksUri = expandedOptions.jwksUrl;
 	}
 
-	// Check for known provider presets
+	// Check for known provider presets. Normalize to lowercase once, here, so
+	// every later `config.provider === 'github'`-style comparison (handlers.ts,
+	// OAuthProvider.ts, this file's own preset `configure()` switch) sees the
+	// same casing that preset lookup already accepts case-insensitively
+	// (HarperFast/oauth#242).
 	const providerType = expandedOptions.provider || providerName;
+	const normalizedProviderType = typeof providerType === 'string' ? providerType.toLowerCase() : providerType;
 	const providerPreset = providerType ? getProvider(providerType) : null;
+	if (typeof expandedOptions.provider === 'string') {
+		expandedOptions.provider = normalizedProviderType;
+	}
 
 	// Build redirect URI with provider name in path. No loopback fallback: a missing
 	// redirectUri used to default to http://localhost:9926/oauth, which some IdPs
