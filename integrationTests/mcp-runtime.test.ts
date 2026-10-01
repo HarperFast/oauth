@@ -5,18 +5,18 @@
  *      MCPAssertionJtiStore expires at its own expiry (the later of the
  *      assertion's exp and insertion time, plus 60 s), not at the table
  *      default of 120 s, and is refused as a replay until then.
- *   2. Concurrent presentations of one jti: the number the store accepts is
- *      recorded as observed (see the harper#1745 residual in
- *      assertionJtiStore.ts); a presentation after the burst is refused.
+ *   2. Concurrent presentations of one jti: at least one is accepted (see the
+ *      harper#1745 residual in assertionJtiStore.ts), and a presentation
+ *      after the burst is refused.
  *   3. Concurrent refreshes of one refresh token through POST
- *      /oauth/mcp/token: the outcomes are recorded as observed (rotation is
- *      not atomic; see refreshTokenStore.ts). If any refresh is refused as
+ *      /oauth/mcp/token (rotation is not atomic; see refreshTokenStore.ts):
+ *      at least one refresh succeeds. If any refresh is refused as
  *      superseded, the family must be revoked and every token issued in the
  *      race refused; otherwise a token that lost the race is refused and
  *      revokes the family.
  *
  * The fixture's TEST-ONLY /mcp-test routes call the plugin's own stores; no
- * CIMD document is fetched. Observations are printed as test diagnostics.
+ * CIMD document is fetched.
  */
 
 import { suite, test, before, after } from 'node:test';
@@ -99,17 +99,16 @@ suite('MCP runtime: replay retention and concurrent refresh', (ctx: ContextWithH
 		);
 	});
 
-	test('concurrent presentations of one jti (characterization)', async (t) => {
+	test('concurrent presentations of one jti (characterization)', async () => {
 		const client = 'https://agent.test/concurrent-client.json';
 		const row = { client_id: client, jti: randomUUID(), exp: Math.floor(Date.now() / 1000) + 60 };
 		const results = await Promise.all(Array.from({ length: 8 }, () => testRoute('/replay', row)));
 		const accepted = results.filter((r) => r.fresh).length;
-		t.diagnostic(`8 concurrent presentations of one jti: ${accepted} accepted, ${8 - accepted} refused`);
 		ok(accepted >= 1);
 		strictEqual((await testRoute('/replay', row)).fresh, false, 'a presentation after the burst is refused');
 	});
 
-	test('concurrent refreshes of one refresh token (characterization)', async (t) => {
+	test('concurrent refreshes of one refresh token (characterization)', async () => {
 		const { refreshToken, familyId } = await testRoute('/seed-family');
 		const first = await refresh(refreshToken);
 		strictEqual(first.status, 200, 'a sequential refresh rotates');
@@ -121,13 +120,8 @@ suite('MCP runtime: replay retention and concurrent refresh', (ctx: ContextWithH
 		const responses = await Promise.all(Array.from({ length: 5 }, () => refresh(current)));
 		const bodies = await Promise.all(responses.map((r) => r.json()));
 		const issued = bodies.filter((b) => typeof b.refresh_token === 'string').map((b) => b.refresh_token as string);
-		const errors = bodies.filter((b) => b.error).map((b) => `${b.error}: ${b.error_description}`);
 		const family = await testRoute('/family', { id: familyId });
 		const live = issued.filter((token) => hashOf(token) === family.current_token_hash);
-		t.diagnostic(
-			`5 concurrent refreshes of one token: ${issued.length} issued a token, errors ${JSON.stringify(errors)}; ` +
-				`${live.length} issued token(s) match the stored hash; family revoked: ${family.revoked}`
-		);
 		ok(issued.length >= 1, 'at least one refresh succeeds');
 		strictEqual(family.client_auth_method, 'none');
 
@@ -139,7 +133,6 @@ suite('MCP runtime: replay retention and concurrent refresh', (ctx: ContextWithH
 			strictEqual(family.revoked, true, 'a superseded presentation revokes the family');
 			for (const token of issued) {
 				const res = await refresh(token);
-				t.diagnostic(`a token issued in the race, after the revocation: ${res.status}`);
 				strictEqual(res.status, 400, 'a revoked family refreshes no token');
 			}
 		} else {
