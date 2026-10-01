@@ -345,10 +345,8 @@ describe('handleToken — shared client authenticator', () => {
 		});
 
 		it('rejects a detected repeat in a form body as Harper deserializes it (invalid_request)', async () => {
-			// The body Harper's application/x-www-form-urlencoded deserializer builds
-			// (harper server/serverHelpers/contentTypes.ts): each first value stays
-			// under its name, and the field repeated last goes to `key` as
-			// [first value, latest value].
+			// A body in the shape Harper's form deserializer builds for these inputs
+			// (harper server/serverHelpers/contentTypes.ts, HarperFast/harper#2953).
 			const harperForm = (query) => {
 				const object = {};
 				for (const [name, value] of new URLSearchParams(query)) {
@@ -378,11 +376,9 @@ describe('handleToken — shared client authenticator', () => {
 		});
 
 		describe('repeats and unrecognized parameters in the deserialized body, on every grant', () => {
-			// The two deserialized shapes: Harper's form deserializer records the
-			// field repeated last as `key: [first value, latest value]`
-			// (HarperFast/harper#2953), and will store every value under the
-			// parameter's own name once that is fixed. What the first shape hides:
-			// the harper#2953 note in docs/mcp-oauth.md.
+			// The two deserialized shapes: a `key` array (HarperFast/harper#2953) and,
+			// once that is fixed, an array under the parameter's own name. See the
+			// harper#2953 note in docs/mcp-oauth.md.
 			const SINGLE_VALUED = [
 				'grant_type',
 				'code',

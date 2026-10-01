@@ -274,12 +274,9 @@ const SINGLE_VALUED_PARAMETERS = [
  * The single-valued parameter whose repeat is detected in the deserialized
  * body, if any. Harper's form deserializer will store every value of a
  * repeated parameter as an array under its own name once HarperFast/harper#2953
- * is fixed. Until then it keeps each parameter's first value under its name
- * and records only the field repeated last in the body, as
- * `key: [first value, latest value]`; a `key` whose first element equals a
- * listed parameter's value is taken as that parameter's repeat. What that
- * shape hides or misattributes: the HarperFast/harper#2953 note in
- * docs/mcp-oauth.md.
+ * is fixed. Until then a repeated field can appear as a `key` array; a `key`
+ * whose first element equals a listed parameter's value is taken as that
+ * parameter's repeat. See the HarperFast/harper#2953 note in docs/mcp-oauth.md.
  */
 function repeatedParameter(body: any): string | undefined {
 	if (!body || typeof body !== 'object') return undefined;

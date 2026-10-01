@@ -862,12 +862,9 @@ These rules apply to every client on `authorization_code` and `refresh_token`:
   body `client_secret` and an assertion each count as one.
 - Repeat detection, on every grant, and the `client_credentials` check of
   `resource` values see only the deserialized body. On Harper versions affected
-  by HarperFast/harper#2953, the form deserializer keeps each parameter's first
-  value and, as `key`, the first and latest values of the field repeated last in
-  the body. No other value is visible, so an earlier repeat of another field or a
-  middle `resource` value goes unseen. If the first value of the field repeated
-  last equals the value of a listed parameter, or of `resource`, that field's
-  repeat is taken as a repeat of that parameter, or as `resource` values.
+  by HarperFast/harper#2953, the form deserializer does not keep every value of
+  a repeated field, so a repeat or a `resource` value can be missing from what
+  these checks see, or be attributed to another field.
 - Otherwise, these are rejected with `invalid_client` (401) before any client
   lookup: malformed `Basic` credentials, an unknown `client_assertion_type`, and
   an assertion longer than 8192 characters.
