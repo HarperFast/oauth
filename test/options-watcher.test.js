@@ -369,6 +369,73 @@ describe('OAuth Plugin Options Watcher', () => {
 		);
 	});
 
+	describe('reload ordering vs. a per-key OptionsWatcher merge', () => {
+		// Harper's real OptionsWatcher#merge writes a multi-key edit into the
+		// live config ONE KEY AT A TIME and emits 'change' synchronously after
+		// each write — not once after the whole batch. This mock reproduces that
+		// by mutating the SAME config object in place and invoking the change
+		// listener after each mutation (rather than replacing `_config` wholesale
+		// and firing the listener once, as the other reload tests above do).
+
+		it('does not publish a half-applied snapshot from an intermediate key during the merge (reload ordering race)', async () => {
+			scope.options._config.mcp = {
+				enabled: true,
+				issuer: 'https://app.example.com',
+				dynamicClientRegistration: { enabled: false },
+			};
+			await handleApplication(scope);
+			const previousMcpConfig = OAuthResource.mcpConfig;
+			assert.equal(previousMcpConfig?.dynamicClientRegistration?.enabled, false);
+
+			let errorLogged = false;
+			scope.logger.error = (msg) => {
+				if (typeof msg === 'string' && msg.includes('Failed to update OAuth configuration')) errorLogged = true;
+			};
+
+			// Key 1: flips DCR on (no token configured yet). Taken alone this
+			// snapshot is "valid" (DCR enabled, open registration) — without the
+			// reload-ordering fix this is exactly the half-applied state that
+			// gets read and published before key 2 lands.
+			scope.options._config.mcp.dynamicClientRegistration.enabled = true;
+			configChangeListeners[0]();
+			// Key 2: sets an initialAccessToken that resolves to an unresolved
+			// placeholder (the env var is unset) — the snapshot with BOTH keys
+			// applied must fail closed instead.
+			scope.options._config.mcp.dynamicClientRegistration.initialAccessToken = '${_TEST_UNSET_DCR_TOKEN}';
+			configChangeListeners[0]();
+
+			await new Promise((resolve) => setTimeout(resolve, 10));
+
+			assert.ok(errorLogged, 'the rejected (placeholder) snapshot should be logged');
+			assert.equal(
+				OAuthResource.mcpConfig,
+				previousMcpConfig,
+				'the previous (DCR-disabled) config must keep serving — no half-applied open-DCR snapshot may ever be published'
+			);
+		});
+
+		it('still applies once all keys of a valid multi-key edit have landed', async () => {
+			scope.options._config.mcp = {
+				enabled: true,
+				issuer: 'https://app.example.com',
+				dynamicClientRegistration: { enabled: false },
+			};
+			await handleApplication(scope);
+			const previousMcpConfig = OAuthResource.mcpConfig;
+
+			scope.options._config.mcp.dynamicClientRegistration.enabled = true;
+			configChangeListeners[0]();
+			scope.options._config.mcp.dynamicClientRegistration.initialAccessToken = 'a-real-token';
+			configChangeListeners[0]();
+
+			await new Promise((resolve) => setTimeout(resolve, 10));
+
+			assert.notEqual(OAuthResource.mcpConfig, previousMcpConfig, 'the valid reload should have applied');
+			assert.equal(OAuthResource.mcpConfig?.dynamicClientRegistration?.enabled, true);
+			assert.equal(OAuthResource.mcpConfig?.dynamicClientRegistration?.initialAccessToken, 'a-real-token');
+		});
+	});
+
 	it('should handle adding new provider', async () => {
 		await handleApplication(scope);
 
