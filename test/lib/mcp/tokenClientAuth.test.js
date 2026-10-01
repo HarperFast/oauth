@@ -768,6 +768,29 @@ describe('handleToken — shared client authenticator', () => {
 			assert.equal(codes.has('code-1'), true, 'no code consumed when the replay check cannot run');
 		});
 
+		it('leaves the code and assertion usable after an unauthorized resource', async () => {
+			const assertion = signAssertion();
+			const bad = await exchange(body(assertion, { resource: [RESOURCE, `${RESOURCE}/other`] }), {
+				config: MIXED,
+			});
+			assert.equal(bad.status, 400);
+			assert.equal(bad.body.error, 'invalid_target');
+			assert.equal(codes.has('code-1'), true);
+			assert.equal(jtis.size, 0);
+			const retry = await exchange(body(assertion, { resource: RESOURCE }), { config: MIXED });
+			assert.equal(retry.status, 200);
+			assert.equal(jtis.size, 1);
+		});
+
+		it('keeps assertion replay recording on an absent-resource request', async () => {
+			const assertion = signAssertion();
+			const missing = await exchange(body(assertion), { config: MIXED, code: 'missing' });
+			assert.equal(missing.body.error, 'invalid_grant');
+			assert.equal(jtis.size, 1);
+			assertInvalidClient(await exchange(body(assertion), { config: MIXED }), /jti has already been used/);
+			assert.equal(codes.has('code-1'), true);
+		});
+
 		it('retains the replay record past the assertion exp', async () => {
 			assert.equal((await exchange(body(signAssertion()), { config: MIXED })).status, 200);
 			const [{ record, context }] = [...jtis.values()];
@@ -852,6 +875,29 @@ describe('handleToken — shared client authenticator', () => {
 			});
 			return token;
 		}
+
+		it('leaves the refresh family and assertion usable after an unauthorized resource', async () => {
+			const familyId = `${BOUND_FAMILY_ID_PREFIX}resource`;
+			const token = seedFamily(familyId, ASSISTANT, 'private_key_jwt');
+			const hash = families.get(familyId).current_token_hash;
+			const assertion = signAssertion();
+			const body = {
+				client_id: ASSISTANT,
+				client_assertion: assertion,
+				client_assertion_type: TYPE,
+			};
+			const bad = await refresh(token, { ...body, resource: [RESOURCE, `${RESOURCE}/other`] }, MIXED);
+			assert.equal(bad.status, 400);
+			assert.equal(bad.body.error, 'invalid_target');
+			assert.equal(families.get(familyId).current_token_hash, hash);
+			assert.equal(jtis.size, 0);
+			const retry = await refresh(token, { ...body, resource: RESOURCE }, MIXED);
+			assert.equal(retry.status, 200);
+			assert.equal(jtis.size, 1);
+			const stale = await refresh(token, { ...body, resource: RESOURCE }, MIXED);
+			assertInvalidClient(stale, /jti has already been used/);
+			assert.equal(families.get(familyId).revoked, false);
+		});
 
 		it('rejects an unbound (pre-activation) code before consuming it', async () => {
 			seedCode('code-1', 'public-1', REDIRECT, undefined);

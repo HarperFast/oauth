@@ -790,9 +790,9 @@ also accepts the exact advertised token endpoint URL as the sole `aud`:
 - only on `authorization_code` and `refresh_token`, never for headless or
   stored clients.
 
-The accepted audience form (`issuer` or `token_endpoint`) is logged; the
-assertion never is. This departs from RFC 7523bis §4, which forbids the token
-endpoint as an audience.
+When an info logger is available, the accepted audience form (`issuer` or
+`token_endpoint`) is logged; the assertion never is. This departs from RFC
+7523bis §4, which forbids the token endpoint as an audience.
 
 ```yaml
 mcp:
@@ -879,6 +879,16 @@ name; later values are not checked there. With the array shape expected after
 HarperFast/harper#2953, the token endpoint refuses an array for a listed
 single-valued parameter, and accepts a `resource` array only when every value is
 acceptable.
+
+For `authorization_code` and `refresh_token`, after grant validation, each
+parsed `resource` value on a redeemable code or current refresh token with a
+stored resource must match both that resource and the current MCP resource. A
+mismatch then returns `400 invalid_target` before an assertion ID is recorded,
+the code consumed, or the refresh family rotated. Superseded refresh replay
+handling retains precedence over resource validation. Omitting `resource` leaves
+issuance unchanged. An otherwise valid grant record without a stored resource
+still reaches signing and returns `server_error`, whether or not the request
+supplies `resource`.
 
 ### Grant binding
 
