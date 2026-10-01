@@ -30,6 +30,7 @@ import {
 	DEFAULT_FETCH_TIMEOUT_MS,
 	DEFAULT_MAX_DOCUMENT_BYTES,
 	fetchPinnedBoundedJson,
+	maxAgeDirective,
 	toFinitePositive,
 } from './cimd.ts';
 import { jwksUriIssue, publicKeySetFromDocument } from './clientKeySet.ts';
@@ -170,9 +171,9 @@ export function httpCurrentAgeMs(input: {
 export function jwksCacheLifetimeMs(header: string | null, currentAgeMs = 0n): number {
 	if (!header) return JWKS_CACHE_DEFAULT_TTL_S * 1000;
 	if (/\bno-store\b|\bno-cache\b/i.test(header)) return 0;
-	const match = /\bmax-age\s*=\s*(\d+)/i.exec(header);
-	if (!match) return JWKS_CACHE_DEFAULT_TTL_S * 1000;
-	const remainingMs = BigInt(match[1]) * 1000n - currentAgeMs;
+	const maxAge = maxAgeDirective(header);
+	if (maxAge === undefined) return JWKS_CACHE_DEFAULT_TTL_S * 1000;
+	const remainingMs = BigInt(maxAge) * 1000n - currentAgeMs;
 	if (remainingMs <= 0n) return 0;
 	return remainingMs < BigInt(JWKS_CACHE_MAX_TTL_S * 1000) ? Number(remainingMs) : JWKS_CACHE_MAX_TTL_S * 1000;
 }

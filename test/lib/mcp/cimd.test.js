@@ -22,6 +22,7 @@ import {
 	_setDnsLookup,
 	_setFetch,
 	_clearCimdCache,
+	cacheTtlSeconds,
 } from '../../../dist/lib/mcp/cimd.js';
 import { resetMCPClientsTableCache } from '../../../dist/lib/mcp/clientStore.js';
 import { permittedAuthMethod } from '../../../dist/lib/mcp/clientAuthMethod.js';
@@ -837,6 +838,13 @@ describe('resolveCimdClient — cache', () => {
 		await resolveCimdClient(VALID_URL, undefined);
 		await resolveCimdClient(VALID_URL, undefined);
 		assert.equal(fetchCalls, 1, 'second call served from cache');
+	});
+
+	it('reads max-age in its token and quoted-string forms', () => {
+		assert.equal(cacheTtlSeconds('max-age="0"', 60, 86_400, 3_600), 60);
+		assert.equal(cacheTtlSeconds('public, max-age="600"', 60, 86_400, 3_600), 600);
+		assert.equal(cacheTtlSeconds('max-age=600', 60, 86_400, 3_600), 600);
+		assert.equal(cacheTtlSeconds('max-age="600', 60, 86_400, 3_600), 3_600, 'an unterminated quote is no directive');
 	});
 
 	it('honors Cache-Control max-age (clamped to [60s, 86400s])', async () => {

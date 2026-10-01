@@ -551,6 +551,15 @@ export function isCimdClientId(clientId: string): boolean {
 // --- Cache helpers ---
 
 /**
+ * The delta-seconds of a `Cache-Control` `max-age` directive, in its token or
+ * quoted-string form (RFC 9111 §5.2); undefined when there is none.
+ */
+export function maxAgeDirective(header: string): string | undefined {
+	const match = /\bmax-age\s*=\s*(?:(\d+)|"(\d+)")/i.exec(header);
+	return match ? (match[1] ?? match[2]) : undefined;
+}
+
+/**
  * Cache lifetime (seconds) from a `Cache-Control` header, clamped to
  * [minSeconds, maxSeconds]; `defaultSeconds` when absent or unparseable.
  * `no-store`/`no-cache` are honored as the minimum, not literally — the floor
@@ -564,11 +573,9 @@ export function cacheTtlSeconds(
 ): number {
 	if (!header) return defaultSeconds;
 	if (/\bno-store\b|\bno-cache\b/i.test(header)) return minSeconds;
-	const match = /\bmax-age\s*=\s*(\d+)/i.exec(header);
-	if (!match) return defaultSeconds;
-	const seconds = parseInt(match[1], 10);
-	if (isNaN(seconds)) return defaultSeconds;
-	return Math.max(minSeconds, Math.min(maxSeconds, seconds));
+	const maxAge = maxAgeDirective(header);
+	if (maxAge === undefined) return defaultSeconds;
+	return Math.max(minSeconds, Math.min(maxSeconds, Number(maxAge)));
 }
 
 function parseCacheControlMaxAge(header: string | null): number {

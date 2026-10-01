@@ -455,6 +455,8 @@ describe('getClientJwks', () => {
 			assert.equal(jwksCacheLifetimeMs('max-age=7200', 100_000n), 3_600_000);
 			assert.equal(jwksCacheLifetimeMs('no-store', 0n), 0);
 			assert.equal(jwksCacheLifetimeMs(null, 999_000n), 300_000, 'the 300 s default applies without max-age');
+			assert.equal(jwksCacheLifetimeMs('max-age="0"', 0n), 0, 'the quoted-string form is read');
+			assert.equal(jwksCacheLifetimeMs('public, max-age="600"', 0n), 600_000);
 			const t = START;
 			assert.equal(
 				httpCurrentAgeMs({ age: '30', date: null, requestTimeMs: t, responseTimeMs: t + 2_000, nowMs: t + 5_000 }),
