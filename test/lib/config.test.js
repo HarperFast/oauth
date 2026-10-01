@@ -120,6 +120,18 @@ describe('OAuth Configuration', () => {
 			assert.equal(isUnresolvedEnvPlaceholder(123), false);
 			assert.equal(isUnresolvedEnvPlaceholder(true), false);
 		});
+		it('is a shape check only — also matches a RESOLVED value that happens to be the literal placeholder text', () => {
+			// e.g. an env var deliberately set to the string "${X}". expandEnvVar
+			// successfully resolved it; this function can't tell that apart from
+			// an unresolved placeholder, since it never sees whether expansion ran.
+			process.env._TEST_LITERAL_PLACEHOLDER = '${X}';
+			try {
+				assert.equal(expandEnvVar('${_TEST_LITERAL_PLACEHOLDER}'), '${X}');
+				assert.equal(isUnresolvedEnvPlaceholder(expandEnvVar('${_TEST_LITERAL_PLACEHOLDER}')), true);
+			} finally {
+				delete process.env._TEST_LITERAL_PLACEHOLDER;
+			}
+		});
 	});
 
 	describe('normalizeMcpSecurityConfig', () => {
@@ -441,6 +453,17 @@ describe('OAuth Configuration', () => {
 							dynamicClientRegistration: { initialAccessToken: '   ' },
 						}),
 					/mcp\.dynamicClientRegistration\.initialAccessToken.*empty/s
+				);
+			});
+
+			it('declared as a non-string value throws "must be a string", not the empty/whitespace message', () => {
+				assert.throws(
+					() =>
+						normalizeMcpSecurityConfig({
+							enabled: true,
+							dynamicClientRegistration: { initialAccessToken: 12345 },
+						}),
+					/mcp\.dynamicClientRegistration\.initialAccessToken must be a string; got number/
 				);
 			});
 

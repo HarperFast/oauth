@@ -58,12 +58,14 @@ export function expandEnvVarsDeep<T>(value: T): T {
 }
 
 /**
- * True when `value` is a string left untouched by {@link expandEnvVar} because
- * its environment variable was unset — i.e. it's still the literal `${VAR}`
- * placeholder (surrounding whitespace tolerated). A resolved value never
- * matches this, including one that happens to resolve to the literal text
- * `${...}`, since `expandEnvVar` only leaves the placeholder in place when the
- * variable lookup itself failed.
+ * True when `value` has the shape of an unexpanded `${VAR_NAME}` placeholder
+ * (surrounding whitespace tolerated). This is a SHAPE check only — it cannot
+ * distinguish a placeholder {@link expandEnvVar} left untouched because the
+ * variable was unset from a resolved value that genuinely IS that literal
+ * text (e.g. an environment variable deliberately set to the string
+ * `${X}`). Callers rely on the former being the overwhelmingly common case
+ * when this runs on output that has already passed through
+ * `expandEnvVar`/`expandEnvVarsDeep`.
  */
 export function isUnresolvedEnvPlaceholder(value: unknown): boolean {
 	return typeof value === 'string' && /^\$\{[^}]*\}$/.test(value.trim());
@@ -234,7 +236,13 @@ function validateDcrInitialAccessToken(dcr: Record<string, any>): void {
 				'open registration.'
 		);
 	}
-	if (typeof value !== 'string' || value.trim() === '') {
+	if (typeof value !== 'string') {
+		throw new Error(
+			`mcp.dynamicClientRegistration.initialAccessToken must be a string; got ${typeof value}. ` +
+				'Provide a non-empty bearer token, or remove initialAccessToken to allow open registration.'
+		);
+	}
+	if (value.trim() === '') {
 		throw new Error(
 			'mcp.dynamicClientRegistration.initialAccessToken is configured but resolved to an empty or ' +
 				'whitespace-only value. Provide a non-empty bearer token, or remove initialAccessToken to allow ' +
