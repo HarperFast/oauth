@@ -258,12 +258,16 @@ export function buildProviderConfig(
 	// every later `config.provider === 'github'`-style comparison (handlers.ts,
 	// OAuthProvider.ts, this file's own preset `configure()` switch) sees the
 	// same casing that preset lookup already accepts case-insensitively
-	// (HarperFast/oauth#242).
+	// (HarperFast/oauth#242). Only do this when a preset actually matched: a
+	// custom provider identifier with no preset keeps its original case (it
+	// flows into hooks and session metadata, where case matters), and an
+	// explicit '' (falling back to the registry key below purely to resolve
+	// the preset) stays '' so the preset's `configure()` switch below is
+	// skipped rather than re-triggered by the fallback value.
 	const providerType = expandedOptions.provider || providerName;
-	const normalizedProviderType = typeof providerType === 'string' ? providerType.toLowerCase() : providerType;
 	const providerPreset = providerType ? getProvider(providerType) : null;
-	if (typeof expandedOptions.provider === 'string') {
-		expandedOptions.provider = normalizedProviderType;
+	if (typeof expandedOptions.provider === 'string' && expandedOptions.provider !== '' && providerPreset) {
+		expandedOptions.provider = expandedOptions.provider.toLowerCase();
 	}
 
 	// Build redirect URI with provider name in path. No loopback fallback: a missing

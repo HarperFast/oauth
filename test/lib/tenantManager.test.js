@@ -47,6 +47,46 @@ describe('TenantManager', () => {
 				{ message: /okta provider requires domain configuration/i }
 			);
 		});
+
+		it('should throw error for a mixed-case "Okta" tenant without domain', () => {
+			const manager = new TenantManager();
+
+			// getProvider() resolves 'Okta' case-insensitively, so the domain-required
+			// check in the switch must key off the normalized provider, not the raw
+			// mixed-case value — otherwise 'Okta' falls into the `default` branch and
+			// skips the check entirely.
+			assert.throws(
+				() => {
+					manager.registerTenant({
+						tenantId: 'acme-corp',
+						name: 'Acme Corporation',
+						provider: 'Okta',
+						clientId: 'okta-client-id',
+						clientSecret: 'okta-secret',
+					});
+				},
+				{ message: /okta provider requires domain configuration/i }
+			);
+		});
+
+		it('should register a mixed-case "Okta" tenant with domain and store the normalized provider', () => {
+			const manager = new TenantManager();
+
+			manager.registerTenant({
+				tenantId: 'acme-corp',
+				name: 'Acme Corporation',
+				provider: 'Okta',
+				domain: 'acme.okta.com',
+				clientId: 'okta-client-id',
+				clientSecret: 'okta-secret',
+			});
+
+			const tenant = manager.getTenant('acme-corp');
+			assert.ok(tenant);
+			// Stored provider is normalized, not the raw mixed-case input.
+			assert.equal(tenant.providerConfig.provider, 'okta');
+			assert.ok(tenant.providerConfig.authorizationUrl?.includes('acme.okta.com'));
+		});
 	});
 
 	describe('Azure AD tenant registration', () => {
