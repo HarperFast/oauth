@@ -2,6 +2,13 @@
 
 All notable changes to `@harperfast/oauth` are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Entries prior to 2.2.0 were backfilled from the [GitHub release notes](https://github.com/HarperFast/oauth/releases).
 
+## [Unreleased]
+
+### Fixed
+
+- **`mcp.dynamicClientRegistration.initialAccessToken` fails closed on an unresolved placeholder or empty value** (#240): a declared `initialAccessToken` that resolved to an unresolved `${VAR}` placeholder (the variable is unset) previously became the accepted bearer secret itself — anyone who could read the committed config (placeholders routinely are) could register MCP clients — and a set-but-empty value silently enabled open registration behind a warning worded like the legitimate RFC 7591 open mode. Both now throw at startup, naming the key, whenever DCR is enabled (`mcp.enabled` is `true` and `dynamicClientRegistration.enabled` is not `false`). Open registration remains available only by omitting `initialAccessToken` entirely. **Upgrade note:** an instance with DCR enabled and a declared-but-unresolved/empty `initialAccessToken` now fails to start; applying the same bad value via a live config reload is rejected and the previous configuration keeps serving.
+- **An unresolved `${VAR}` placeholder on a documented `mcp` boolean now throws instead of silently dropping to the documented default** (#207): `mcp.enabled`, `mcp.refreshTokenRequiresOfflineAccess`, `mcp.clientCredentials.enabled`, `mcp.clientIdMetadataDocuments.enabled`, and `mcp.dynamicClientRegistration.enabled` previously treated an unset environment variable's leftover placeholder as absent (warn and drop to the documented default) — introduced in 2.5.0 but never called out here. That's safe when the default is off, but `dynamicClientRegistration`'s default is _on_ (a declared block with no explicit `enabled: false` is enabled), so the identical mistake could silently re-enable a gate the operator meant to turn off. A feature-scoped field still drops to its default while the surface it gates is inactive (`mcp.enabled` isn't `true`), so a disabled block with a stray placeholder still boots unchanged. **Upgrade note:** a config with `mcp.enabled: true` and an unresolved placeholder on any of the fields above now fails to start; the same value applied via a live config reload is rejected and the previous configuration keeps serving. Set the variable, or replace the placeholder with a literal `true`/`false`.
+
 ## [2.7.0] - 2026-09-25
 
 ### Added
