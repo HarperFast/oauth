@@ -12,8 +12,9 @@
  * - Only key material is cached (see `publicKeySetFromDocument`), keyed by the
  *   (client_id, jwks_uri) pair — keys fetched for one client are never served
  *   to another, even when both name the same URL.
- * - Obeys `no-store` and `no-cache`; an explicit `max-age` is capped at 3600 seconds, and an absent caching directive defaults to 300 seconds.
- *   An explicit `max-age` counts from the response's HTTP current age (RFC 9111 §4.2.3: from `Age`, and from the response time against `Date`), so a response already stale on arrival is not stored.
+ * - The lifetime follows `Cache-Control`: `no-store` and `no-cache` give none; an explicit `max-age` is capped at 3600 seconds, and an absent caching directive gives 300 seconds.
+ *   An explicit `max-age` counts from the response's HTTP current age (RFC 9111 §4.2.3: from `Age`, and from the response time against `Date`).
+ *   Whatever the directives, a fetched key set is kept at least 60 seconds and used only to verify assertions, so a response's caching directives cannot make every request fetch (the CIMD document cache keeps the same floor).
  *   Errors and invalid sets are never cached.
  * - Concurrent misses for one key share a single fetch; total in-flight
  *   fetches are capped; fetch attempts per (client, uri) are rate-limited.
@@ -36,6 +37,8 @@ import { createRateLimiter } from './rateLimit.ts';
 
 const JWKS_CACHE_MAX_TTL_S = 3_600;
 const JWKS_CACHE_DEFAULT_TTL_S = 300;
+/** Minimum time a fetched key set is kept, whatever its caching directives. */
+export const JWKS_CACHE_MIN_TTL_S = 60;
 const JWKS_CACHE_MAX_ENTRIES = 1_000;
 /** Total concurrent JWKS fetches per worker; over the cap, requests fast-fail with 429. */
 export const MAX_CONCURRENT_JWKS_FETCHES = 8;
@@ -157,12 +160,12 @@ export function httpCurrentAgeMs(input: {
 }
 
 /**
- * Cache lifetime (ms) for a fetched JWK Set, 0 meaning "do not store".
- * Obeys `no-store` and `no-cache`. An explicit `max-age` counts from the
- * response's current age: the remaining lifetime is capped at 3600 seconds and
- * never extended, and nothing is stored once it is exhausted. `max-age` and
- * the current age are compared exactly, whatever their size. An absent
- * caching directive defaults to 300 seconds.
+ * Lifetime (ms) a fetched JWK Set's caching directives give it, 0 meaning
+ * none. `no-store` and `no-cache` give none. An explicit `max-age` counts from
+ * the response's current age: the remaining lifetime is capped at 3600
+ * seconds, and is none once exhausted. `max-age` and the current age are
+ * compared exactly, whatever their size. An absent caching directive gives 300
+ * seconds. The cache keeps a set at least JWKS_CACHE_MIN_TTL_S regardless.
  */
 export function jwksCacheLifetimeMs(header: string | null, currentAgeMs = 0n): number {
 	if (!header) return JWKS_CACHE_DEFAULT_TTL_S * 1000;
@@ -286,13 +289,14 @@ async function fetchAndCache(
 			cacheControl,
 			httpCurrentAgeMs({ age, date, requestTimeMs, responseTimeMs, nowMs: now })
 		);
+		// The floor applies even to no-store, no-cache, zero-age and already-stale
+		// responses: otherwise assertions carrying a client's ID, valid or not,
+		// would each fetch and could exhaust its fetch attempts.
+		const keepMs = Math.max(lifetimeMs, JWKS_CACHE_MIN_TTL_S * 1000);
 		jwksCache.delete(key);
-		// no-store, no-cache, zero-age and already-stale responses are not stored.
-		if (lifetimeMs > 0) {
-			jwksCache.set(key, { keys: keySet.keys, expiresAt: now + lifetimeMs, fetchedAt: now });
-		}
+		jwksCache.set(key, { keys: keySet.keys, expiresAt: now + keepMs, fetchedAt: now });
 		logger?.info?.(
-			`JWKS: fetched ${keySet.keys.length} key(s) for client ${JSON.stringify(clientId)} (cached for ${Math.floor(lifetimeMs / 1000)}s)`
+			`JWKS: fetched ${keySet.keys.length} key(s) for client ${JSON.stringify(clientId)} (cached for ${Math.floor(keepMs / 1000)}s)`
 		);
 		return keySet.keys;
 	} catch (err) {

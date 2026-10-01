@@ -756,8 +756,9 @@ policy, or a `token_endpoint_auth_signing_alg` other than `RS256`, `ES256` or
   The response media type, excluding parameters, must be exactly `application/json` or `application/jwk-set+json`.
 - Only key material of public signature keys is cached: RSA (2048 to 8192 bits),
   EC P-256 and Ed25519. The cache is per client and URL.
-  Obeys `no-store` and `no-cache`; an explicit `max-age` is capped at 3600 seconds, and an absent caching directive defaults to 300 seconds.
-  An explicit `max-age` counts from the response's HTTP current age (RFC 9111 §4.2.3: from `Age`, and from the response time against `Date`), so a response already stale on arrival is not stored.
+  The lifetime follows `Cache-Control`: `no-store` and `no-cache` give none; an explicit `max-age` is capped at 3600 seconds; an absent caching directive gives 300 seconds.
+  An explicit `max-age` counts from the response's HTTP current age (RFC 9111 §4.2.3: from `Age`, and from the response time against `Date`).
+  Whatever the directives, a fetched key set is kept at least 60 seconds and used only to verify assertions, so a response's caching directives cannot make every request fetch.
   `Age` must be a single delta-seconds value and `Date` an HTTP-date (RFC 9110 §5.6.7); otherwise each is ignored. `max-age` and the current age are compared exactly.
 - Concurrent misses share one fetch; in-flight fetches are capped at 8 per
   worker; attempts are limited to 10 per minute per client and URL.

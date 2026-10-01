@@ -20,6 +20,7 @@ import {
 	MAX_CONCURRENT_JWKS_FETCHES,
 	JWKS_FETCH_ATTEMPTS_PER_MINUTE,
 	KID_MISS_REFETCH_INTERVAL_MS,
+	JWKS_CACHE_MIN_TTL_S,
 } from '../../../dist/lib/mcp/jwksFetcher.js';
 import {
 	jwksUriIssue,
@@ -335,19 +336,39 @@ describe('getClientJwks', () => {
 		assert.equal(fetch.calls.length, 2);
 	});
 
-	it('obeys no-store, no-cache and a zero max-age: nothing is stored', async () => {
-		for (const cacheControl of ['no-store', 'no-cache', 'max-age=0', 'public, no-store, max-age=600']) {
+	it('keeps a key set 60 s when its directives give less', async () => {
+		const start = Date.parse('2026-09-30T00:00:00Z');
+		for (const cacheControl of ['no-store', 'no-cache', 'max-age=0', 'max-age=5', 'public, no-store, max-age=600']) {
 			_clearJwksCache();
+			let now = start;
+			_setJwksNow(() => now);
 			const fetch = recordingFetch(() => response({ keys: [KEY_1] }, { cacheControl }));
 			_setFetch(fetch);
 			await getClientJwks(CLIENT_A, JWKS_A, undefined);
-			assert.equal(_jwksCacheSize(), 0, `${cacheControl}: no key material kept`);
+			now = start + JWKS_CACHE_MIN_TTL_S * 1000 - 1;
 			await getClientJwks(CLIENT_A, JWKS_A, undefined);
-			assert.equal(fetch.calls.length, 2, `${cacheControl}: each request fetched`);
+			assert.equal(fetch.calls.length, 1, `${cacheControl}: kept for 60 s`);
+			now = start + JWKS_CACHE_MIN_TTL_S * 1000;
+			await getClientJwks(CLIENT_A, JWKS_A, undefined);
+			assert.equal(fetch.calls.length, 2, `${cacheControl}: refetched after 60 s`);
 		}
 	});
 
-	it('drops a cached set when a refetch answers no-store', async () => {
+	it('requests naming a client cannot exhaust its fetch attempts when its keys say no-store', async () => {
+		let now = Date.parse('2026-09-30T00:00:00Z');
+		_setJwksNow(() => now);
+		const fetch = recordingFetch(() => response({ keys: [KEY_1] }, { cacheControl: 'no-store' }));
+		_setFetch(fetch);
+		// Two requests a second for two minutes, every other one with an unknown kid.
+		for (let i = 0; i < 240; i++) {
+			const keys = await getClientJwks(CLIENT_A, JWKS_A, undefined, { refetchForUnknownKid: i % 2 === 1 });
+			assert.equal(keys[0].kid, 'key-1');
+			now += 500;
+		}
+		assert.equal(fetch.calls.length, 2, 'one fetch per 60 s');
+	});
+
+	it('a refetch answering no-store replaces the cached set', async () => {
 		let now = Date.parse('2026-09-30T00:00:00Z');
 		_setJwksNow(() => now);
 		let cacheControl = 'max-age=3600';
@@ -361,19 +382,19 @@ describe('getClientJwks', () => {
 		served = KEY_2;
 		const refetched = await getClientJwks(CLIENT_A, JWKS_A, undefined, { refetchForUnknownKid: true });
 		assert.equal(refetched[0].kid, 'key-2');
-		assert.equal(_jwksCacheSize(), 0, 'the earlier set is not kept');
+		assert.equal(_jwksCacheSize(), 1);
 		const next = await getClientJwks(CLIENT_A, JWKS_A, undefined);
 		assert.equal(next[0].kid, 'key-2', 'the withdrawn key is not served from cache');
-		assert.equal(fetch.calls.length, 3);
+		assert.equal(fetch.calls.length, 2, 'the replacement is kept for 60 s');
 	});
 
 	it('never extends an explicit max-age', async () => {
 		let now = Date.parse('2026-09-30T00:00:00Z');
 		_setJwksNow(() => now);
-		const fetch = recordingFetch(() => response({ keys: [KEY_1] }, { cacheControl: 'max-age=5' }));
+		const fetch = recordingFetch(() => response({ keys: [KEY_1] }, { cacheControl: 'max-age=90' }));
 		_setFetch(fetch);
 		await getClientJwks(CLIENT_A, JWKS_A, undefined);
-		now += 4_000;
+		now += 89_000;
 		await getClientJwks(CLIENT_A, JWKS_A, undefined);
 		assert.equal(fetch.calls.length, 1, 'cached within max-age');
 		now += 2_000;
@@ -515,24 +536,24 @@ describe('getClientJwks', () => {
 		});
 
 		it('a nearly expired intermediary response is cached only for its remaining freshness', async () => {
-			const probe = await lifetimeOf(() => response({ keys: [KEY_1] }, { cacheControl: 'max-age=3600', age: '3590' }));
-			assert.equal(await probe.at(9_999), 1, 'cached within the remaining 10 s');
-			assert.equal(await probe.at(10_000), 2, 'refetched once the remaining 10 s passed');
+			const probe = await lifetimeOf(() => response({ keys: [KEY_1] }, { cacheControl: 'max-age=3600', age: '3500' }));
+			assert.equal(await probe.at(99_999), 1, 'cached within the remaining 100 s');
+			assert.equal(await probe.at(100_000), 2, 'refetched once the remaining 100 s passed');
 		});
 
-		it('a response already stale on arrival is not stored; the next request refetches', async () => {
+		it('a response already stale on arrival is kept only for the 60 s floor', async () => {
 			for (const age of ['3600', '7200']) {
 				const probe = await lifetimeOf(() => response({ keys: [KEY_1] }, { cacheControl: 'max-age=3600', age }));
-				assert.equal(_jwksCacheSize(), 0, `Age ${age}: nothing stored`);
-				assert.equal(await probe.at(0), 2, `Age ${age}: the next request refetched`);
+				assert.equal(await probe.at(59_999), 1, `Age ${age}: kept for 60 s`);
+				assert.equal(await probe.at(60_000), 2, `Age ${age}: refetched after 60 s`);
 			}
 		});
 
 		it('counts the Date header against the response time', async () => {
-			const date = new Date(START - 590_000).toUTCString();
+			const date = new Date(START - 500_000).toUTCString();
 			const probe = await lifetimeOf(() => response({ keys: [KEY_1] }, { cacheControl: 'max-age=600', date }));
-			assert.equal(await probe.at(9_999), 1);
-			assert.equal(await probe.at(10_000), 2);
+			assert.equal(await probe.at(99_999), 1);
+			assert.equal(await probe.at(100_000), 2);
 		});
 
 		it('reads rfc850 29-Feb-00 at a 2050 response time as 2000-02-29 (2100 has no 29 Feb)', async () => {
@@ -540,30 +561,29 @@ describe('getClientJwks', () => {
 				const probe = await lifetimeOf(() => response({ keys: [KEY_1] }, { cacheControl: 'max-age=600', date }), {
 					start: Date.parse('2050-01-01T00:00:00Z'),
 				});
-				assert.equal(_jwksCacheSize(), 0, `${date}: 2000-02-29, stale on arrival, nothing stored`);
-				assert.equal(await probe.at(0), 2, `${date}: the next request refetched`);
+				assert.equal(await probe.at(60_000), 2, `${date}: 2000-02-29, stale on arrival, kept only for 60 s`);
 			}
 		});
 
 		it('counts the response delay (Age is corrected by it)', async () => {
-			const probe = await lifetimeOf(() => response({ keys: [KEY_1] }, { cacheControl: 'max-age=10' }), {
+			const probe = await lifetimeOf(() => response({ keys: [KEY_1] }, { cacheControl: 'max-age=100' }), {
 				advanceDuringFetch: 4_000,
 			});
-			assert.equal(await probe.at(5_999), 1);
-			assert.equal(await probe.at(6_000), 2);
+			assert.equal(await probe.at(95_999), 1);
+			assert.equal(await probe.at(96_000), 2);
 		});
 
 		it('compares a large Age with max-age exactly, and caps only the remaining lifetime', async () => {
 			const exhausted = await lifetimeOf(() =>
 				response({ keys: [KEY_1] }, { cacheControl: 'max-age=3000000000', age: '3000000000' })
 			);
-			assert.equal(_jwksCacheSize(), 0, 'Age equal to a large max-age: nothing stored');
-			assert.equal(await exhausted.at(0), 2, 'the next request refetched');
-			const oneLeft = await lifetimeOf(() =>
-				response({ keys: [KEY_1] }, { cacheControl: 'max-age=9007199254740993', age: '9007199254740992' })
+			assert.equal(await exhausted.at(59_999), 1, 'Age equal to a large max-age: kept for 60 s');
+			assert.equal(await exhausted.at(60_000), 2);
+			const exact = await lifetimeOf(() =>
+				response({ keys: [KEY_1] }, { cacheControl: 'max-age=9007199254741093', age: '9007199254740992' })
 			);
-			assert.equal(await oneLeft.at(999), 1, 'beyond 2^53, exactly one second is left');
-			assert.equal(await oneLeft.at(1_000), 2);
+			assert.equal(await exact.at(100_999), 1, 'beyond 2^53, exactly 101 seconds are left');
+			assert.equal(await exact.at(101_000), 2);
 			const capped = await lifetimeOf(() =>
 				response({ keys: [KEY_1] }, { cacheControl: 'max-age=3000000000', age: '2999990000' })
 			);
