@@ -2,6 +2,13 @@
 
 All notable changes to `@harperfast/oauth` are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Entries prior to 2.2.0 were backfilled from the [GitHub release notes](https://github.com/HarperFast/oauth/releases).
 
+## [Unreleased]
+
+### Fixed
+
+- **A mixed-case `provider` value (e.g. `'GitHub'`) now gets the same GitHub-authenticated evidence as the lowercase preset** (#242): preset resolution (`getProvider`) has always matched provider names case-insensitively, but the 2.7.0 evidence path compared `config.provider === 'github'` case-sensitively, so a config with `provider: 'GitHub'` kept `emailProvenance: 'unauthenticated'` and `emailAuthenticated: false` even after a successful authenticated GitHub email fetch — denying account adoption, and any `onLogin` hook gating on `authEvidence.emailAuthenticated`, for a genuine GitHub login. `buildProviderConfig` now normalizes `provider` to lowercase once, so every comparison against `config.provider` downstream sees the same casing preset resolution already accepts.
+- **An `undefined` provider option no longer overwrites its preset default** (#243): `buildProviderConfig` copied every key of the caller's provider options into the final config, including keys whose value was `undefined` — the common case for a dynamically resolved provider (e.g. from `onResolveProvider`) that passes through an unset database field such as `scope: row.scope`. For the Google preset this silently replaced `scope: 'openid profile email'` with `undefined`, and `OAuthProvider` then sent an empty `scope` to Google, which rejects the authorization request. `undefined` values are now skipped when building the provider config, so the preset (or plugin default) applies; `null` and `''` remain explicit values a caller can still use to blank a field.
+
 ## [2.7.0] - 2026-09-25
 
 ### Added
