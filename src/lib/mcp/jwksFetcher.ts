@@ -18,7 +18,7 @@
  * - Concurrent misses for one key share a single fetch; total in-flight
  *   fetches are capped; fetch attempts per (client, uri) are rate-limited.
  * - An unknown `kid` can trigger a refetch only after the previous unknown-`kid` attempt’s one-minute interval, including when that attempt failed.
- *   Assertions carrying random `kid`s therefore cannot drive fetches.
+ *   Assertions carrying random `kid`s therefore cannot drive fetches. An unknown `kid` seen while a refetch is in flight waits for that refetch.
  *
  * Caches and limiters are per worker thread, like the CIMD document cache.
  */
@@ -214,6 +214,9 @@ export async function getClientJwks(
 		const lastAttempt = Math.max(fresh.fetchedAt, fresh.kidMissAttemptAt ?? 0);
 		const refetchAllowed = options.refetchForUnknownKid && now - lastAttempt >= KID_MISS_REFETCH_INTERVAL_MS;
 		if (!refetchAllowed) {
+			// A refetch already under way may carry the rotated key: share it.
+			const pending = options.refetchForUnknownKid ? inFlight.get(key) : undefined;
+			if (pending) return pending;
 			// LRU refresh: re-insert so eviction targets the least recently used.
 			jwksCache.delete(key);
 			jwksCache.set(key, fresh);

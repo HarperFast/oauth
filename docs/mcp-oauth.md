@@ -762,6 +762,7 @@ policy, or a `token_endpoint_auth_signing_alg` other than `RS256`, `ES256` or
 - Concurrent misses share one fetch; in-flight fetches are capped at 8 per
   worker; attempts are limited to 10 per minute per client and URL.
   An unknown `kid` can trigger a refetch only after the previous unknown-`kid` attempt’s one-minute interval, including when that attempt failed.
+  An unknown `kid` seen while a refetch is in flight waits for that refetch.
 
 **Assertion checks** (`private_key_jwt` on `authorization_code` and
 `refresh_token`):

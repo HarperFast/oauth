@@ -310,6 +310,31 @@ describe('getClientJwks', () => {
 		assert.equal(fetch.calls.length, 2);
 	});
 
+	it('an unknown kid seen while a refetch is in flight waits for that refetch', async () => {
+		let now = Date.parse('2026-09-30T00:00:00Z');
+		_setJwksNow(() => now);
+		let served = KEY_1;
+		let gate;
+		const fetch = recordingFetch(async () => {
+			await gate;
+			return response({ keys: [served] }, { cacheControl: 'max-age=3600' });
+		});
+		_setFetch(fetch);
+		await getClientJwks(CLIENT_A, JWKS_A, undefined);
+		served = KEY_2; // the client rotated
+		now += KID_MISS_REFETCH_INTERVAL_MS;
+		let release;
+		gate = new Promise((resolve) => (release = resolve));
+		const first = getClientJwks(CLIENT_A, JWKS_A, undefined, { refetchForUnknownKid: true });
+		const second = getClientJwks(CLIENT_A, JWKS_A, undefined, { refetchForUnknownKid: true });
+		const plain = await getClientJwks(CLIENT_A, JWKS_A, undefined);
+		assert.equal(plain[0].kid, 'key-1', 'a request without an unknown kid is answered from the cache');
+		release();
+		assert.equal((await first)[0].kid, 'key-2');
+		assert.equal((await second)[0].kid, 'key-2', 'the concurrent unknown-kid request gets the refetched keys');
+		assert.equal(fetch.calls.length, 2);
+	});
+
 	it('obeys no-store, no-cache and a zero max-age: nothing is stored', async () => {
 		for (const cacheControl of ['no-store', 'no-cache', 'max-age=0', 'public, no-store, max-age=600']) {
 			_clearJwksCache();
