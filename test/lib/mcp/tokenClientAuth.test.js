@@ -293,29 +293,35 @@ describe('handleToken — shared client authenticator', () => {
 		if (pattern) assert.match(res.body.error_description, pattern);
 	}
 
+	function assertInvalidRequest(res, pattern) {
+		assert.equal(res.status, 400, JSON.stringify(res.body));
+		assert.equal(res.body.error, 'invalid_request');
+		if (pattern) assert.match(res.body.error_description, pattern);
+	}
+
 	describe('partial, empty, duplicate and conflicting credentials', () => {
 		beforeEach(() => seedCode('code-1', 'public-1', REDIRECT, 'none'));
 
 		const publicBody = { client_id: 'public-1', redirect_uri: REDIRECT };
 		const TYPE = 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer';
 
-		it('rejects half an assertion pair', async () => {
-			assertInvalidClient(await exchange({ ...publicBody, client_assertion: signAssertion() }), /presented together/);
-			assertInvalidClient(await exchange({ ...publicBody, client_assertion_type: TYPE }), /presented together/);
+		it('rejects half an assertion pair (invalid_request)', async () => {
+			assertInvalidRequest(await exchange({ ...publicBody, client_assertion: signAssertion() }), /presented together/);
+			assertInvalidRequest(await exchange({ ...publicBody, client_assertion_type: TYPE }), /presented together/);
 		});
 
-		it('rejects empty credential parameters', async () => {
-			for (const name of ['client_assertion', 'client_assertion_type', 'client_secret']) {
-				assertInvalidClient(
+		it('rejects empty credential parameters (invalid_request)', async () => {
+			for (const name of ['client_assertion', 'client_assertion_type', 'client_secret', 'client_id']) {
+				assertInvalidRequest(
 					await exchange({ ...publicBody, [name]: '' }),
 					new RegExp(`${name} must be a single non-empty value`)
 				);
 			}
 		});
 
-		it('rejects repeated credential parameters and a repeated client_id', async () => {
-			assertInvalidClient(await exchange({ ...publicBody, client_secret: ['a', 'b'] }), /single non-empty value/);
-			assertInvalidClient(
+		it('rejects array-valued credential parameters and client_id (invalid_request)', async () => {
+			assertInvalidRequest(await exchange({ ...publicBody, client_secret: ['a', 'b'] }), /single non-empty value/);
+			assertInvalidRequest(
 				await exchange({
 					...publicBody,
 					client_assertion: [signAssertion(), signAssertion()],
@@ -323,18 +329,34 @@ describe('handleToken — shared client authenticator', () => {
 				}),
 				/single non-empty value/
 			);
-			const dupId = await exchange({ ...publicBody, client_id: ['public-1', 'public-1'] });
-			assert.equal(dupId.status, 400);
-			assert.equal(dupId.body.error, 'invalid_request');
+			assertInvalidRequest(
+				await exchange({ ...publicBody, client_id: ['public-1', 'public-1'] }),
+				/single non-empty value/
+			);
 		});
 
-		it('rejects an assertion alongside a secret or any Basic header, including an empty-secret one', async () => {
+		it('rejects an assertion alongside a secret or any Basic header, including an empty-secret one (invalid_request)', async () => {
 			const withAssertion = { ...publicBody, client_assertion: signAssertion(), client_assertion_type: TYPE };
-			assertInvalidClient(
+			assertInvalidRequest(
 				await exchange({ ...withAssertion, client_secret: 'x' }),
 				/Multiple client authentication methods/
 			);
-			assertInvalidClient(await exchange(withAssertion, { headers: basic('public-1', '') }), /Multiple/);
+			assertInvalidRequest(await exchange(withAssertion, { headers: basic('public-1', '') }), /Multiple/);
+		});
+
+		it('challenges for Basic on a 401 only when the request used Basic', async () => {
+			const challenged = await exchange(publicBody, { headers: { authorization: 'Basic !!!' } });
+			assertInvalidClient(challenged, /Malformed Basic/);
+			assert.equal(challenged.headers['WWW-Authenticate'], 'Basic realm="oauth"');
+			const wrongSecret = await exchange({ redirect_uri: REDIRECT }, { headers: basic('conf-1', 'not-the-secret') });
+			assertInvalidClient(wrongSecret, /Invalid client credentials/);
+			assert.equal(wrongSecret.headers['WWW-Authenticate'], 'Basic realm="oauth"');
+			const withoutBasic = await exchange({ ...publicBody, client_secret: 'x' });
+			assertInvalidClient(withoutBasic);
+			assert.equal(withoutBasic.headers['WWW-Authenticate'], undefined);
+			const notA401 = await exchange({ ...publicBody, client_secret: 'x' }, { headers: basic('public-1', 'y') });
+			assertInvalidRequest(notA401, /Multiple/);
+			assert.equal(notA401.headers['WWW-Authenticate'], undefined);
 		});
 
 		it('rejects an unknown assertion type', async () => {
@@ -744,13 +766,13 @@ describe('handleToken — shared client authenticator', () => {
 			assert.ok(fetches.includes(ASSISTANT), 'the subject was used to resolve the client');
 		});
 
-		it('rejects Basic credentials combined with a body client_secret as invalid_client', async () => {
+		it('rejects Basic credentials combined with a body client_secret as invalid_request', async () => {
 			seedCode('code-2', 'conf-1', REDIRECT, 'client_secret_basic');
 			const res = await exchange(
 				{ redirect_uri: REDIRECT, client_secret: 'conf-secret' },
 				{ headers: basic('conf-1', 'conf-secret'), code: 'code-2' }
 			);
-			assertInvalidClient(res, /Multiple client authentication methods/);
+			assertInvalidRequest(res, /Multiple client authentication methods/);
 			assert.equal(codes.has('code-2'), true);
 		});
 

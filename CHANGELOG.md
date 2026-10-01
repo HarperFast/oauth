@@ -15,7 +15,7 @@ All notable changes to `@harperfast/oauth` are documented here. The format is ba
 
 ### Changed
 
-- **Client credentials presented at the token endpoint are verified or rejected** (`authorization_code` and `refresh_token`). Half an assertion pair, an empty or repeated credential parameter, malformed `Basic` credentials, or an assertion alongside another mechanism is rejected with `invalid_client`. A client permitted `none` that sends assertion parameters is rejected. **Compatibility:** assertion parameters that were previously ignored now cause `invalid_client`.
+- **Client credentials presented at the token endpoint are verified or rejected** (`authorization_code` and `refresh_token`). A `client_id` or credential parameter that is empty or not a single string, half an assertion pair, or an assertion alongside another mechanism is rejected with `invalid_request` (400); malformed `Basic` credentials with `invalid_client` (401). A `401` answering a request that used `Basic` carries `WWW-Authenticate: Basic`. A client permitted `none` that sends assertion parameters is rejected. **Compatibility:** assertion parameters that were previously ignored now cause a rejection.
 - **Interactive CIMD documents are validated for their declared authentication.** A document is rejected with `invalid_client` when:
   - `token_endpoint_auth_method` is present but not a string;
   - `token_endpoint_auth_methods_supported` is not an array of strings, or omits the singular value;
@@ -36,7 +36,6 @@ All notable changes to `@harperfast/oauth` are documented here. The format is ba
 
 - **CIMD documents containing `client_secret*` members are rejected** with `invalid_client` (for example `client_secret` or `client_secret_expires_at`), in either document shape.
 - **Over-length client assertions are rejected before any client lookup.** The verifier's 8192-character bound is applied at the token endpoint before an assertion is parsed for its client ID or any client is looked up, on every grant that accepts assertions.
-- **Conflicting `Basic` and body `client_secret` authentication returns `invalid_client`** (401) instead of `invalid_request` on the `authorization_code` and `refresh_token` grants.
 - **A client assertion presented concurrently is accepted at most once per node**, on every grant that accepts assertions. Replay records (`mcp_assertion_jtis`) gain a `uses` counter: each presentation adds 1 atomically, and only the one that reads back 1 is accepted, so concurrent presentations can all be refused. Previously they could all be accepted.
 - **A refresh-family revocation is no longer undone by a concurrent refresh.** Rotation and revocation now write only their own field (`current_token_hash`, `revoked`), so a revocation committed while another request rotates the family stays in force.
 - **Client, authorization-code and refresh-family read failures return `server_error`** (500) instead of being reported as an unknown client or an invalid grant. A missing record still gives `invalid_client` or `invalid_grant`.

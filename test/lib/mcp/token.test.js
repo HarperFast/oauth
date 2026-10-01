@@ -581,7 +581,7 @@ describe('handleToken', () => {
 		assert.equal(res.body.error, 'invalid_client');
 	});
 
-	it('rejects mixing Basic header with a body client_secret as invalid_client (RFC 6749 §2.3)', async () => {
+	it('rejects mixing Basic header with a body client_secret as invalid_request (RFC 6749 §5.2)', async () => {
 		seedCode('code-1', { client_id: 'conf-1' });
 		const res = await handleToken(
 			{ headers: basicHeader('conf-1', CONF_SECRET) },
@@ -594,8 +594,8 @@ describe('handleToken', () => {
 			},
 			mcpConfig
 		);
-		assert.equal(res.status, 401);
-		assert.equal(res.body.error, 'invalid_client');
+		assert.equal(res.status, 400);
+		assert.equal(res.body.error, 'invalid_request');
 		assert.match(res.body.error_description, /Multiple client authentication methods/);
 	});
 

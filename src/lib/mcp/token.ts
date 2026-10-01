@@ -281,6 +281,17 @@ function invalidClient(description: string): { error: TokenResponse } {
 	return { error: errorResponse(401, 'invalid_client', description) };
 }
 
+/** RFC 6749 §5.2: a repeated or missing parameter, or more than one authentication mechanism. */
+function invalidRequest(description: string): { error: TokenResponse } {
+	return { error: errorResponse(400, 'invalid_request', description) };
+}
+
+/**
+ * RFC 6749 §5.2: a 401 answering a request that authenticated with the
+ * `Authorization` header carries a challenge for the scheme it used.
+ */
+const BASIC_CHALLENGE = 'Basic realm="oauth"';
+
 /** The error for a presentation that differs from the permitted method. */
 function methodMismatch(
 	permitted: ClientAuthMethod,
@@ -312,11 +323,12 @@ function methodMismatch(
  * - nothing (or an empty-secret Basic header carrying only the client_id, as
  *   some public clients send) → none; PKCE is the proof.
  *
- * Rejected with invalid_client before any lookup: a partial assertion pair, an
- * empty or repeated credential parameter, malformed Basic credentials, more
- * than one mechanism (RFC 6749 §2.3, RFC 7521 §4.2.1) — an empty-secret Basic
- * header never accompanies an assertion — and an assertion longer than the
- * verifier accepts.
+ * Rejected before any lookup with invalid_request (RFC 6749 §5.2): a
+ * repeated parameter, an empty credential parameter, a partial assertion
+ * pair, and more than one mechanism (RFC 6749 §2.3, RFC 7521 §4.2.1) — an
+ * empty-secret Basic header never accompanies an assertion. Rejected before
+ * any lookup with invalid_client: an unknown client_assertion_type, malformed
+ * Basic credentials, and an assertion longer than the verifier accepts.
  */
 async function authenticateClient(
 	request: Request | undefined,
@@ -328,18 +340,16 @@ async function authenticateClient(
 	if ('malformed' in basic) return invalidClient('Malformed Basic client credentials');
 
 	const clientIdParam = singleParameter(body, 'client_id');
-	if ('invalid' in clientIdParam) {
-		return { error: errorResponse(400, 'invalid_request', 'client_id must be a single non-empty value') };
-	}
 	const secretParam = singleParameter(body, 'client_secret');
 	const assertionParam = singleParameter(body, 'client_assertion');
 	const assertionTypeParam = singleParameter(body, 'client_assertion_type');
 	for (const [name, param] of [
+		['client_id', clientIdParam],
 		['client_secret', secretParam],
 		['client_assertion', assertionParam],
 		['client_assertion_type', assertionTypeParam],
 	] as const) {
-		if ('invalid' in param) return invalidClient(`${name} must be a single non-empty value`);
+		if ('invalid' in param) return invalidRequest(`${name} must be a single non-empty value`);
 	}
 	const secret = (secretParam as { value?: string }).value;
 	const assertion = (assertionParam as { value?: string }).value;
@@ -348,28 +358,27 @@ async function authenticateClient(
 
 	if (assertion !== undefined || assertionType !== undefined) {
 		if (assertion === undefined || assertionType === undefined) {
-			return invalidClient('client_assertion and client_assertion_type must be presented together');
+			return invalidRequest('client_assertion and client_assertion_type must be presented together');
 		}
 		if (assertionType !== CLIENT_ASSERTION_TYPE_JWT_BEARER) {
 			return invalidClient(`client_assertion_type must be ${CLIENT_ASSERTION_TYPE_JWT_BEARER}`);
 		}
-		if (hasBasic || secret !== undefined) return invalidClient('Multiple client authentication methods');
+		if (hasBasic || secret !== undefined) return invalidRequest('Multiple client authentication methods');
 		// The verifier's length bound, applied before the assertion is parsed for a
 		// client_id candidate or any client lookup begins.
 		if (assertion.length > MAX_ASSERTION_LENGTH) return invalidClient(ASSERTION_TOO_LONG);
 	}
-	if (hasBasic && secret !== undefined) return invalidClient('Multiple client authentication methods');
-	if (hasBasic && clientIdParam.value !== undefined && clientIdParam.value !== basic.clientId) {
-		return { error: errorResponse(400, 'invalid_request', 'client_id mismatch between header and body') };
+	if (hasBasic && secret !== undefined) return invalidRequest('Multiple client authentication methods');
+	const bodyClientId = (clientIdParam as { value?: string }).value;
+	if (hasBasic && bodyClientId !== undefined && bodyClientId !== basic.clientId) {
+		return invalidRequest('client_id mismatch between header and body');
 	}
 
 	const clientId =
 		(hasBasic ? basic.clientId : undefined) ??
-		clientIdParam.value ??
+		bodyClientId ??
 		(assertion !== undefined ? unverifiedAssertionSubject(assertion) : undefined);
-	if (!clientId) {
-		return { error: errorResponse(400, 'invalid_request', 'client_id is required') };
-	}
+	if (!clientId) return invalidRequest('client_id is required');
 
 	const presented: PresentedCredentials =
 		assertion !== undefined
@@ -1031,6 +1040,20 @@ async function handleClientCredentialsGrant(
  * When present, `onMCPTokenIssued` is fired after every successful mint.
  */
 export async function handleToken(
+	request: Request | undefined,
+	body: any,
+	mcpConfig: MCPConfig,
+	hookManager?: HookManager,
+	logger?: Logger
+): Promise<TokenResponse> {
+	const response = await dispatchToken(request, body, mcpConfig, hookManager, logger);
+	if (response.status === 401 && /^\s*basic(\s|$)/i.test(getRequestHeader(request?.headers, 'authorization') ?? '')) {
+		response.headers = { ...response.headers, 'WWW-Authenticate': BASIC_CHALLENGE };
+	}
+	return response;
+}
+
+async function dispatchToken(
 	request: Request | undefined,
 	body: any,
 	mcpConfig: MCPConfig,

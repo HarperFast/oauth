@@ -853,12 +853,16 @@ These rules apply to every client on `authorization_code` and `refresh_token`:
   `client_secret_basic`, and a body `client_secret` presents
   `client_secret_post`. Nothing, or an empty-secret `Basic` header carrying only
   the `client_id`, presents `none`.
-- These are rejected with `invalid_client` (401) before any client lookup: half
-  an assertion pair, an empty or repeated credential parameter, an unknown
-  `client_assertion_type`, malformed `Basic` credentials, a `Basic` header with a
-  secret alongside a body `client_secret`, an assertion alongside a secret or any
-  `Basic` header, and an assertion longer than 8192 characters. A repeated
-  `client_id` is `invalid_request`.
+- These are rejected with `invalid_request` (400) before any client lookup, as
+  RFC 6749 §5.2 specifies: a `client_id` or credential parameter that is empty
+  or not a single string, half an assertion pair, and more than one mechanism
+  (a `Basic` header with a secret alongside a body `client_secret`, or an
+  assertion alongside a secret or any `Basic` header).
+- These are rejected with `invalid_client` (401) before any client lookup: an
+  unknown `client_assertion_type`, malformed `Basic` credentials, and an
+  assertion longer than 8192 characters.
+- A `401` answering a request that carried an `Authorization: Basic` header
+  includes `WWW-Authenticate: Basic`.
 - A presentation that differs from the permitted method is `invalid_client`. A
   client permitted `none` that sends assertion parameters is rejected rather
   than having them ignored.
