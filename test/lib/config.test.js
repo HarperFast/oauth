@@ -257,6 +257,30 @@ describe('OAuth Configuration', () => {
 				assert.doesNotThrow(() => normalizeMcpSecurityConfig({ enabled: true, clientIdMetadataDocuments: null }));
 			});
 		});
+
+		describe('dynamicClientRegistration.allowedRedirectUriHosts — scalar must not become substring matching', () => {
+			it('wraps a scalar host into a lowercased exact-match array', () => {
+				const cfg = { dynamicClientRegistration: { allowedRedirectUriHosts: 'Trusted.Example.COM' } };
+				normalizeMcpSecurityConfig(cfg);
+				assert.deepEqual(cfg.dynamicClientRegistration.allowedRedirectUriHosts, ['trusted.example.com']);
+			});
+			it('normalizes an array of hostnames (trim + lowercase, drops empties)', () => {
+				const cfg = { dynamicClientRegistration: { allowedRedirectUriHosts: [' A.com ', 'B.COM', ''] } };
+				normalizeMcpSecurityConfig(cfg);
+				assert.deepEqual(cfg.dynamicClientRegistration.allowedRedirectUriHosts, ['a.com', 'b.com']);
+			});
+			it('rejects a non-string entry rather than failing open', () => {
+				assert.throws(
+					() => normalizeMcpSecurityConfig({ dynamicClientRegistration: { allowedRedirectUriHosts: [123] } }),
+					/allowedRedirectUriHosts must be/
+				);
+			});
+			it('leaves an absent allowedRedirectUriHosts untouched', () => {
+				const cfg = { dynamicClientRegistration: {} };
+				normalizeMcpSecurityConfig(cfg);
+				assert.equal('allowedRedirectUriHosts' in cfg.dynamicClientRegistration, false);
+			});
+		});
 		it('drops any other non-boolean value with a warning (total normalization)', () => {
 			const warnings = [];
 			const logger = { warn: (...args) => warnings.push(args.join(' ')) };

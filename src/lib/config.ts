@@ -313,6 +313,23 @@ export function normalizeMcpSecurityConfig(mcpConfig: Record<string, any>, logge
 		if (mcpActive && dcr.enabled !== false) {
 			validateDcrInitialAccessToken(dcr);
 		}
+		// allowedRedirectUriHosts is matched with Array.includes in
+		// clientValidator.ts — a scalar string there silently becomes
+		// String.prototype.includes (substring matching) instead of an exact-host
+		// allowlist. Normalize to an array up front, exactly like CIMD's
+		// allowedHosts below (this list is shared by both the DCR and CIMD
+		// redirect-uri checks).
+		if (dcr.allowedRedirectUriHosts !== undefined) {
+			const raw = Array.isArray(dcr.allowedRedirectUriHosts)
+				? dcr.allowedRedirectUriHosts
+				: [dcr.allowedRedirectUriHosts];
+			if (raw.some((h: unknown) => typeof h !== 'string')) {
+				throw new Error(
+					'mcp.dynamicClientRegistration.allowedRedirectUriHosts must be a hostname string or an array of hostname strings'
+				);
+			}
+			dcr.allowedRedirectUriHosts = raw.map((h: string) => h.trim().toLowerCase()).filter((h: string) => h.length > 0);
+		}
 	}
 
 	const cimd = mcpConfig.clientIdMetadataDocuments;
