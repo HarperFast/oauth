@@ -1070,4 +1070,12 @@ describe('resolveClient — routing', () => {
 		});
 		assert.equal(result, null);
 	});
+
+	it('skips CIMD when clientIdMetadataDocuments is an array — `typeof === "object"` must not pass as a mapping', async () => {
+		const result = await resolveClient(VALID_URL, {
+			enabled: true,
+			clientIdMetadataDocuments: [{ enabled: false }],
+		});
+		assert.equal(result, null);
+	});
 });

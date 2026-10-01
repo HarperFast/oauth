@@ -471,15 +471,10 @@ export async function handleApplication(scope: Scope): Promise<void> {
 
 		updating = true;
 		try {
-			// OptionsWatcher's merge writes a multi-key edit into the live config
-			// one key at a time and emits 'change' synchronously per key —
-			// updateConfiguration has no internal await, so without this yield the
-			// first event's getAll() would read (and publish) a half-applied
-			// snapshot before the remaining keys land. A macrotask yield (not a
-			// microtask one) lets that whole synchronous emit burst finish first;
-			// every key lands as `pendingUpdate`-triggered re-runs below before
-			// getAll() is ever called. The initial boot call to updateConfiguration()
-			// bypasses runUpdate entirely, so this doesn't delay startup.
+			// OptionsWatcher's merge emits 'change' per key, synchronously, before a
+			// multi-key edit finishes landing — without this macrotask yield,
+			// getAll() could read a half-applied snapshot. Boot's call bypasses
+			// runUpdate entirely, so this doesn't delay startup.
 			await new Promise((resolve) => setImmediate(resolve));
 			// Loop while holding the guard so the last snapshot wins. Catch per-iteration
 			// (not around the loop): a throwing intermediate snapshot must not abort before

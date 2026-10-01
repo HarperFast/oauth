@@ -105,17 +105,11 @@ export function coerceConfigBoolean(value: unknown): boolean | undefined {
  * and name the variable instead, exactly like `mcp.signingKeyPem` and
  * `redirectUri` do for the same placeholder shape.
  *
- * `failOnPlaceholder` defaults to true. The four feature-scoped fields
- * (`mcp.refreshTokenRequiresOfflineAccess`, `mcp.clientCredentials.enabled`,
- * `mcp.dynamicClientRegistration.enabled`, `mcp.clientIdMetadataDocuments.enabled`)
- * pass `mcpConfig.enabled === true` so a block that's disabled overall — or
- * whose own `enabled` didn't resolve to `true` — stays inert (byte-identical-
- * boot contract) even if some other placeholder is still sitting in its
- * config. `mcp.enabled` itself passes `false` explicitly: unlike the
- * feature-scoped fields, dropping it already lands on the safe direction
- * (MCP off), and there's no outer flag to hide an ambiguous value behind —
- * throwing here would stop the whole plugin, including every provider's
- * browser OAuth login, over one stray placeholder.
+ * `failOnPlaceholder` defaults to true. The four feature-scoped fields pass
+ * `mcpConfig.enabled === true`, so they stay inert while MCP overall is off
+ * (byte-identical-boot contract) and fail closed once it's on. `mcp.enabled`
+ * itself passes `false` explicitly — see {@link normalizeMcpSecurityConfig}
+ * for why that one field keeps the pre-#207 warn-and-drop behavior.
  */
 function normalizeBooleanField(
 	obj: Record<string, any>,
@@ -270,12 +264,9 @@ function validateDcrInitialAccessToken(dcr: Record<string, any>): void {
  *   while it's inactive, the placeholder still drops with a warning so a
  *   disabled block stays inert. Consumers may therefore gate on plain
  *   truthiness / `!== false` without re-validating types.
- * - `mcp.enabled` itself keeps the pre-#207 warn-and-drop behavior for an
- *   unresolved placeholder or empty value: it's dropped with a warning
- *   naming the key, and the documented default (off) applies — it does NOT
- *   throw. Dropping already lands on the safe direction, and failing closed
- *   here would stop the whole plugin (every provider's browser OAuth login)
- *   over one unset variable.
+ * - `mcp.enabled` itself keeps the pre-#207 warn-and-drop behavior (does not
+ *   throw) — see {@link normalizeBooleanField}'s doc for why this one field
+ *   is the exception.
  * - `mcp.clientIdMetadataDocuments.allowedHosts` is normalized to an array of
  *   exact, lowercased hostnames. A scalar string (which `Array.includes` /
  *   `String.includes` would turn into substring matching) is wrapped into a
@@ -292,13 +283,8 @@ function validateDcrInitialAccessToken(dcr: Record<string, any>): void {
  *   registration is only ever chosen by omitting the key).
  */
 export function normalizeMcpSecurityConfig(mcpConfig: Record<string, any>, logger?: Logger): void {
-	// The master switch keeps the pre-#207 warn-and-drop behavior instead of
-	// failing closed: dropping an unresolved mcp.enabled placeholder already
-	// lands on the safe direction (MCP off), and there's no outer flag to
-	// gate a throw behind here — it would take down the whole plugin,
-	// including every provider's browser OAuth login, over a single stray
-	// placeholder. The four feature-scoped booleans below still fail closed
-	// while MCP is active; this one never does.
+	// mcp.enabled is the one field kept on the pre-#207 warn-and-drop path (see
+	// normalizeBooleanField's doc); the feature-scoped booleans below fail closed.
 	normalizeBooleanField(mcpConfig, 'enabled', 'mcp.enabled', logger, false);
 	// Feature-scoped fields below only fail closed on their own placeholder when
 	// the surface they gate is actually active (mcp.enabled === true) — a
@@ -319,17 +305,17 @@ export function normalizeMcpSecurityConfig(mcpConfig: Record<string, any>, logge
 	}
 
 	const dcr = mcpConfig.dynamicClientRegistration;
-	if (dcr !== undefined && dcr !== null && typeof dcr !== 'object') {
-		// A non-object, non-null value (`false`, `0`, an unresolved placeholder
-		// string, ...) must not reach dcrEnabled()'s `dcrConfig != null &&
-		// dcrConfig.enabled !== false` predicate — `.enabled` on a non-object is
-		// always `undefined`, so that check falls through to its default-ENABLED
-		// result and silently turns a would-be "disable DCR" value into open
-		// registration. Fail loudly instead of guessing.
+	if (dcr !== undefined && dcr !== null && (typeof dcr !== 'object' || Array.isArray(dcr))) {
+		// A non-mapping value (`false`, `0`, an unresolved placeholder string, an
+		// array, ...) must not reach dcrEnabled()'s `dcrConfig != null &&
+		// dcrConfig.enabled !== false` predicate — `.enabled` on a non-mapping is
+		// always `undefined` (arrays included), so that check falls through to
+		// its default-ENABLED result and silently turns a would-be "disable DCR"
+		// value into open registration. Fail loudly instead of guessing.
 		if (mcpActive) {
 			throw new Error('mcp.dynamicClientRegistration must be a mapping; use enabled: false to disable');
 		}
-	} else if (dcr && typeof dcr === 'object') {
+	} else if (dcr && typeof dcr === 'object' && !Array.isArray(dcr)) {
 		normalizeBooleanField(dcr, 'enabled', 'mcp.dynamicClientRegistration.enabled', logger, mcpActive);
 		// Only when MCP itself is enabled and DCR isn't explicitly disabled — a
 		// disabled block must stay inert, matching mcp.signingKeyPem's gating
@@ -357,16 +343,16 @@ export function normalizeMcpSecurityConfig(mcpConfig: Record<string, any>, logge
 	}
 
 	const cimd = mcpConfig.clientIdMetadataDocuments;
-	if (cimd !== undefined && cimd !== null && typeof cimd !== 'object') {
-		// Same non-object guard as dynamicClientRegistration above: CIMD's own
-		// `cimdConfig?.enabled !== false` predicate (cimd.ts) also falls through
-		// to its default — for CIMD that default is already "enabled", so a
-		// scalar block meant to disable it (`clientIdMetadataDocuments: false`)
-		// would otherwise be silently ignored rather than taking effect.
+	if (cimd !== undefined && cimd !== null && (typeof cimd !== 'object' || Array.isArray(cimd))) {
+		// Same non-mapping guard as dynamicClientRegistration above (arrays
+		// included): CIMD's own `cimdConfig?.enabled !== false` predicate
+		// (cimd.ts) also falls through to its default — for CIMD that default
+		// is already "enabled", so a block meant to disable it would otherwise
+		// be silently ignored rather than taking effect.
 		if (mcpActive) {
 			throw new Error('mcp.clientIdMetadataDocuments must be a mapping; use enabled: false to disable');
 		}
-	} else if (cimd && typeof cimd === 'object') {
+	} else if (cimd && typeof cimd === 'object' && !Array.isArray(cimd)) {
 		normalizeBooleanField(cimd, 'enabled', 'mcp.clientIdMetadataDocuments.enabled', logger, mcpActive);
 
 		if (cimd.allowedHosts !== undefined) {

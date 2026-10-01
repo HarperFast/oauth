@@ -108,6 +108,15 @@ describe('handleRegister (RFC 7591 DCR)', () => {
 			assert.equal(response.status, 404);
 			assert.equal(storedRecords.size, 0);
 		});
+
+		it('returns 404 when the DCR block is an array — `typeof === "object"` must not pass as a mapping', async () => {
+			const response = await handleRegister(makeRequest(), VALID_BODY, {
+				enabled: true,
+				dynamicClientRegistration: [{ enabled: true }],
+			});
+			assert.equal(response.status, 404);
+			assert.equal(storedRecords.size, 0);
+		});
 	});
 
 	describe('initial access token gate', () => {

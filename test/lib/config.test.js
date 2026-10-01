@@ -272,6 +272,19 @@ describe('OAuth Configuration', () => {
 					/mcp\.clientIdMetadataDocuments must be a mapping; use enabled: false to disable/
 				);
 			});
+			it('an array passes `typeof === "object"` but must not be treated as a mapping', () => {
+				// `dynamicClientRegistration:\n  - enabled: false` is a YAML authoring
+				// mistake that parses as an array. `[].enabled` is undefined, which
+				// would otherwise default-enable DCR/CIMD with no token/allowlist.
+				assert.throws(
+					() => normalizeMcpSecurityConfig({ enabled: true, dynamicClientRegistration: [{ enabled: false }] }),
+					/mcp\.dynamicClientRegistration must be a mapping; use enabled: false to disable/
+				);
+				assert.throws(
+					() => normalizeMcpSecurityConfig({ enabled: true, clientIdMetadataDocuments: [] }),
+					/mcp\.clientIdMetadataDocuments must be a mapping; use enabled: false to disable/
+				);
+			});
 			it('a non-object block on either stays inert when mcp is inactive (byte-identical-boot contract)', () => {
 				assert.doesNotThrow(() => normalizeMcpSecurityConfig({ dynamicClientRegistration: false }));
 				assert.doesNotThrow(() => normalizeMcpSecurityConfig({ enabled: false, clientIdMetadataDocuments: 0 }));

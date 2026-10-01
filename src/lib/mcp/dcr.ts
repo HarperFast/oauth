@@ -202,15 +202,13 @@ function buildClientFromRequest(
  */
 export function dcrEnabled(mcpConfig: MCPConfig | undefined): boolean {
 	const dcrConfig = mcpConfig?.dynamicClientRegistration;
-	// Require an actual mapping: a bare `dynamicClientRegistration:` key in
-	// YAML parses as null (treat like an absent block, fail-closed), and a
-	// non-object scalar (`false`, `0`, an unresolved placeholder string) must
-	// not reach `.enabled` — `dcrConfig.enabled` on a non-object is always
-	// `undefined`, so `!== false` would otherwise default such a value to
-	// enabled. normalizeMcpSecurityConfig rejects this shape at boot when MCP
-	// is active; this predicate is the runtime-enforced version of that same
-	// rule. Enabling takes a real block (`{}`).
-	return typeof dcrConfig === 'object' && dcrConfig !== null && dcrConfig.enabled !== false;
+	// Require an actual mapping (arrays excluded) — `.enabled` on anything else
+	// is `undefined`, which `!== false` would default to enabled.
+	// normalizeMcpSecurityConfig rejects this shape at boot when MCP is active;
+	// this predicate is the runtime-enforced version of that same rule.
+	return (
+		typeof dcrConfig === 'object' && dcrConfig !== null && !Array.isArray(dcrConfig) && dcrConfig.enabled !== false
+	);
 }
 
 // Once-per-process: ungated DCR is legitimate (open registration per RFC

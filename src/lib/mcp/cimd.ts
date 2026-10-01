@@ -1059,17 +1059,15 @@ export async function resolveClient(
 	// a CIMD fetch-limiter key or a store lookup (unknown-client null, no leak).
 	if (clientId.length > MAX_CLIENT_ID_LENGTH) return null;
 	const cimdConfig = mcpConfig?.clientIdMetadataDocuments;
-	// CIMD is enabled by default when mcp.enabled; disabled only by explicit
-	// `enabled: false`. A non-object, non-null `cimdConfig` (e.g. the scalar
-	// `false`) must NOT reach that default: `cimdConfig?.enabled` on a non-object
-	// is `undefined`, which `!== false` would otherwise resolve to "enabled" —
-	// silently ignoring an operator's attempt to disable the block entirely.
-	// normalizeMcpSecurityConfig rejects this shape at boot when MCP is active;
-	// this predicate is the runtime-enforced version of that same rule.
+	// CIMD defaults to enabled; disabled only by an actual mapping's explicit
+	// `enabled: false` (arrays excluded — `.enabled` there is `undefined`, which
+	// `!== false` would otherwise resolve to "enabled"). normalizeMcpSecurityConfig
+	// rejects a non-mapping shape at boot when MCP is active; this predicate is
+	// the runtime-enforced version of that same rule.
 	const cimdEnabled =
 		cimdConfig === undefined || cimdConfig === null
 			? true
-			: typeof cimdConfig === 'object' && cimdConfig.enabled !== false;
+			: typeof cimdConfig === 'object' && !Array.isArray(cimdConfig) && cimdConfig.enabled !== false;
 	if (cimdEnabled && isCimdClientId(clientId)) {
 		return resolveCimdClient(
 			clientId,
