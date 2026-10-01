@@ -31,7 +31,9 @@
  * `clientIdMetadataDocuments.privateKeyJwt.enabled`, or by the headless grant,
  * whose advertisement steers interactive clients too. The advertised signing
  * algorithms are exactly the union of what the enabled paths accept. With
- * neither enabled, interactive CIMD clients resolve to `none`.
+ * MCP and CIMD enabled and a valid issuer, omitting `privateKeyJwt.enabled`
+ * enables interactive CIMD verification by default; an explicit `false`
+ * suppresses it only when the headless grant is off.
  */
 
 import type { MCPClientRecord, MCPConfig } from '../../types.ts';
@@ -58,7 +60,7 @@ export function isClientAuthMethod(value: unknown): value is ClientAuthMethod {
 
 /** Is interactive `private_key_jwt` switched on by configuration (the metadata change)? */
 export function interactivePrivateKeyJwtEnabled(mcpConfig: MCPConfig | undefined): boolean {
-	return mcpConfig?.clientIdMetadataDocuments?.privateKeyJwt?.enabled === true;
+	return mcpConfig !== undefined && mcpConfig.clientIdMetadataDocuments?.privateKeyJwt?.enabled !== false;
 }
 
 /** Is the headless (client_credentials) `private_key_jwt` verification path enabled? */
@@ -70,7 +72,7 @@ export function headlessPrivateKeyJwtActive(mcpConfig: MCPConfig | undefined): b
  * Is the interactive CIMD `private_key_jwt` verification path active? It is
  * whenever CIMD resolution is on and `private_key_jwt` is advertised to CIMD
  * clients: by the interactive setting, or by the headless grant, whose
- * advertisement steers interactive clients that declare `private_key_jwt`.
+ * advertisement also lets interactive clients select `private_key_jwt`.
  */
 export function interactivePrivateKeyJwtActive(mcpConfig: MCPConfig | undefined): boolean {
 	return (

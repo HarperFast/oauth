@@ -184,6 +184,9 @@ describe('OAuth Configuration', () => {
 				normalizeMcpSecurityConfig(cfg);
 				assert.equal(cfg.clientIdMetadataDocuments.privateKeyJwt.enabled, true);
 				assert.equal(cfg.clientCredentials.acceptTokenEndpointAudience, false);
+				const disabled = { clientIdMetadataDocuments: { privateKeyJwt: { enabled: 'false' } } };
+				normalizeMcpSecurityConfig(disabled);
+				assert.equal(disabled.clientIdMetadataDocuments.privateKeyJwt.enabled, false);
 			});
 
 			it('normalizes jwksUriAllowedOrigins to exact https origins and refuses anything else', () => {

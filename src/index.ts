@@ -19,6 +19,7 @@ import { clearOAuthSession } from './lib/handlers.ts';
 import { HookManager } from './lib/hookManager.ts';
 import { DynamicProviderCache, DEFAULT_DYNAMIC_PROVIDER_CACHE_TTL_SECONDS } from './lib/dynamicProviderCache.ts';
 import { registerWellKnownHandlers } from './lib/mcp/wellKnown.ts';
+import { interactivePrivateKeyJwtEnabled } from './lib/mcp/clientAuthMethod.ts';
 import { algFromPrivateKeyPem } from './lib/mcp/keyStore.ts';
 import { redactSecrets } from './lib/redact.ts';
 import type { Scope, OAuthPluginConfig, ProviderRegistry, OAuthHooks } from './types.ts';
@@ -268,7 +269,7 @@ export async function handleApplication(scope: Scope): Promise<void> {
 		// enabled) carries signed assertions to the token endpoint: it needs
 		// CIMD resolution and, like client_credentials, a TLS issuer outside
 		// loopback development.
-		if (mcpConfig?.enabled && mcpConfig.clientIdMetadataDocuments?.privateKeyJwt?.enabled === true) {
+		if (mcpConfig?.enabled && interactivePrivateKeyJwtEnabled(mcpConfig)) {
 			if (mcpConfig.clientIdMetadataDocuments?.enabled === false) {
 				throw new Error(
 					'mcp.clientIdMetadataDocuments.privateKeyJwt.enabled requires CIMD resolution ' +

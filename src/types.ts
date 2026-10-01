@@ -323,10 +323,14 @@ export interface MCPClientIdMetadataDocumentsConfig {
 export interface MCPCimdPrivateKeyJwtConfig {
 	/**
 	 * Advertise `private_key_jwt` (and the interactive signing algorithms) in
-	 * the authorization server metadata, so interactive CIMD clients that
-	 * declare it are resolved to it. Default: false. A server that enables the
-	 * client_credentials grant already advertises `private_key_jwt`; there, an
-	 * interactive client's assertion is verified whatever this setting is.
+	 * the authorization server metadata. Default: true when MCP is enabled.
+	 * An interactive CIMD client with usable keys selects it when it is the sole
+	 * available method, or when both it and `none` remain without a singular
+	 * preference for `none`; only a client selected for `private_key_jwt` must
+	 * present a verified assertion. Set false to omit this advertisement when
+	 * the client_credentials grant is off. When that grant is on, it already
+	 * advertises `private_key_jwt` and keeps interactive verification active
+	 * even if this setting is false.
 	 */
 	enabled?: boolean;
 	/**

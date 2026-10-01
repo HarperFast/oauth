@@ -94,6 +94,7 @@ const PUBLIC_DOC = { client_id: PUBLIC_CIMD, client_name: 'Public', redirect_uri
 
 const BASE = { enabled: true, issuer: ISSUER, resource: RESOURCE, accessTokenTtl: 3600, refreshTokenTtl: 86400 };
 const DEFAULT = BASE;
+const SETTING_OFF = { ...BASE, clientIdMetadataDocuments: { privateKeyJwt: { enabled: false } } };
 const MIXED = { ...BASE, clientCredentials: { enabled: true } };
 const SETTING_ON = { ...BASE, clientIdMetadataDocuments: { privateKeyJwt: { enabled: true } } };
 
@@ -627,18 +628,21 @@ describe('handleToken — shared client authenticator', () => {
 			assert.equal(codes.has('code-1'), true);
 		});
 
-		it('a none-only CIMD client, and ChatGPT-shaped clients where private_key_jwt is not advertised', async () => {
+		it('a none-only CIMD client, and ChatGPT-shaped clients with private_key_jwt explicitly disabled', async () => {
 			for (const [clientId, redirect] of [
 				[PUBLIC_CIMD, 'https://public.example.com/cb'],
 				[ASSISTANT, ASSISTANT_REDIRECT],
 			]) {
 				seedCode('code-1', clientId, redirect, 'none');
-				const res = await exchange({
-					client_id: clientId,
-					redirect_uri: redirect,
-					client_assertion: signAssertion(),
-					client_assertion_type: 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer',
-				});
+				const res = await exchange(
+					{
+						client_id: clientId,
+						redirect_uri: redirect,
+						client_assertion: signAssertion(),
+						client_assertion_type: 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer',
+					},
+					{ config: SETTING_OFF }
+				);
 				assertInvalidClient(res, /Public client must not present a client assertion/);
 			}
 			assert.ok(!fetches.includes(ASSISTANT_JWKS), 'no keys are fetched for a rejected presentation');
@@ -657,6 +661,7 @@ describe('handleToken — shared client authenticator', () => {
 		beforeEach(() => seedCode('code-1', ASSISTANT, ASSISTANT_REDIRECT, 'private_key_jwt'));
 
 		for (const [name, config] of [
+			['the default configuration', DEFAULT],
 			['a server advertising it for headless agents', MIXED],
 			['the interactive setting', SETTING_ON],
 		]) {
@@ -865,7 +870,7 @@ describe('handleToken — shared client authenticator', () => {
 		it('refuses a code bound to private_key_jwt once the configuration only permits none', async () => {
 			// Authorized on a server advertising private_key_jwt; exchanged after it stopped.
 			seedCode('code-1', ASSISTANT, ASSISTANT_REDIRECT, 'private_key_jwt');
-			const res = await exchange(asPublic, { config: DEFAULT });
+			const res = await exchange(asPublic, { config: SETTING_OFF });
 			assert.equal(res.status, 400);
 			assert.equal(res.body.error, 'invalid_grant');
 			assert.match(res.body.error_description, /bound to a different client authentication method/);
@@ -940,7 +945,7 @@ describe('handleToken — shared client authenticator', () => {
 			const stored = seedFamily(`${FAMILY_ID_PREFIX}legacy-dcr`, 'public-1', undefined);
 			assert.equal((await refresh(stored, { client_id: 'public-1' }, DEFAULT)).status, 200);
 			const cimdPublic = seedFamily(`${FAMILY_ID_PREFIX}legacy-cimd`, ASSISTANT, undefined);
-			assert.equal((await refresh(cimdPublic, asPublic, DEFAULT)).status, 200);
+			assert.equal((await refresh(cimdPublic, asPublic, SETTING_OFF)).status, 200);
 			// The same legacy link cannot continue once private_key_jwt is required: reauthorize.
 			const cimdUpgraded = seedFamily(`${FAMILY_ID_PREFIX}legacy-cimd-2`, ASSISTANT, undefined);
 			const res = await refresh(cimdUpgraded, withAssertion({ redirect_uri: undefined }), MIXED);
@@ -1263,7 +1268,7 @@ describe('handleToken — shared client authenticator', () => {
 			// advertises: private_key_jwt in the metadata (and so the method ChatGPT is permitted).
 			// Outcomes: the recorded request (token-endpoint aud), its issuer-audience variant, the none-only form.
 			const MATRIX = [
-				['CIMD on, interactive setting absent, headless off', DEFAULT, false, [401, 401, 200]],
+				['CIMD on, interactive setting absent, headless off', DEFAULT, true, [401, 200, 401]],
 				['interactive setting false, headless off', interactiveOff(DEFAULT), false, [401, 401, 200]],
 				['interactive setting true', SETTING_ON, true, [401, 200, 401]],
 				['headless on, interactive setting absent', MIXED, true, [401, 200, 401]],
@@ -1276,12 +1281,7 @@ describe('handleToken — shared client authenticator', () => {
 					[200, 200, 401],
 				],
 				['interactive setting true, expired exception', exceptionOn(SETTING_ON, Date.now() - 1), true, [401, 200, 401]],
-				[
-					'interactive setting absent, exception configured (it enables nothing)',
-					exceptionOn(DEFAULT),
-					false,
-					[401, 401, 200],
-				],
+				['interactive setting absent, exact-ID exception', exceptionOn(DEFAULT), true, [200, 200, 401]],
 			];
 
 			for (const [name, config, advertises, [recorded, issuerAud, noneOnly]] of MATRIX) {
@@ -1453,7 +1453,7 @@ describe('handleToken — shared client authenticator', () => {
 				200
 			);
 			assert.equal(
-				(await refresh(legacy(`${UPSTREAM_FAMILY_ID_PREFIX}cimd`, DUAL), { client_id: DUAL }, DEFAULT)).status,
+				(await refresh(legacy(`${UPSTREAM_FAMILY_ID_PREFIX}cimd`, DUAL), { client_id: DUAL }, SETTING_OFF)).status,
 				200,
 				'a CIMD family from 2.7.0 stays bound to none'
 			);
@@ -1497,7 +1497,7 @@ describe('handleToken — shared client authenticator', () => {
 			assert.equal(withKey.status, 400);
 			assert.match(withKey.body.error_description, /bound to a different client authentication method/);
 			// Under the configuration it was issued with, it still refreshes.
-			assert.equal((await refresh(token, { client_id: CHATGPT_CLIENT_ID }, DEFAULT)).status, 200);
+			assert.equal((await refresh(token, { client_id: CHATGPT_CLIENT_ID }, SETTING_OFF)).status, 200);
 		});
 
 		it('a stored secret client still authenticates after registration is disabled; discovery agrees', async () => {

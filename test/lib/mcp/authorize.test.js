@@ -881,10 +881,19 @@ describe('handleAuthorize — CIMD interstitial', () => {
 	describe('client-authentication binding', () => {
 		const CHATGPT_QUERY = { ...CIMD_QUERY, client_id: CHATGPT_CLIENT_ID, redirect_uri: CHATGPT_REDIRECT_URI };
 
-		it('captures none for ChatGPT where private_key_jwt is not advertised', async () => {
+		it('captures private_key_jwt for ChatGPT by default', async () => {
 			_setFetch(makeCimdFetch(CHATGPT_CIMD_DOCUMENT));
 			const { entries, harnesses } = makeProviderRegistry('github');
 			const response = await handleAuthorize(makeRequest(), makeTarget(CHATGPT_QUERY), { enabled: true }, entries);
+			assert.equal(response.status, 200);
+			assert.equal(harnesses.github.generatedTokens[0].mcp.clientAuthMethod, 'private_key_jwt');
+		});
+
+		it('captures none for ChatGPT when the interactive setting is explicitly false', async () => {
+			_setFetch(makeCimdFetch(CHATGPT_CIMD_DOCUMENT));
+			const { entries, harnesses } = makeProviderRegistry('github');
+			const config = { enabled: true, clientIdMetadataDocuments: { privateKeyJwt: { enabled: false } } };
+			const response = await handleAuthorize(makeRequest(), makeTarget(CHATGPT_QUERY), config, entries);
 			assert.equal(response.status, 200);
 			assert.equal(harnesses.github.generatedTokens[0].mcp.clientAuthMethod, 'none');
 		});
@@ -901,7 +910,8 @@ describe('handleAuthorize — CIMD interstitial', () => {
 		it('redirects unauthorized_client when no method can be permitted for the client', async () => {
 			_setFetch(makeCimdFetch(makeCimdDoc(CIMD_CLIENT_ID, { token_endpoint_auth_method: 'private_key_jwt' })));
 			const { entries, harnesses } = makeProviderRegistry('github');
-			const response = await handleAuthorize(makeRequest(), makeTarget(CIMD_QUERY), { enabled: true }, entries);
+			const config = { enabled: true, clientIdMetadataDocuments: { privateKeyJwt: { enabled: false } } };
+			const response = await handleAuthorize(makeRequest(), makeTarget(CIMD_QUERY), config, entries);
 			assert.equal(response.status, 302);
 			const params = new URL(response.headers.Location).searchParams;
 			assert.equal(params.get('error'), 'unauthorized_client');

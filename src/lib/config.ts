@@ -237,7 +237,8 @@ function validateSigningKeyPem(mcpConfig: Record<string, any>): void {
  *   single-element array; anything that isn't a string or array of strings is
  *   rejected rather than treated as "no restriction".
  * - `mcp.clientIdMetadataDocuments.privateKeyJwt`: `enabled` is a documented
- *   boolean; `jwksUriAllowedOrigins` is normalized to exact https origins;
+ *   boolean, defaulting to true when absent; `jwksUriAllowedOrigins` is
+ *   normalized to exact https origins;
  *   `tokenEndpointAudience` needs exact CIMD client IDs and a parseable
  *   `expiresAt` (normalized to epoch ms). Invalid values throw.
  * - `mcp.clientCredentials.acceptTokenEndpointAudience` is a documented boolean.

@@ -1,10 +1,7 @@
 /**
  * Tests for token-endpoint authentication method selection
  * (clientAuthMethod.ts): what the server advertises, and the one method it
- * permits per client — including the PR A safety matrix: without the
- * interactive setting, a server that does not advertise private_key_jwt
- * resolves ChatGPT to `none`, and a server that already advertises it for
- * headless agents resolves ChatGPT to private_key_jwt (verified).
+ * permits per client, including the default-on and explicit-false paths.
  */
 
 import { describe, it } from 'node:test';
@@ -22,6 +19,7 @@ import {
 import { CHATGPT_CLIENT_ID } from '../../helpers/cimdFixtures.js';
 
 const DEFAULT = { enabled: true };
+const SETTING_OFF = { enabled: true, clientIdMetadataDocuments: { privateKeyJwt: { enabled: false } } };
 const MIXED = { enabled: true, clientCredentials: { enabled: true } };
 const SETTING_ON = { enabled: true, clientIdMetadataDocuments: { privateKeyJwt: { enabled: true } } };
 
@@ -51,13 +49,23 @@ const CHATGPT = interactive(
 );
 
 describe('advertised methods and algorithms', () => {
-	it('keeps the default metadata unchanged', () => {
+	it('advertises private_key_jwt by default', () => {
 		assert.deepEqual(advertisedTokenEndpointAuthMethods(DEFAULT), [
 			'none',
 			'client_secret_basic',
 			'client_secret_post',
+			'private_key_jwt',
 		]);
-		assert.equal(advertisedAssertionSigningAlgorithms(DEFAULT), undefined);
+		assert.deepEqual(advertisedAssertionSigningAlgorithms(DEFAULT), ['RS256', 'ES256', 'EdDSA']);
+	});
+
+	it('omits private_key_jwt when explicitly disabled without headless agents', () => {
+		assert.deepEqual(advertisedTokenEndpointAuthMethods(SETTING_OFF), [
+			'none',
+			'client_secret_basic',
+			'client_secret_post',
+		]);
+		assert.equal(advertisedAssertionSigningAlgorithms(SETTING_OFF), undefined);
 	});
 
 	it('adds private_key_jwt for headless agents, with the interactive algorithms they steer to', () => {
@@ -73,7 +81,8 @@ describe('advertised methods and algorithms', () => {
 			clientIdMetadataDocuments: { enabled: false, privateKeyJwt: { enabled: true } },
 		};
 		const cases = [
-			[DEFAULT, false, false],
+			[DEFAULT, false, true],
+			[SETTING_OFF, false, false],
 			[HEADLESS_ONLY, true, false],
 			[MIXED, true, true],
 			[BOTH, true, true],
@@ -108,9 +117,10 @@ describe('advertised methods and algorithms', () => {
 	});
 });
 
-describe('permittedAuthMethod — PR A safety matrix for the ChatGPT document', () => {
-	it('resolves to none where private_key_jwt is not advertised', () => {
-		assert.deepEqual(permittedAuthMethod(CHATGPT, DEFAULT), { method: 'none' });
+describe('permittedAuthMethod — ChatGPT document', () => {
+	it('resolves to private_key_jwt by default and to none when explicitly disabled', () => {
+		assert.deepEqual(permittedAuthMethod(CHATGPT, DEFAULT), { method: 'private_key_jwt' });
+		assert.deepEqual(permittedAuthMethod(CHATGPT, SETTING_OFF), { method: 'none' });
 	});
 
 	it('resolves to private_key_jwt where headless agents already advertise it', () => {
@@ -137,7 +147,8 @@ describe('permittedAuthMethod — selection rules', () => {
 			{ jwks_uri: 'https://chatgpt.com/oauth/jwks.json' }
 		);
 		assert.deepEqual(permittedAuthMethod(noPreference, SETTING_ON), { method: 'private_key_jwt' });
-		assert.deepEqual(permittedAuthMethod(noPreference, DEFAULT), { method: 'none' });
+		assert.deepEqual(permittedAuthMethod(noPreference, DEFAULT), { method: 'private_key_jwt' });
+		assert.deepEqual(permittedAuthMethod(noPreference, SETTING_OFF), { method: 'none' });
 	});
 
 	it('never downgrades a private_key_jwt preference whose keys are unusable', () => {
@@ -154,7 +165,7 @@ describe('permittedAuthMethod — selection rules', () => {
 		};
 		assert.deepEqual(permittedAuthMethod(crossOrigin, allowed), { method: 'private_key_jwt' });
 		// Where private_key_jwt is not advertised, the client is expected to use none.
-		assert.deepEqual(permittedAuthMethod(crossOrigin, DEFAULT), { method: 'none' });
+		assert.deepEqual(permittedAuthMethod(crossOrigin, SETTING_OFF), { method: 'none' });
 		const unsupportedPin = interactive({
 			...CHATGPT._cimdAuth,
 			signingAlg: undefined,
@@ -170,7 +181,7 @@ describe('permittedAuthMethod — selection rules', () => {
 			{ declared: ['private_key_jwt'], preferred: 'private_key_jwt' },
 			{ jwks_uri: 'https://chatgpt.com/oauth/jwks.json' }
 		);
-		assert.match(permittedAuthMethod(pkjwtOnly, DEFAULT).error, /no token endpoint authentication method/);
+		assert.match(permittedAuthMethod(pkjwtOnly, SETTING_OFF).error, /no token endpoint authentication method/);
 		const unknownOnly = interactive({ declared: ['tls_client_auth'] });
 		assert.match(permittedAuthMethod(unknownOnly, SETTING_ON).error, /no token endpoint authentication method/);
 	});
