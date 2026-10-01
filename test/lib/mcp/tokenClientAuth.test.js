@@ -168,7 +168,7 @@ describe('handleToken — shared client authenticator', () => {
 	let jtis;
 	let served;
 	let fetches;
-	let jtiCreate;
+	let jtiPatch;
 	let logLines;
 	const logger = {
 		info: (m) => logLines.push(m),
@@ -212,13 +212,12 @@ describe('handleToken — shared client authenticator', () => {
 		codes = new Map();
 		families = new Map();
 		jtis = new Map();
-		jtiCreate = async (record, context) => {
-			if (jtis.has(record.id)) {
-				const error = new Error('Record already exists');
-				error.statusCode = 409;
-				throw error;
+		jtiPatch = async (id, update, context) => {
+			const record = { ...jtis.get(id)?.record };
+			for (const [name, value] of Object.entries(update)) {
+				record[name] = value?.__op__ === 'add' ? (Number(record[name]) || 0) + value.value : value;
 			}
-			jtis.set(record.id, { record, context });
+			jtis.set(id, { record, context });
 		};
 		global.databases = {
 			oauth: {
@@ -240,7 +239,10 @@ describe('handleToken — shared client authenticator', () => {
 					]),
 					'kid'
 				),
-				mcp_assertion_jtis: { create: (record, context) => jtiCreate(record, context) },
+				mcp_assertion_jtis: {
+					get: async (id) => jtis.get(id)?.record ?? null,
+					patch: (id, update, context) => jtiPatch(id, update, context),
+				},
 			},
 		};
 		served = { [ASSISTANT]: ASSISTANT_DOC, [FOREIGN]: FOREIGN_DOC, [PUBLIC_CIMD]: PUBLIC_DOC };
@@ -512,7 +514,7 @@ describe('handleToken — shared client authenticator', () => {
 			assert.equal((await exchange(body(assertion), { config: MIXED })).status, 200);
 			seedCode('code-1', ASSISTANT, ASSISTANT_REDIRECT, 'private_key_jwt');
 			assertInvalidClient(await exchange(body(assertion), { config: MIXED }), /jti has already been used/);
-			jtiCreate = async () => {
+			jtiPatch = async () => {
 				throw new Error('store unavailable');
 			};
 			const failed = await exchange(body(signAssertion()), { config: MIXED });

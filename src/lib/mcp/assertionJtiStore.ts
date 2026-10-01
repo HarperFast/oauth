@@ -21,22 +21,16 @@
  * uniqueness per issuer), and hashing normalizes an arbitrary client-chosen
  * string to a fixed-length key.
  *
- * Enforcement uses `Table.create()` — Harper's insert-if-absent, which throws
- * a 409 ClientError ("Record already exists") — rather than an awaited
- * get-then-put a concurrent request could interleave.
- *
- * Residual race (documented, accepted): Harper currently enforces create()'s
- * existence check against the pre-staging snapshot only, so concurrent
- * in-flight creates can degrade to last-write-wins with both callers
- * reporting success (HarperFast/harper#1745). Exposure is bounded to
- * presentations in flight simultaneously — within the staging→commit interval
- * on one node, or replication lag across nodes — NOT open reuse across the
- * assertion's ~60s validity window; each duplicate mints one short-TTL token.
- * If harper#1745 lands per-node enforcement, the 409 also surfaces on
- * commit-time conflict and this guard becomes fully atomic per node with no
- * code change here (the catch below already handles it). Do NOT replace this
- * table with a per-process cache, which would not be shared across workers
- * or nodes.
+ * Enforcement is an atomic counter: each presentation adds 1 to the row's
+ * `uses` with a partial update (`patch` with an `add` operation), which Harper
+ * applies at commit on top of the row as then stored, retrying on a
+ * conflicting write. Only the presentation that reads back `uses === 1` is
+ * accepted; every other is refused as a replay, including concurrent ones. A
+ * row that already exists before the increment (one written by an earlier
+ * version carries no `uses`) is a replay. This holds per node: within the
+ * replication delay, each node can accept one presentation. Do NOT replace this
+ * table with a per-process cache, which would not be shared across workers or
+ * nodes.
  *
  * Unlike the other MCP stores, storage errors here are NOT swallowed:
  * treating "could not check" as "not seen" would fail open on the one guard
@@ -114,28 +108,29 @@ export class MCPAssertionJtiStore {
 	 * Record a (client_id, jti) sighting. Returns true when this is the first
 	 * sighting (proceed with issuance), false when the jti was already seen
 	 * (replay — reject). `expSeconds` is the verified assertion's `exp`; the
-	 * row is retained until `exp` plus the retention margin. Non-409 storage
-	 * errors propagate to the caller: this guard must fail closed, never
-	 * "couldn't check, assume fresh".
+	 * row is retained until `exp` plus the retention margin. Storage errors
+	 * propagate to the caller: this guard must fail closed, never "couldn't
+	 * check, assume fresh".
 	 */
 	async checkAndRecord(clientId: string, jti: string, expSeconds?: number): Promise<boolean> {
 		const table = getJtisTable();
 		const id = jtiKey(clientId, jti);
 		const expiresAt = replayRetentionExpiresAt(expSeconds);
-		try {
-			// Insert-if-absent; ANY existing record under this key is a replay.
-			// Only id, client_id and expires_at are app-owned; `created_at` is
-			// stamped by Harper via @createdTime (see schema). The context's
+		if (!(await table.get(id))) {
+			// Only id, client_id, expires_at and uses are app-owned; `created_at`
+			// is stamped by Harper via @createdTime (see schema). The context's
 			// `expiresAt` sets this row's expiry, overriding the table default.
-			await table.create({ id, client_id: clientId, expires_at: expiresAt }, { expiresAt });
-		} catch (error) {
-			if ((error as { statusCode?: number })?.statusCode === 409) {
-				this.logger?.warn?.(`MCP assertion replay detected for client ${clientId}`);
-				return false;
+			await table.patch(
+				id,
+				{ client_id: clientId, expires_at: expiresAt, uses: { __op__: 'add', value: 1 } },
+				{ expiresAt }
+			);
+			if ((await table.get(id))?.uses === 1) {
+				this.logger?.debug?.(`Recorded MCP assertion jti for client ${clientId}`);
+				return true;
 			}
-			throw error;
 		}
-		this.logger?.debug?.(`Recorded MCP assertion jti for client ${clientId}`);
-		return true;
+		this.logger?.warn?.(`MCP assertion replay detected for client ${clientId}`);
+		return false;
 	}
 }

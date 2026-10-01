@@ -909,16 +909,6 @@ export interface Table {
 	get(id: string): Promise<any>;
 	put(record: any): Promise<any>;
 	/**
-	 * Insert-if-absent: creates the record, throwing a 409 `ClientError`
-	 * ("Record already exists") when a record with the same primary key
-	 * exists. NOTE: Harper currently enforces the existence check against the
-	 * pre-staging snapshot only — concurrent creates can degrade to
-	 * last-write-wins (HarperFast/harper#1745). The optional context's
-	 * `expiresAt` (epoch ms) sets this record's expiry, overriding the table
-	 * default.
-	 */
-	create(record: any, context?: { expiresAt?: number }): Promise<any>;
-	/**
 	 * Partial update: writes only the given fields, applied at commit on top of
 	 * the record as then stored, so fields written by a concurrent request
 	 * survive. A field value of `{ __op__: 'add', value: n }` adds `n` to the

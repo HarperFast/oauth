@@ -776,7 +776,7 @@ policy, or a `token_endpoint_auth_signing_alg` other than `RS256`, `ES256` or
 - `exp` and `iat` are required, with a lifetime of at most 300 seconds and 5
   seconds of clock skew. `nbf` is honoured.
 - `jti` is required.
-  Recorded replays are rejected; simultaneous presentations can both pass until Harper provides atomic reservation.
+  A `jti` is accepted at most once per node, including when presented concurrently.
   - Replay records: Expires at the later of assertion `exp` and insertion time, plus 60 seconds.
 
 **Audience exception (opt-in, expiring).** `privateKeyJwt.tokenEndpointAudience`
@@ -907,9 +907,10 @@ cannot be written it is still `invalid_grant`, without claiming the revocation,
 with nothing issued and the family left live until a later presentation retires
 or revokes it, or it expires.
 
-**Concurrency.** Neither the replay record nor the refresh rotation is atomic on
-Harper. More than one concurrent presentation of one assertion can be accepted.
-Concurrent refreshes of one token are not serialized: depending on timing, more
+**Concurrency.** The replay record is an atomic counter: of concurrent
+presentations of one assertion, at most one is accepted on a node, and possibly
+none. Across nodes, each node can accept one presentation within the
+replication delay. Concurrent refreshes of one token are not serialized: depending on timing, more
 than one can rotate it, after which only the last-written token works and
 presenting any other revokes the family; or the later requests see a superseded
 token and revoke the family at once, and the client reauthorizes. A rotation
@@ -995,16 +996,15 @@ the issuer, which RFC 7523bis requires); `typ` absent, `JWT` or
 `client-authentication+jwt`; no `jku`, `jwk`, `x5u` or `x5c` header; `exp`
 within 60 s of now; `jti` required, recorded in the shared
 `mcp_assertion_jtis` table.
-Recorded replays are rejected; simultaneous presentations can both pass until Harper provides atomic reservation.
+A `jti` is accepted at most once per node, including when presented concurrently.
 A `Basic` header or `client_secret` alongside the assertion is rejected — proof
 of key possession is the only accepted authentication for this grant.
 
-> **Replay-guard bound:** `jti` single-use is enforced best-effort under
-> concurrency — Harper's `Table.create()` existence check is not atomic across
-> simultaneous in-flight requests ([harper#1745](https://github.com/HarperFast/harper/issues/1745)
-> tracks the atomic-reserve contract), so concurrent presentations of the same
-> assertion can race; anything after the first row lands is rejected. The
-> residual is deliberately narrow: assertions live ≤ 60 s, the grant requires
+> **Replay-guard bound:** each presentation atomically adds 1 to the replay
+> record's `uses`, and only the presentation that reads back 1 is accepted, so
+> single use holds per node under concurrency. Across nodes, each node can
+> accept one presentation within the replication delay. The residual is
+> deliberately narrow: assertions live ≤ 60 s, the grant requires
 > an `https:` issuer, and capturing a live assertion in transit therefore
 > implies a vantage point (TLS interception, host access) from which the
 > minted bearer token itself is equally exposed.

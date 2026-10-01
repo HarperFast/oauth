@@ -97,13 +97,13 @@ type mcp_refresh_families @table(database: "oauth", expiration: 2592000) {
 ## per-record expiry (the assertion's exp + a margin above the clock
 ## tolerance; see assertionJtiStore.ts), so retention always covers the
 ## accepted validity window. The table expiration below is only the default
-## for rows written without one. Enforcement is Table.create()
-## insert-if-absent; see the assertionJtiStore.ts header for the residual-race
-## notes (existence check is pre-staging snapshot only — harper#1745).
+## for rows written without one. Enforcement is an atomic increment of `uses`;
+## see the assertionJtiStore.ts header.
 type mcp_assertion_jtis @table(database: "oauth", expiration: 120) {
 	id: ID @primaryKey
 	client_id: String
 	expires_at: Float # epoch ms; mirrors the row's per-record expiry
+	uses: Int # presentations recorded; only the one that reads back 1 is accepted
 	created_at: Float @createdTime # Harper-assigned (epoch ms); not hand-written
 }
 

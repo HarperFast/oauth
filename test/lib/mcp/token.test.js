@@ -1230,17 +1230,7 @@ describe('handleToken — client_credentials grant (#162)', () => {
 			oauth: {
 				harper_oauth_mcp_clients: makeTable(clients, 'client_id'),
 				harper_oauth_mcp_keys: makeTable(keys, 'kid'),
-				mcp_assertion_jtis: {
-					...makeTable(jtis, 'id'),
-					create: async (record) => {
-						if (jtis.has(record.id)) {
-							const err = new Error('Record already exists');
-							err.statusCode = 409;
-							throw err;
-						}
-						jtis.set(record.id, record);
-					},
-				},
+				mcp_assertion_jtis: makeTable(jtis, 'id'),
 			},
 		};
 

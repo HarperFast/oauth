@@ -5,9 +5,9 @@
  *      MCPAssertionJtiStore expires at its own expiry (the later of the
  *      assertion's exp and insertion time, plus 60 s), not at the table
  *      default of 120 s, and is refused as a replay until then.
- *   2. Concurrent presentations of one jti: at least one is accepted (see the
- *      harper#1745 residual in assertionJtiStore.ts), and a presentation
- *      after the burst is refused.
+ *   2. Concurrent presentations of one jti: at most one is accepted (an
+ *      atomic counter; see assertionJtiStore.ts), and a presentation after
+ *      the burst is refused.
  *   3. Concurrent refreshes of one refresh token through POST
  *      /oauth/mcp/token (rotation is not atomic; see refreshTokenStore.ts):
  *      at least one refresh succeeds. If any refresh is refused as
@@ -99,13 +99,14 @@ suite('MCP runtime: replay retention and concurrent refresh', (ctx: ContextWithH
 		);
 	});
 
-	test('concurrent presentations of one jti (characterization)', async () => {
+	test('concurrent presentations of one jti: at most one is accepted', async () => {
 		const client = 'https://agent.test/concurrent-client.json';
-		const row = { client_id: client, jti: randomUUID(), exp: Math.floor(Date.now() / 1000) + 60 };
-		const results = await Promise.all(Array.from({ length: 8 }, () => testRoute('/replay', row)));
-		const accepted = results.filter((r) => r.fresh).length;
-		ok(accepted >= 1);
-		strictEqual((await testRoute('/replay', row)).fresh, false, 'a presentation after the burst is refused');
+		for (let burst = 0; burst < 20; burst++) {
+			const row = { client_id: client, jti: randomUUID(), exp: Math.floor(Date.now() / 1000) + 60 };
+			const results = await Promise.all(Array.from({ length: 8 }, () => testRoute('/replay', row)));
+			ok(results.filter((r) => r.fresh).length <= 1, 'at most one presentation is accepted');
+			strictEqual((await testRoute('/replay', row)).fresh, false, 'a presentation after the burst is refused');
+		}
 	});
 
 	test('concurrent refreshes of one refresh token (characterization)', async () => {
