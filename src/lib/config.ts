@@ -125,10 +125,20 @@ function normalizeBooleanField(
 		return;
 	}
 	const isUnresolvedPlaceholder = isUnresolvedEnvPlaceholder(value);
-	if (isUnresolvedPlaceholder && failOnPlaceholder) {
+	// Not every substitution mechanism leaves the placeholder text behind when
+	// its variable is unset — docker-compose's `X=${X}` resolves to "" (not the
+	// literal "${X}") for an unset X. That's the same operator-unreadable gate
+	// value as an unresolved placeholder; treat it identically rather than
+	// letting it fall through to "must be a boolean" and get silently dropped.
+	const isEmptyString = typeof value === 'string' && value.trim() === '';
+	if ((isUnresolvedPlaceholder || isEmptyString) && failOnPlaceholder) {
 		throw new Error(
-			`${path} is the unresolved env placeholder ${JSON.stringify(value)} (variable unset). ` +
-				`Set the variable to "true" or "false", or remove ${path} to use its documented default.`
+			isUnresolvedPlaceholder
+				? `${path} is the unresolved env placeholder ${JSON.stringify(value)} (variable unset). ` +
+						`Set the variable to "true" or "false", or remove ${path} to use its documented default.`
+				: `${path} resolved to an empty value (likely an unset environment variable substitution — ` +
+						`e.g. docker-compose's "\${VAR}" resolves to "" when VAR is unset). ` +
+						`Set the variable to "true" or "false", or remove ${path} to use its documented default.`
 		);
 	}
 	logger?.warn?.(

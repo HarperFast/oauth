@@ -206,6 +206,25 @@ describe('OAuth Configuration', () => {
 			it('a feature-scoped placeholder stays inert when mcp.enabled is absent (not just explicitly false)', () => {
 				assert.doesNotThrow(() => normalizeMcpSecurityConfig({ refreshTokenRequiresOfflineAccess: '${FLAG}' }));
 			});
+			it('an empty string after expansion (e.g. docker-compose\'s "${VAR}" resolving to "" for an unset VAR) throws the same as an unresolved placeholder', () => {
+				assert.throws(
+					() => normalizeMcpSecurityConfig({ enabled: true, refreshTokenRequiresOfflineAccess: '' }),
+					/mcp\.refreshTokenRequiresOfflineAccess resolved to an empty value/
+				);
+			});
+			it('an all-whitespace string after expansion also throws', () => {
+				assert.throws(
+					() => normalizeMcpSecurityConfig({ enabled: true, dynamicClientRegistration: { enabled: '   ' } }),
+					/mcp\.dynamicClientRegistration\.enabled resolved to an empty value/
+				);
+			});
+			it('an empty string on a feature-scoped field stays inert (warns, drops) when mcp is inactive — same as a placeholder', () => {
+				const warnings = [];
+				const logger = { warn: (...args) => warnings.push(args.join(' ')) };
+				const cfg = { refreshTokenRequiresOfflineAccess: '' };
+				assert.doesNotThrow(() => normalizeMcpSecurityConfig(cfg, logger));
+				assert.equal(cfg.refreshTokenRequiresOfflineAccess, undefined);
+			});
 		});
 
 		describe('non-object dynamicClientRegistration / clientIdMetadataDocuments blocks must not fail open', () => {
