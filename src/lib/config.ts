@@ -88,15 +88,35 @@ export function coerceConfigBoolean(value: unknown): boolean | undefined {
 /**
  * Normalize one documented-boolean config field in place, TOTALLY: after this
  * call the field is either a real boolean or absent. Coercible values
- * (booleans, "true"/"false" strings) are coerced; anything else present —
- * including an unresolved `${ENV_VAR}` placeholder left by expandEnvVarsDeep
- * when the variable is unset — is DELETED with a warning, so the field's
- * documented default applies. Without this, a truthy junk value silently
- * flips whichever direction the consuming gate happens to test (e.g.
- * `refreshTokenRequiresOfflineAccess: ${FLAG}` with FLAG unset would activate
- * a documented default-off gate).
+ * (booleans, "true"/"false" strings) are coerced; a non-boolean, non-
+ * placeholder junk value (e.g. `"yes"`, `1`, `{}`) is DELETED with a warning,
+ * so the field's documented default applies.
+ *
+ * An unresolved `${ENV_VAR}` placeholder left by expandEnvVarsDeep when the
+ * variable is unset THROWS instead, when `failOnPlaceholder` is true (#207):
+ * dropping it to the documented default silently picks a direction the
+ * operator never chose — e.g. `mcp.dynamicClientRegistration.enabled: ${FLAG}`
+ * with `FLAG` unset dropping to "absent" resolves to DCR's default-ENABLED
+ * state (a block with no explicit `enabled: false` is on), the opposite of
+ * what dropping a gate is supposed to achieve. A security gate with a value
+ * the operator can't read back has no safe direction to guess; fail loudly
+ * and name the variable instead, exactly like `mcp.signingKeyPem` and
+ * `redirectUri` do for the same placeholder shape.
+ *
+ * `failOnPlaceholder` defaults to true (used for `mcp.enabled` itself — the
+ * master switch has no outer flag to hide an ambiguous value behind). Callers
+ * normalizing a feature-scoped field pass `mcpConfig.enabled === true` so a
+ * block that's disabled overall — or whose own `enabled` didn't resolve to
+ * `true` — stays inert (byte-identical-boot contract) even if some other
+ * placeholder is still sitting in its config.
  */
-function normalizeBooleanField(obj: Record<string, any>, field: string, path: string, logger?: Logger): void {
+function normalizeBooleanField(
+	obj: Record<string, any>,
+	field: string,
+	path: string,
+	logger?: Logger,
+	failOnPlaceholder = true
+): void {
 	const value = obj[field];
 	if (value === undefined || value === null) return; // Absent (or bare YAML key) — default applies already.
 	const coerced = coerceConfigBoolean(value);
@@ -105,6 +125,12 @@ function normalizeBooleanField(obj: Record<string, any>, field: string, path: st
 		return;
 	}
 	const isUnresolvedPlaceholder = isUnresolvedEnvPlaceholder(value);
+	if (isUnresolvedPlaceholder && failOnPlaceholder) {
+		throw new Error(
+			`${path} is the unresolved env placeholder ${JSON.stringify(value)} (variable unset). ` +
+				`Set the variable to "true" or "false", or remove ${path} to use its documented default.`
+		);
+	}
 	logger?.warn?.(
 		isUnresolvedPlaceholder
 			? `MCP: ${path} is the unresolved env placeholder ${JSON.stringify(value)} (variable unset). ` +
@@ -214,8 +240,12 @@ function validateDcrInitialAccessToken(dcr: Record<string, any>): void {
  *   `mcp.refreshTokenRequiresOfflineAccess`, `mcp.clientCredentials.enabled`,
  *   `mcp.clientIdMetadataDocuments.enabled`,
  *   `mcp.dynamicClientRegistration.enabled`) is normalized totally via
- *   {@link normalizeBooleanField}: coerced to a real boolean, or removed with
- *   a warning so the documented default applies. Consumers may therefore gate
+ *   {@link normalizeBooleanField}: coerced to a real boolean; a non-boolean,
+ *   non-placeholder value is removed with a warning so the documented default
+ *   applies; an unresolved `${VAR}` placeholder throws naming the variable
+ *   (#207) — except on a feature-scoped field while the surface it gates
+ *   isn't active (`mcp.enabled` itself is not `true`), which still drops with
+ *   a warning so a disabled block stays inert. Consumers may therefore gate
  *   on plain truthiness / `!== false` without re-validating types.
  * - `mcp.clientIdMetadataDocuments.allowedHosts` is normalized to an array of
  *   exact, lowercased hostnames. A scalar string (which `Array.includes` /
@@ -233,33 +263,41 @@ function validateDcrInitialAccessToken(dcr: Record<string, any>): void {
  *   registration is only ever chosen by omitting the key).
  */
 export function normalizeMcpSecurityConfig(mcpConfig: Record<string, any>, logger?: Logger): void {
+	// The master switch: no outer flag exists to hide an unresolved placeholder
+	// behind, so this one always fails closed (normalizeBooleanField's default).
 	normalizeBooleanField(mcpConfig, 'enabled', 'mcp.enabled', logger);
+	// Feature-scoped fields below only fail closed on their own placeholder when
+	// the surface they gate is actually active (mcp.enabled === true) — a
+	// disabled block must stay inert (byte-identical-boot contract) even if a
+	// placeholder is still sitting in its unused config.
+	const mcpActive = mcpConfig.enabled === true;
 	normalizeBooleanField(
 		mcpConfig,
 		'refreshTokenRequiresOfflineAccess',
 		'mcp.refreshTokenRequiresOfflineAccess',
-		logger
+		logger,
+		mcpActive
 	);
 
 	const clientCredentials = mcpConfig.clientCredentials;
 	if (clientCredentials && typeof clientCredentials === 'object') {
-		normalizeBooleanField(clientCredentials, 'enabled', 'mcp.clientCredentials.enabled', logger);
+		normalizeBooleanField(clientCredentials, 'enabled', 'mcp.clientCredentials.enabled', logger, mcpActive);
 	}
 
 	const dcr = mcpConfig.dynamicClientRegistration;
 	if (dcr && typeof dcr === 'object') {
-		normalizeBooleanField(dcr, 'enabled', 'mcp.dynamicClientRegistration.enabled', logger);
+		normalizeBooleanField(dcr, 'enabled', 'mcp.dynamicClientRegistration.enabled', logger, mcpActive);
 		// Only when MCP itself is enabled and DCR isn't explicitly disabled — a
 		// disabled block must stay inert, matching mcp.signingKeyPem's gating
 		// below and dcrEnabled()'s own predicate (dcr.ts).
-		if (mcpConfig.enabled === true && dcr.enabled !== false) {
+		if (mcpActive && dcr.enabled !== false) {
 			validateDcrInitialAccessToken(dcr);
 		}
 	}
 
 	const cimd = mcpConfig.clientIdMetadataDocuments;
 	if (cimd && typeof cimd === 'object') {
-		normalizeBooleanField(cimd, 'enabled', 'mcp.clientIdMetadataDocuments.enabled', logger);
+		normalizeBooleanField(cimd, 'enabled', 'mcp.clientIdMetadataDocuments.enabled', logger, mcpActive);
 
 		if (cimd.allowedHosts !== undefined) {
 			const raw = Array.isArray(cimd.allowedHosts) ? cimd.allowedHosts : [cimd.allowedHosts];
@@ -277,7 +315,7 @@ export function normalizeMcpSecurityConfig(mcpConfig: Record<string, any>, logge
 	// rely on — e.g. a shipped config carrying `${VAR}` placeholders with
 	// the surface off must not refuse boot). Mirrors the enabled-gating of
 	// the other MCP startup checks in src/index.ts.
-	if (mcpConfig.enabled === true) {
+	if (mcpActive) {
 		validateSigningKeyPem(mcpConfig);
 	}
 }

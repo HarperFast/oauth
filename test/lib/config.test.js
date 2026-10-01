@@ -137,9 +137,10 @@ describe('OAuth Configuration', () => {
 			normalizeMcpSecurityConfig(cfgTrue);
 			assert.equal(cfgTrue.refreshTokenRequiresOfflineAccess, true);
 		});
-		it('drops an unresolved "${FLAG}" placeholder so a documented-off gate stays off, and warns', () => {
-			// expandEnvVarsDeep leaves "${FLAG}" intact when FLAG is unset; that
-			// string is truthy and must not activate the gate (PR #192 review).
+		it('drops an unresolved "${FLAG}" placeholder on a feature-scoped field while mcp is inactive, and warns (byte-identical-boot contract)', () => {
+			// mcp.enabled is absent here — the surface this gate scopes to isn't
+			// active, so a placeholder left in its unused config must not refuse
+			// boot; it drops to the documented default with a warning instead.
 			const warnings = [];
 			const logger = { warn: (...args) => warnings.push(args.join(' ')) };
 			const cfg = { refreshTokenRequiresOfflineAccess: '${FLAG}' };
@@ -147,6 +148,64 @@ describe('OAuth Configuration', () => {
 			assert.equal(cfg.refreshTokenRequiresOfflineAccess, undefined, 'placeholder dropped — default applies');
 			assert.equal(warnings.length, 1);
 			assert.match(warnings[0], /unresolved env placeholder/);
+		});
+		describe('unresolved "${VAR}" placeholder on a boolean gate throws instead of silently dropping (#207)', () => {
+			it('mcp.enabled itself always fails closed — no outer flag to hide behind', () => {
+				assert.throws(
+					() => normalizeMcpSecurityConfig({ enabled: '${MCP_ENABLED}' }),
+					/mcp\.enabled is the unresolved env placeholder.*MCP_ENABLED/s
+				);
+			});
+			it('refreshTokenRequiresOfflineAccess throws while mcp is active', () => {
+				assert.throws(
+					() => normalizeMcpSecurityConfig({ enabled: true, refreshTokenRequiresOfflineAccess: '${FLAG}' }),
+					/mcp\.refreshTokenRequiresOfflineAccess is the unresolved env placeholder.*FLAG/s
+				);
+			});
+			it('clientCredentials.enabled throws while mcp is active', () => {
+				assert.throws(
+					() =>
+						normalizeMcpSecurityConfig({
+							enabled: true,
+							clientCredentials: { enabled: '${CC_ENABLED}' },
+						}),
+					/mcp\.clientCredentials\.enabled is the unresolved env placeholder.*CC_ENABLED/s
+				);
+			});
+			it('dynamicClientRegistration.enabled throws while mcp is active', () => {
+				assert.throws(
+					() =>
+						normalizeMcpSecurityConfig({
+							enabled: true,
+							dynamicClientRegistration: { enabled: '${DCR_ENABLED}' },
+						}),
+					/mcp\.dynamicClientRegistration\.enabled is the unresolved env placeholder.*DCR_ENABLED/s
+				);
+			});
+			it('clientIdMetadataDocuments.enabled throws while mcp is active', () => {
+				assert.throws(
+					() =>
+						normalizeMcpSecurityConfig({
+							enabled: true,
+							clientIdMetadataDocuments: { enabled: '${CIMD_ENABLED}' },
+						}),
+					/mcp\.clientIdMetadataDocuments\.enabled is the unresolved env placeholder.*CIMD_ENABLED/s
+				);
+			});
+			it('a feature-scoped placeholder stays inert (warns, drops) when mcp.enabled is false', () => {
+				assert.doesNotThrow(() =>
+					normalizeMcpSecurityConfig({
+						enabled: false,
+						refreshTokenRequiresOfflineAccess: '${FLAG}',
+						clientCredentials: { enabled: '${CC_ENABLED}' },
+						dynamicClientRegistration: { enabled: '${DCR_ENABLED}' },
+						clientIdMetadataDocuments: { enabled: '${CIMD_ENABLED}' },
+					})
+				);
+			});
+			it('a feature-scoped placeholder stays inert when mcp.enabled is absent (not just explicitly false)', () => {
+				assert.doesNotThrow(() => normalizeMcpSecurityConfig({ refreshTokenRequiresOfflineAccess: '${FLAG}' }));
+			});
 		});
 		it('drops any other non-boolean value with a warning (total normalization)', () => {
 			const warnings = [];

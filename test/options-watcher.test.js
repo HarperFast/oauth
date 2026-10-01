@@ -335,6 +335,40 @@ describe('OAuth Plugin Options Watcher', () => {
 		);
 	});
 
+	it('a live reload with an unresolved placeholder on an mcp boolean gate is rejected and the previous config keeps serving (#207)', async () => {
+		scope.options._config.mcp = {
+			enabled: true,
+			issuer: 'https://app.example.com',
+			refreshTokenRequiresOfflineAccess: true,
+		};
+		await handleApplication(scope);
+		const previousMcpConfig = OAuthResource.mcpConfig;
+		assert.equal(previousMcpConfig?.refreshTokenRequiresOfflineAccess, true);
+
+		let errorLogged = false;
+		scope.logger.error = (msg) => {
+			if (typeof msg === 'string' && msg.includes('Failed to update OAuth configuration')) errorLogged = true;
+		};
+
+		// Reload with an unresolved placeholder on the active gate — rejected.
+		scope.options._config = {
+			...scope.options._config,
+			mcp: {
+				...scope.options._config.mcp,
+				refreshTokenRequiresOfflineAccess: '${OFFLINE_ACCESS_REQUIRED}',
+			},
+		};
+		configChangeListeners[0]();
+		await new Promise((resolve) => setTimeout(resolve, 10));
+
+		assert.ok(errorLogged, 'the rejected reload should be logged');
+		assert.equal(
+			OAuthResource.mcpConfig,
+			previousMcpConfig,
+			'the previous mcp config must keep serving after a rejected reload'
+		);
+	});
+
 	it('should handle adding new provider', async () => {
 		await handleApplication(scope);
 
