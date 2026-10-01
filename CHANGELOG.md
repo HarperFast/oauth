@@ -15,6 +15,7 @@ All notable changes to `@harperfast/oauth` are documented here. The format is ba
 
 ### Changed
 
+- **Compatibility:** `client_credentials` requests that repeat any form parameter now receive `400 invalid_request` before client authentication or token issuance.
 - **Client credentials presented at the token endpoint are verified or rejected** (`authorization_code` and `refresh_token`). A parameter repeated in a form body, a `client_id` or credential parameter that is empty or not a single string, half an assertion pair, or more than one authentication mechanism (any `Basic` header counts as one) is rejected with `invalid_request` (400); otherwise, malformed `Basic` credentials are rejected with `invalid_client` (401). A `401` answering a request that used `Basic` carries `WWW-Authenticate: Basic`. A client permitted `none` that sends assertion parameters is rejected. **Compatibility:** assertion parameters that were previously ignored are now verified or rejected.
 - **Interactive CIMD documents are validated for their declared authentication.** A document is rejected with `invalid_client` when:
   - `token_endpoint_auth_method` is present but not a string;
