@@ -644,6 +644,99 @@ describe('OAuth Configuration', () => {
 				assert.equal(config.scope, 'openid profile email');
 			});
 
+			it('should normalize a mixed-case provider field to lowercase (#242)', () => {
+				const providerConfig = {
+					provider: 'GitHub',
+					clientId: 'github-client',
+					clientSecret: 'github-secret',
+					redirectUri: 'https://app.test.com/oauth',
+				};
+
+				const config = buildProviderConfig(providerConfig, 'github', {});
+
+				assert.equal(config.authorizationUrl, 'https://github.com/login/oauth/authorize');
+				assert.equal(config.provider, 'github');
+			});
+
+			it('a custom provider identifier with no preset keeps its original case', () => {
+				const providerConfig = {
+					provider: 'AcmeOIDC',
+					clientId: 'acme-client',
+					clientSecret: 'acme-secret',
+					authorizationUrl: 'https://acme.example.com/authorize',
+					tokenUrl: 'https://acme.example.com/token',
+					userInfoUrl: 'https://acme.example.com/userinfo',
+					redirectUri: 'https://app.test.com/oauth',
+				};
+
+				const config = buildProviderConfig(providerConfig, 'acme', {});
+
+				assert.equal(config.provider, 'AcmeOIDC');
+				assert.equal(config.authorizationUrl, 'https://acme.example.com/authorize');
+			});
+
+			it('an explicit empty provider under a preset registry key keeps custom endpoints and does not run configure()', () => {
+				const providerConfig = {
+					provider: '',
+					clientId: 'auth0-client',
+					clientSecret: 'auth0-secret',
+					domain: 'myapp.auth0.com',
+					authorizationUrl: 'https://custom.example.com/authorize',
+					tokenUrl: 'https://custom.example.com/token',
+					userInfoUrl: 'https://custom.example.com/userinfo',
+					redirectUri: 'https://app.test.com/oauth',
+				};
+
+				const config = buildProviderConfig(providerConfig, 'auth0', {});
+
+				assert.equal(config.provider, '');
+				assert.equal(config.authorizationUrl, 'https://custom.example.com/authorize');
+				assert.equal(config.tokenUrl, 'https://custom.example.com/token');
+				assert.equal(config.userInfoUrl, 'https://custom.example.com/userinfo');
+			});
+
+			it('an undefined option (e.g. from a dynamic onResolveProvider hook) does not override the Google preset scope (#243)', () => {
+				const providerConfig = {
+					provider: 'google',
+					clientId: 'google-client',
+					clientSecret: 'google-secret',
+					redirectUri: 'https://app.test.com/oauth',
+					scope: undefined,
+				};
+
+				const config = buildProviderConfig(providerConfig, 'google', {});
+
+				assert.equal(config.scope, 'openid profile email');
+			});
+
+			it('an undefined usernameClaim keeps the preset default (#243)', () => {
+				const providerConfig = {
+					provider: 'github',
+					clientId: 'github-client',
+					clientSecret: 'github-secret',
+					redirectUri: 'https://app.test.com/oauth',
+					usernameClaim: undefined,
+				};
+
+				const config = buildProviderConfig(providerConfig, 'github', {});
+
+				assert.equal(config.usernameClaim, 'login');
+			});
+
+			it('an explicit scope value still overrides the preset (#243)', () => {
+				const providerConfig = {
+					provider: 'google',
+					clientId: 'google-client',
+					clientSecret: 'google-secret',
+					redirectUri: 'https://app.test.com/oauth',
+					scope: 'openid email',
+				};
+
+				const config = buildProviderConfig(providerConfig, 'google', {});
+
+				assert.equal(config.scope, 'openid email');
+			});
+
 			it('should configure Azure with tenant', () => {
 				const tenantId = '12345678-1234-1234-1234-123456789012';
 				const providerConfig = {

@@ -23,6 +23,14 @@ async function onResolveProvider(providerName: string, logger?: Logger): Promise
 
 **Returns:** Provider configuration object or null if provider not found
 
+The returned config is merged with the plugin defaults and provider preset the
+same way static `providers` config is: an explicit `undefined` value on any
+field (e.g. `scope: row.scope` from a database row with no override) is
+treated as "not specified" and does not clear the preset's default — pass
+`null` or `''` to explicitly blank most fields (`redirectUri` is an exception:
+it falls back to the plugin-level default, or fails configuration if there
+isn't one, rather than being blanked).
+
 **Example:**
 
 ```javascript
