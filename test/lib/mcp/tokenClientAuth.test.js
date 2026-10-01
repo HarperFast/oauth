@@ -376,6 +376,33 @@ describe('handleToken — shared client authenticator', () => {
 			assert.equal(once.status, 200, JSON.stringify(once.body));
 		});
 
+		it('answers invalid_request for an assertion with any Basic header, whatever its type, on both grants', async () => {
+			const grants = [
+				{ grant_type: 'authorization_code', code: 'code-1', code_verifier: CODE_VERIFIER, redirect_uri: REDIRECT },
+				{ grant_type: 'refresh_token', refresh_token: 'p2-family.secret' },
+			];
+			const headers = [basic('public-1', 'x'), basic('public-1', ''), { authorization: 'Basic !!!' }];
+			for (const grant of grants) {
+				for (const header of headers) {
+					for (const type of ['urn:nope', TYPE]) {
+						const body = {
+							...grant,
+							client_id: 'public-1',
+							client_assertion: signAssertion(),
+							client_assertion_type: type,
+						};
+						const res = await handleToken({ headers: header }, body, DEFAULT, undefined, logger);
+						assertInvalidRequest(res, /Multiple client authentication methods/);
+					}
+				}
+			}
+			assertInvalidRequest(
+				await exchange({ ...publicBody, client_secret: 'x' }, { headers: { authorization: 'Basic !!!' } }),
+				/Multiple client authentication methods/
+			);
+			assert.equal(codes.has('code-1'), true, 'no code consumed');
+		});
+
 		it('challenges for Basic on a 401 only when the request used Basic', async () => {
 			const challenged = await exchange(publicBody, { headers: { authorization: 'Basic !!!' } });
 			assertInvalidClient(challenged, /Malformed Basic/);

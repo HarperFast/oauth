@@ -856,11 +856,11 @@ These rules apply to every client on `authorization_code` and `refresh_token`:
 - These are rejected with `invalid_request` (400) before any client lookup: a
   parameter repeated in a form body, a `client_id` or credential parameter that
   is empty or not a single string, half an assertion pair, and more than one
-  mechanism (a `Basic` header with a secret alongside a body `client_secret`, or
-  an assertion alongside a secret or any `Basic` header).
-- These are rejected with `invalid_client` (401) before any client lookup: an
-  unknown `client_assertion_type`, malformed `Basic` credentials, and an
-  assertion longer than 8192 characters.
+  mechanism, where any `Basic` header, a body `client_secret` and an assertion
+  each count as one.
+- Otherwise, these are rejected with `invalid_client` (401) before any client
+  lookup: malformed `Basic` credentials, an unknown `client_assertion_type`, and
+  an assertion longer than 8192 characters.
 - A `401` answering a request that carried an `Authorization: Basic` header
   includes `WWW-Authenticate: Basic`.
 - A presentation that differs from the permitted method is `invalid_client`. A

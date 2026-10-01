@@ -281,15 +281,12 @@ function invalidClient(description: string): { error: TokenResponse } {
 	return { error: errorResponse(401, 'invalid_client', description) };
 }
 
-/** RFC 6749 §5.2: a repeated or missing parameter, or more than one authentication mechanism. */
+/** RFC 6749 §5.2's error for a malformed request. */
 function invalidRequest(description: string): { error: TokenResponse } {
 	return { error: errorResponse(400, 'invalid_request', description) };
 }
 
-/**
- * RFC 6749 §5.2: a 401 answering a request that authenticated with the
- * `Authorization` header carries a challenge for the scheme it used.
- */
+/** RFC 6749 §5.2: a 401 answering a request that used `Authorization: Basic` carries a Basic challenge. */
 const BASIC_CHALLENGE = 'Basic realm="oauth"';
 
 /** The error for a presentation that differs from the permitted method. */
@@ -325,10 +322,11 @@ function methodMismatch(
  *
  * Rejected before any lookup with invalid_request (RFC 6749 §5.2): a
  * parameter repeated in a form body, a client_id or credential parameter that
- * is empty or not a single string, a partial assertion pair, and more than one mechanism (RFC 6749 §2.3, RFC 7521 §4.2.1) — an
- * empty-secret Basic header never accompanies an assertion. Rejected before
- * any lookup with invalid_client: an unknown client_assertion_type, malformed
- * Basic credentials, and an assertion longer than the verifier accepts.
+ * is empty or not a single string, half an assertion pair, and more than one
+ * mechanism (RFC 6749 §2.3, RFC 7521 §4.2.1), counting any Basic header,
+ * malformed or not. Otherwise rejected before any lookup with invalid_client:
+ * malformed Basic credentials, an unknown client_assertion_type, and an
+ * assertion longer than the verifier accepts.
  */
 async function authenticateClient(
 	request: Request | undefined,
@@ -340,7 +338,7 @@ async function authenticateClient(
 	// own name and records the repetition as an array under `key`.
 	if (Array.isArray(body?.key)) return invalidRequest('Request parameters must not be repeated');
 	const basic = readBasicAuth(getRequestHeader(request?.headers, 'authorization'));
-	if ('malformed' in basic) return invalidClient('Malformed Basic client credentials');
+	const basicPresented = !('absent' in basic);
 
 	const clientIdParam = singleParameter(body, 'client_id');
 	const secretParam = singleParameter(body, 'client_secret');
@@ -357,21 +355,23 @@ async function authenticateClient(
 	const secret = (secretParam as { value?: string }).value;
 	const assertion = (assertionParam as { value?: string }).value;
 	const assertionType = (assertionTypeParam as { value?: string }).value;
-	const hasBasic = 'clientId' in basic;
+	if ((assertion === undefined) !== (assertionType === undefined)) {
+		return invalidRequest('client_assertion and client_assertion_type must be presented together');
+	}
+	// Any Basic header counts as a mechanism, malformed or not.
+	const mechanisms = [basicPresented, secret !== undefined, assertion !== undefined].filter(Boolean).length;
+	if (mechanisms > 1) return invalidRequest('Multiple client authentication methods');
 
-	if (assertion !== undefined || assertionType !== undefined) {
-		if (assertion === undefined || assertionType === undefined) {
-			return invalidRequest('client_assertion and client_assertion_type must be presented together');
-		}
+	if ('malformed' in basic) return invalidClient('Malformed Basic client credentials');
+	const hasBasic = 'clientId' in basic;
+	if (assertion !== undefined) {
 		if (assertionType !== CLIENT_ASSERTION_TYPE_JWT_BEARER) {
 			return invalidClient(`client_assertion_type must be ${CLIENT_ASSERTION_TYPE_JWT_BEARER}`);
 		}
-		if (hasBasic || secret !== undefined) return invalidRequest('Multiple client authentication methods');
 		// The verifier's length bound, applied before the assertion is parsed for a
 		// client_id candidate or any client lookup begins.
 		if (assertion.length > MAX_ASSERTION_LENGTH) return invalidClient(ASSERTION_TOO_LONG);
 	}
-	if (hasBasic && secret !== undefined) return invalidRequest('Multiple client authentication methods');
 	const bodyClientId = (clientIdParam as { value?: string }).value;
 	if (hasBasic && bodyClientId !== undefined && bodyClientId !== basic.clientId) {
 		return invalidRequest('client_id mismatch between header and body');
