@@ -13,6 +13,7 @@ import {
 	expandEnvVarsDeep,
 	coerceConfigBoolean,
 	normalizeMcpSecurityConfig,
+	isUnresolvedEnvPlaceholder,
 } from '../../dist/lib/config.js';
 
 describe('OAuth Configuration', () => {
@@ -91,6 +92,33 @@ describe('OAuth Configuration', () => {
 			assert.equal(coerceConfigBoolean('yes'), undefined);
 			assert.equal(coerceConfigBoolean(1), undefined);
 			assert.equal(coerceConfigBoolean(undefined), undefined);
+		});
+	});
+
+	describe('isUnresolvedEnvPlaceholder', () => {
+		it('matches a bare ${VAR} placeholder', () => {
+			assert.equal(isUnresolvedEnvPlaceholder('${MY_VAR}'), true);
+		});
+		it('matches with surrounding whitespace', () => {
+			assert.equal(isUnresolvedEnvPlaceholder('  ${MY_VAR}  '), true);
+		});
+		it('matches an empty placeholder body', () => {
+			assert.equal(isUnresolvedEnvPlaceholder('${}'), true);
+		});
+		it('does not match a resolved/literal string', () => {
+			assert.equal(isUnresolvedEnvPlaceholder('literal'), false);
+			assert.equal(isUnresolvedEnvPlaceholder(''), false);
+		});
+		it('does not match a partial or embedded placeholder', () => {
+			assert.equal(isUnresolvedEnvPlaceholder('${MISSING_CLOSE'), false);
+			assert.equal(isUnresolvedEnvPlaceholder('MISSING_OPEN}'), false);
+			assert.equal(isUnresolvedEnvPlaceholder('text ${VAR} text'), false);
+		});
+		it('does not match non-string values', () => {
+			assert.equal(isUnresolvedEnvPlaceholder(undefined), false);
+			assert.equal(isUnresolvedEnvPlaceholder(null), false);
+			assert.equal(isUnresolvedEnvPlaceholder(123), false);
+			assert.equal(isUnresolvedEnvPlaceholder(true), false);
 		});
 	});
 

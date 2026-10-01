@@ -58,6 +58,18 @@ export function expandEnvVarsDeep<T>(value: T): T {
 }
 
 /**
+ * True when `value` is a string left untouched by {@link expandEnvVar} because
+ * its environment variable was unset — i.e. it's still the literal `${VAR}`
+ * placeholder (surrounding whitespace tolerated). A resolved value never
+ * matches this, including one that happens to resolve to the literal text
+ * `${...}`, since `expandEnvVar` only leaves the placeholder in place when the
+ * variable lookup itself failed.
+ */
+export function isUnresolvedEnvPlaceholder(value: unknown): boolean {
+	return typeof value === 'string' && /^\$\{[^}]*\}$/.test(value.trim());
+}
+
+/**
  * Coerce a config value that documents a boolean but may arrive as an
  * env-expanded string (`enabled: ${FLAG}` → `"false"`). Returns the boolean
  * for `true`/`false` (case-insensitive), otherwise `undefined` (so callers
@@ -92,7 +104,7 @@ function normalizeBooleanField(obj: Record<string, any>, field: string, path: st
 		obj[field] = coerced;
 		return;
 	}
-	const isUnresolvedPlaceholder = typeof value === 'string' && /^\$\{[^}]*\}$/.test(value.trim());
+	const isUnresolvedPlaceholder = isUnresolvedEnvPlaceholder(value);
 	logger?.warn?.(
 		isUnresolvedPlaceholder
 			? `MCP: ${path} is the unresolved env placeholder ${JSON.stringify(value)} (variable unset). ` +
@@ -130,7 +142,7 @@ function validateSigningKeyPem(mcpConfig: Record<string, any>): void {
 	// would turn "unpin on reload" into a boot-validation failure.
 	if (!('signingKeyPem' in mcpConfig) || mcpConfig.signingKeyPem === undefined) return;
 	const value = mcpConfig.signingKeyPem;
-	if (typeof value === 'string' && /^\$\{[^}]*\}$/.test(value.trim())) {
+	if (isUnresolvedEnvPlaceholder(value)) {
 		throw new Error(
 			`mcp.signingKeyPem is the unresolved env placeholder ${JSON.stringify(value)} (variable unset). ` +
 				'Set the variable to a PEM-encoded private key, or remove mcp.signingKeyPem to use a self-generated key.'
@@ -266,7 +278,7 @@ export function buildProviderConfig(
 	// (the pattern every doc example uses) would otherwise pass the blank
 	// check above as a non-empty string, match neither rewrite below, and get
 	// sent to the IdP verbatim. Fail closed here too (see HarperFast/oauth#208).
-	if (/^\$\{[^}]*\}$/.test(baseRedirectUri.trim())) {
+	if (isUnresolvedEnvPlaceholder(baseRedirectUri)) {
 		throw new Error(
 			`OAuth provider '${providerName}' has an unresolved 'redirectUri' environment variable placeholder ` +
 				`(${JSON.stringify(baseRedirectUri)}) — the variable is unset. Set the plugin-level 'redirectUri' ` +
