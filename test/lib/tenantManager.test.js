@@ -47,6 +47,41 @@ describe('TenantManager', () => {
 				{ message: /okta provider requires domain configuration/i }
 			);
 		});
+
+		it('should throw error for a mixed-case "Okta" tenant without domain', () => {
+			const manager = new TenantManager();
+
+			assert.throws(
+				() => {
+					manager.registerTenant({
+						tenantId: 'acme-corp',
+						name: 'Acme Corporation',
+						provider: 'Okta',
+						clientId: 'okta-client-id',
+						clientSecret: 'okta-secret',
+					});
+				},
+				{ message: /okta provider requires domain configuration/i }
+			);
+		});
+
+		it('should register a mixed-case "Okta" tenant with domain and store the normalized provider', () => {
+			const manager = new TenantManager();
+
+			manager.registerTenant({
+				tenantId: 'acme-corp',
+				name: 'Acme Corporation',
+				provider: 'Okta',
+				domain: 'acme.okta.com',
+				clientId: 'okta-client-id',
+				clientSecret: 'okta-secret',
+			});
+
+			const tenant = manager.getTenant('acme-corp');
+			assert.ok(tenant);
+			assert.equal(tenant.providerConfig.provider, 'okta');
+			assert.ok(tenant.providerConfig.authorizationUrl?.includes('acme.okta.com'));
+		});
 	});
 
 	describe('Azure AD tenant registration', () => {
@@ -262,6 +297,25 @@ describe('TenantManager', () => {
 			const tenant = manager.getTenant('acme-corp');
 			assert.equal(tenant?.providerConfig.customField, 'customValue');
 			assert.equal(tenant?.providerConfig.anotherField, 123);
+		});
+
+		it('keeps the normalized provider even if additionalConfig carries a mixed-case provider', () => {
+			const manager = new TenantManager();
+
+			manager.registerTenant({
+				tenantId: 'acme-corp',
+				name: 'Acme Corporation',
+				provider: 'Okta',
+				domain: 'acme.okta.com',
+				clientId: 'okta-client-id',
+				clientSecret: 'okta-secret',
+				additionalConfig: {
+					provider: 'Okta',
+				},
+			});
+
+			const tenant = manager.getTenant('acme-corp');
+			assert.equal(tenant?.providerConfig.provider, 'okta');
 		});
 	});
 
