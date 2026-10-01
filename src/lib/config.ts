@@ -222,7 +222,13 @@ export function normalizeMcpSecurityConfig(mcpConfig: Record<string, any>, logge
 }
 
 /**
- * Build configuration for a specific provider
+ * Build configuration for a specific provider.
+ *
+ * `providerConfig` keys with value `undefined` are treated as "not specified"
+ * and are skipped, so they never override a plugin default or preset value —
+ * this matters for a dynamically resolved config (e.g. from `onResolveProvider`)
+ * that passes through an unset field such as `scope: row.scope`. `null` and
+ * `''` are explicit values and are kept as-is.
  */
 export function buildProviderConfig(
 	providerConfig: Record<string, any>,
@@ -231,9 +237,15 @@ export function buildProviderConfig(
 ): OAuthProviderConfig {
 	const options = providerConfig || {};
 
-	// Expand environment variables in config values
+	// Expand environment variables in config values. An `undefined` value means
+	// "not specified" and must not override the plugin default or the preset
+	// below — the common trigger is a dynamic `onResolveProvider` hook that
+	// passes through an unset field (e.g. `scope: row.scope`), which would
+	// otherwise blank out the preset's default (HarperFast/oauth#243). `null`
+	// and `''` are explicit values and are kept.
 	const expandedOptions: Record<string, any> = {};
 	for (const [key, value] of Object.entries(options)) {
+		if (value === undefined) continue;
 		expandedOptions[key] = expandEnvVar(value);
 	}
 

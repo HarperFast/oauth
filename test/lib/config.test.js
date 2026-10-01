@@ -661,6 +661,48 @@ describe('OAuth Configuration', () => {
 				assert.equal(config.provider, 'github');
 			});
 
+			it('an undefined option (e.g. from a dynamic onResolveProvider hook) does not override the Google preset scope (#243)', () => {
+				const providerConfig = {
+					provider: 'google',
+					clientId: 'google-client',
+					clientSecret: 'google-secret',
+					redirectUri: 'https://app.test.com/oauth',
+					scope: undefined,
+				};
+
+				const config = buildProviderConfig(providerConfig, 'google', {});
+
+				assert.equal(config.scope, 'openid profile email');
+			});
+
+			it('an undefined usernameClaim keeps the preset default (#243)', () => {
+				const providerConfig = {
+					provider: 'github',
+					clientId: 'github-client',
+					clientSecret: 'github-secret',
+					redirectUri: 'https://app.test.com/oauth',
+					usernameClaim: undefined,
+				};
+
+				const config = buildProviderConfig(providerConfig, 'github', {});
+
+				assert.equal(config.usernameClaim, 'login');
+			});
+
+			it('an explicit scope value still overrides the preset (#243)', () => {
+				const providerConfig = {
+					provider: 'google',
+					clientId: 'google-client',
+					clientSecret: 'google-secret',
+					redirectUri: 'https://app.test.com/oauth',
+					scope: 'openid email',
+				};
+
+				const config = buildProviderConfig(providerConfig, 'google', {});
+
+				assert.equal(config.scope, 'openid email');
+			});
+
 			it('should configure Azure with tenant', () => {
 				const tenantId = '12345678-1234-1234-1234-123456789012';
 				const providerConfig = {
