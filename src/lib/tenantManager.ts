@@ -70,16 +70,20 @@ export class TenantManager {
 			throw new Error(`Unknown provider type: ${tenant.provider}`);
 		}
 
+		// getProvider() resolves case-insensitively; normalize so the switch below,
+		// error messages, and the stored provider all agree on one case.
+		const normalizedProvider = tenant.provider.toLowerCase();
+
 		// Apply provider-specific configuration
 		// Note: Provider configure() methods now include security validation
 		let providerSpecificConfig: Partial<OAuthProviderConfig> = {};
 
 		if (baseProvider.configure) {
-			switch (tenant.provider) {
+			switch (normalizedProvider) {
 				case 'okta':
 				case 'auth0':
 					if (!tenant.domain) {
-						throw new Error(`${tenant.provider} provider requires domain configuration`);
+						throw new Error(`${normalizedProvider} provider requires domain configuration`);
 					}
 					providerSpecificConfig = baseProvider.configure(tenant.domain);
 					break;
@@ -101,17 +105,20 @@ export class TenantManager {
 			}
 		}
 
-		// Build the complete provider configuration
+		// additionalConfig is spread last so callers can override any field it sets,
+		// but provider is pinned below regardless, so normalization above can't be
+		// defeated by a mixed-case additionalConfig.provider.
 		const providerConfig: OAuthProviderConfig = {
 			...baseProvider,
 			...providerSpecificConfig,
-			provider: tenant.provider,
+			provider: normalizedProvider,
 			clientId: tenant.clientId,
 			clientSecret: tenant.clientSecret,
 			scope: tenant.scope || baseProvider.scope,
 			postLoginRedirect: tenant.postLoginRedirect,
 			...tenant.additionalConfig,
 		};
+		providerConfig.provider = normalizedProvider;
 
 		this.tenants.set(tenant.tenantId, {
 			config: tenant,

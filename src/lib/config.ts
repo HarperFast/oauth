@@ -377,7 +377,13 @@ export function normalizeMcpSecurityConfig(mcpConfig: Record<string, any>, logge
 }
 
 /**
- * Build configuration for a specific provider
+ * Build configuration for a specific provider.
+ *
+ * `providerConfig` keys with value `undefined` are treated as "not specified"
+ * and are skipped, so they never override a plugin default or preset value —
+ * this matters for a dynamically resolved config (e.g. from `onResolveProvider`)
+ * that passes through an unset field such as `scope: row.scope`. `null` and
+ * `''` are explicit values and are kept as-is.
  */
 export function buildProviderConfig(
 	providerConfig: Record<string, any>,
@@ -386,9 +392,9 @@ export function buildProviderConfig(
 ): OAuthProviderConfig {
 	const options = providerConfig || {};
 
-	// Expand environment variables in config values
 	const expandedOptions: Record<string, any> = {};
 	for (const [key, value] of Object.entries(options)) {
+		if (value === undefined) continue;
 		expandedOptions[key] = expandEnvVar(value);
 	}
 
@@ -397,9 +403,13 @@ export function buildProviderConfig(
 		expandedOptions.jwksUri = expandedOptions.jwksUrl;
 	}
 
-	// Check for known provider presets
+	// Normalize `provider` to lowercase only when it matches a preset (#242); a custom
+	// identifier with no preset, or an explicit '', is left untouched.
 	const providerType = expandedOptions.provider || providerName;
 	const providerPreset = providerType ? getProvider(providerType) : null;
+	if (typeof expandedOptions.provider === 'string' && expandedOptions.provider !== '' && providerPreset) {
+		expandedOptions.provider = expandedOptions.provider.toLowerCase();
+	}
 
 	// Build redirect URI with provider name in path. No loopback fallback: a missing
 	// redirectUri used to default to http://localhost:9926/oauth, which some IdPs
