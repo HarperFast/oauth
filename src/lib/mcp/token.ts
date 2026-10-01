@@ -288,7 +288,7 @@ function repeatedParameter(body: any): string | undefined {
 }
 
 /**
- * Every `resource` value of a token request, in either deserializer shape
+ * The `resource` values visible in the deserialized body, in either shape
  * (see `repeatedParameter`); empty when absent.
  */
 function requestedResources(body: any): unknown[] {
@@ -1115,8 +1115,8 @@ async function dispatchToken(
 	// stack trace or raw error message. The per-grant handlers already return
 	// their own 4xx errors; this only catches the unexpected.
 	try {
-		// A repeated single-valued parameter is refused on every grant, before
-		// any grant reads the body; other parameters are left to the grants.
+		// A detected repeat of a single-valued parameter is refused on every grant,
+		// before any grant reads the body.
 		const repeated = repeatedParameter(body);
 		if (repeated !== undefined) {
 			return errorResponse(400, 'invalid_request', `${repeated} must not be repeated`);
