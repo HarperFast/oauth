@@ -854,14 +854,20 @@ These rules apply to every client on `authorization_code` and `refresh_token`:
   `client_secret_post`. Nothing, or an empty-secret `Basic` header carrying only
   the `client_id`, presents `none`.
 - These are rejected with `invalid_request` (400) before any client lookup: a
-  repeated `grant_type`, `code`, `redirect_uri`, `code_verifier`,
+  repeat of `grant_type`, `code`, `redirect_uri`, `code_verifier`,
   `refresh_token`, `client_id`, `client_secret`, `client_assertion`,
-  `client_assertion_type` or `scope`, a `client_id` or credential parameter that
-  is empty or not a single string, half an assertion pair, and more than one
-  mechanism, where any `Basic` header, a body `client_secret` and an assertion
-  each count as one. On Harper versions affected by HarperFast/harper#2953, the
-  form deserializer keeps only each parameter's first value and the last
-  repetition in the body, so only that repetition is detected.
+  `client_assertion_type` or `scope` detected in the deserialized body, a
+  `client_id` or credential parameter that is empty or not a single string, half
+  an assertion pair, and more than one mechanism, where any `Basic` header, a
+  body `client_secret` and an assertion each count as one.
+- Repeat detection, on every grant, and the `client_credentials` check of
+  `resource` values see only the deserialized body. On Harper versions affected
+  by HarperFast/harper#2953, the form deserializer keeps each parameter's first
+  value and, as `key`, the first and latest values of the field repeated last in
+  the body. No other value is visible, so an earlier repeat of another field or a
+  middle `resource` value goes unseen. If the first value of the field repeated
+  last equals the value of a listed parameter, or of `resource`, that field's
+  repeat is taken as a repeat of that parameter, or as `resource` values.
 - Otherwise, these are rejected with `invalid_client` (401) before any client
   lookup: malformed `Basic` credentials, an unknown `client_assertion_type`, and
   an assertion longer than 8192 characters.

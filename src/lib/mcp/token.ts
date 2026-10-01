@@ -254,8 +254,8 @@ function singleParameter(body: any, name: string): { value?: string } | { invali
 /**
  * The single-valued token request parameters. RFC 6749 §3.2: request
  * parameters must not be included more than once, and unrecognized ones are
- * ignored. `resource` may repeat (RFC 8707 §2) and is checked as a list by the
- * grant that reads it.
+ * ignored. `resource` may repeat (RFC 8707 §2); the grant that reads it checks
+ * the values `requestedResources` infers from the deserialized body.
  */
 const SINGLE_VALUED_PARAMETERS = [
 	'grant_type',
@@ -271,11 +271,15 @@ const SINGLE_VALUED_PARAMETERS = [
 ] as const;
 
 /**
- * The single-valued parameter the body repeats, if any. Harper's form
- * deserializer will store a repetition as an array under the parameter's own
- * name once HarperFast/harper#2953 is fixed. Until then it keeps each
- * parameter's first value under its name and records only the last
- * repetition in the body, as `key: [first value, repeated value]`.
+ * The single-valued parameter whose repeat is detected in the deserialized
+ * body, if any. Harper's form deserializer will store every value of a
+ * repeated parameter as an array under its own name once HarperFast/harper#2953
+ * is fixed. Until then it keeps each parameter's first value under its name
+ * and records only the field repeated last in the body, as
+ * `key: [first value, latest value]`; a `key` whose first element equals a
+ * listed parameter's value is taken as that parameter's repeat. What that
+ * shape hides or misattributes: the HarperFast/harper#2953 note in
+ * docs/mcp-oauth.md.
  */
 function repeatedParameter(body: any): string | undefined {
 	if (!body || typeof body !== 'object') return undefined;
@@ -288,8 +292,10 @@ function repeatedParameter(body: any): string | undefined {
 }
 
 /**
- * The `resource` values visible in the deserialized body, in either shape
- * (see `repeatedParameter`); empty when absent.
+ * The `resource` values inferred from the deserialized body, in either shape
+ * (see `repeatedParameter`); empty when absent. In the pre-harper#2953 shape
+ * they are `key` whenever its first element equals `resource`, whichever field
+ * `key` came from; see the HarperFast/harper#2953 note in docs/mcp-oauth.md.
  */
 function requestedResources(body: any): unknown[] {
 	const value = body?.resource;
@@ -374,8 +380,8 @@ function methodMismatch(
  * §4.2.1), counting any Basic header, malformed or not. Otherwise rejected
  * before any lookup with invalid_client: malformed Basic credentials, an
  * unknown client_assertion_type, and an assertion longer than the verifier
- * accepts. `dispatchToken` has already refused a repeated single-valued
- * parameter.
+ * accepts. `dispatchToken` has already refused a detected repeat of a
+ * single-valued parameter.
  */
 async function authenticateClient(
 	request: Request | undefined,
@@ -1042,9 +1048,10 @@ async function handleClientCredentialsGrant(
 		}
 	}
 
-	// RFC 8707 resource binding: every requested resource (it may repeat,
-	// RFC 8707 §2) must exactly match the canonical MCP resource, fail closed —
-	// no prefix or wildcard comparisons (#159 req 3).
+	// RFC 8707 resource binding: each `resource` value inferred from the
+	// deserialized body (`requestedResources`; RFC 8707 §2 lets it repeat) must
+	// exactly match the canonical MCP resource, fail closed — no prefix or
+	// wildcard comparisons (#159 req 3).
 	// Checked BEFORE the jti is consumed: a recoverable request-param mistake
 	// must not burn the single-use assertion.
 	const canonicalResource = resolveResource(request as any, mcpConfig);

@@ -344,10 +344,11 @@ describe('handleToken — shared client authenticator', () => {
 			assertInvalidRequest(await exchange(withAssertion, { headers: basic('public-1', '') }), /Multiple/);
 		});
 
-		it('rejects a repeated parameter the endpoint reads in a form body (invalid_request)', async () => {
+		it('rejects a detected repeat in a form body as Harper deserializes it (invalid_request)', async () => {
 			// The body Harper's application/x-www-form-urlencoded deserializer builds
-			// (harper server/serverHelpers/contentTypes.ts): the first value stays
-			// under its name, the repetition goes to `key`.
+			// (harper server/serverHelpers/contentTypes.ts): each first value stays
+			// under its name, and the field repeated last goes to `key` as
+			// [first value, latest value].
 			const harperForm = (query) => {
 				const object = {};
 				for (const [name, value] of new URLSearchParams(query)) {
@@ -376,10 +377,12 @@ describe('handleToken — shared client authenticator', () => {
 			assert.equal(once.status, 200, JSON.stringify(once.body));
 		});
 
-		describe('repeated and unrecognized parameters, on every grant', () => {
-			// Harper's form deserializer stores a repetition as an array under
-			// `key`, starting with the first value (HarperFast/harper#2953), or
-			// under the parameter's own name once that is fixed.
+		describe('repeats and unrecognized parameters in the deserialized body, on every grant', () => {
+			// The two deserialized shapes: Harper's form deserializer records the
+			// field repeated last as `key: [first value, latest value]`
+			// (HarperFast/harper#2953), and will store every value under the
+			// parameter's own name once that is fixed. What the first shape hides:
+			// the harper#2953 note in docs/mcp-oauth.md.
 			const SINGLE_VALUED = [
 				'grant_type',
 				'code',
@@ -457,7 +460,7 @@ describe('handleToken — shared client authenticator', () => {
 
 			const token = (body) => handleToken({ headers: {} }, body, config, undefined, logger);
 
-			it('refuses a repeated single-valued parameter in either deserializer shape, consuming nothing', async () => {
+			it('refuses a single-valued parameter repeated in either deserialized shape, consuming nothing', async () => {
 				for (const [grant, body] of Object.entries(freshGrants())) {
 					for (const name of SINGLE_VALUED) {
 						const value = body[name] ?? `repeated-${name}`;
@@ -475,7 +478,7 @@ describe('handleToken — shared client authenticator', () => {
 				}
 			});
 
-			it('client_credentials: a repeated resource is accepted when every value is the MCP resource, invalid_target otherwise', async () => {
+			it('client_credentials: two resource values in the deserialized body are accepted when both are the MCP resource, invalid_target otherwise', async () => {
 				const body = freshGrants().client_credentials;
 				for (const refused of [
 					{ resource: [RESOURCE, OTHER_RESOURCE] },
@@ -488,7 +491,7 @@ describe('handleToken — shared client authenticator', () => {
 					assert.equal(res.status, 400, label);
 					assert.equal(res.body.error, 'invalid_target', label);
 				}
-				// The refusals consumed nothing: the same assertion is accepted with an allowed repeat.
+				// The refusals consumed nothing: the same assertion is accepted with two allowed values.
 				const accepted = await token({ ...body, resource: [RESOURCE, RESOURCE] });
 				assert.equal(accepted.status, 200, JSON.stringify(accepted.body));
 				const pre2953 = await token({
@@ -499,7 +502,7 @@ describe('handleToken — shared client authenticator', () => {
 				assert.equal(pre2953.status, 200, JSON.stringify(pre2953.body));
 			});
 
-			it('ignores an unrecognized parameter: an array-valued JSON field, or a repeated form field', async () => {
+			it('ignores an unrecognized parameter: vendor_options as a JSON array, or vendor repeated in the pre-harper#2953 form shape', async () => {
 				for (const unknown of [{ vendor_options: ['a', 'b'] }, { vendor: 'a', key: ['a', 'b'] }]) {
 					for (const [grant, body] of Object.entries(freshGrants())) {
 						const res = await token({ ...body, ...unknown });
