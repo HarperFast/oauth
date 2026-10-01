@@ -51,10 +51,6 @@ describe('TenantManager', () => {
 		it('should throw error for a mixed-case "Okta" tenant without domain', () => {
 			const manager = new TenantManager();
 
-			// getProvider() resolves 'Okta' case-insensitively, so the domain-required
-			// check in the switch must key off the normalized provider, not the raw
-			// mixed-case value — otherwise 'Okta' falls into the `default` branch and
-			// skips the check entirely.
 			assert.throws(
 				() => {
 					manager.registerTenant({

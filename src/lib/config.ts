@@ -237,8 +237,6 @@ export function buildProviderConfig(
 ): OAuthProviderConfig {
 	const options = providerConfig || {};
 
-	// Expand environment variables in config values (see function doc for the
-	// `undefined`-skip contract).
 	const expandedOptions: Record<string, any> = {};
 	for (const [key, value] of Object.entries(options)) {
 		if (value === undefined) continue;
@@ -250,11 +248,8 @@ export function buildProviderConfig(
 		expandedOptions.jwksUri = expandedOptions.jwksUrl;
 	}
 
-	// Check for known provider presets. Normalize `provider` to lowercase only when
-	// it matches a preset, so downstream `=== 'github'`-style comparisons agree with
-	// preset lookup's own case-insensitive match (#242). A custom identifier with no
-	// preset, or an explicit '' (kept so it doesn't re-trigger the preset's
-	// `configure()` switch via the registry-key fallback), is left untouched.
+	// Normalize `provider` to lowercase only when it matches a preset (#242); a custom
+	// identifier with no preset, or an explicit '', is left untouched.
 	const providerType = expandedOptions.provider || providerName;
 	const providerPreset = providerType ? getProvider(providerType) : null;
 	if (typeof expandedOptions.provider === 'string' && expandedOptions.provider !== '' && providerPreset) {

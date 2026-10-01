@@ -445,9 +445,6 @@ describe('OAuth Handlers', () => {
 		});
 
 		it('authEvidence: a mixed-case "GitHub" config still yields github-authenticated provenance (#242)', async () => {
-			// Preset resolution (getProvider) is case-insensitive, so a config built
-			// with provider: 'GitHub' must normalize to the same 'github' that this
-			// evidence path compares config.provider against.
 			const githubCasedConfig = buildProviderConfig(
 				{
 					provider: 'GitHub',
