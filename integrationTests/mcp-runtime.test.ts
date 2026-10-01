@@ -14,6 +14,8 @@
  *      superseded, the family must be revoked and every token issued in the
  *      race refused; otherwise a token that lost the race is refused and
  *      revokes the family.
+ *   4. A family's rotation and revocation are partial updates: a rotation
+ *      written after a revocation keeps the revocation and every other field.
  *
  * The fixture's TEST-ONLY /mcp-test routes call the plugin's own stores; no
  * CIMD document is fetched.
@@ -107,6 +109,18 @@ suite('MCP runtime: replay retention and concurrent refresh', (ctx: ContextWithH
 			ok(results.filter((r) => r.fresh).length <= 1, 'at most one presentation is accepted');
 			strictEqual((await testRoute('/replay', row)).fresh, false, 'a presentation after the burst is refused');
 		}
+	});
+
+	test('a rotation written after a revocation keeps it and every other field', async () => {
+		const { familyId } = await testRoute('/seed-family');
+		await testRoute('/revoke', { id: familyId });
+		await testRoute('/rotate', { id: familyId, hash: 'rotated-hash' });
+		const family = await testRoute('/family', { id: familyId });
+		strictEqual(family.revoked, true);
+		strictEqual(family.current_token_hash, 'rotated-hash');
+		strictEqual(family.client_id, CLIENT_ID);
+		strictEqual(family.client_auth_method, 'none');
+		strictEqual(family.resource, 'https://mcp.test/mcp');
 	});
 
 	test('concurrent refreshes of one refresh token (characterization)', async () => {

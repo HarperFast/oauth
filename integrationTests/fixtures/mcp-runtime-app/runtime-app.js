@@ -7,6 +7,8 @@
  *   GET /mcp-test/replay-row?client_id&jti      → { exists, expires_at, expiresAt }
  *   GET /mcp-test/seed-family                   → { refreshToken, familyId } (public stored client, bound none)
  *   GET /mcp-test/family?id                     → the stored family, or { exists: false }
+ *   GET /mcp-test/revoke?id                     → {} (MCPRefreshFamilyStore.revoke)
+ *   GET /mcp-test/rotate?id&hash                → {} (MCPRefreshFamilyStore.rotate)
  */
 import { server, databases } from 'harper';
 import { MCPAssertionJtiStore, jtiKey } from './node_modules/@harperfast/oauth/dist/lib/mcp/assertionJtiStore.js';
@@ -70,6 +72,14 @@ async function handle(request) {
 				client_auth_method: 'none',
 			});
 			return json({ refreshToken: token, familyId });
+		}
+		case '/revoke': {
+			await new MCPRefreshFamilyStore().revoke(q.get('id'));
+			return json({});
+		}
+		case '/rotate': {
+			await new MCPRefreshFamilyStore().rotate(q.get('id'), q.get('hash'));
+			return json({});
 		}
 		case '/family': {
 			const family = await new MCPRefreshFamilyStore().get(q.get('id'));
