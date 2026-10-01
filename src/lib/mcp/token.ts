@@ -321,12 +321,12 @@ function methodMismatch(
  *   some public clients send) → none; PKCE is the proof.
  *
  * Rejected before any lookup with invalid_request (RFC 6749 §5.2): a
- * parameter repeated in a form body, a client_id or credential parameter that
- * is empty or not a single string, half an assertion pair, and more than one
- * mechanism (RFC 6749 §2.3, RFC 7521 §4.2.1), counting any Basic header,
- * malformed or not. Otherwise rejected before any lookup with invalid_client:
- * malformed Basic credentials, an unknown client_assertion_type, and an
- * assertion longer than the verifier accepts.
+ * client_id or credential parameter that is empty or not a single string,
+ * half an assertion pair, and more than one mechanism (RFC 6749 §2.3, RFC 7521
+ * §4.2.1), counting any Basic header, malformed or not. Otherwise rejected
+ * before any lookup with invalid_client: malformed Basic credentials, an
+ * unknown client_assertion_type, and an assertion longer than the verifier
+ * accepts. `dispatchToken` has already refused repeated parameters.
  */
 async function authenticateClient(
 	request: Request | undefined,
@@ -334,9 +334,6 @@ async function authenticateClient(
 	mcpConfig: MCPConfig | undefined,
 	logger?: Logger
 ): Promise<ClientAuthResult> {
-	// Harper's form deserializer keeps a repeated field's first value under its
-	// own name and records the repetition as an array under `key`.
-	if (Array.isArray(body?.key)) return invalidRequest('Request parameters must not be repeated');
 	const basic = readBasicAuth(getRequestHeader(request?.headers, 'authorization'));
 	const basicPresented = !('absent' in basic);
 
@@ -1069,6 +1066,14 @@ async function dispatchToken(
 	// stack trace or raw error message. The per-grant handlers already return
 	// their own 4xx errors; this only catches the unexpected.
 	try {
+		// A repeated parameter is refused on every grant, before any grant
+		// reads the body. Harper's form deserializer stores a repetition as an
+		// array: under `key` (HarperFast/harper#2953), or under the parameter's
+		// own name once that is fixed. No token parameter is an array, so an
+		// array value is a repetition in either shape.
+		if (body && typeof body === 'object' && Object.values(body).some(Array.isArray)) {
+			return errorResponse(400, 'invalid_request', 'Request parameters must not be repeated');
+		}
 		const grantType = typeof body?.grant_type === 'string' ? body.grant_type : undefined;
 		// client_credentials is explicit opt-in (default OFF); when disabled it
 		// is indistinguishable from any other unsupported grant.

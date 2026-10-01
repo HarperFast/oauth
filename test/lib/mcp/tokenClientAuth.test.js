@@ -319,19 +319,19 @@ describe('handleToken — shared client authenticator', () => {
 			}
 		});
 
-		it('rejects array-valued credential parameters and client_id (invalid_request)', async () => {
-			assertInvalidRequest(await exchange({ ...publicBody, client_secret: ['a', 'b'] }), /single non-empty value/);
+		it('rejects array-valued credential parameters and client_id as repeated parameters (invalid_request)', async () => {
+			assertInvalidRequest(await exchange({ ...publicBody, client_secret: ['a', 'b'] }), /must not be repeated/);
 			assertInvalidRequest(
 				await exchange({
 					...publicBody,
 					client_assertion: [signAssertion(), signAssertion()],
 					client_assertion_type: TYPE,
 				}),
-				/single non-empty value/
+				/must not be repeated/
 			);
 			assertInvalidRequest(
 				await exchange({ ...publicBody, client_id: ['public-1', 'public-1'] }),
-				/single non-empty value/
+				/must not be repeated/
 			);
 		});
 
@@ -374,6 +374,65 @@ describe('handleToken — shared client authenticator', () => {
 				logger
 			);
 			assert.equal(once.status, 200, JSON.stringify(once.body));
+		});
+
+		it('refuses a repeated parameter that no grant reads, on every grant, in either deserializer shape', async () => {
+			// Harper stores a repetition as an array under `key`
+			// (HarperFast/harper#2953), or under the parameter's own name once
+			// that is fixed. None of these grants reads `scope`.
+			const agent = generateKeyPairSync('ed25519');
+			const HEADLESS = 'https://agents.example.com/fleet/agent-1.json';
+			served[HEADLESS] = {
+				client_id: HEADLESS,
+				client_name: 'Headless agent',
+				grant_types: ['client_credentials'],
+				token_endpoint_auth_method: 'private_key_jwt',
+				jwks: { keys: [agent.publicKey.export({ format: 'jwk' })] },
+			};
+			const config = { ...MIXED, clientIdMetadataDocuments: { allowedHosts: ['agents.example.com'] } };
+			const now = Math.floor(Date.now() / 1000);
+			const h = b64url({ alg: 'EdDSA', typ: 'JWT' });
+			const p = b64url({ iss: HEADLESS, sub: HEADLESS, aud: ISSUER, iat: now, exp: now + 30, jti: 'repeat-jti' });
+			const assertion = `${h}.${p}.${sign(null, Buffer.from(`${h}.${p}`), agent.privateKey).toString('base64url')}`;
+			const familyId = `${BOUND_FAMILY_ID_PREFIX}repeat`;
+			const { token, hash } = makeRefreshToken(familyId);
+			families.set(familyId, {
+				family_id: familyId,
+				current_token_hash: hash,
+				revoked: false,
+				client_id: 'public-1',
+				user: 'alice',
+				resource: RESOURCE,
+				expires_at: now + 3600,
+				client_auth_method: 'none',
+			});
+			const grants = {
+				authorization_code: {
+					...publicBody,
+					grant_type: 'authorization_code',
+					code: 'code-1',
+					code_verifier: CODE_VERIFIER,
+				},
+				refresh_token: { grant_type: 'refresh_token', refresh_token: token, client_id: 'public-1' },
+				client_credentials: {
+					grant_type: 'client_credentials',
+					client_id: HEADLESS,
+					client_assertion_type: TYPE,
+					client_assertion: assertion,
+				},
+			};
+			for (const [grant, body] of Object.entries(grants)) {
+				for (const repeat of [{ scope: ['a', 'b'] }, { scope: 'a', key: ['a', 'b'] }]) {
+					const res = await handleToken({ headers: {} }, { ...body, ...repeat }, config, undefined, logger);
+					const label = `${grant} ${JSON.stringify(repeat)}: ${JSON.stringify(res.body)}`;
+					assert.equal(res.status, 400, label);
+					assert.equal(res.body.error, 'invalid_request', label);
+					assert.match(res.body.error_description, /must not be repeated/, label);
+				}
+				// Nothing was consumed: the same request without the repeat succeeds.
+				const once = await handleToken({ headers: {} }, body, config, undefined, logger);
+				assert.equal(once.status, 200, `${grant}: ${JSON.stringify(once.body)}`);
+			}
 		});
 
 		it('answers invalid_request for an assertion with any Basic header, whatever its type, on both grants', async () => {
