@@ -276,6 +276,87 @@ describe('OAuth Configuration', () => {
 				assert.equal(cfg.signingKeyPem, pem);
 			});
 		});
+
+		describe('dynamicClientRegistration.initialAccessToken (#240 — fails open on an unresolved/empty gate)', () => {
+			it('declared as an unresolved ${VAR} placeholder throws, naming the variable', () => {
+				assert.throws(
+					() =>
+						normalizeMcpSecurityConfig({
+							enabled: true,
+							dynamicClientRegistration: { initialAccessToken: '${DCR_TOKEN}' },
+						}),
+					/mcp\.dynamicClientRegistration\.initialAccessToken.*unresolved env placeholder.*DCR_TOKEN/s
+				);
+			});
+
+			it('declared but resolved empty (e.g. unset/empty env var) throws, naming the field', () => {
+				assert.throws(
+					() =>
+						normalizeMcpSecurityConfig({
+							enabled: true,
+							dynamicClientRegistration: { initialAccessToken: '' },
+						}),
+					/mcp\.dynamicClientRegistration\.initialAccessToken.*empty/s
+				);
+			});
+
+			it('declared but all-whitespace throws', () => {
+				assert.throws(
+					() =>
+						normalizeMcpSecurityConfig({
+							enabled: true,
+							dynamicClientRegistration: { initialAccessToken: '   ' },
+						}),
+					/mcp\.dynamicClientRegistration\.initialAccessToken.*empty/s
+				);
+			});
+
+			it('declared with a non-empty token passes through unchanged', () => {
+				const cfg = {
+					enabled: true,
+					dynamicClientRegistration: { initialAccessToken: 'super-secret-token' },
+				};
+				normalizeMcpSecurityConfig(cfg);
+				assert.equal(cfg.dynamicClientRegistration.initialAccessToken, 'super-secret-token');
+			});
+
+			it('not declared at all leaves the config untouched — open registration remains available by omission', () => {
+				const cfg = { enabled: true, dynamicClientRegistration: {} };
+				normalizeMcpSecurityConfig(cfg);
+				assert.equal('initialAccessToken' in cfg.dynamicClientRegistration, false);
+			});
+
+			it('declared as undefined (live-reload removed the key) counts as undeclared — no throw', () => {
+				assert.doesNotThrow(() =>
+					normalizeMcpSecurityConfig({
+						enabled: true,
+						dynamicClientRegistration: { initialAccessToken: undefined },
+					})
+				);
+			});
+
+			it('mcp.enabled false leaves a declared-but-bad token INERT — the disabled block must not refuse boot', () => {
+				assert.doesNotThrow(() =>
+					normalizeMcpSecurityConfig({
+						enabled: false,
+						dynamicClientRegistration: { initialAccessToken: '${DCR_TOKEN}' },
+					})
+				);
+			});
+
+			it('dynamicClientRegistration.enabled: false leaves a declared-but-bad token INERT (DCR itself is off)', () => {
+				assert.doesNotThrow(() =>
+					normalizeMcpSecurityConfig({
+						enabled: true,
+						dynamicClientRegistration: { enabled: false, initialAccessToken: '${DCR_TOKEN}' },
+					})
+				);
+			});
+
+			it('no dynamicClientRegistration block at all is unaffected', () => {
+				assert.doesNotThrow(() => normalizeMcpSecurityConfig({ enabled: true }));
+			});
+		});
 	});
 
 	describe('expandEnvVar', () => {

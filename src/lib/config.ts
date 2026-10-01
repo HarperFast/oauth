@@ -170,6 +170,44 @@ function validateSigningKeyPem(mcpConfig: Record<string, any>): void {
 }
 
 /**
+ * Validate `mcp.dynamicClientRegistration.initialAccessToken` when the
+ * operator DECLARED it and DCR is enabled. `checkInitialAccessToken` (dcr.ts)
+ * gates purely on the configured value's truthiness, so two misconfigurations
+ * turn the gate into no gate at all (#240):
+ * - An unresolved `${VAR}` placeholder (the variable is unset) is a non-empty
+ *   string — it IS the "configured" value, and becomes the accepted bearer
+ *   secret. Anyone who can read the committed config (placeholders routinely
+ *   are) can then register MCP clients.
+ * - A set-but-empty value is falsy, so `checkInitialAccessToken` treats the
+ *   token as entirely absent: open registration, silently.
+ * Neither is a deliberate "I want open registration" choice — that's only
+ * expressed by omitting the key. Fail loudly at boot instead:
+ * - declared + unresolved `${VAR}` placeholder → throw naming the variable.
+ * - declared + resolves to an empty or all-whitespace string → throw.
+ * - NOT declared at all (field absent, or `undefined` from a live-reload
+ *   removal) → this function takes no action; open registration proceeds
+ *   exactly as before.
+ */
+function validateDcrInitialAccessToken(dcr: Record<string, any>): void {
+	if (!('initialAccessToken' in dcr) || dcr.initialAccessToken === undefined) return;
+	const value = dcr.initialAccessToken;
+	if (isUnresolvedEnvPlaceholder(value)) {
+		throw new Error(
+			`mcp.dynamicClientRegistration.initialAccessToken is the unresolved env placeholder ${JSON.stringify(value)} ` +
+				'(variable unset). Set the variable to the DCR bearer token, or remove initialAccessToken to allow ' +
+				'open registration.'
+		);
+	}
+	if (typeof value !== 'string' || value.trim() === '') {
+		throw new Error(
+			'mcp.dynamicClientRegistration.initialAccessToken is configured but resolved to an empty or ' +
+				'whitespace-only value. Provide a non-empty bearer token, or remove initialAccessToken to allow ' +
+				'open registration.'
+		);
+	}
+}
+
+/**
  * Normalize the security-relevant fields of the `mcp` config block in place,
  * so a mis-typed value can never silently flip a gate:
  * - Every documented boolean (`mcp.enabled`,
@@ -188,6 +226,11 @@ function validateSigningKeyPem(mcpConfig: Record<string, any>): void {
  *   {@link validateSigningKeyPem}. This one throws instead of dropping with a
  *   warning: unlike the booleans above, there is no safe default to fall back
  *   to for a declared-but-broken pin.
+ * - `mcp.dynamicClientRegistration.initialAccessToken`, if declared and DCR is
+ *   enabled, must resolve to a non-empty value — see
+ *   {@link validateDcrInitialAccessToken}. Also throws rather than dropping:
+ *   there is no safe default gate value to fall back to either (open
+ *   registration is only ever chosen by omitting the key).
  */
 export function normalizeMcpSecurityConfig(mcpConfig: Record<string, any>, logger?: Logger): void {
 	normalizeBooleanField(mcpConfig, 'enabled', 'mcp.enabled', logger);
@@ -206,6 +249,12 @@ export function normalizeMcpSecurityConfig(mcpConfig: Record<string, any>, logge
 	const dcr = mcpConfig.dynamicClientRegistration;
 	if (dcr && typeof dcr === 'object') {
 		normalizeBooleanField(dcr, 'enabled', 'mcp.dynamicClientRegistration.enabled', logger);
+		// Only when MCP itself is enabled and DCR isn't explicitly disabled — a
+		// disabled block must stay inert, matching mcp.signingKeyPem's gating
+		// below and dcrEnabled()'s own predicate (dcr.ts).
+		if (mcpConfig.enabled === true && dcr.enabled !== false) {
+			validateDcrInitialAccessToken(dcr);
+		}
 	}
 
 	const cimd = mcpConfig.clientIdMetadataDocuments;
