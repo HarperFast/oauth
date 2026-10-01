@@ -108,7 +108,10 @@ export class TenantManager {
 			}
 		}
 
-		// Build the complete provider configuration
+		// Build the complete provider configuration. additionalConfig is spread last so
+		// callers can override any field it sets, but provider must stay normalizedProvider
+		// regardless — an additionalConfig.provider in different casing would defeat the
+		// normalization above and break downstream `=== 'okta'`-style comparisons.
 		const providerConfig: OAuthProviderConfig = {
 			...baseProvider,
 			...providerSpecificConfig,
@@ -119,6 +122,7 @@ export class TenantManager {
 			postLoginRedirect: tenant.postLoginRedirect,
 			...tenant.additionalConfig,
 		};
+		providerConfig.provider = normalizedProvider;
 
 		this.tenants.set(tenant.tenantId, {
 			config: tenant,

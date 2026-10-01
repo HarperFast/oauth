@@ -237,12 +237,8 @@ export function buildProviderConfig(
 ): OAuthProviderConfig {
 	const options = providerConfig || {};
 
-	// Expand environment variables in config values. An `undefined` value means
-	// "not specified" and must not override the plugin default or the preset
-	// below — the common trigger is a dynamic `onResolveProvider` hook that
-	// passes through an unset field (e.g. `scope: row.scope`), which would
-	// otherwise blank out the preset's default (HarperFast/oauth#243). `null`
-	// and `''` are explicit values and are kept.
+	// Expand environment variables in config values (see function doc for the
+	// `undefined`-skip contract).
 	const expandedOptions: Record<string, any> = {};
 	for (const [key, value] of Object.entries(options)) {
 		if (value === undefined) continue;
@@ -254,16 +250,11 @@ export function buildProviderConfig(
 		expandedOptions.jwksUri = expandedOptions.jwksUrl;
 	}
 
-	// Check for known provider presets. Normalize to lowercase once, here, so
-	// every later `config.provider === 'github'`-style comparison (handlers.ts,
-	// OAuthProvider.ts, this file's own preset `configure()` switch) sees the
-	// same casing that preset lookup already accepts case-insensitively
-	// (HarperFast/oauth#242). Only do this when a preset actually matched: a
-	// custom provider identifier with no preset keeps its original case (it
-	// flows into hooks and session metadata, where case matters), and an
-	// explicit '' (falling back to the registry key below purely to resolve
-	// the preset) stays '' so the preset's `configure()` switch below is
-	// skipped rather than re-triggered by the fallback value.
+	// Check for known provider presets. Normalize `provider` to lowercase only when
+	// it matches a preset, so downstream `=== 'github'`-style comparisons agree with
+	// preset lookup's own case-insensitive match (#242). A custom identifier with no
+	// preset, or an explicit '' (kept so it doesn't re-trigger the preset's
+	// `configure()` switch via the registry-key fallback), is left untouched.
 	const providerType = expandedOptions.provider || providerName;
 	const providerPreset = providerType ? getProvider(providerType) : null;
 	if (typeof expandedOptions.provider === 'string' && expandedOptions.provider !== '' && providerPreset) {

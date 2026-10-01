@@ -83,7 +83,6 @@ describe('TenantManager', () => {
 
 			const tenant = manager.getTenant('acme-corp');
 			assert.ok(tenant);
-			// Stored provider is normalized, not the raw mixed-case input.
 			assert.equal(tenant.providerConfig.provider, 'okta');
 			assert.ok(tenant.providerConfig.authorizationUrl?.includes('acme.okta.com'));
 		});
@@ -302,6 +301,25 @@ describe('TenantManager', () => {
 			const tenant = manager.getTenant('acme-corp');
 			assert.equal(tenant?.providerConfig.customField, 'customValue');
 			assert.equal(tenant?.providerConfig.anotherField, 123);
+		});
+
+		it('keeps the normalized provider even if additionalConfig carries a mixed-case provider', () => {
+			const manager = new TenantManager();
+
+			manager.registerTenant({
+				tenantId: 'acme-corp',
+				name: 'Acme Corporation',
+				provider: 'Okta',
+				domain: 'acme.okta.com',
+				clientId: 'okta-client-id',
+				clientSecret: 'okta-secret',
+				additionalConfig: {
+					provider: 'Okta',
+				},
+			});
+
+			const tenant = manager.getTenant('acme-corp');
+			assert.equal(tenant?.providerConfig.provider, 'okta');
 		});
 	});
 

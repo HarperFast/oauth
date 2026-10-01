@@ -654,10 +654,7 @@ describe('OAuth Configuration', () => {
 
 				const config = buildProviderConfig(providerConfig, 'github', {});
 
-				// Preset is still resolved case-insensitively...
 				assert.equal(config.authorizationUrl, 'https://github.com/login/oauth/authorize');
-				// ...and the stored provider field is normalized to the same lowercase
-				// value every `config.provider === 'github'` comparison downstream expects.
 				assert.equal(config.provider, 'github');
 			});
 
@@ -674,8 +671,6 @@ describe('OAuth Configuration', () => {
 
 				const config = buildProviderConfig(providerConfig, 'acme', {});
 
-				// No preset matched 'AcmeOIDC', so it must not be lowercased — hooks,
-				// session metadata, and any binding keyed on it depend on the exact case.
 				assert.equal(config.provider, 'AcmeOIDC');
 				assert.equal(config.authorizationUrl, 'https://acme.example.com/authorize');
 			});
@@ -694,26 +689,10 @@ describe('OAuth Configuration', () => {
 
 				const config = buildProviderConfig(providerConfig, 'auth0', {});
 
-				// '' is an explicit value and must survive — it must not be replaced by
-				// the 'auth0' registry key, which would re-trigger the preset's
-				// configure() switch and overwrite the operator's custom endpoints.
 				assert.equal(config.provider, '');
 				assert.equal(config.authorizationUrl, 'https://custom.example.com/authorize');
 				assert.equal(config.tokenUrl, 'https://custom.example.com/token');
 				assert.equal(config.userInfoUrl, 'https://custom.example.com/userinfo');
-			});
-
-			it('an explicit "GitHub" provider still normalizes to lowercase (preset matched)', () => {
-				const providerConfig = {
-					provider: 'GitHub',
-					clientId: 'github-client',
-					clientSecret: 'github-secret',
-					redirectUri: 'https://app.test.com/oauth',
-				};
-
-				const config = buildProviderConfig(providerConfig, 'github', {});
-
-				assert.equal(config.provider, 'github');
 			});
 
 			it('an undefined option (e.g. from a dynamic onResolveProvider hook) does not override the Google preset scope (#243)', () => {
