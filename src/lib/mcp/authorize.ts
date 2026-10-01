@@ -37,6 +37,7 @@ import type {
 } from '../../types.ts';
 import { CimdClientError, resolveClient } from './cimd.ts';
 import { allowsGrant, LOCAL_HOSTS } from './clientValidator.ts';
+import { permittedAuthMethod } from './clientAuthMethod.ts';
 import {
 	browserSecretMatches,
 	buildBrowserSecretCookie,
@@ -475,6 +476,14 @@ export async function handleAuthorize(
 		return redirect('invalid_target', resourceErr);
 	}
 
+	// Bind the token-endpoint authentication method permitted now: the code
+	// and its refresh family must be redeemed with exactly this method, so a
+	// later document or configuration change cannot weaken a live grant.
+	const permitted = permittedAuthMethod(client, mcpConfig);
+	if ('error' in permitted) {
+		return redirect('unauthorized_client', permitted.error);
+	}
+
 	const mcpState: MCPAuthorizeState = {
 		clientId: query.client_id,
 		resource: query.resource,
@@ -483,6 +492,7 @@ export async function handleAuthorize(
 		redirectUri: query.redirect_uri,
 		scope: query.scope,
 		clientState,
+		clientAuthMethod: permitted.method,
 	};
 
 	// CIMD clients: show the interstitial confirmation page before redirecting.

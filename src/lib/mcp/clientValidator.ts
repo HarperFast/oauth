@@ -11,7 +11,7 @@ export const SUPPORTED_GRANT_TYPES = new Set(['authorization_code', 'refresh_tok
 /** Grants assumed for clients persisted before grant_types was required. */
 export const LEGACY_DEFAULT_GRANT_TYPES = ['authorization_code', 'refresh_token'];
 export const SUPPORTED_RESPONSE_TYPES = new Set(['code']);
-/** Auth methods supported for DCR clients. CIMD clients in v1 are restricted to 'none'. */
+/** Auth methods supported for DCR clients; CIMD methods are selected in `clientAuthMethod.ts`. */
 export const SUPPORTED_AUTH_METHODS = new Set(['none', 'client_secret_basic', 'client_secret_post']);
 export const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
 

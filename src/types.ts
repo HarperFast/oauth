@@ -164,6 +164,13 @@ export interface MCPClientCredentialsConfig {
 	 * requests get 429 + `error: "slow_down"` + `Retry-After`.
 	 */
 	rateLimit?: number | false;
+	/**
+	 * Keep accepting the token-endpoint URL as an assertion `aud` for this
+	 * grant, alongside the issuer. Default: true, so existing agents keep
+	 * working while their signers move to the issuer; set false to accept the
+	 * issuer only (RFC 7523bis).
+	 */
+	acceptTokenEndpointAudience?: boolean;
 }
 
 /**
@@ -229,6 +236,28 @@ export interface MCPClientMetadata {
 	 * resolution (OKP/Ed25519, public keys only, bounded count).
 	 */
 	jwks?: { keys: Record<string, unknown>[] };
+	/**
+	 * URL of the client's JWK Set (interactive CIMD clients only). Its location
+	 * policy is checked on every use; see clientKeySet.ts.
+	 */
+	jwks_uri?: string;
+}
+
+/**
+ * An interactive CIMD client's declared token-endpoint authentication, as
+ * parsed from its document (internal; see clientAuthMethod.ts).
+ */
+export interface MCPCimdAuthDeclaration {
+	/** Declared methods, in document order: the plural list, else the singular value, else ["none"]. */
+	declared: string[];
+	/** The singular `token_endpoint_auth_method` (the client's preference), when present. */
+	preferred?: string;
+	/** The document's `token_endpoint_auth_signing_alg`, when present and supported. */
+	signingAlg?: 'RS256' | 'ES256' | 'EdDSA';
+	/** Why the pinned signing algorithm cannot be used, when it is unsupported. */
+	signingAlgIssue?: string;
+	/** Why the inline `jwks` cannot be used (configuration-independent), when it cannot. */
+	keyIssue?: string;
 }
 
 /**
@@ -251,6 +280,12 @@ export interface MCPClientRecord extends MCPClientMetadata {
 	 * @internal
 	 */
 	_cimd?: boolean;
+	/**
+	 * Declared token-endpoint authentication of an interactive CIMD client
+	 * (not persisted). The permitted method is computed from it per request.
+	 * @internal
+	 */
+	_cimdAuth?: MCPCimdAuthDeclaration;
 }
 
 /**
@@ -276,8 +311,42 @@ export interface MCPClientIdMetadataDocumentsConfig {
 	allowedHosts?: string[];
 	/** Fetch timeout in milliseconds. Default: 5000. */
 	fetchTimeoutMs?: number;
-	/** Maximum document size in bytes. Default: 65536 (64 KB). */
+	/** Maximum document size in bytes. Default: 65536 (64 KB). Also bounds fetched `jwks_uri` documents. */
 	maxDocumentBytes?: number;
+	/** `private_key_jwt` for interactive CIMD clients. See docs/mcp-oauth.md. */
+	privateKeyJwt?: MCPCimdPrivateKeyJwtConfig;
+}
+
+/**
+ * `private_key_jwt` settings for interactive CIMD clients.
+ */
+export interface MCPCimdPrivateKeyJwtConfig {
+	/**
+	 * Advertise `private_key_jwt` (and the interactive signing algorithms) in
+	 * the authorization server metadata, so interactive CIMD clients that
+	 * declare it are resolved to it. Default: false. A server that enables the
+	 * client_credentials grant already advertises `private_key_jwt`; there, an
+	 * interactive client's assertion is verified whatever this setting is.
+	 */
+	enabled?: boolean;
+	/**
+	 * Additional https origins (beyond the client ID's own origin) from which a
+	 * `jwks_uri` may be fetched. Normalized at startup to exact origins.
+	 */
+	jwksUriAllowedOrigins?: string[];
+	/**
+	 * Opt-in, expiring interoperability exception: also accept the advertised
+	 * token-endpoint URL as a client assertion's sole `aud` for the listed
+	 * interactive CIMD client IDs (authorization_code and refresh_token only),
+	 * when their keys come from the client ID's own origin. Departs from
+	 * RFC 7523bis; see docs/mcp-oauth.md.
+	 */
+	tokenEndpointAudience?: {
+		/** Exact CIMD client IDs (https URLs) eligible for the exception. */
+		clientIds: string[];
+		/** When the exception stops applying: an ISO 8601 date-time, normalized at startup to epoch ms. */
+		expiresAt: string | number;
+	};
 }
 
 /**
@@ -312,6 +381,13 @@ export interface MCPAuthorizeState {
 	 * lib/mcp/consentBinding.ts and handlers.ts).
 	 */
 	browserNonceHash?: string;
+	/**
+	 * The token-endpoint authentication method permitted for this client when
+	 * authorization began. Carried into the authorization code and the refresh
+	 * family; a flow state without it predates the binding and is rejected at
+	 * the callback.
+	 */
+	clientAuthMethod?: string;
 }
 
 /**
@@ -328,6 +404,12 @@ export interface MCPAuthCodeRecord {
 	code_challenge_method: string;
 	redirect_uri: string;
 	scope?: string;
+	/**
+	 * Token-endpoint authentication method bound at authorization; the
+	 * exchange must use exactly this method. A code without it predates the
+	 * binding and is rejected.
+	 */
+	client_auth_method?: string;
 }
 
 /**
@@ -376,19 +458,26 @@ export interface MCPRefreshFamilyRecord {
 	resource: string;
 	scope?: string;
 	expires_at: number;
+	/**
+	 * Token-endpoint authentication method bound to this family (copied from
+	 * the authorization code). Present on bound families (`p2-` ids); every
+	 * refresh must use exactly this method.
+	 */
+	client_auth_method?: string;
 }
 
 /**
- * MCP client-assertion replay-guard record (table `mcp_assertion_jtis`,
- * `expiration: 120`).
+ * MCP client-assertion replay-guard record (table `mcp_assertion_jtis`).
  *
  * `id` is sha256(client_id, jti) — see assertionJtiStore.ts for the keying
- * and accepted-race notes. Rows only need to outlive the maximum assertion
- * window; the table TTL evicts them.
+ * and accepted-race notes. Each row carries an explicit expiry covering its
+ * assertion's accepted validity window.
  */
 export interface MCPAssertionJtiRecord {
 	id: string;
 	client_id: string;
+	/** Epoch ms; mirrors the row's per-record expiry (assertion exp + margin). */
+	expires_at?: number;
 	/** Harper-assigned (epoch ms) via @createdTime; never written by the app. */
 	created_at?: number;
 }
@@ -817,16 +906,22 @@ export interface ProviderRegistry {
  * Methods available on a Harper table
  */
 export interface Table {
-	get(id: string): Promise<any>;
+	/**
+	 * Read a record. Without a context the read joins the caller's transaction
+	 * (inside a REST request, the request's, which reads one snapshot). A
+	 * context with no `transaction` opens a new transaction; Harper writes
+	 * `context.transaction` onto it, so pass a new object for each read.
+	 */
+	get(id: string, context?: Record<string, unknown>): Promise<any>;
 	put(record: any): Promise<any>;
 	/**
-	 * Insert-if-absent: creates the record, throwing a 409 `ClientError`
-	 * ("Record already exists") when a record with the same primary key
-	 * exists. NOTE: Harper currently enforces the existence check against the
-	 * pre-staging snapshot only — concurrent creates can degrade to
-	 * last-write-wins (HarperFast/harper#1745).
+	 * Partial update: writes only the given fields, applied at commit on top of
+	 * the record as then stored, so fields written by a concurrent request
+	 * survive. A field value of `{ __op__: 'add', value: n }` adds `n` to the
+	 * stored number (a missing field counts as 0). The optional context's
+	 * `expiresAt` (epoch ms) sets the record's expiry.
 	 */
-	create(record: any): Promise<any>;
+	patch(id: string, update: Record<string, any>, context?: { expiresAt?: number }): Promise<void>;
 	delete(id: string): Promise<void>;
 	/**
 	 * Enumerate records matching a query. An empty query (`{}`) returns all rows.

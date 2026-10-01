@@ -23,6 +23,7 @@
  */
 
 import type { Logger, MCPConfig } from '../../types.ts';
+import { advertisedAssertionSigningAlgorithms, advertisedTokenEndpointAuthMethods } from './clientAuthMethod.ts';
 import { getRequestHeader } from '../requestHeaders.ts';
 import { dcrEnabled } from './dcr.ts';
 import { MCPKeyStore, resolveEffectiveAlg } from './keyStore.ts';
@@ -88,6 +89,11 @@ export function resolveIssuer(request: HarperRequest, mcpConfig: MCPConfig): str
 	const host = request.host ?? getRequestHeader(request.headers, 'host') ?? 'localhost';
 	const scheme = request.protocol ?? 'https';
 	return `${scheme}://${host}`;
+}
+
+/** The token endpoint URL for `issuer` — the exact value advertised in AS metadata. */
+export function tokenEndpointUrl(issuer: string): string {
+	return `${issuer}/oauth/mcp/token`;
 }
 
 /**
@@ -174,10 +180,11 @@ export async function buildAuthorizationServerMetadata(
 	const cimdEnabled = mcpConfig.clientIdMetadataDocuments?.enabled !== false;
 	// client_credentials is explicit opt-in (#162); advertised only when enabled.
 	const clientCredentialsEnabled = mcpConfig.clientCredentials?.enabled === true;
+	const signingAlgs = advertisedAssertionSigningAlgorithms(mcpConfig);
 	return {
 		issuer,
 		authorization_endpoint: `${issuer}/oauth/mcp/authorize`,
-		token_endpoint: `${issuer}/oauth/mcp/token`,
+		token_endpoint: tokenEndpointUrl(issuer),
 		// Advertised under the same predicate the handler enforces (#182):
 		// metadata must not point clients at an endpoint that 404s.
 		...(dcrEnabled(mcpConfig) ? { registration_endpoint: `${issuer}/oauth/mcp/register` } : {}),
@@ -195,14 +202,14 @@ export async function buildAuthorizationServerMetadata(
 		// permits a partial list; upstream-provider scopes are opaque
 		// pass-through and are deliberately not enumerated.
 		scopes_supported: ['offline_access'],
-		token_endpoint_auth_methods_supported: [
-			'none',
-			'client_secret_basic',
-			'client_secret_post',
-			...(clientCredentialsEnabled ? ['private_key_jwt'] : []),
-		],
-		// EdDSA is the only assertion alg the client_credentials grant verifies.
-		...(clientCredentialsEnabled ? { token_endpoint_auth_signing_alg_values_supported: ['EdDSA'] } : {}),
+		// Every method the token endpoint verifies across registration
+		// mechanisms. private_key_jwt appears exactly when a verification path
+		// for it is enabled (clientAuthMethod.ts).
+		token_endpoint_auth_methods_supported: advertisedTokenEndpointAuthMethods(mcpConfig),
+		// RFC 8414: required whenever private_key_jwt is listed. Exactly the
+		// union of the algorithms the enabled verification paths accept
+		// (headless: EdDSA; interactive, when active: RS256, ES256, EdDSA).
+		...(signingAlgs ? { token_endpoint_auth_signing_alg_values_supported: signingAlgs } : {}),
 		// Effective alg first, then any other alg still live in the key set (see
 		// advertisedAlgs above). Per-key algs are published in the JWKS; EdDSA is
 		// deferred (#127).

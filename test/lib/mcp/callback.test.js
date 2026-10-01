@@ -20,6 +20,7 @@ const SAMPLE_MCP_STATE = {
 	redirectUri: 'https://mcp-client.example.com/cb',
 	scope: 'mcp:read',
 	clientState: 'mcp-client-state',
+	clientAuthMethod: 'none',
 };
 
 const SAMPLE_USER_ID = 'alice@example.com';
@@ -75,6 +76,7 @@ describe('handleMCPCallback', () => {
 		assert.equal(record.resource, SAMPLE_MCP_STATE.resource);
 		assert.equal(record.code_challenge, SAMPLE_MCP_STATE.codeChallenge);
 		assert.equal(record.code_challenge_method, SAMPLE_MCP_STATE.codeChallengeMethod);
+		assert.equal(record.client_auth_method, 'none', 'the bound method is carried into the code');
 		assert.equal(record.redirect_uri, SAMPLE_MCP_STATE.redirectUri);
 		assert.equal(record.scope, SAMPLE_MCP_STATE.scope);
 		// created_at is Harper-managed (@createdTime), not hand-written.
@@ -161,5 +163,16 @@ describe('handleMCPCallback', () => {
 		for (const banned of ['access_token', 'refresh_token', 'id_token', 'token_type']) {
 			assert.ok(!location.includes(banned), `${banned} must not appear in MCP redirect URL`);
 		}
+	});
+
+	it('never mints a code from a flow state without a client-authentication binding', async () => {
+		const unbound = { ...SAMPLE_MCP_STATE };
+		delete unbound.clientAuthMethod;
+		const result = await handleMCPCallback(SAMPLE_REQUEST, unbound, SAMPLE_USER_ID, SAMPLE_MCP_CONFIG);
+		const url = new URL(result.headers.Location);
+		assert.equal(url.searchParams.get('error'), 'invalid_request');
+		assert.match(url.searchParams.get('error_description'), /predates client authentication binding/);
+		assert.equal(url.searchParams.get('code'), null);
+		assert.equal(storedRecords.size, 0);
 	});
 });
