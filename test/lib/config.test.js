@@ -162,11 +162,23 @@ describe('OAuth Configuration', () => {
 			assert.match(warnings[0], /unresolved env placeholder/);
 		});
 		describe('unresolved "${VAR}" placeholder on a boolean gate throws instead of silently dropping (#207)', () => {
-			it('mcp.enabled itself always fails closed — no outer flag to hide behind', () => {
-				assert.throws(
-					() => normalizeMcpSecurityConfig({ enabled: '${MCP_ENABLED}' }),
-					/mcp\.enabled is the unresolved env placeholder.*MCP_ENABLED/s
-				);
+			it('mcp.enabled itself keeps the pre-#207 warn-and-drop behavior — dropping already lands on the safe direction (MCP off)', () => {
+				const warnings = [];
+				const logger = { warn: (...args) => warnings.push(args.join(' ')) };
+				const cfg = { enabled: '${MCP_ENABLED}' };
+				assert.doesNotThrow(() => normalizeMcpSecurityConfig(cfg, logger));
+				assert.equal(cfg.enabled, undefined, 'placeholder dropped — default (off) applies');
+				assert.equal(warnings.length, 1);
+				assert.match(warnings[0], /mcp\.enabled is the unresolved env placeholder.*MCP_ENABLED/s);
+			});
+			it('mcp.enabled as a placeholder also leaves a feature-scoped placeholder inert — the whole thing boots with MCP off', () => {
+				const warnings = [];
+				const logger = { warn: (...args) => warnings.push(args.join(' ')) };
+				const cfg = { enabled: '${MCP_ENABLED}', refreshTokenRequiresOfflineAccess: '${FLAG}' };
+				assert.doesNotThrow(() => normalizeMcpSecurityConfig(cfg, logger));
+				assert.equal(cfg.enabled, undefined);
+				assert.equal(cfg.refreshTokenRequiresOfflineAccess, undefined);
+				assert.equal(warnings.length, 2);
 			});
 			it('refreshTokenRequiresOfflineAccess throws while mcp is active', () => {
 				assert.throws(

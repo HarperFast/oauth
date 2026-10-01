@@ -105,12 +105,17 @@ export function coerceConfigBoolean(value: unknown): boolean | undefined {
  * and name the variable instead, exactly like `mcp.signingKeyPem` and
  * `redirectUri` do for the same placeholder shape.
  *
- * `failOnPlaceholder` defaults to true (used for `mcp.enabled` itself — the
- * master switch has no outer flag to hide an ambiguous value behind). Callers
- * normalizing a feature-scoped field pass `mcpConfig.enabled === true` so a
- * block that's disabled overall — or whose own `enabled` didn't resolve to
- * `true` — stays inert (byte-identical-boot contract) even if some other
- * placeholder is still sitting in its config.
+ * `failOnPlaceholder` defaults to true. The four feature-scoped fields
+ * (`mcp.refreshTokenRequiresOfflineAccess`, `mcp.clientCredentials.enabled`,
+ * `mcp.dynamicClientRegistration.enabled`, `mcp.clientIdMetadataDocuments.enabled`)
+ * pass `mcpConfig.enabled === true` so a block that's disabled overall — or
+ * whose own `enabled` didn't resolve to `true` — stays inert (byte-identical-
+ * boot contract) even if some other placeholder is still sitting in its
+ * config. `mcp.enabled` itself passes `false` explicitly: unlike the
+ * feature-scoped fields, dropping it already lands on the safe direction
+ * (MCP off), and there's no outer flag to hide an ambiguous value behind —
+ * throwing here would stop the whole plugin, including every provider's
+ * browser OAuth login, over one stray placeholder.
  */
 function normalizeBooleanField(
 	obj: Record<string, any>,
@@ -254,17 +259,23 @@ function validateDcrInitialAccessToken(dcr: Record<string, any>): void {
 /**
  * Normalize the security-relevant fields of the `mcp` config block in place,
  * so a mis-typed value can never silently flip a gate:
- * - Every documented boolean (`mcp.enabled`,
- *   `mcp.refreshTokenRequiresOfflineAccess`, `mcp.clientCredentials.enabled`,
+ * - The four feature-scoped documented booleans
+ *   (`mcp.refreshTokenRequiresOfflineAccess`, `mcp.clientCredentials.enabled`,
  *   `mcp.clientIdMetadataDocuments.enabled`,
- *   `mcp.dynamicClientRegistration.enabled`) is normalized totally via
+ *   `mcp.dynamicClientRegistration.enabled`) are normalized totally via
  *   {@link normalizeBooleanField}: coerced to a real boolean; a non-boolean,
  *   non-placeholder value is removed with a warning so the documented default
  *   applies; an unresolved `${VAR}` placeholder throws naming the variable
- *   (#207) — except on a feature-scoped field while the surface it gates
- *   isn't active (`mcp.enabled` itself is not `true`), which still drops with
- *   a warning so a disabled block stays inert. Consumers may therefore gate
- *   on plain truthiness / `!== false` without re-validating types.
+ *   (#207) while the surface it gates is active (`mcp.enabled === true`) —
+ *   while it's inactive, the placeholder still drops with a warning so a
+ *   disabled block stays inert. Consumers may therefore gate on plain
+ *   truthiness / `!== false` without re-validating types.
+ * - `mcp.enabled` itself keeps the pre-#207 warn-and-drop behavior for an
+ *   unresolved placeholder or empty value: it's dropped with a warning
+ *   naming the key, and the documented default (off) applies — it does NOT
+ *   throw. Dropping already lands on the safe direction, and failing closed
+ *   here would stop the whole plugin (every provider's browser OAuth login)
+ *   over one unset variable.
  * - `mcp.clientIdMetadataDocuments.allowedHosts` is normalized to an array of
  *   exact, lowercased hostnames. A scalar string (which `Array.includes` /
  *   `String.includes` would turn into substring matching) is wrapped into a
@@ -281,9 +292,14 @@ function validateDcrInitialAccessToken(dcr: Record<string, any>): void {
  *   registration is only ever chosen by omitting the key).
  */
 export function normalizeMcpSecurityConfig(mcpConfig: Record<string, any>, logger?: Logger): void {
-	// The master switch: no outer flag exists to hide an unresolved placeholder
-	// behind, so this one always fails closed (normalizeBooleanField's default).
-	normalizeBooleanField(mcpConfig, 'enabled', 'mcp.enabled', logger);
+	// The master switch keeps the pre-#207 warn-and-drop behavior instead of
+	// failing closed: dropping an unresolved mcp.enabled placeholder already
+	// lands on the safe direction (MCP off), and there's no outer flag to
+	// gate a throw behind here — it would take down the whole plugin,
+	// including every provider's browser OAuth login, over a single stray
+	// placeholder. The four feature-scoped booleans below still fail closed
+	// while MCP is active; this one never does.
+	normalizeBooleanField(mcpConfig, 'enabled', 'mcp.enabled', logger, false);
 	// Feature-scoped fields below only fail closed on their own placeholder when
 	// the surface they gate is actually active (mcp.enabled === true) — a
 	// disabled block must stay inert (byte-identical-boot contract) even if a
