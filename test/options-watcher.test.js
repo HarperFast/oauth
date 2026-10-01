@@ -3,6 +3,21 @@ import assert from 'node:assert/strict';
 import { handleApplication } from '../dist/index.js';
 import { OAuthResource } from '../dist/lib/resource.js';
 
+/**
+ * Poll `condition` instead of sleeping a fixed delay after firing a config
+ * change: `runUpdate`'s reload-ordering yield (`await setImmediate`) plus
+ * coverage instrumentation can push the real async completion past a short
+ * fixed sleep, which races rather than waits.
+ */
+async function waitFor(condition, { timeout = 2000, interval = 5 } = {}) {
+	const deadline = Date.now() + timeout;
+	for (;;) {
+		if (await condition()) return;
+		if (Date.now() >= deadline) throw new Error(`waitFor: condition not met within ${timeout}ms`);
+		await new Promise((resolve) => setTimeout(resolve, interval));
+	}
+}
+
 describe('OAuth Plugin Options Watcher', () => {
 	let scope;
 	let configChangeListeners;
@@ -254,6 +269,7 @@ describe('OAuth Plugin Options Watcher', () => {
 
 	it('should handle provider removal', async () => {
 		await handleApplication(scope);
+		const previousResource = resources.oauth;
 
 		// Remove all providers
 		scope.options._config = {
@@ -261,10 +277,9 @@ describe('OAuth Plugin Options Watcher', () => {
 			providers: {},
 		};
 
-		// Trigger change event and wait for async update
+		// Trigger change event and wait for the resource to actually be replaced
 		configChangeListeners[0]();
-		// Give async config update time to complete
-		await new Promise((resolve) => setTimeout(resolve, 10));
+		await waitFor(() => resources.oauth !== previousResource);
 
 		// Should set error resource when no providers
 		assert.ok(resources.oauth, 'OAuth resource should still exist');
@@ -285,11 +300,12 @@ describe('OAuth Plugin Options Watcher', () => {
 		};
 		await handleApplication(scope);
 		assert.equal(OAuthResource.mcpConfig?.enabled, true, 'MCP config should be live while a provider is configured');
+		const previousResource = resources.oauth;
 
 		// Reload to zero providers — the plugin is no longer validly configured.
 		scope.options._config = { debug: false, providers: {} };
 		configChangeListeners[0]();
-		await new Promise((resolve) => setTimeout(resolve, 10));
+		await waitFor(() => resources.oauth !== previousResource);
 
 		// Fail closed: the stale enabled MCP config must not survive, or withMCPAuth's
 		// default getter (and the well-known handlers) would keep verifying tokens /
@@ -325,7 +341,7 @@ describe('OAuth Plugin Options Watcher', () => {
 			},
 		};
 		configChangeListeners[0]();
-		await new Promise((resolve) => setTimeout(resolve, 10));
+		await waitFor(() => errorLogged);
 
 		assert.ok(errorLogged, 'the rejected reload should be logged');
 		assert.equal(
@@ -359,7 +375,7 @@ describe('OAuth Plugin Options Watcher', () => {
 			},
 		};
 		configChangeListeners[0]();
-		await new Promise((resolve) => setTimeout(resolve, 10));
+		await waitFor(() => errorLogged);
 
 		assert.ok(errorLogged, 'the rejected reload should be logged');
 		assert.equal(
@@ -404,7 +420,7 @@ describe('OAuth Plugin Options Watcher', () => {
 			scope.options._config.mcp.dynamicClientRegistration.initialAccessToken = '${_TEST_UNSET_DCR_TOKEN}';
 			configChangeListeners[0]();
 
-			await new Promise((resolve) => setTimeout(resolve, 10));
+			await waitFor(() => errorLogged);
 
 			assert.ok(errorLogged, 'the rejected (placeholder) snapshot should be logged');
 			assert.equal(
@@ -422,13 +438,14 @@ describe('OAuth Plugin Options Watcher', () => {
 			};
 			await handleApplication(scope);
 			const previousMcpConfig = OAuthResource.mcpConfig;
+			const previousResource = resources.oauth;
 
 			scope.options._config.mcp.dynamicClientRegistration.enabled = true;
 			configChangeListeners[0]();
 			scope.options._config.mcp.dynamicClientRegistration.initialAccessToken = 'a-real-token';
 			configChangeListeners[0]();
 
-			await new Promise((resolve) => setTimeout(resolve, 10));
+			await waitFor(() => resources.oauth !== previousResource);
 
 			assert.notEqual(OAuthResource.mcpConfig, previousMcpConfig, 'the valid reload should have applied');
 			assert.equal(OAuthResource.mcpConfig?.dynamicClientRegistration?.enabled, true);
@@ -484,8 +501,8 @@ describe('OAuth Plugin Options Watcher', () => {
 		// Trigger change event
 		configChangeListeners[0]();
 
-		// Give async error handling time to complete
-		await new Promise((resolve) => setTimeout(resolve, 10));
+		// Wait for the async error handling to actually complete
+		await waitFor(() => errorLogged);
 
 		// Should log error
 		assert.ok(errorLogged, 'Should log config update errors');
