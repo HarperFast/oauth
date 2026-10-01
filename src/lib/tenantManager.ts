@@ -8,6 +8,7 @@
 import type { OAuthProviderConfig, Logger } from '../types.ts';
 import { getProvider } from './providers/index.ts';
 import { validateTenantId, validateEmailDomain } from './providers/validation.ts';
+import { skipUndefined } from './config.ts';
 
 export interface TenantConfig {
 	/** Unique tenant identifier (e.g., 'acme-corp', 'globex') */
@@ -107,7 +108,10 @@ export class TenantManager {
 
 		// additionalConfig is spread last so callers can override any field it sets,
 		// but provider is pinned below regardless, so normalization above can't be
-		// defeated by a mixed-case additionalConfig.provider.
+		// defeated by a mixed-case additionalConfig.provider. undefined entries are
+		// skipped (mirroring buildProviderConfig in config.ts, #243) so a tenant row
+		// with e.g. additionalConfig: { scope: undefined } can't wipe out the preset
+		// default scope (#248); null and '' are explicit values and are kept as-is.
 		const providerConfig: OAuthProviderConfig = {
 			...baseProvider,
 			...providerSpecificConfig,
@@ -116,7 +120,7 @@ export class TenantManager {
 			clientSecret: tenant.clientSecret,
 			scope: tenant.scope || baseProvider.scope,
 			postLoginRedirect: tenant.postLoginRedirect,
-			...tenant.additionalConfig,
+			...skipUndefined(tenant.additionalConfig),
 		};
 		providerConfig.provider = normalizedProvider;
 
