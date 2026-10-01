@@ -5,9 +5,10 @@
  *      MCPAssertionJtiStore expires at its own expiry (the later of the
  *      assertion's exp and insertion time, plus 60 s), not at the table
  *      default of 120 s, and is refused as a replay until then.
- *   2. Concurrent presentations of one jti: at most one is accepted (an
- *      atomic counter; see assertionJtiStore.ts), and a presentation after
- *      the burst is refused.
+ *   2. A single presentation of a fresh jti is accepted. Concurrent
+ *      presentations of one jti: at most one is accepted (an atomic counter;
+ *      see assertionJtiStore.ts), and a presentation after the burst is
+ *      refused.
  *   3. Concurrent refreshes of one refresh token through POST
  *      /oauth/mcp/token (rotation is not atomic; see refreshTokenStore.ts):
  *      at least one refresh succeeds. If any refresh is refused as
@@ -18,14 +19,19 @@
  *      written after a revocation keeps the revocation and every other field.
  *   5. A parameter repeated in a form-encoded POST /oauth/mcp/token is refused
  *      with invalid_request before the grant is processed.
+ *   6. A headless client_credentials grant through POST /oauth/mcp/token, which
+ *      runs inside Harper's REST request transaction: a fresh assertion is
+ *      accepted, and its replay is refused with invalid_grant.
  *
- * The fixture's TEST-ONLY /mcp-test routes call the plugin's own stores; no
- * CIMD document is fetched.
+ * The fixture's TEST-ONLY /mcp-test routes call the plugin's own stores
+ * outside a request transaction. The fixture serves the headless client's
+ * CIMD document through the plugin's resolver seams; nothing is fetched over
+ * the network.
  */
 
 import { suite, test, before, after } from 'node:test';
 import { strictEqual, ok } from 'node:assert/strict';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, createPrivateKey, randomUUID, sign } from 'node:crypto';
 import { join, dirname } from 'node:path';
 import { createRequire } from 'node:module';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -39,6 +45,32 @@ function getHarperBinPath(): string {
 
 const fixturePath = join(import.meta.dirname, 'fixtures', 'mcp-runtime-app');
 const CLIENT_ID = 'runtime-public-client';
+
+// The fixture's TEST-ONLY headless client; runtime-app.js publishes the public
+// half of the key derived from the same label in its CIMD document.
+const HEADLESS_CLIENT_ID = 'https://agent.test/headless/agent.json';
+const HEADLESS_KEY = createPrivateKey({
+	key: Buffer.concat([
+		Buffer.from('302e020100300506032b657004220420', 'hex'),
+		createHash('sha256').update('mcp-runtime-app headless test key').digest(),
+	]),
+	format: 'der',
+	type: 'pkcs8',
+});
+
+function headlessAssertion(): string {
+	const now = Math.floor(Date.now() / 1000);
+	const segment = (value: object) => Buffer.from(JSON.stringify(value)).toString('base64url');
+	const signingInput = `${segment({ alg: 'EdDSA', typ: 'JWT' })}.${segment({
+		iss: HEADLESS_CLIENT_ID,
+		sub: HEADLESS_CLIENT_ID,
+		aud: 'https://mcp.test',
+		iat: now,
+		exp: now + 30,
+		jti: randomUUID(),
+	})}`;
+	return `${signingInput}.${sign(null, Buffer.from(signingInput), HEADLESS_KEY).toString('base64url')}`;
+}
 
 suite('MCP runtime: replay retention and concurrent refresh', (ctx: ContextWithHarper) => {
 	before(async () => {
@@ -65,6 +97,19 @@ suite('MCP runtime: replay retention and concurrent refresh', (ctx: ContextWithH
 			method: 'POST',
 			headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
 			body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: refreshToken, client_id: CLIENT_ID }),
+		});
+	}
+
+	function clientCredentials(assertion: string): Promise<Response> {
+		return fetch(new URL('/oauth/mcp/token', ctx.harper.httpURL), {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({
+				grant_type: 'client_credentials',
+				client_id: HEADLESS_CLIENT_ID,
+				client_assertion_type: 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer',
+				client_assertion: assertion,
+			}),
 		});
 	}
 
@@ -105,12 +150,26 @@ suite('MCP runtime: replay retention and concurrent refresh', (ctx: ContextWithH
 
 	test('concurrent presentations of one jti: at most one is accepted', async () => {
 		const client = 'https://agent.test/concurrent-client.json';
+		const single = { client_id: client, jti: randomUUID(), exp: Math.floor(Date.now() / 1000) + 60 };
+		strictEqual((await testRoute('/replay', single)).fresh, true, 'a single fresh presentation is accepted');
 		for (let burst = 0; burst < 20; burst++) {
 			const row = { client_id: client, jti: randomUUID(), exp: Math.floor(Date.now() / 1000) + 60 };
 			const results = await Promise.all(Array.from({ length: 8 }, () => testRoute('/replay', row)));
 			ok(results.filter((r) => r.fresh).length <= 1, 'at most one presentation is accepted');
 			strictEqual((await testRoute('/replay', row)).fresh, false, 'a presentation after the burst is refused');
 		}
+	});
+
+	test('client_credentials through POST /oauth/mcp/token: a fresh assertion is accepted, its replay is invalid_grant', async () => {
+		const assertion = headlessAssertion();
+		const first = await clientCredentials(assertion);
+		const issued = await first.json();
+		strictEqual(first.status, 200, JSON.stringify(issued));
+		strictEqual(typeof issued.access_token, 'string');
+		const replay = await clientCredentials(assertion);
+		const refused = await replay.json();
+		strictEqual(replay.status, 400, JSON.stringify(refused));
+		strictEqual(refused.error, 'invalid_grant');
 	});
 
 	test('a rotation written after a revocation keeps it and every other field', async () => {

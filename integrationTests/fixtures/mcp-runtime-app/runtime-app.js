@@ -1,7 +1,7 @@
 /**
  * TEST-ONLY routes for the runtime characterization suite. They call the
  * plugin's own stores so the suite exercises its real code against real
- * Harper tables, without a CIMD document fetch. Never deploy this fixture.
+ * Harper tables. Never deploy this fixture.
  *
  *   GET /mcp-test/replay?client_id&jti&exp      → { fresh } (MCPAssertionJtiStore.checkAndRecord)
  *   GET /mcp-test/replay-row?client_id&jti      → { exists, expires_at, expiresAt }
@@ -9,9 +9,20 @@
  *   GET /mcp-test/family?id                     → the stored family, or { exists: false }
  *   GET /mcp-test/revoke?id                     → {} (MCPRefreshFamilyStore.revoke)
  *   GET /mcp-test/rotate?id&hash                → {} (MCPRefreshFamilyStore.rotate)
+ *
+ * These routes are server.http handlers and run outside a request transaction;
+ * Harper's REST handler runs POST /oauth/mcp/token inside one.
+ *
+ * It also serves the CIMD document of one TEST-ONLY headless
+ * (client_credentials) client, HEADLESS_CLIENT_ID, through the plugin's
+ * resolver seams (_setDnsLookup, _setFetch), so no network is involved. The
+ * document's inline Ed25519 key derives from HEADLESS_KEY_LABEL, which
+ * mcp-runtime.test.ts uses to sign that client's assertions.
  */
+import { createHash, createPrivateKey, createPublicKey } from 'node:crypto';
 import { server, databases } from 'harper';
 import { MCPAssertionJtiStore, jtiKey } from './node_modules/@harperfast/oauth/dist/lib/mcp/assertionJtiStore.js';
+import { _setDnsLookup, _setFetch } from './node_modules/@harperfast/oauth/dist/lib/mcp/cimd.js';
 import { MCPClientStore } from './node_modules/@harperfast/oauth/dist/lib/mcp/clientStore.js';
 import {
 	MCPRefreshFamilyStore,
@@ -20,6 +31,45 @@ import {
 } from './node_modules/@harperfast/oauth/dist/lib/mcp/refreshTokenStore.js';
 
 const RUNTIME_CLIENT_ID = 'runtime-public-client';
+
+const HEADLESS_CLIENT_ID = 'https://agent.test/headless/agent.json';
+const HEADLESS_KEY_LABEL = 'mcp-runtime-app headless test key';
+const ED25519_PKCS8_PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex');
+const headlessKey = createPrivateKey({
+	key: Buffer.concat([ED25519_PKCS8_PREFIX, createHash('sha256').update(HEADLESS_KEY_LABEL).digest()]),
+	format: 'der',
+	type: 'pkcs8',
+});
+const HEADLESS_DOCUMENT = JSON.stringify({
+	client_id: HEADLESS_CLIENT_ID,
+	client_name: 'Runtime headless agent',
+	grant_types: ['client_credentials'],
+	token_endpoint_auth_method: 'private_key_jwt',
+	jwks: { keys: [createPublicKey(headlessKey).export({ format: 'jwk' })] },
+});
+
+_setDnsLookup(async (hostname) => {
+	if (hostname !== 'agent.test') throw new Error(`the fixture resolves only agent.test, not ${hostname}`);
+	return [{ address: '93.184.216.34', family: 4 }];
+});
+_setFetch(async (url) => {
+	const found = url === HEADLESS_CLIENT_ID;
+	const bytes = Buffer.from(found ? HEADLESS_DOCUMENT : '{}');
+	let sent = false;
+	return {
+		status: found ? 200 : 404,
+		headers: new Map([
+			['content-type', 'application/json'],
+			['content-length', String(bytes.length)],
+		]),
+		body: {
+			getReader: () => ({
+				read: async () => (sent ? { done: true, value: undefined } : ((sent = true), { done: false, value: bytes })),
+				cancel: () => {},
+			}),
+		},
+	};
+});
 
 const json = (body, status = 200) => ({
 	status,

@@ -27,10 +27,18 @@
  * conflicting write. Only the presentation that reads back `uses === 1` is
  * accepted; every other is refused as a replay, including concurrent ones. A
  * row that already exists before the increment (one written by an earlier
- * version carries no `uses`) is a replay. This holds per node: within the
- * replication delay, each node can accept one presentation. Do NOT replace this
- * table with a per-process cache, which would not be shared across workers or
- * nodes.
+ * version carries no `uses`) is a replay.
+ *
+ * The patch commits in its own transaction. The existence check reads in the
+ * caller's transaction, which inside a REST request is the request's: its
+ * snapshot does not include the patch. The read-back therefore passes a new
+ * context object, so it opens its own transaction and sees the committed
+ * count. Harper writes `context.transaction` onto the object it is given, so
+ * each read-back gets a fresh object, never a shared one.
+ *
+ * Single use holds per node: within the replication delay, each node can
+ * accept one presentation. Do NOT replace this table with a per-process cache,
+ * which would not be shared across workers or nodes.
  *
  * Unlike the other MCP stores, storage errors here are NOT swallowed:
  * treating "could not check" as "not seen" would fail open on the one guard
@@ -125,7 +133,9 @@ export class MCPAssertionJtiStore {
 				{ client_id: clientId, expires_at: expiresAt, uses: { __op__: 'add', value: 1 } },
 				{ expiresAt }
 			);
-			if ((await table.get(id))?.uses === 1) {
+			// A new context: the read opens its own transaction and sees the
+			// committed patch (see the module comment).
+			if ((await table.get(id, {}))?.uses === 1) {
 				this.logger?.debug?.(`Recorded MCP assertion jti for client ${clientId}`);
 				return true;
 			}

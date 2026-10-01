@@ -906,7 +906,13 @@ export interface ProviderRegistry {
  * Methods available on a Harper table
  */
 export interface Table {
-	get(id: string): Promise<any>;
+	/**
+	 * Read a record. Without a context the read joins the caller's transaction
+	 * (inside a REST request, the request's, which reads one snapshot). A
+	 * context with no `transaction` opens a new transaction; Harper writes
+	 * `context.transaction` onto it, so pass a new object for each read.
+	 */
+	get(id: string, context?: Record<string, unknown>): Promise<any>;
 	put(record: any): Promise<any>;
 	/**
 	 * Partial update: writes only the given fields, applied at commit on top of

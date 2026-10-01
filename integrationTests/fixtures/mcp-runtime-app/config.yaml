@@ -3,8 +3,9 @@
 #
 # Loads the OAuth plugin with MCP enabled and a pinned issuer/resource, plus
 # runtime-app.js, which exposes TEST-ONLY routes under /mcp-test that call the
-# plugin's own stores (never deploy this fixture). A provider is configured so
-# the plugin configures itself; the test never contacts it.
+# plugin's own stores and serves one headless client's CIMD document through
+# the plugin's resolver seams (never deploy this fixture). A provider is
+# configured so the plugin configures itself; the test never contacts it.
 
 rest: true
 
@@ -23,6 +24,10 @@ rest: true
     enabled: true
     issuer: 'https://mcp.test'
     resource: 'https://mcp.test/mcp'
+    clientIdMetadataDocuments:
+      allowedHosts: ['agent.test']
+    clientCredentials:
+      enabled: true
 
 jsResource:
   files: 'runtime-app.js'

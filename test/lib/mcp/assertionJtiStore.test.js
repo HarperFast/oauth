@@ -74,6 +74,33 @@ describe('MCPAssertionJtiStore', () => {
 		assert.equal(storedRecords.size, 1, 'replay does not write a second record');
 	});
 
+	it('reads back in its own transaction, not the request snapshot that predates the patch', async () => {
+		// Inside a REST request a read without a context joins the request's
+		// transaction, whose snapshot is taken at its first read; the patch
+		// commits separately and is not in it. A read with a context opens a
+		// new transaction and sees committed rows.
+		const readBackContexts = [];
+		let snapshot;
+		mockTable.get = async (id, context) => {
+			if (context === undefined) {
+				snapshot ??= new Map(storedRecords);
+				return snapshot.get(id) ?? null;
+			}
+			readBackContexts.push(context);
+			return storedRecords.get(id) ?? null;
+		};
+		const inRequest = (jti) => {
+			snapshot = undefined; // each request reads its own snapshot
+			return store.checkAndRecord('client-1', jti);
+		};
+		for (const jti of ['jti-one', 'jti-two']) {
+			assert.equal(await inRequest(jti), true, `${jti}: a fresh assertion is accepted`);
+			assert.equal(await inRequest(jti), false, `${jti}: its replay is refused`);
+		}
+		assert.equal(readBackContexts.length, 2, 'one read-back per first presentation');
+		assert.notEqual(readBackContexts[0], readBackContexts[1], 'each read-back gets a new context object');
+	});
+
 	it('treats ANY pre-existing record as a replay, including one without uses (an earlier version wrote it)', async () => {
 		storedRecords.set(jtiKey('client-1', 'jti-abc'), {});
 		assert.equal(await store.checkAndRecord('client-1', 'jti-abc'), false);
