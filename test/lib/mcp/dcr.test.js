@@ -87,6 +87,27 @@ describe('handleRegister (RFC 7591 DCR)', () => {
 			});
 			assert.equal(response.status, 201);
 		});
+
+		it('returns 404 when the DCR block is a non-object scalar (e.g. a misconfigured `false`) — must not fail open', async () => {
+			// `dcrConfig.enabled` on a non-object is always undefined, which a
+			// naive `!== false` check would treat as "enabled". normalizeMcpSecurityConfig
+			// rejects this shape at boot; dcrEnabled() is the defense-in-depth check here.
+			const response = await handleRegister(makeRequest(), VALID_BODY, {
+				enabled: true,
+				dynamicClientRegistration: false,
+			});
+			assert.equal(response.status, 404);
+			assert.equal(storedRecords.size, 0);
+		});
+
+		it('returns 404 when the DCR block is an unresolved placeholder string', async () => {
+			const response = await handleRegister(makeRequest(), VALID_BODY, {
+				enabled: true,
+				dynamicClientRegistration: '${DCR_BLOCK}',
+			});
+			assert.equal(response.status, 404);
+			assert.equal(storedRecords.size, 0);
+		});
 	});
 
 	describe('initial access token gate', () => {

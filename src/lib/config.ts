@@ -285,7 +285,17 @@ export function normalizeMcpSecurityConfig(mcpConfig: Record<string, any>, logge
 	}
 
 	const dcr = mcpConfig.dynamicClientRegistration;
-	if (dcr && typeof dcr === 'object') {
+	if (dcr !== undefined && dcr !== null && typeof dcr !== 'object') {
+		// A non-object, non-null value (`false`, `0`, an unresolved placeholder
+		// string, ...) must not reach dcrEnabled()'s `dcrConfig != null &&
+		// dcrConfig.enabled !== false` predicate — `.enabled` on a non-object is
+		// always `undefined`, so that check falls through to its default-ENABLED
+		// result and silently turns a would-be "disable DCR" value into open
+		// registration. Fail loudly instead of guessing.
+		if (mcpActive) {
+			throw new Error('mcp.dynamicClientRegistration must be a mapping; use enabled: false to disable');
+		}
+	} else if (dcr && typeof dcr === 'object') {
 		normalizeBooleanField(dcr, 'enabled', 'mcp.dynamicClientRegistration.enabled', logger, mcpActive);
 		// Only when MCP itself is enabled and DCR isn't explicitly disabled — a
 		// disabled block must stay inert, matching mcp.signingKeyPem's gating
@@ -296,7 +306,16 @@ export function normalizeMcpSecurityConfig(mcpConfig: Record<string, any>, logge
 	}
 
 	const cimd = mcpConfig.clientIdMetadataDocuments;
-	if (cimd && typeof cimd === 'object') {
+	if (cimd !== undefined && cimd !== null && typeof cimd !== 'object') {
+		// Same non-object guard as dynamicClientRegistration above: CIMD's own
+		// `cimdConfig?.enabled !== false` predicate (cimd.ts) also falls through
+		// to its default — for CIMD that default is already "enabled", so a
+		// scalar block meant to disable it (`clientIdMetadataDocuments: false`)
+		// would otherwise be silently ignored rather than taking effect.
+		if (mcpActive) {
+			throw new Error('mcp.clientIdMetadataDocuments must be a mapping; use enabled: false to disable');
+		}
+	} else if (cimd && typeof cimd === 'object') {
 		normalizeBooleanField(cimd, 'enabled', 'mcp.clientIdMetadataDocuments.enabled', logger, mcpActive);
 
 		if (cimd.allowedHosts !== undefined) {

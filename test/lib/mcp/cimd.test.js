@@ -1059,4 +1059,15 @@ describe('resolveClient — routing', () => {
 		});
 		assert.equal(result, null);
 	});
+
+	it('skips CIMD when clientIdMetadataDocuments is a non-object scalar (e.g. a misconfigured `false`) — must not fail open', async () => {
+		// `cimdConfig?.enabled` on a non-object is always undefined, which a naive
+		// `!== false` check would default to "enabled" (CIMD's default-on
+		// semantics) — silently ignoring the operator's attempt to disable it.
+		const result = await resolveClient(VALID_URL, {
+			enabled: true,
+			clientIdMetadataDocuments: false,
+		});
+		assert.equal(result, null);
+	});
 });

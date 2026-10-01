@@ -207,6 +207,37 @@ describe('OAuth Configuration', () => {
 				assert.doesNotThrow(() => normalizeMcpSecurityConfig({ refreshTokenRequiresOfflineAccess: '${FLAG}' }));
 			});
 		});
+
+		describe('non-object dynamicClientRegistration / clientIdMetadataDocuments blocks must not fail open', () => {
+			it('a non-object, non-null dynamicClientRegistration block throws while mcp is active', () => {
+				assert.throws(
+					() => normalizeMcpSecurityConfig({ enabled: true, dynamicClientRegistration: false }),
+					/mcp\.dynamicClientRegistration must be a mapping; use enabled: false to disable/
+				);
+				assert.throws(
+					() => normalizeMcpSecurityConfig({ enabled: true, dynamicClientRegistration: 0 }),
+					/mcp\.dynamicClientRegistration must be a mapping/
+				);
+				assert.throws(
+					() => normalizeMcpSecurityConfig({ enabled: true, dynamicClientRegistration: '${DCR_BLOCK}' }),
+					/mcp\.dynamicClientRegistration must be a mapping/
+				);
+			});
+			it('a non-object, non-null clientIdMetadataDocuments block throws while mcp is active', () => {
+				assert.throws(
+					() => normalizeMcpSecurityConfig({ enabled: true, clientIdMetadataDocuments: false }),
+					/mcp\.clientIdMetadataDocuments must be a mapping; use enabled: false to disable/
+				);
+			});
+			it('a non-object block on either stays inert when mcp is inactive (byte-identical-boot contract)', () => {
+				assert.doesNotThrow(() => normalizeMcpSecurityConfig({ dynamicClientRegistration: false }));
+				assert.doesNotThrow(() => normalizeMcpSecurityConfig({ enabled: false, clientIdMetadataDocuments: 0 }));
+			});
+			it('a bare null block (YAML key with no children) is unaffected — still means absent/disabled', () => {
+				assert.doesNotThrow(() => normalizeMcpSecurityConfig({ enabled: true, dynamicClientRegistration: null }));
+				assert.doesNotThrow(() => normalizeMcpSecurityConfig({ enabled: true, clientIdMetadataDocuments: null }));
+			});
+		});
 		it('drops any other non-boolean value with a warning (total normalization)', () => {
 			const warnings = [];
 			const logger = { warn: (...args) => warnings.push(args.join(' ')) };
