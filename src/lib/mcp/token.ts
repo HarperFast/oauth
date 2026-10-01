@@ -241,8 +241,8 @@ export function parseBasicAuth(authHeader: string | undefined): { clientId: stri
 
 /**
  * One body parameter's value: `{}` when absent, `{ value }` for a single
- * non-empty string, `{ invalid: true }` when present but empty or repeated
- * (a repeated form field arrives as an array).
+ * non-empty string, `{ invalid: true }` when present but empty or not a
+ * string (an array, for example).
  */
 function singleParameter(body: any, name: string): { value?: string } | { invalid: true } {
 	const raw = body?.[name];
@@ -324,8 +324,8 @@ function methodMismatch(
  *   some public clients send) → none; PKCE is the proof.
  *
  * Rejected before any lookup with invalid_request (RFC 6749 §5.2): a
- * repeated parameter, an empty credential parameter, a partial assertion
- * pair, and more than one mechanism (RFC 6749 §2.3, RFC 7521 §4.2.1) — an
+ * parameter repeated in a form body, a client_id or credential parameter that
+ * is empty or not a single string, a partial assertion pair, and more than one mechanism (RFC 6749 §2.3, RFC 7521 §4.2.1) — an
  * empty-secret Basic header never accompanies an assertion. Rejected before
  * any lookup with invalid_client: an unknown client_assertion_type, malformed
  * Basic credentials, and an assertion longer than the verifier accepts.
@@ -336,6 +336,9 @@ async function authenticateClient(
 	mcpConfig: MCPConfig | undefined,
 	logger?: Logger
 ): Promise<ClientAuthResult> {
+	// Harper's form deserializer keeps a repeated field's first value under its
+	// own name and records the repetition as an array under `key`.
+	if (Array.isArray(body?.key)) return invalidRequest('Request parameters must not be repeated');
 	const basic = readBasicAuth(getRequestHeader(request?.headers, 'authorization'));
 	if ('malformed' in basic) return invalidClient('Malformed Basic client credentials');
 

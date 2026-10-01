@@ -344,6 +344,38 @@ describe('handleToken — shared client authenticator', () => {
 			assertInvalidRequest(await exchange(withAssertion, { headers: basic('public-1', '') }), /Multiple/);
 		});
 
+		it('rejects any parameter repeated in a form body (invalid_request)', async () => {
+			// The body Harper's application/x-www-form-urlencoded deserializer builds
+			// (harper server/serverHelpers/contentTypes.ts): the first value stays
+			// under its name, the repetition goes to `key`.
+			const harperForm = (query) => {
+				const object = {};
+				for (const [name, value] of new URLSearchParams(query)) {
+					if (Object.hasOwn(object, name)) {
+						const last = object[name];
+						if (Array.isArray(last)) last.push(value);
+						else object.key = [last, value];
+					} else object[name] = value;
+				}
+				return object;
+			};
+			const form = `grant_type=authorization_code&code=code-1&code_verifier=${CODE_VERIFIER}&redirect_uri=${encodeURIComponent(REDIRECT)}`;
+			for (const repeat of ['client_id=public-1&client_id=public-1', 'client_id=public-1&code=code-1']) {
+				const body = harperForm(`${form}&${repeat}`);
+				const res = await handleToken({ headers: {} }, body, DEFAULT, undefined, logger);
+				assertInvalidRequest(res, /must not be repeated/);
+			}
+			assert.equal(codes.has('code-1'), true, 'no code consumed');
+			const once = await handleToken(
+				{ headers: {} },
+				harperForm(`${form}&client_id=public-1`),
+				DEFAULT,
+				undefined,
+				logger
+			);
+			assert.equal(once.status, 200, JSON.stringify(once.body));
+		});
+
 		it('challenges for Basic on a 401 only when the request used Basic', async () => {
 			const challenged = await exchange(publicBody, { headers: { authorization: 'Basic !!!' } });
 			assertInvalidClient(challenged, /Malformed Basic/);

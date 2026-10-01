@@ -16,6 +16,8 @@
  *      revokes the family.
  *   4. A family's rotation and revocation are partial updates: a rotation
  *      written after a revocation keeps the revocation and every other field.
+ *   5. A parameter repeated in a form-encoded POST /oauth/mcp/token is refused
+ *      with invalid_request before the grant is processed.
  *
  * The fixture's TEST-ONLY /mcp-test routes call the plugin's own stores; no
  * CIMD document is fetched.
@@ -121,6 +123,26 @@ suite('MCP runtime: replay retention and concurrent refresh', (ctx: ContextWithH
 		strictEqual(family.client_id, CLIENT_ID);
 		strictEqual(family.client_auth_method, 'none');
 		strictEqual(family.resource, 'https://mcp.test/mcp');
+	});
+
+	test('a parameter repeated in a form-encoded token request is invalid_request', async () => {
+		const { refreshToken, familyId } = await testRoute('/seed-family');
+		const before = await testRoute('/family', { id: familyId });
+		const body = new URLSearchParams({
+			grant_type: 'refresh_token',
+			refresh_token: refreshToken,
+			client_id: CLIENT_ID,
+		});
+		body.append('client_id', CLIENT_ID);
+		const res = await fetch(new URL('/oauth/mcp/token', ctx.harper.httpURL), {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+			body,
+		});
+		strictEqual(res.status, 400);
+		strictEqual((await res.json()).error, 'invalid_request');
+		strictEqual((await testRoute('/family', { id: familyId })).current_token_hash, before.current_token_hash);
+		strictEqual((await refresh(refreshToken)).status, 200, 'the same request without the repeat refreshes');
 	});
 
 	test('concurrent refreshes of one refresh token (characterization)', async () => {
