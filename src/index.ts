@@ -64,6 +64,16 @@ export { withMCPAuth } from './lib/mcp/withMCPAuth.ts';
 export type { WithMCPAuthOptions } from './lib/mcp/withMCPAuth.ts';
 export type { MCPRequestClaims } from './types.ts';
 
+function isHttpsOrLoopbackIssuer(issuer: string): boolean {
+	const url = new URL(issuer);
+	return (
+		url.protocol === 'https:' ||
+		url.hostname === 'localhost' ||
+		url.hostname === '127.0.0.1' ||
+		url.hostname === '[::1]'
+	);
+}
+
 // Store hooks registered at module load time and active hookManager
 let pendingHooks: OAuthHooks | null = null;
 let activeHookManager: HookManager | null = null;
@@ -247,10 +257,7 @@ export async function handleApplication(scope: Scope): Promise<void> {
 			// AS is a startup error. Loopback stays allowed for local development.
 			// (mcp.issuer is guaranteed present and origin-validated by the
 			// mcp.enabled checks above, which throw before this block runs.)
-			const issuerUrl = new URL(mcpConfig.issuer!);
-			const loopback =
-				issuerUrl.hostname === 'localhost' || issuerUrl.hostname === '127.0.0.1' || issuerUrl.hostname === '[::1]';
-			if (issuerUrl.protocol !== 'https:' && !loopback) {
+			if (!isHttpsOrLoopbackIssuer(mcpConfig.issuer!)) {
 				throw new Error(
 					'mcp.clientCredentials.enabled requires an https: mcp.issuer (the token endpoint must be TLS ' +
 						'per RFC 6749 §3.2); http: is only permitted for loopback development issuers.'
@@ -268,10 +275,7 @@ export async function handleApplication(scope: Scope): Promise<void> {
 						'(mcp.clientIdMetadataDocuments.enabled must not be false).'
 				);
 			}
-			const issuerUrl = new URL(mcpConfig.issuer!);
-			const loopback =
-				issuerUrl.hostname === 'localhost' || issuerUrl.hostname === '127.0.0.1' || issuerUrl.hostname === '[::1]';
-			if (issuerUrl.protocol !== 'https:' && !loopback) {
+			if (!isHttpsOrLoopbackIssuer(mcpConfig.issuer!)) {
 				throw new Error(
 					'mcp.clientIdMetadataDocuments.privateKeyJwt.enabled requires an https: mcp.issuer; http: is only ' +
 						'permitted for loopback development issuers.'

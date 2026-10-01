@@ -829,9 +829,9 @@ describe('handleToken', () => {
 		assert.deepEqual(
 			lines.filter((l) => l.startsWith('MCP token:')),
 			[
-				'MCP token: refresh replay detected, but the family revocation could not be persisted; the request was refused with invalid_grant and the family stays live',
+				`MCP token: refresh replay detected for family ${familyId}, but its revocation could not be persisted; the request was refused with invalid_grant and the family stays live`,
 			],
-			'the handler logs one fixed line, without the error text'
+			'the handler logs one line with the family id and without the error text'
 		);
 
 		// Once the store accepts writes, the same presentation revokes the family.

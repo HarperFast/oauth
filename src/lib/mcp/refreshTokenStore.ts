@@ -168,7 +168,7 @@ export class MCPRefreshFamilyStore {
 	private async patch(familyId: string, update: Record<string, unknown>): Promise<void> {
 		const table = getFamiliesTable();
 		try {
-			await table.patch(familyId, update);
+			await table.patch(familyId, update, {});
 		} catch (error) {
 			this.logger?.error?.('Failed to update MCP refresh family:', error);
 			throw error;

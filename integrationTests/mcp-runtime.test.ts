@@ -17,17 +17,16 @@
  *      revokes the family.
  *   4. A family's rotation and revocation are partial updates: a rotation
  *      written after a revocation keeps the revocation and every other field.
- *   5. A form-encoded refresh with client_id sent twice is judged on the first
- *      value (Harper 5.1.9, without HarperFast/harper#2953): invalid_client when
- *      the first is unknown, consuming nothing, and a refresh when it is the
- *      client.
+ *   5. A form-encoded refresh with client_id sent twice uses the first value
+ *      on the old Harper parser; a parser with HarperFast/harper#2953 makes
+ *      either ordering invalid_request.
  *   6. A headless client_credentials grant through POST /oauth/mcp/token, which
  *      runs inside Harper's REST request transaction: a fresh assertion is
  *      accepted, and its replay is refused with invalid_grant.
- *   7. On that grant, a form body with resource sent twice is judged on the
- *      first value, as in 5: invalid_target when the first is not the MCP
- *      resource, consuming nothing, and accepted when it is; vendor_options as
- *      a JSON array and vendor sent twice in a form body are ignored.
+ *   7. On that grant, a form body with resource sent twice uses the first
+ *      value on the old parser; a parser with HarperFast/harper#2953 checks
+ *      both values. Vendor_options as a JSON array and vendor sent twice in
+ *      a form body are ignored.
  *
  * The fixture's TEST-ONLY /mcp-test routes call the plugin's own stores
  * outside a request transaction. The fixture serves the headless client's
@@ -47,6 +46,22 @@ const require = createRequire(import.meta.url);
 
 function getHarperBinPath(): string {
 	return join(dirname(require.resolve('harper')), 'bin', 'harper.js');
+}
+
+function formParserKeepsRepeatedValues(): boolean {
+	const parserPath = join(dirname(require.resolve('harper')), 'server', 'serverHelpers', 'contentTypes.js');
+	const { getDeserializer } = require(parserPath);
+	const parsed = getDeserializer('application/x-www-form-urlencoded')(
+		'resource=first&resource=second&client_id=first&client_id=second'
+	);
+	if (Array.isArray(parsed.resource)) {
+		strictEqual(parsed.resource.join(','), 'first,second');
+		strictEqual(parsed.client_id.join(','), 'first,second');
+		return true;
+	}
+	strictEqual(parsed.resource, 'first', 'the installed parser has the old repeated-field shape');
+	strictEqual(parsed.client_id, 'first', 'the installed parser has the old repeated-field shape');
+	return false;
 }
 
 const fixturePath = join(import.meta.dirname, 'fixtures', 'mcp-runtime-app');
@@ -183,7 +198,8 @@ suite('MCP runtime: replay retention and concurrent refresh', (ctx: ContextWithH
 		strictEqual(refused.error, 'invalid_grant');
 	});
 
-	test('client_credentials with resource sent twice in a form body is judged on the first value', async () => {
+	test('client_credentials with resource sent twice follows the installed form parser', async () => {
+		const keepsRepeats = formParserKeepsRepeatedValues();
 		const assertion = headlessAssertion();
 		const refused = await clientCredentials(assertion, [
 			['resource', 'https://other.test/mcp'],
@@ -196,7 +212,9 @@ suite('MCP runtime: replay retention and concurrent refresh', (ctx: ContextWithH
 			['resource', 'https://mcp.test/mcp'],
 			['resource', 'https://other.test/mcp'],
 		]);
-		strictEqual(accepted.status, 200, `the refusal consumed nothing: ${JSON.stringify(await accepted.json())}`);
+		const outcome = await accepted.json();
+		strictEqual(accepted.status, keepsRepeats ? 400 : 200, JSON.stringify(outcome));
+		if (keepsRepeats) strictEqual(outcome.error, 'invalid_target');
 	});
 
 	test('client_credentials ignores vendor_options as a JSON array and vendor sent twice in a form body', async () => {
@@ -225,7 +243,8 @@ suite('MCP runtime: replay retention and concurrent refresh', (ctx: ContextWithH
 		strictEqual(family.resource, 'https://mcp.test/mcp');
 	});
 
-	test('a form-encoded refresh with client_id sent twice is judged on the first value', async () => {
+	test('a form-encoded refresh with client_id sent twice follows the installed form parser', async () => {
+		const keepsRepeats = formParserKeepsRepeatedValues();
 		const { refreshToken, familyId } = await testRoute('/seed-family');
 		const before = await testRoute('/family', { id: familyId });
 		const refreshAs = (first: string, second: string) => {
@@ -238,10 +257,12 @@ suite('MCP runtime: replay retention and concurrent refresh', (ctx: ContextWithH
 			});
 		};
 		const unknownFirst = await refreshAs('unknown-client', CLIENT_ID);
-		strictEqual(unknownFirst.status, 401);
-		strictEqual((await unknownFirst.json()).error, 'invalid_client');
+		strictEqual(unknownFirst.status, keepsRepeats ? 400 : 401);
+		strictEqual((await unknownFirst.json()).error, keepsRepeats ? 'invalid_request' : 'invalid_client');
 		strictEqual((await testRoute('/family', { id: familyId })).current_token_hash, before.current_token_hash);
-		strictEqual((await refreshAs(CLIENT_ID, 'unknown-client')).status, 200, 'the second client_id is not used');
+		const clientFirst = await refreshAs(CLIENT_ID, 'unknown-client');
+		strictEqual(clientFirst.status, keepsRepeats ? 400 : 200);
+		if (keepsRepeats) strictEqual((await clientFirst.json()).error, 'invalid_request');
 	});
 
 	test('concurrent refreshes of one refresh token (characterization)', async () => {

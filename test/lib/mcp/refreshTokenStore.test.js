@@ -155,15 +155,19 @@ describe('MCPRefreshFamilyStore', () => {
 
 	it('rotate() and revoke() are partial updates of their own field', async () => {
 		const calls = [];
-		global.databases.oauth.mcp_refresh_families.patch = async (id, update) => {
-			calls.push([id, update]);
+		global.databases.oauth.mcp_refresh_families.patch = async (id, update, context) => {
+			calls.push([id, update, context]);
 		};
 		await store.rotate('fam-1', 'hash-next');
 		await store.revoke('fam-1');
 		assert.deepEqual(calls, [
-			['fam-1', { current_token_hash: 'hash-next' }],
-			['fam-1', { revoked: true }],
+			['fam-1', { current_token_hash: 'hash-next' }, {}],
+			['fam-1', { revoked: true }, {}],
 		]);
+		assert.notStrictEqual(calls[0][2], calls[1][2], 'each patch receives a fresh context');
+		for (const [, , context] of calls) {
+			assert.equal(Object.hasOwn(context, 'transaction'), false, 'the patch does not join the request transaction');
+		}
 	});
 
 	it('propagates rotate() and revoke() errors', async () => {

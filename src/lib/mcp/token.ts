@@ -95,11 +95,11 @@ function cimdErrorResponse(err: CimdClientError): TokenResponse {
 
 /**
  * The handler's line when a superseded family's revocation cannot be written:
- * fixed and single-line, without the error text or the token. The store's own
+ * single-line, with the family id and without the error text or the token. The store's own
  * write-error log still carries the underlying error.
  */
-const REVOCATION_NOT_PERSISTED_LOG =
-	'MCP token: refresh replay detected, but the family revocation could not be persisted; the request was refused with invalid_grant and the family stays live';
+const REVOCATION_NOT_PERSISTED_LOG = (familyId: string) =>
+	`MCP token: refresh replay detected for family ${familyId}, but its revocation could not be persisted; the request was refused with invalid_grant and the family stays live`;
 
 function nowSeconds(): number {
 	return Math.floor(Date.now() / 1000);
@@ -762,32 +762,29 @@ async function handleRefreshTokenGrant(
 		// hash mismatch NEVER reissues, and a failed write still answers
 		// invalid_grant. Only a persisted revocation is claimed, in the response
 		// and in this handler's log line. After a failed write the handler logs
-		// one fixed line naming the failure, without the error text or the token
+		// one line naming the family and failure, without the error text or the token
 		// (the store's own write-error log still carries the error), and the
 		// family stays live until a later presentation retires or revokes it, or
 		// it expires.
 		try {
 			await familyStore.revoke(family.family_id);
 		} catch {
-			logger?.error?.(REVOCATION_NOT_PERSISTED_LOG);
+			logger?.error?.(REVOCATION_NOT_PERSISTED_LOG(family.family_id));
 			return errorResponse(400, 'invalid_grant', 'Refresh token has been superseded');
 		}
 		logger?.warn?.(`MCP token: refresh replay detected; revoked family ${family.family_id}`);
 		return errorResponse(400, 'invalid_grant', 'Refresh token has been superseded; family revoked');
 	}
 
-	// Defense in depth (#229): a family minted before provenance stamping is
-	// retired the first time it is presented for refresh, rather than rotated.
-	// Lazy, per-family — no startup sweep. Provenance lives in the family id
-	// itself (see FAMILY_ID_PREFIX in refreshTokenStore.ts), which rotation
-	// reuses (makeRefreshToken(family.family_id) below) and no `put` can
-	// change — so mixed-version rollouts are safe: an old worker or node
-	// rotating a family minted by this version leaves its id, and therefore
-	// its provenance, unchanged. The remaining cost is that every family
-	// minted before this upgrade (bare-UUID id) re-authorizes once at its
-	// next refresh, and after a rollback only families minted while rolled
-	// back re-authorize once after re-upgrading. The client re-authorizes
-	// into a fresh, provenanced family per RFC 6749 §5.2.
+	// Version 2.7.0 introduced provenance stamping. A bare-UUID family from
+	// before 2.7.0 is retired on its next refresh; p1- families from 2.7.x
+	// pass this check. Below, their binding is none for CIMD clients and the
+	// registered method (default none) for stored clients. The check
+	// is lazy, per family, with no startup sweep. Rotation reuses the family id.
+	// On rollback to 2.7.x, p2- families are retired at their next refresh,
+	// while codes in flight can be redeemed without the binding check. Routing
+	// bound grants to a version below 2.7 is unsafe. See Migration and rollback
+	// in docs/mcp-oauth.md before running mixed versions.
 	if (!isProvenancedFamilyId(family.family_id)) {
 		let persisted = false;
 		try {

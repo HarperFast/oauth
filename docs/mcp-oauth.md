@@ -218,28 +218,27 @@ Refresh tokens rotate on use: a superseded (already-used) refresh token is
 refused with `invalid_grant` and revokes the whole family (replay defense). If
 the revocation write fails, the token is still refused with `invalid_grant` and
 nothing is issued. The response does not claim the revocation; the token
-endpoint's handler logs one fixed line naming the failure, without the error
-text or the token, and claims no revocation; the refresh-family store's own
+endpoint's handler logs one line naming the family and failure, without the error
+text or the token; the refresh-family store's own
 write-error log still carries the underlying error. The family stays live until
 a later presentation retires or revokes it, or it expires. Refresh families
 live for `refreshTokenTtl` (default 30 days).
 
-Refresh families minted by this version carry a provenance marker in the
-family id itself; a family from before that (or replicated from an older
-node) is rejected with `invalid_grant` and retired the first time it is
-presented for refresh, so the client re-authorizes into a fresh, provenanced
-family. If the retirement write fails, the request is still rejected with
-`invalid_grant`, the failure is logged, and the family stays live until a later
-presentation retires or revokes it, or it expires.
-This is a lazy, per-family check on the existing refresh path — no
-startup sweep. Because the marker lives in the id and rotation reuses the id,
-mixed-version rollouts are safe: an old worker or node rotating a family
-minted by this version leaves its provenance untouched.
+Version 2.7.0 introduced a provenance marker in the refresh-family id. A
+family with a bare UUID id from before 2.7.0 is rejected with `invalid_grant`
+and retired on its next refresh, so its client re-authorizes. If retirement
+cannot be persisted, the request is still rejected, the failure is logged, and
+the family stays live until a later presentation retires or revokes it, or it
+expires. This check runs per family on refresh, with no startup sweep.
 
-Real cost when upgrading: every MCP client holding a refresh token minted
-before this version re-authorizes once, at its next refresh. After a
-rollback, only families minted while rolled back re-authorize once after
-re-upgrading. Nothing else to run — no manual step, no data migration.
+Families with `p1-` ids from 2.7.x keep their provenance: refresh treats them
+as bound to `none` for CIMD clients, or to the registered method (default
+`none`) for stored clients. A different currently permitted method requires
+reauthorization; see [Migration and rollback](#migration-and-rollback).
+On rollback to 2.7.x, `p2-` families are retired at their next refresh, so
+those clients re-authorize; codes in flight can be redeemed there without the
+binding check. Routing bound grants to a version below 2.7 is unsafe. Drain
+older nodes before issuing bound grants as described in that section.
 
 By default any client whose registered `grant_types` include `refresh_token`
 receives a refresh token on the code exchange. The AS metadata advertises
@@ -874,8 +873,12 @@ These rules apply to every client on `authorization_code` and `refresh_token`:
   refresh family returns `server_error` (500); a record that does not exist
   returns `invalid_client` or `invalid_grant`.
 
-On a Harper without HarperFast/harper#2953, repeated form parameters are not
-detected and only the first value is used.
+On Harper's old form deserializer (including 5.1.9), a repeated listed
+single-valued parameter or `resource` keeps its first value under its own
+name; later values are not checked there. With the array shape expected after
+HarperFast/harper#2953, the token endpoint refuses an array for a listed
+single-valued parameter, and accepts a `resource` array only when every value is
+acceptable.
 
 ### Grant binding
 
@@ -929,7 +932,7 @@ writes only the token hash, so it does not undo a revocation committed by a
 concurrent request. A revocation whose write fails still answers
 `invalid_grant`, without claiming the revocation, and leaves the family live.
 
-### Stored/DCR registration and method selection remain; the stricter token-request parser and grant binding also apply to stored clients.
+### Stored/DCR registration and token-request compatibility
 
 CIMD resolution only applies to URL-shaped client IDs. Any `client_id` that does
 not parse as an HTTPS URL with a non-root path goes directly to the DCR store as
