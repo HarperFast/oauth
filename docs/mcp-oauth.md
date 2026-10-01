@@ -854,10 +854,14 @@ These rules apply to every client on `authorization_code` and `refresh_token`:
   `client_secret_post`. Nothing, or an empty-secret `Basic` header carrying only
   the `client_id`, presents `none`.
 - These are rejected with `invalid_request` (400) before any client lookup: a
-  parameter repeated in a form body, a `client_id` or credential parameter that
+  repeated `grant_type`, `code`, `redirect_uri`, `code_verifier`,
+  `refresh_token`, `client_id`, `client_secret`, `client_assertion`,
+  `client_assertion_type` or `scope`, a `client_id` or credential parameter that
   is empty or not a single string, half an assertion pair, and more than one
   mechanism, where any `Basic` header, a body `client_secret` and an assertion
-  each count as one.
+  each count as one. On Harper versions affected by HarperFast/harper#2953, the
+  form deserializer keeps only each parameter's first value and the last
+  repetition in the body, so only that repetition is detected.
 - Otherwise, these are rejected with `invalid_client` (401) before any client
   lookup: malformed `Basic` credentials, an unknown `client_assertion_type`, and
   an assertion longer than 8192 characters.
