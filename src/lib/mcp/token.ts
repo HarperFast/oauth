@@ -254,8 +254,7 @@ function singleParameter(body: any, name: string): { value?: string } | { invali
 /**
  * The single-valued token request parameters. RFC 6749 §3.2: request
  * parameters must not be included more than once, and unrecognized ones are
- * ignored. `resource` may repeat (RFC 8707 §2); the grant that reads it checks
- * the values `requestedResources` infers from the deserialized body.
+ * ignored. `resource` may repeat (RFC 8707 §2).
  */
 const SINGLE_VALUED_PARAMETERS = [
 	'grant_type',
@@ -271,35 +270,19 @@ const SINGLE_VALUED_PARAMETERS = [
 ] as const;
 
 /**
- * The single-valued parameter whose repeat is detected in the deserialized
- * body, if any. Harper's form deserializer will store every value of a
- * repeated parameter as an array under its own name once HarperFast/harper#2953
- * is fixed. Until then a repeated field can appear as a `key` array; a `key`
- * whose first element equals a listed parameter's value is taken as that
- * parameter's repeat. See the HarperFast/harper#2953 note in docs/mcp-oauth.md.
+ * The first single-valued parameter whose value in the body is an array, if
+ * any. See docs/mcp-oauth.md on HarperFast/harper#2953.
  */
 function repeatedParameter(body: any): string | undefined {
 	if (!body || typeof body !== 'object') return undefined;
-	const repetition: unknown[] | undefined = Array.isArray(body.key) ? body.key : undefined;
-	return SINGLE_VALUED_PARAMETERS.find(
-		(name) =>
-			Array.isArray(body[name]) ||
-			(repetition !== undefined && typeof body[name] === 'string' && repetition[0] === body[name])
-	);
+	return SINGLE_VALUED_PARAMETERS.find((name) => Array.isArray(body[name]));
 }
 
-/**
- * The `resource` values inferred from the deserialized body, in either shape
- * (see `repeatedParameter`); empty when absent. In the pre-harper#2953 shape
- * they are `key` whenever its first element equals `resource`, whichever field
- * `key` came from; see the HarperFast/harper#2953 note in docs/mcp-oauth.md.
- */
+/** The body's `resource` values: none when absent, each element when an array. */
 function requestedResources(body: any): unknown[] {
 	const value = body?.resource;
 	if (value === undefined) return [];
-	if (Array.isArray(value)) return value;
-	if (Array.isArray(body.key) && body.key[0] === value) return body.key;
-	return [value];
+	return Array.isArray(value) ? value : [value];
 }
 
 /** The client's identity from an assertion's unverified `sub`, when no client_id was sent (RFC 7521 §4.2). */
@@ -377,8 +360,8 @@ function methodMismatch(
  * §4.2.1), counting any Basic header, malformed or not. Otherwise rejected
  * before any lookup with invalid_client: malformed Basic credentials, an
  * unknown client_assertion_type, and an assertion longer than the verifier
- * accepts. `dispatchToken` has already refused a detected repeat of a
- * single-valued parameter.
+ * accepts. `dispatchToken` has already refused a single-valued parameter
+ * whose value is an array.
  */
 async function authenticateClient(
 	request: Request | undefined,
@@ -1028,6 +1011,17 @@ async function handleClientCredentialsGrant(
 		return errorResponse(401, 'invalid_client', `client_assertion verification failed: ${result.reason}`);
 	}
 
+	// RFC 8707 resource binding: each `resource` value (`requestedResources`;
+	// RFC 8707 §2 lets it repeat) must exactly match the canonical MCP
+	// resource, fail closed — no prefix or wildcard comparisons (#159 req 3).
+	// Checked BEFORE the issuance rate limit, so an `invalid_target` refusal is
+	// not charged to it, and BEFORE the jti is consumed: a recoverable
+	// request-param mistake must not burn the single-use assertion.
+	const canonicalResource = resolveResource(request as any, mcpConfig);
+	if (requestedResources(body).some((resource) => resource !== canonicalResource)) {
+		return errorResponse(400, 'invalid_target', 'resource does not match the configured MCP resource');
+	}
+
 	// Issuance rate limit (#163, #159 req 5): applied AFTER proof-of-possession,
 	// keyed by the now-verified client_id. Running it pre-auth would let any
 	// caller drain a real agent's quota by replaying the agent's PUBLIC CIMD
@@ -1043,17 +1037,6 @@ async function handleClientCredentialsGrant(
 			response.headers = { ...response.headers, 'Retry-After': String(limit.retryAfterSeconds) };
 			return response;
 		}
-	}
-
-	// RFC 8707 resource binding: each `resource` value inferred from the
-	// deserialized body (`requestedResources`; RFC 8707 §2 lets it repeat) must
-	// exactly match the canonical MCP resource, fail closed — no prefix or
-	// wildcard comparisons (#159 req 3).
-	// Checked BEFORE the jti is consumed: a recoverable request-param mistake
-	// must not burn the single-use assertion.
-	const canonicalResource = resolveResource(request as any, mcpConfig);
-	if (requestedResources(body).some((resource) => resource !== canonicalResource)) {
-		return errorResponse(400, 'invalid_target', 'resource does not match the configured MCP resource');
 	}
 
 	// Replay guard: a storage failure here THROWS to the top-level 500 handler
@@ -1119,8 +1102,8 @@ async function dispatchToken(
 	// stack trace or raw error message. The per-grant handlers already return
 	// their own 4xx errors; this only catches the unexpected.
 	try {
-		// A detected repeat of a single-valued parameter is refused on every grant,
-		// before any grant reads the body.
+		// A single-valued parameter whose value is an array is refused on every
+		// grant, before any grant reads the body.
 		const repeated = repeatedParameter(body);
 		if (repeated !== undefined) {
 			return errorResponse(400, 'invalid_request', `${repeated} must not be repeated`);

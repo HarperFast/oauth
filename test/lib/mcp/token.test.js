@@ -1493,4 +1493,15 @@ describe('handleToken — client_credentials grant (#162)', () => {
 		assert.equal((await handleToken({ headers: {} }, grantBody(), limited)).status, 200);
 		assert.equal((await handleToken({ headers: {} }, grantBody(), limited)).status, 200);
 	});
+
+	it('invalid_target refusals are not charged to the issuance limit', async () => {
+		const limited = { ...ccConfig, clientCredentials: { ...ccConfig.clientCredentials, rateLimit: 2 } };
+		for (const resource of [`${RESOURCE}/sub`, [RESOURCE, `${RESOURCE}/sub`]]) {
+			const refused = await handleToken({ headers: {} }, grantBody({ resource }), limited);
+			assert.equal(refused.status, 400, JSON.stringify(refused.body));
+			assert.equal(refused.body.error, 'invalid_target');
+		}
+		const valid = await handleToken({ headers: {} }, grantBody({ resource: RESOURCE }), limited);
+		assert.equal(valid.status, 200, JSON.stringify(valid.body));
+	});
 });

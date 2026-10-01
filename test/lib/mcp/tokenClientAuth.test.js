@@ -344,41 +344,7 @@ describe('handleToken — shared client authenticator', () => {
 			assertInvalidRequest(await exchange(withAssertion, { headers: basic('public-1', '') }), /Multiple/);
 		});
 
-		it('rejects a detected repeat in a form body as Harper deserializes it (invalid_request)', async () => {
-			// A body in the shape Harper's form deserializer builds for these inputs
-			// (harper server/serverHelpers/contentTypes.ts, HarperFast/harper#2953).
-			const harperForm = (query) => {
-				const object = {};
-				for (const [name, value] of new URLSearchParams(query)) {
-					if (Object.hasOwn(object, name)) {
-						const last = object[name];
-						if (Array.isArray(last)) last.push(value);
-						else object.key = [last, value];
-					} else object[name] = value;
-				}
-				return object;
-			};
-			const form = `grant_type=authorization_code&code=code-1&code_verifier=${CODE_VERIFIER}&redirect_uri=${encodeURIComponent(REDIRECT)}`;
-			for (const repeat of ['client_id=public-1&client_id=public-1', 'client_id=public-1&code=code-1']) {
-				const body = harperForm(`${form}&${repeat}`);
-				const res = await handleToken({ headers: {} }, body, DEFAULT, undefined, logger);
-				assertInvalidRequest(res, /must not be repeated/);
-			}
-			assert.equal(codes.has('code-1'), true, 'no code consumed');
-			const once = await handleToken(
-				{ headers: {} },
-				harperForm(`${form}&client_id=public-1`),
-				DEFAULT,
-				undefined,
-				logger
-			);
-			assert.equal(once.status, 200, JSON.stringify(once.body));
-		});
-
-		describe('repeats and unrecognized parameters in the deserialized body, on every grant', () => {
-			// The two deserialized shapes: a `key` array (HarperFast/harper#2953) and,
-			// once that is fixed, an array under the parameter's own name. See the
-			// harper#2953 note in docs/mcp-oauth.md.
+		describe('repeats and unrecognized parameters, on every grant', () => {
 			const SINGLE_VALUED = [
 				'grant_type',
 				'code',
@@ -456,55 +422,122 @@ describe('handleToken — shared client authenticator', () => {
 
 			const token = (body) => handleToken({ headers: {} }, body, config, undefined, logger);
 
-			it('refuses a single-valued parameter repeated in either deserialized shape, consuming nothing', async () => {
+			it('refuses a single-valued parameter whose value is an array, consuming nothing', async () => {
 				for (const [grant, body] of Object.entries(freshGrants())) {
 					for (const name of SINGLE_VALUED) {
 						const value = body[name] ?? `repeated-${name}`;
-						for (const repeat of [{ [name]: [value, value] }, { [name]: value, key: [value, value] }]) {
-							const res = await token({ ...body, ...repeat });
-							const label = `${grant} ${JSON.stringify(repeat)}: ${JSON.stringify(res.body)}`;
-							assert.equal(res.status, 400, label);
-							assert.equal(res.body.error, 'invalid_request', label);
-							assert.equal(res.body.error_description, `${name} must not be repeated`, label);
-						}
+						const res = await token({ ...body, [name]: [value, value] });
+						const label = `${grant} ${name}: ${JSON.stringify(res.body)}`;
+						assert.equal(res.status, 400, label);
+						assert.equal(res.body.error, 'invalid_request', label);
+						assert.equal(res.body.error_description, `${name} must not be repeated`, label);
 					}
-					// Nothing was consumed: the same request without the repeat succeeds.
+					// Nothing was consumed: the same request without the array succeeds.
 					const once = await token(body);
 					assert.equal(once.status, 200, `${grant}: ${JSON.stringify(once.body)}`);
 				}
 			});
 
-			it('client_credentials: two resource values in the deserialized body are accepted when both are the MCP resource, invalid_target otherwise', async () => {
+			it('client_credentials: a resource array is accepted when every value is the MCP resource, invalid_target otherwise', async () => {
 				const body = freshGrants().client_credentials;
-				for (const refused of [
-					{ resource: [RESOURCE, OTHER_RESOURCE] },
-					{ resource: [OTHER_RESOURCE, RESOURCE] },
-					{ resource: RESOURCE, key: [RESOURCE, OTHER_RESOURCE] },
-					{ resource: OTHER_RESOURCE, key: [OTHER_RESOURCE, RESOURCE] },
+				for (const resource of [
+					[RESOURCE, OTHER_RESOURCE],
+					[OTHER_RESOURCE, RESOURCE],
 				]) {
-					const res = await token({ ...body, ...refused });
-					const label = `${JSON.stringify(refused)}: ${JSON.stringify(res.body)}`;
+					const res = await token({ ...body, resource });
+					const label = `${JSON.stringify(resource)}: ${JSON.stringify(res.body)}`;
 					assert.equal(res.status, 400, label);
 					assert.equal(res.body.error, 'invalid_target', label);
 				}
 				// The refusals consumed nothing: the same assertion is accepted with two allowed values.
 				const accepted = await token({ ...body, resource: [RESOURCE, RESOURCE] });
 				assert.equal(accepted.status, 200, JSON.stringify(accepted.body));
-				const pre2953 = await token({
-					...freshGrants().client_credentials,
-					resource: RESOURCE,
-					key: [RESOURCE, RESOURCE],
-				});
-				assert.equal(pre2953.status, 200, JSON.stringify(pre2953.body));
 			});
 
-			it('ignores an unrecognized parameter: vendor_options as a JSON array, or vendor repeated in the pre-harper#2953 form shape', async () => {
-				for (const unknown of [{ vendor_options: ['a', 'b'] }, { vendor: 'a', key: ['a', 'b'] }]) {
-					for (const [grant, body] of Object.entries(freshGrants())) {
-						const res = await token({ ...body, ...unknown });
-						assert.equal(res.status, 200, `${grant} ${JSON.stringify(unknown)}: ${JSON.stringify(res.body)}`);
-					}
+			it('ignores an unrecognized parameter sent as a JSON array', async () => {
+				for (const [grant, body] of Object.entries(freshGrants())) {
+					const res = await token({ ...body, vendor_options: ['a', 'b'] });
+					assert.equal(res.status, 200, `${grant}: ${JSON.stringify(res.body)}`);
 				}
+			});
+
+			describe('a form body as Harper deserializes it without HarperFast/harper#2953: the first value is used', () => {
+				// Harper 5.1.9's form deserializer (server/serverHelpers/contentTypes.ts),
+				// with Object.hasOwn in place of object.hasOwnProperty.
+				const harperForm = (query) => {
+					const object = {};
+					for (const [key, value] of new URLSearchParams(query)) {
+						if (Object.hasOwn(object, key)) {
+							const last = object[key];
+							if (Array.isArray(last)) last.push(value);
+							else object.key = [last, value];
+						} else object[key] = value;
+					}
+					return object;
+				};
+				/** `body` form-encoded, `extra` appended, then deserialized as above. */
+				const form = (body, extra) => harperForm(`${new URLSearchParams(body)}&${extra}`);
+				const R = encodeURIComponent(RESOURCE);
+				const X = encodeURIComponent(OTHER_RESOURCE);
+
+				/** The outcome, and no refusal names a parameter as repeated. */
+				function assertJudged(res, expected, label) {
+					label = `${label}: ${JSON.stringify(res.body)}`;
+					assert.doesNotMatch(String(res.body.error_description ?? ''), /must not be repeated/, label);
+					assert.equal(res.status, expected.status, label);
+					if (expected.error) assert.equal(res.body.error, expected.error, label);
+					if (expected.description) assert.equal(res.body.error_description, expected.description, label);
+				}
+				const OK = { status: 200 };
+				const UNKNOWN_CLIENT = { status: 401, error: 'invalid_client', description: 'Unknown client' };
+
+				it('client_id repeated, then resource=R&resource=R: judged on the first client_id, on every grant', async () => {
+					for (const [first, second, expected] of [
+						[undefined, undefined, OK],
+						[undefined, 'unknown-1', OK],
+						['unknown-1', undefined, UNKNOWN_CLIENT],
+					]) {
+						for (const [grant, body] of Object.entries(freshGrants())) {
+							const firstId = first ?? body.client_id;
+							const secondId = second ?? body.client_id;
+							const res = await token(
+								form(
+									{ ...body, client_id: firstId },
+									`client_id=${encodeURIComponent(secondId)}&resource=${R}&resource=${R}`
+								)
+							);
+							assertJudged(res, expected, `${grant} client_id=${firstId}&client_id=${secondId}`);
+						}
+					}
+				});
+
+				it('scope=x&foo=x&foo=y is not taken as a repeat of scope, on every grant', async () => {
+					for (const [grant, body] of Object.entries(freshGrants())) {
+						assertJudged(await token(form(body, 'scope=x&foo=x&foo=y')), OK, grant);
+					}
+				});
+
+				it('a JSON body with key: [grant_type, "x"] is not taken as a repeat of grant_type, on every grant', async () => {
+					for (const [grant, body] of Object.entries(freshGrants())) {
+						assertJudged(await token({ ...body, key: [body.grant_type, 'x'] }), OK, grant);
+					}
+				});
+
+				it('client_credentials: resource=R&vendor=R&vendor=X is judged on resource=R only', async () => {
+					const body = freshGrants().client_credentials;
+					assertJudged(await token(form(body, `resource=${R}&vendor=${R}&vendor=${X}`)), OK, 'vendor repeated');
+				});
+
+				it('client_credentials: three resource values are judged on the first', async () => {
+					const body = freshGrants().client_credentials;
+					assertJudged(
+						await token(form(body, `resource=${X}&resource=${R}&resource=${R}`)),
+						{ status: 400, error: 'invalid_target' },
+						'X&R&R'
+					);
+					// The refusal consumed nothing: the same assertion, first value R, is accepted.
+					assertJudged(await token(form(body, `resource=${R}&resource=${X}&resource=${R}`)), OK, 'R&X&R');
+				});
 			});
 		});
 

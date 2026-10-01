@@ -853,18 +853,13 @@ These rules apply to every client on `authorization_code` and `refresh_token`:
   `client_secret_basic`, and a body `client_secret` presents
   `client_secret_post`. Nothing, or an empty-secret `Basic` header carrying only
   the `client_id`, presents `none`.
-- These are rejected with `invalid_request` (400) before any client lookup: a
-  repeat of `grant_type`, `code`, `redirect_uri`, `code_verifier`,
+- These are rejected with `invalid_request` (400) before any client lookup: an
+  array value for `grant_type`, `code`, `redirect_uri`, `code_verifier`,
   `refresh_token`, `client_id`, `client_secret`, `client_assertion`,
-  `client_assertion_type` or `scope` detected in the deserialized body, a
-  `client_id` or credential parameter that is empty or not a single string, half
-  an assertion pair, and more than one mechanism, where any `Basic` header, a
-  body `client_secret` and an assertion each count as one.
-- Repeat detection, on every grant, and the `client_credentials` check of
-  `resource` values see only the deserialized body. On Harper versions affected
-  by HarperFast/harper#2953, the form deserializer does not keep every value of
-  a repeated field, so a repeat or a `resource` value can be missing from what
-  these checks see, or be attributed to another field.
+  `client_assertion_type` or `scope` (on every grant), a `client_id` or
+  credential parameter that is empty or not a single string, half an assertion
+  pair, and more than one mechanism, where any `Basic` header, a body
+  `client_secret` and an assertion each count as one.
 - Otherwise, these are rejected with `invalid_client` (401) before any client
   lookup: malformed `Basic` credentials, an unknown `client_assertion_type`, and
   an assertion longer than 8192 characters.
@@ -878,6 +873,9 @@ These rules apply to every client on `authorization_code` and `refresh_token`:
 - A storage failure while reading the client, the authorization code or the
   refresh family returns `server_error` (500); a record that does not exist
   returns `invalid_client` or `invalid_grant`.
+
+On a Harper without HarperFast/harper#2953, repeated form parameters are not
+detected and only the first value is used.
 
 ### Grant binding
 
@@ -1037,7 +1035,8 @@ with `error: "slow_down"` and a `Retry-After` header (seconds until a retry can
 succeed). The limit is debited **after** the client assertion is verified, so it
 counts only authenticated issuance — a caller cannot drain a real agent's quota
 by replaying the agent's public `client_id` URL with a bogus assertion (those
-fail verification with `401` and never touch the bucket). Pre-auth work is
+fail verification with `401` and never touch the bucket). An `invalid_target`
+refusal is not counted either. Pre-auth work is
 bounded separately: CIMD metadata fetches are limited at a fixed 10 attempts/min
 per `client_id` URL (cache hits don't consume, so only failing documents
 repeat), and resolution/DNS concurrency is capped globally.

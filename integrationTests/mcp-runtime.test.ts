@@ -17,15 +17,17 @@
  *      revokes the family.
  *   4. A family's rotation and revocation are partial updates: a rotation
  *      written after a revocation keeps the revocation and every other field.
- *   5. A form-encoded POST /oauth/mcp/token whose only repeat is client_id is
- *      refused with invalid_request before the grant is processed.
+ *   5. A form-encoded refresh with client_id sent twice is judged on the first
+ *      value (Harper 5.1.9, without HarperFast/harper#2953): invalid_client when
+ *      the first is unknown, consuming nothing, and a refresh when it is the
+ *      client.
  *   6. A headless client_credentials grant through POST /oauth/mcp/token, which
  *      runs inside Harper's REST request transaction: a fresh assertion is
  *      accepted, and its replay is refused with invalid_grant.
- *   7. On that grant, a form body with resource sent twice is accepted when
- *      both values are the MCP resource and refused with invalid_target when
- *      the second is not, consuming nothing; vendor_options as a JSON array and
- *      vendor sent twice in a form body are ignored.
+ *   7. On that grant, a form body with resource sent twice is judged on the
+ *      first value, as in 5: invalid_target when the first is not the MCP
+ *      resource, consuming nothing, and accepted when it is; vendor_options as
+ *      a JSON array and vendor sent twice in a form body are ignored.
  *
  * The fixture's TEST-ONLY /mcp-test routes call the plugin's own stores
  * outside a request transaction. The fixture serves the headless client's
@@ -181,18 +183,18 @@ suite('MCP runtime: replay retention and concurrent refresh', (ctx: ContextWithH
 		strictEqual(refused.error, 'invalid_grant');
 	});
 
-	test('client_credentials with resource sent twice: accepted when both values are the MCP resource, invalid_target when the second is not', async () => {
+	test('client_credentials with resource sent twice in a form body is judged on the first value', async () => {
 		const assertion = headlessAssertion();
 		const refused = await clientCredentials(assertion, [
-			['resource', 'https://mcp.test/mcp'],
 			['resource', 'https://other.test/mcp'],
+			['resource', 'https://mcp.test/mcp'],
 		]);
 		const refusal = await refused.json();
 		strictEqual(refused.status, 400, JSON.stringify(refusal));
 		strictEqual(refusal.error, 'invalid_target');
 		const accepted = await clientCredentials(assertion, [
 			['resource', 'https://mcp.test/mcp'],
-			['resource', 'https://mcp.test/mcp'],
+			['resource', 'https://other.test/mcp'],
 		]);
 		strictEqual(accepted.status, 200, `the refusal consumed nothing: ${JSON.stringify(await accepted.json())}`);
 	});
@@ -223,24 +225,23 @@ suite('MCP runtime: replay retention and concurrent refresh', (ctx: ContextWithH
 		strictEqual(family.resource, 'https://mcp.test/mcp');
 	});
 
-	test('a form-encoded token request whose only repeat is client_id is invalid_request', async () => {
+	test('a form-encoded refresh with client_id sent twice is judged on the first value', async () => {
 		const { refreshToken, familyId } = await testRoute('/seed-family');
 		const before = await testRoute('/family', { id: familyId });
-		const body = new URLSearchParams({
-			grant_type: 'refresh_token',
-			refresh_token: refreshToken,
-			client_id: CLIENT_ID,
-		});
-		body.append('client_id', CLIENT_ID);
-		const res = await fetch(new URL('/oauth/mcp/token', ctx.harper.httpURL), {
-			method: 'POST',
-			headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-			body,
-		});
-		strictEqual(res.status, 400);
-		strictEqual((await res.json()).error, 'invalid_request');
+		const refreshAs = (first: string, second: string) => {
+			const body = new URLSearchParams({ grant_type: 'refresh_token', refresh_token: refreshToken, client_id: first });
+			body.append('client_id', second);
+			return fetch(new URL('/oauth/mcp/token', ctx.harper.httpURL), {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+				body,
+			});
+		};
+		const unknownFirst = await refreshAs('unknown-client', CLIENT_ID);
+		strictEqual(unknownFirst.status, 401);
+		strictEqual((await unknownFirst.json()).error, 'invalid_client');
 		strictEqual((await testRoute('/family', { id: familyId })).current_token_hash, before.current_token_hash);
-		strictEqual((await refresh(refreshToken)).status, 200, 'the same request without the repeat refreshes');
+		strictEqual((await refreshAs(CLIENT_ID, 'unknown-client')).status, 200, 'the second client_id is not used');
 	});
 
 	test('concurrent refreshes of one refresh token (characterization)', async () => {
