@@ -9,7 +9,7 @@
 import { describe, it, before, after, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, generateKeyPairSync, randomBytes, sign } from 'node:crypto';
-import { handleToken } from '../../../dist/lib/mcp/token.js';
+import { _resetGrantRateLimiter, handleToken } from '../../../dist/lib/mcp/token.js';
 import { MAX_ASSERTION_LENGTH } from '../../../dist/lib/mcp/clientAssertion.js';
 import { buildAuthorizationServerMetadata } from '../../../dist/lib/mcp/wellKnown.js';
 import { resetMCPAssertionJtisTableCache } from '../../../dist/lib/mcp/assertionJtiStore.js';
@@ -344,7 +344,7 @@ describe('handleToken — shared client authenticator', () => {
 			assertInvalidRequest(await exchange(withAssertion, { headers: basic('public-1', '') }), /Multiple/);
 		});
 
-		it('rejects any parameter repeated in a form body (invalid_request)', async () => {
+		it('rejects a repeated parameter the endpoint reads in a form body (invalid_request)', async () => {
 			// The body Harper's application/x-www-form-urlencoded deserializer builds
 			// (harper server/serverHelpers/contentTypes.ts): the first value stays
 			// under its name, the repetition goes to `key`.
@@ -376,63 +376,137 @@ describe('handleToken — shared client authenticator', () => {
 			assert.equal(once.status, 200, JSON.stringify(once.body));
 		});
 
-		it('refuses a repeated parameter that no grant reads, on every grant, in either deserializer shape', async () => {
-			// Harper stores a repetition as an array under `key`
-			// (HarperFast/harper#2953), or under the parameter's own name once
-			// that is fixed. None of these grants reads `scope`.
-			const agent = generateKeyPairSync('ed25519');
+		describe('repeated and unrecognized parameters, on every grant', () => {
+			// Harper's form deserializer stores a repetition as an array under
+			// `key`, starting with the first value (HarperFast/harper#2953), or
+			// under the parameter's own name once that is fixed.
+			const SINGLE_VALUED = [
+				'grant_type',
+				'code',
+				'redirect_uri',
+				'code_verifier',
+				'refresh_token',
+				'client_id',
+				'client_secret',
+				'client_assertion',
+				'client_assertion_type',
+				'scope',
+			];
 			const HEADLESS = 'https://agents.example.com/fleet/agent-1.json';
-			served[HEADLESS] = {
-				client_id: HEADLESS,
-				client_name: 'Headless agent',
-				grant_types: ['client_credentials'],
-				token_endpoint_auth_method: 'private_key_jwt',
-				jwks: { keys: [agent.publicKey.export({ format: 'jwk' })] },
-			};
+			const OTHER_RESOURCE = 'https://other.example.com/mcp';
+			const agent = generateKeyPairSync('ed25519');
 			const config = { ...MIXED, clientIdMetadataDocuments: { allowedHosts: ['agents.example.com'] } };
-			const now = Math.floor(Date.now() / 1000);
-			const h = b64url({ alg: 'EdDSA', typ: 'JWT' });
-			const p = b64url({ iss: HEADLESS, sub: HEADLESS, aud: ISSUER, iat: now, exp: now + 30, jti: 'repeat-jti' });
-			const assertion = `${h}.${p}.${sign(null, Buffer.from(`${h}.${p}`), agent.privateKey).toString('base64url')}`;
-			const familyId = `${BOUND_FAMILY_ID_PREFIX}repeat`;
-			const { token, hash } = makeRefreshToken(familyId);
-			families.set(familyId, {
-				family_id: familyId,
-				current_token_hash: hash,
-				revoked: false,
-				client_id: 'public-1',
-				user: 'alice',
-				resource: RESOURCE,
-				expires_at: now + 3600,
-				client_auth_method: 'none',
-			});
-			const grants = {
-				authorization_code: {
-					...publicBody,
-					grant_type: 'authorization_code',
-					code: 'code-1',
-					code_verifier: CODE_VERIFIER,
-				},
-				refresh_token: { grant_type: 'refresh_token', refresh_token: token, client_id: 'public-1' },
-				client_credentials: {
-					grant_type: 'client_credentials',
+			let familyCount = 0;
+
+			beforeEach(() => {
+				_resetGrantRateLimiter();
+				served[HEADLESS] = {
 					client_id: HEADLESS,
-					client_assertion_type: TYPE,
-					client_assertion: assertion,
-				},
-			};
-			for (const [grant, body] of Object.entries(grants)) {
-				for (const repeat of [{ scope: ['a', 'b'] }, { scope: 'a', key: ['a', 'b'] }]) {
-					const res = await handleToken({ headers: {} }, { ...body, ...repeat }, config, undefined, logger);
-					const label = `${grant} ${JSON.stringify(repeat)}: ${JSON.stringify(res.body)}`;
-					assert.equal(res.status, 400, label);
-					assert.equal(res.body.error, 'invalid_request', label);
-					assert.match(res.body.error_description, /must not be repeated/, label);
-				}
-				// Nothing was consumed: the same request without the repeat succeeds.
-				const once = await handleToken({ headers: {} }, body, config, undefined, logger);
-				assert.equal(once.status, 200, `${grant}: ${JSON.stringify(once.body)}`);
+					client_name: 'Headless agent',
+					grant_types: ['client_credentials'],
+					token_endpoint_auth_method: 'private_key_jwt',
+					jwks: { keys: [agent.publicKey.export({ format: 'jwk' })] },
+				};
+			});
+
+			function headlessAssertion() {
+				const now = Math.floor(Date.now() / 1000);
+				const h = b64url({ alg: 'EdDSA', typ: 'JWT' });
+				const p = b64url({
+					iss: HEADLESS,
+					sub: HEADLESS,
+					aud: ISSUER,
+					iat: now,
+					exp: now + 30,
+					jti: randomBytes(12).toString('hex'),
+				});
+				return `${h}.${p}.${sign(null, Buffer.from(`${h}.${p}`), agent.privateKey).toString('base64url')}`;
 			}
+
+			/** A fresh, otherwise valid request body for each grant (a new code, family and assertion). */
+			function freshGrants() {
+				seedCode('code-1', 'public-1', REDIRECT, 'none');
+				const familyId = `${BOUND_FAMILY_ID_PREFIX}repeat-${++familyCount}`;
+				const { token, hash } = makeRefreshToken(familyId);
+				families.set(familyId, {
+					family_id: familyId,
+					current_token_hash: hash,
+					revoked: false,
+					client_id: 'public-1',
+					user: 'alice',
+					resource: RESOURCE,
+					expires_at: Math.floor(Date.now() / 1000) + 3600,
+					client_auth_method: 'none',
+				});
+				return {
+					authorization_code: {
+						...publicBody,
+						grant_type: 'authorization_code',
+						code: 'code-1',
+						code_verifier: CODE_VERIFIER,
+					},
+					refresh_token: { grant_type: 'refresh_token', refresh_token: token, client_id: 'public-1' },
+					client_credentials: {
+						grant_type: 'client_credentials',
+						client_id: HEADLESS,
+						client_assertion_type: TYPE,
+						client_assertion: headlessAssertion(),
+					},
+				};
+			}
+
+			const token = (body) => handleToken({ headers: {} }, body, config, undefined, logger);
+
+			it('refuses a repeated single-valued parameter in either deserializer shape, consuming nothing', async () => {
+				for (const [grant, body] of Object.entries(freshGrants())) {
+					for (const name of SINGLE_VALUED) {
+						const value = body[name] ?? `repeated-${name}`;
+						for (const repeat of [{ [name]: [value, value] }, { [name]: value, key: [value, value] }]) {
+							const res = await token({ ...body, ...repeat });
+							const label = `${grant} ${JSON.stringify(repeat)}: ${JSON.stringify(res.body)}`;
+							assert.equal(res.status, 400, label);
+							assert.equal(res.body.error, 'invalid_request', label);
+							assert.equal(res.body.error_description, `${name} must not be repeated`, label);
+						}
+					}
+					// Nothing was consumed: the same request without the repeat succeeds.
+					const once = await token(body);
+					assert.equal(once.status, 200, `${grant}: ${JSON.stringify(once.body)}`);
+				}
+			});
+
+			it('client_credentials: a repeated resource is accepted when every value is the MCP resource, invalid_target otherwise', async () => {
+				const body = freshGrants().client_credentials;
+				for (const refused of [
+					{ resource: [RESOURCE, OTHER_RESOURCE] },
+					{ resource: [OTHER_RESOURCE, RESOURCE] },
+					{ resource: RESOURCE, key: [RESOURCE, OTHER_RESOURCE] },
+					{ resource: OTHER_RESOURCE, key: [OTHER_RESOURCE, RESOURCE] },
+				]) {
+					const res = await token({ ...body, ...refused });
+					const label = `${JSON.stringify(refused)}: ${JSON.stringify(res.body)}`;
+					assert.equal(res.status, 400, label);
+					assert.equal(res.body.error, 'invalid_target', label);
+				}
+				// The refusals consumed nothing: the same assertion is accepted with an allowed repeat.
+				const accepted = await token({ ...body, resource: [RESOURCE, RESOURCE] });
+				assert.equal(accepted.status, 200, JSON.stringify(accepted.body));
+				const pre2953 = await token({
+					...freshGrants().client_credentials,
+					resource: RESOURCE,
+					key: [RESOURCE, RESOURCE],
+				});
+				assert.equal(pre2953.status, 200, JSON.stringify(pre2953.body));
+			});
+
+			it('ignores an unrecognized parameter: an array-valued JSON field, or a repeated form field', async () => {
+				for (const unknown of [{ vendor_options: ['a', 'b'] }, { vendor: 'a', key: ['a', 'b'] }]) {
+					for (const [grant, body] of Object.entries(freshGrants())) {
+						const res = await token({ ...body, ...unknown });
+						assert.equal(res.status, 200, `${grant} ${JSON.stringify(unknown)}: ${JSON.stringify(res.body)}`);
+					}
+				}
+			});
 		});
 
 		it('answers invalid_request for an assertion with any Basic header, whatever its type, on both grants', async () => {

@@ -251,6 +251,54 @@ function singleParameter(body: any, name: string): { value?: string } | { invali
 	return { value: raw };
 }
 
+/**
+ * The single-valued token request parameters. RFC 6749 §3.2: request
+ * parameters must not be included more than once, and unrecognized ones are
+ * ignored. `resource` may repeat (RFC 8707 §2) and is checked as a list by the
+ * grant that reads it.
+ */
+const SINGLE_VALUED_PARAMETERS = [
+	'grant_type',
+	'code',
+	'redirect_uri',
+	'code_verifier',
+	'refresh_token',
+	'client_id',
+	'client_secret',
+	'client_assertion',
+	'client_assertion_type',
+	'scope',
+] as const;
+
+/**
+ * The single-valued parameter the body repeats, if any. Harper's form
+ * deserializer will store a repetition as an array under the parameter's own
+ * name once HarperFast/harper#2953 is fixed. Until then it keeps each
+ * parameter's first value under its name and records only the last
+ * repetition in the body, as `key: [first value, repeated value]`.
+ */
+function repeatedParameter(body: any): string | undefined {
+	if (!body || typeof body !== 'object') return undefined;
+	const repetition: unknown[] | undefined = Array.isArray(body.key) ? body.key : undefined;
+	return SINGLE_VALUED_PARAMETERS.find(
+		(name) =>
+			Array.isArray(body[name]) ||
+			(repetition !== undefined && typeof body[name] === 'string' && repetition[0] === body[name])
+	);
+}
+
+/**
+ * Every `resource` value of a token request, in either deserializer shape
+ * (see `repeatedParameter`); empty when absent.
+ */
+function requestedResources(body: any): unknown[] {
+	const value = body?.resource;
+	if (value === undefined) return [];
+	if (Array.isArray(value)) return value;
+	if (Array.isArray(body.key) && body.key[0] === value) return body.key;
+	return [value];
+}
+
 /** The client's identity from an assertion's unverified `sub`, when no client_id was sent (RFC 7521 §4.2). */
 function unverifiedAssertionSubject(assertion: string): string | undefined {
 	const payloadSegment = assertion.split('.')[1];
@@ -326,7 +374,8 @@ function methodMismatch(
  * §4.2.1), counting any Basic header, malformed or not. Otherwise rejected
  * before any lookup with invalid_client: malformed Basic credentials, an
  * unknown client_assertion_type, and an assertion longer than the verifier
- * accepts. `dispatchToken` has already refused repeated parameters.
+ * accepts. `dispatchToken` has already refused a repeated single-valued
+ * parameter.
  */
 async function authenticateClient(
 	request: Request | undefined,
@@ -993,13 +1042,13 @@ async function handleClientCredentialsGrant(
 		}
 	}
 
-	// RFC 8707 resource binding: exact match against the canonical MCP
-	// resource, fail closed — no prefix or wildcard comparisons (#159 req 3).
+	// RFC 8707 resource binding: every requested resource (it may repeat,
+	// RFC 8707 §2) must exactly match the canonical MCP resource, fail closed —
+	// no prefix or wildcard comparisons (#159 req 3).
 	// Checked BEFORE the jti is consumed: a recoverable request-param mistake
 	// must not burn the single-use assertion.
 	const canonicalResource = resolveResource(request as any, mcpConfig);
-	const requestedResource = typeof body?.resource === 'string' ? body.resource : undefined;
-	if (requestedResource !== undefined && requestedResource !== canonicalResource) {
+	if (requestedResources(body).some((resource) => resource !== canonicalResource)) {
 		return errorResponse(400, 'invalid_target', 'resource does not match the configured MCP resource');
 	}
 
@@ -1066,13 +1115,11 @@ async function dispatchToken(
 	// stack trace or raw error message. The per-grant handlers already return
 	// their own 4xx errors; this only catches the unexpected.
 	try {
-		// A repeated parameter is refused on every grant, before any grant
-		// reads the body. Harper's form deserializer stores a repetition as an
-		// array: under `key` (HarperFast/harper#2953), or under the parameter's
-		// own name once that is fixed. No token parameter is an array, so an
-		// array value is a repetition in either shape.
-		if (body && typeof body === 'object' && Object.values(body).some(Array.isArray)) {
-			return errorResponse(400, 'invalid_request', 'Request parameters must not be repeated');
+		// A repeated single-valued parameter is refused on every grant, before
+		// any grant reads the body; other parameters are left to the grants.
+		const repeated = repeatedParameter(body);
+		if (repeated !== undefined) {
+			return errorResponse(400, 'invalid_request', `${repeated} must not be repeated`);
 		}
 		const grantType = typeof body?.grant_type === 'string' ? body.grant_type : undefined;
 		// client_credentials is explicit opt-in (default OFF); when disabled it

@@ -17,11 +17,15 @@
  *      revokes the family.
  *   4. A family's rotation and revocation are partial updates: a rotation
  *      written after a revocation keeps the revocation and every other field.
- *   5. A parameter repeated in a form-encoded POST /oauth/mcp/token is refused
+ *   5. A repeated client_id in a form-encoded POST /oauth/mcp/token is refused
  *      with invalid_request before the grant is processed.
  *   6. A headless client_credentials grant through POST /oauth/mcp/token, which
  *      runs inside Harper's REST request transaction: a fresh assertion is
  *      accepted, and its replay is refused with invalid_grant.
+ *   7. On that grant, a repeated resource is accepted when every value is the
+ *      MCP resource and refused with invalid_target otherwise, consuming
+ *      nothing; an array-valued JSON field and a repeated form field that the
+ *      endpoint does not read are ignored.
  *
  * The fixture's TEST-ONLY /mcp-test routes call the plugin's own stores
  * outside a request transaction. The fixture serves the headless client's
@@ -100,16 +104,21 @@ suite('MCP runtime: replay retention and concurrent refresh', (ctx: ContextWithH
 		});
 	}
 
-	function clientCredentials(assertion: string): Promise<Response> {
+	const clientCredentialsParams = (assertion: string) => ({
+		grant_type: 'client_credentials',
+		client_id: HEADLESS_CLIENT_ID,
+		client_assertion_type: 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer',
+		client_assertion: assertion,
+	});
+
+	/** A form-encoded client_credentials request; `extra` pairs are appended, so a name may repeat. */
+	function clientCredentials(assertion: string, extra: [string, string][] = []): Promise<Response> {
+		const body = new URLSearchParams(clientCredentialsParams(assertion));
+		for (const [name, value] of extra) body.append(name, value);
 		return fetch(new URL('/oauth/mcp/token', ctx.harper.httpURL), {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-			body: new URLSearchParams({
-				grant_type: 'client_credentials',
-				client_id: HEADLESS_CLIENT_ID,
-				client_assertion_type: 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer',
-				client_assertion: assertion,
-			}),
+			body,
 		});
 	}
 
@@ -172,6 +181,36 @@ suite('MCP runtime: replay retention and concurrent refresh', (ctx: ContextWithH
 		strictEqual(refused.error, 'invalid_grant');
 	});
 
+	test('client_credentials with a repeated resource: accepted when every value is the MCP resource, otherwise invalid_target', async () => {
+		const assertion = headlessAssertion();
+		const refused = await clientCredentials(assertion, [
+			['resource', 'https://mcp.test/mcp'],
+			['resource', 'https://other.test/mcp'],
+		]);
+		const refusal = await refused.json();
+		strictEqual(refused.status, 400, JSON.stringify(refusal));
+		strictEqual(refusal.error, 'invalid_target');
+		const accepted = await clientCredentials(assertion, [
+			['resource', 'https://mcp.test/mcp'],
+			['resource', 'https://mcp.test/mcp'],
+		]);
+		strictEqual(accepted.status, 200, `the refusal consumed nothing: ${JSON.stringify(await accepted.json())}`);
+	});
+
+	test('client_credentials ignores an array-valued JSON field and a repeated form field it does not read', async () => {
+		const json = await fetch(new URL('/oauth/mcp/token', ctx.harper.httpURL), {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ ...clientCredentialsParams(headlessAssertion()), vendor_options: ['a', 'b'] }),
+		});
+		strictEqual(json.status, 200, JSON.stringify(await json.json()));
+		const form = await clientCredentials(headlessAssertion(), [
+			['vendor', 'a'],
+			['vendor', 'b'],
+		]);
+		strictEqual(form.status, 200, JSON.stringify(await form.json()));
+	});
+
 	test('a rotation written after a revocation keeps it and every other field', async () => {
 		const { familyId } = await testRoute('/seed-family');
 		await testRoute('/revoke', { id: familyId });
@@ -184,7 +223,7 @@ suite('MCP runtime: replay retention and concurrent refresh', (ctx: ContextWithH
 		strictEqual(family.resource, 'https://mcp.test/mcp');
 	});
 
-	test('a parameter repeated in a form-encoded token request is invalid_request', async () => {
+	test('a repeated client_id in a form-encoded token request is invalid_request', async () => {
 		const { refreshToken, familyId } = await testRoute('/seed-family');
 		const before = await testRoute('/family', { id: familyId });
 		const body = new URLSearchParams({
