@@ -211,32 +211,45 @@ function importPublicKey(jwk: Record<string, unknown>, alg: AssertionAlgorithm):
 }
 
 /**
- * Why a JWK cannot serve as a public signature-verification key, or null when
- * it can. Shared by the verifier (defense in depth) and by key-set validation
- * for inline `jwks` and fetched `jwks_uri` documents.
+ * The imported key and its algorithm when a JWK can serve as a public
+ * signature-verification key, or why it cannot.
  */
-export function publicSigningKeyIssue(jwk: unknown): string | null {
-	if (!jwk || typeof jwk !== 'object' || Array.isArray(jwk)) return 'key must be a JWK object';
+function inspectPublicSigningKey(jwk: unknown): { key: KeyObject; alg: AssertionAlgorithm } | { issue: string } {
+	if (!jwk || typeof jwk !== 'object' || Array.isArray(jwk)) return { issue: 'key must be a JWK object' };
 	const k = jwk as Record<string, unknown>;
 	for (const member of PRIVATE_JWK_MEMBERS) {
-		if (member in k) return 'key carries private or symmetric key material';
+		if (member in k) return { issue: 'key carries private or symmetric key material' };
 	}
-	if (k.use !== undefined && k.use !== 'sig') return 'key use must be sig';
+	if (k.use !== undefined && k.use !== 'sig') return { issue: 'key use must be sig' };
 	if (k.key_ops !== undefined && (!Array.isArray(k.key_ops) || !k.key_ops.includes('verify'))) {
-		return 'key_ops must include verify';
+		return { issue: 'key_ops must include verify' };
 	}
 	if (k.kid !== undefined && (typeof k.kid !== 'string' || k.kid.length === 0 || k.kid.length > 256)) {
-		return 'kid must be a non-empty string of at most 256 characters';
+		return { issue: 'kid must be a non-empty string of at most 256 characters' };
 	}
 	const alg = algorithmForKeyType(k);
-	if (!alg) return 'key type is not supported (RSA, EC P-256 or OKP Ed25519)';
-	if (k.alg !== undefined && k.alg !== alg) return `key alg must be ${alg} for its key type`;
-	if (!importPublicKey(k, alg)) {
-		return alg === 'RS256'
-			? `key material is malformed or the RSA modulus is outside ${MIN_RSA_MODULUS_BITS}-${MAX_RSA_MODULUS_BITS} bits`
-			: 'key material is malformed';
+	if (!alg) return { issue: 'key type is not supported (RSA, EC P-256 or OKP Ed25519)' };
+	if (k.alg !== undefined && k.alg !== alg) return { issue: `key alg must be ${alg} for its key type` };
+	const key = importPublicKey(k, alg);
+	if (!key) {
+		return {
+			issue:
+				alg === 'RS256'
+					? `key material is malformed or the RSA modulus is outside ${MIN_RSA_MODULUS_BITS}-${MAX_RSA_MODULUS_BITS} bits`
+					: 'key material is malformed',
+		};
 	}
-	return null;
+	return { key, alg };
+}
+
+/**
+ * Why a JWK cannot serve as a public signature-verification key, or null when
+ * it can. Used by key-set validation for inline `jwks` and fetched `jwks_uri`
+ * documents; the verifier applies the same checks.
+ */
+export function publicSigningKeyIssue(jwk: unknown): string | null {
+	const inspected = inspectPublicSigningKey(jwk);
+	return 'issue' in inspected ? inspected.issue : null;
 }
 
 /**
@@ -356,24 +369,23 @@ export function verifyClientAssertion(params: VerifyClientAssertionParams): Clie
 	if ('error' in selected) {
 		return fail(selected.error, { unknownKid: selected.unknownKid });
 	}
-	const keyIssue = publicSigningKeyIssue(selected.jwk);
-	if (keyIssue) {
-		return fail(`registered JWK is not a public ${KEY_FAMILY[alg]} key: ${keyIssue}`);
+	const inspected = inspectPublicSigningKey(selected.jwk);
+	if ('issue' in inspected) {
+		return fail(`registered JWK is not a public ${KEY_FAMILY[alg]} key: ${inspected.issue}`);
 	}
 	// One key, one algorithm (RFC 8725 §3.1): the key's type must imply the header alg.
-	if (algorithmForKeyType(selected.jwk) !== alg) {
+	if (inspected.alg !== alg) {
 		return fail(`registered JWK is not a public ${KEY_FAMILY[alg]} key`);
 	}
-	const publicKey = importPublicKey(selected.jwk, alg);
-	if (!publicKey) {
-		return fail(`registered JWK is not a public ${KEY_FAMILY[alg]} key`);
-	}
+	const publicKey = inspected.key;
 
 	if (!BASE64URL_PATTERN.test(signatureSegment)) {
 		return fail('client_assertion signature is malformed');
 	}
 	const signature = Buffer.from(signatureSegment, 'base64url');
-	const expectedLength = FIXED_SIGNATURE_LENGTH[alg] ?? (publicKey.asymmetricKeyDetails?.modulusLength ?? 0) / 8;
+	// An RSA signature is as long as the modulus in whole bytes (RFC 8017 §8.2.1).
+	const expectedLength =
+		FIXED_SIGNATURE_LENGTH[alg] ?? Math.ceil((publicKey.asymmetricKeyDetails?.modulusLength ?? 0) / 8);
 	if (signature.length !== expectedLength) {
 		return fail('client_assertion signature is malformed');
 	}

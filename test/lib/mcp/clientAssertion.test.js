@@ -513,6 +513,12 @@ describe('verifyClientAssertion — per-algorithm verification', () => {
 		assert.match(result.reason, /not a public RSA key/);
 	});
 
+	it('verifies an RSA key whose modulus is not a whole number of bytes', () => {
+		const odd = makeAlgKeyPair('RS256', { modulusLength: 2050 });
+		const result = verifyAlg(makeAlgAssertion('RS256', { privateKey: odd.privateKey }), [odd.jwk]);
+		assert.equal(result.valid, true, result.reason);
+	});
+
 	it('rejects RSA keys shorter than 2048 bits', () => {
 		const small = makeAlgKeyPair('RS256', { modulusLength: 1024 });
 		const result = verifyAlg(makeAlgAssertion('RS256', { privateKey: small.privateKey }), [small.jwk]);
