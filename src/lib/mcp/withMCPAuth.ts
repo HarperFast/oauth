@@ -201,7 +201,7 @@ export function withMCPAuth(handler: HttpListener, options: WithMCPAuthOptions =
 			return handled || defaultResponse;
 		};
 
-		// Repo invariant (CLAUDE.md; OAuthResource.parseRoute caps paths at 2048
+		// Repo invariant (AGENTS.md; OAuthResource.parseRoute caps paths at 2048
 		// for DoS mitigation): withMCPAuth can be registered outermost and doesn't
 		// go through parseRoute, so enforce the limit independently — fail closed
 		// before any token work.
