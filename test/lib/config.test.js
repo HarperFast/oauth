@@ -1582,13 +1582,14 @@ describe('OAuth Configuration', () => {
 			assert.throws(() => initializeProviders(options, mockLogger), /reserved for the MCP OAuth endpoints/);
 		});
 
-		it('should skip providers with missing required fields', () => {
+		it('should skip providers with missing required fields beyond the credentials (#259)', () => {
 			const options = {
 				redirectUri: 'https://app.test.com/oauth',
 				providers: {
 					incomplete: {
 						clientId: 'test-client',
-						// Missing clientSecret and URLs
+						clientSecret: 'test-secret',
+						// Missing authorizationUrl/tokenUrl/userInfoUrl
 					},
 					valid: {
 						clientId: 'valid-client',
@@ -1773,6 +1774,214 @@ describe('OAuth Configuration', () => {
 
 			assert.ok(providers.github);
 			assert.equal(providers.github.config.redirectUri, 'https://app.test.com/oauth/github/callback');
+		});
+
+		describe('an unconfigured provider must not block the others at startup (#259)', () => {
+			it('1. both credentials unset placeholders, no redirectUri: the provider is skipped with a warning and other providers still initialize', () => {
+				delete process.env.OAUTH_TEST_259_CLIENT_ID;
+				delete process.env.OAUTH_TEST_259_CLIENT_SECRET;
+				const warnings = [];
+				const logger = { ...mockLogger, warn: (msg) => warnings.push(msg) };
+
+				const options = {
+					// No plugin-level redirectUri, and none on github: a regression in ordering
+					// would throw here instead of warning and skipping.
+					providers: {
+						github: {
+							clientId: '${OAUTH_TEST_259_CLIENT_ID}',
+							clientSecret: '${OAUTH_TEST_259_CLIENT_SECRET}',
+						},
+						google: {
+							clientId: 'google-client',
+							clientSecret: 'google-secret',
+							authorizationUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
+							tokenUrl: 'https://oauth2.googleapis.com/token',
+							userInfoUrl: 'https://openidconnect.googleapis.com/v1/userinfo',
+							redirectUri: 'https://app.test.com/oauth',
+						},
+					},
+				};
+
+				const providers = initializeProviders(options, logger);
+
+				assert.equal(providers.github, undefined, 'the unconfigured provider is skipped');
+				assert.ok(providers.google, 'other providers still initialize');
+				assert.ok(
+					warnings.some((msg) => msg.includes('github') && msg.includes('not configured')),
+					'skipping is warned, not silent'
+				);
+			});
+
+			it('2. both credentials set, no redirectUri: throws as in #238', () => {
+				const options = {
+					// No plugin-level redirectUri either.
+					providers: {
+						github: {
+							clientId: 'github-client',
+							clientSecret: 'github-secret',
+							authorizationUrl: 'https://github.com/login/oauth/authorize',
+							tokenUrl: 'https://github.com/login/oauth/access_token',
+							userInfoUrl: 'https://api.github.com/user',
+						},
+					},
+				};
+
+				assert.throws(() => initializeProviders(options, mockLogger), /redirectUri/);
+			});
+
+			it('3. both credentials set, redirectUri an unset placeholder: throws as in #238', () => {
+				delete process.env.OAUTH_TEST_259_REDIRECT;
+				const options = {
+					providers: {
+						github: {
+							clientId: 'github-client',
+							clientSecret: 'github-secret',
+							authorizationUrl: 'https://github.com/login/oauth/authorize',
+							tokenUrl: 'https://github.com/login/oauth/access_token',
+							userInfoUrl: 'https://api.github.com/user',
+							redirectUri: '${OAUTH_TEST_259_REDIRECT}',
+						},
+					},
+				};
+
+				assert.throws(() => initializeProviders(options, mockLogger), /redirectUri/);
+			});
+
+			it('4. clientId set, clientSecret an unset placeholder: skipped with an error naming the variable, other providers still initialize', () => {
+				delete process.env.OAUTH_TEST_259_CLIENT_SECRET_2;
+				const errors = [];
+				const logger = { ...mockLogger, error: (msg) => errors.push(msg) };
+
+				const options = {
+					redirectUri: 'https://app.test.com/oauth',
+					providers: {
+						github: {
+							clientId: 'github-client',
+							clientSecret: '${OAUTH_TEST_259_CLIENT_SECRET_2}',
+							authorizationUrl: 'https://github.com/login/oauth/authorize',
+							tokenUrl: 'https://github.com/login/oauth/access_token',
+							userInfoUrl: 'https://api.github.com/user',
+						},
+						google: {
+							clientId: 'google-client',
+							clientSecret: 'google-secret',
+							authorizationUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
+							tokenUrl: 'https://oauth2.googleapis.com/token',
+							userInfoUrl: 'https://openidconnect.googleapis.com/v1/userinfo',
+						},
+					},
+				};
+
+				const providers = initializeProviders(options, logger);
+
+				assert.equal(providers.github, undefined, 'the half-configured provider is skipped');
+				assert.ok(providers.google, 'other providers still initialize');
+				assert.ok(errors.some((msg) => msg.includes('github') && msg.includes('half configured')));
+				assert.ok(errors.some((msg) => msg.includes('OAUTH_TEST_259_CLIENT_SECRET_2')));
+			});
+
+			it('4b. clientSecret set, clientId an unset placeholder: skipped with an error naming the variable (mirror of 4)', () => {
+				delete process.env.OAUTH_TEST_259_CLIENT_ID_2B;
+				const errors = [];
+				const logger = { ...mockLogger, error: (msg) => errors.push(msg) };
+
+				const options = {
+					redirectUri: 'https://app.test.com/oauth',
+					providers: {
+						github: {
+							clientId: '${OAUTH_TEST_259_CLIENT_ID_2B}',
+							clientSecret: 'github-secret',
+							authorizationUrl: 'https://github.com/login/oauth/authorize',
+							tokenUrl: 'https://github.com/login/oauth/access_token',
+							userInfoUrl: 'https://api.github.com/user',
+						},
+					},
+				};
+
+				const providers = initializeProviders(options, logger);
+
+				assert.equal(providers.github, undefined, 'the half-configured provider is skipped');
+				assert.ok(errors.some((msg) => msg.includes('github') && msg.includes('half configured')));
+				assert.ok(errors.some((msg) => msg.includes('OAUTH_TEST_259_CLIENT_ID_2B')));
+			});
+
+			it('5. both credentials unset placeholders and redirectUri an unset placeholder: skipped with a warning', () => {
+				delete process.env.OAUTH_TEST_259_CLIENT_ID_3;
+				delete process.env.OAUTH_TEST_259_CLIENT_SECRET_3;
+				delete process.env.OAUTH_TEST_259_REDIRECT_3;
+				const warnings = [];
+				const logger = { ...mockLogger, warn: (msg) => warnings.push(msg) };
+
+				const options = {
+					providers: {
+						github: {
+							clientId: '${OAUTH_TEST_259_CLIENT_ID_3}',
+							clientSecret: '${OAUTH_TEST_259_CLIENT_SECRET_3}',
+							redirectUri: '${OAUTH_TEST_259_REDIRECT_3}',
+						},
+					},
+				};
+
+				const providers = initializeProviders(options, logger);
+
+				assert.equal(providers.github, undefined);
+				assert.ok(warnings.some((msg) => msg.includes('github') && msg.includes('not configured')));
+			});
+
+			it('6. both credentials whitespace-only: skipped with a warning, other providers still initialize', () => {
+				const warnings = [];
+				const logger = { ...mockLogger, warn: (msg) => warnings.push(msg) };
+
+				const options = {
+					providers: {
+						github: {
+							clientId: '   ',
+							clientSecret: '   ',
+						},
+						google: {
+							clientId: 'google-client',
+							clientSecret: 'google-secret',
+							authorizationUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
+							tokenUrl: 'https://oauth2.googleapis.com/token',
+							userInfoUrl: 'https://openidconnect.googleapis.com/v1/userinfo',
+							redirectUri: 'https://app.test.com/oauth',
+						},
+					},
+				};
+
+				const providers = initializeProviders(options, logger);
+
+				assert.equal(providers.github, undefined, 'the unconfigured provider is skipped');
+				assert.ok(providers.google, 'other providers still initialize');
+				assert.ok(
+					warnings.some((msg) => msg.includes('github') && msg.includes('not configured')),
+					'skipping is warned, not silent'
+				);
+			});
+
+			it('7. clientId set, clientSecret whitespace-only: skipped with an error naming clientSecret', () => {
+				const errors = [];
+				const logger = { ...mockLogger, error: (msg) => errors.push(msg) };
+
+				const options = {
+					redirectUri: 'https://app.test.com/oauth',
+					providers: {
+						github: {
+							clientId: 'github-client',
+							clientSecret: '   ',
+							authorizationUrl: 'https://github.com/login/oauth/authorize',
+							tokenUrl: 'https://github.com/login/oauth/access_token',
+							userInfoUrl: 'https://api.github.com/user',
+						},
+					},
+				};
+
+				const providers = initializeProviders(options, logger);
+
+				assert.equal(providers.github, undefined, 'the half-configured provider is skipped');
+				assert.ok(errors.some((msg) => msg.includes('github') && msg.includes('half configured')));
+				assert.ok(errors.some((msg) => msg.includes('clientSecret')));
+			});
 		});
 	});
 });
