@@ -1182,6 +1182,41 @@ describe('OAuthProvider', () => {
 			}
 		});
 
+		it('Graph id/oid correlation also works via userInfoUrl host alone (generic provider pointed at graph.microsoft.com)', async () => {
+			// isAzureGraphUserInfo() has two arms: provider === 'azure', and the
+			// userInfoUrl host. This exercises the host arm specifically (no
+			// provider: 'azure'/'microsoft'), which is what makes the correlation
+			// work for the 'microsoft' alias (providers/index.ts) and for a custom
+			// provider config that points userInfoUrl at Graph without declaring
+			// provider: 'azure'.
+			const originalFetch = global.fetch;
+			global.fetch = async () => ({
+				ok: true,
+				json: async () => ({ id: 'aaaa-oid-1234', mail: 'alice@contoso.example' }),
+			});
+
+			const graphHostConfig = {
+				...mockConfig,
+				provider: 'generic',
+				userInfoUrl: 'https://graph.microsoft.com/v1.0/me',
+				fetchEmail: true,
+			};
+			provider = new OAuthProvider(graphHostConfig, mockLogger);
+
+			try {
+				const idTokenClaimsNoEmail = {
+					sub: 'azure-sub-1',
+					oid: 'aaaa-oid-1234',
+					iss: 'https://login.microsoftonline.com/common/v2.0',
+				};
+				const userInfo = await provider.getUserInfo('access-token', idTokenClaimsNoEmail);
+				assert.equal(userInfo.mail, 'alice@contoso.example', 'host-only match correlates via oid/id');
+				assert.equal(userInfo._emailProvenance, 'unauthenticated');
+			} finally {
+				global.fetch = originalFetch;
+			}
+		});
+
 		it('the id/oid pairing is rejected for a non-Azure, non-Graph provider (no alternate pairing outside Azure/Graph)', async () => {
 			// Same Graph-shaped response (id, no sub) and a matching oid claim, but
 			// on a plain generic provider whose userInfoUrl is not graph.microsoft.com
