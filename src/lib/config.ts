@@ -504,6 +504,22 @@ export function normalizeMcpSecurityConfig(mcpConfig: Record<string, any>, logge
 }
 
 /**
+ * Shallow-copy an object, dropping keys whose value is `undefined`. `null` and
+ * `''` are explicit values and are kept as-is — only `undefined` means "not
+ * specified", so a passed-through unset field can't clobber a preset/default
+ * it's spread onto.
+ */
+export function skipUndefined(source: Record<string, any> | null | undefined): Record<string, any> {
+	const result: Record<string, any> = {};
+	if (!source) return result;
+	for (const [key, value] of Object.entries(source)) {
+		if (value === undefined) continue;
+		result[key] = value;
+	}
+	return result;
+}
+
+/**
  * Build configuration for a specific provider.
  *
  * `providerConfig` keys with value `undefined` are treated as "not specified"
@@ -520,8 +536,7 @@ export function buildProviderConfig(
 	const options = providerConfig || {};
 
 	const expandedOptions: Record<string, any> = {};
-	for (const [key, value] of Object.entries(options)) {
-		if (value === undefined) continue;
+	for (const [key, value] of Object.entries(skipUndefined(options))) {
 		expandedOptions[key] = expandEnvVar(value);
 	}
 

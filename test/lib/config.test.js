@@ -14,6 +14,7 @@ import {
 	coerceConfigBoolean,
 	normalizeMcpSecurityConfig,
 	isUnresolvedEnvPlaceholder,
+	skipUndefined,
 } from '../../dist/lib/config.js';
 
 describe('OAuth Configuration', () => {
@@ -74,6 +75,30 @@ describe('OAuth Configuration', () => {
 				undefined,
 				'unresolved placeholder must not flip the gate'
 			);
+		});
+	});
+
+	describe('skipUndefined', () => {
+		it('drops keys whose value is undefined', () => {
+			const result = skipUndefined({ a: 1, b: undefined, c: 'x' });
+			assert.deepEqual(result, { a: 1, c: 'x' });
+			assert.equal('b' in result, false);
+		});
+
+		it('keeps null and empty-string values as explicit entries', () => {
+			const result = skipUndefined({ a: null, b: '' });
+			assert.deepEqual(result, { a: null, b: '' });
+		});
+
+		it('returns an empty object for null/undefined input', () => {
+			assert.deepEqual(skipUndefined(null), {});
+			assert.deepEqual(skipUndefined(undefined), {});
+		});
+
+		it('does not mutate the source object', () => {
+			const source = { a: 1, b: undefined };
+			skipUndefined(source);
+			assert.deepEqual(source, { a: 1, b: undefined });
 		});
 	});
 
