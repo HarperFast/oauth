@@ -822,11 +822,15 @@ export async function handleCallback(
  * mirroring Harper's own logout().
  *
  * Returns `true` when there was nothing to persist (no session, or an anonymous session with
- * no `id` — the intentional quiet no-op) or the persist succeeded. Returns `false` when an
- * *existing* session (has an `id`) couldn't be persisted — `.update` wasn't callable, or it
- * rejected — so callers must not treat that like a completed logout/invalidation. Reports this
- * as a boolean rather than throwing: a caller that forgets to catch a thrown error would turn a
- * persistence hiccup into an unhandled rejection instead.
+ * no `id` — the intentional quiet no-op) or the clear fully succeeded. Returns `false` when an
+ * *existing* session (has an `id`) couldn't be reliably cleared — the store write failed
+ * (`.update` wasn't callable, or it rejected), or it succeeded but the in-memory clear that
+ * follows threw — so callers must not treat that like a completed logout/invalidation. A store
+ * write failure leaves the stored row stale for every future request; an in-memory-only failure
+ * leaves just this one already-in-flight request seeing the old identity — either way, `false`
+ * means don't trust this request's session as cleared. Reports this as a boolean rather than
+ * throwing: a caller that forgets to catch a thrown error would turn a persistence hiccup into
+ * an unhandled rejection instead.
  */
 export async function clearOAuthSession(session: any, logger?: Logger): Promise<boolean> {
 	if (!session) return true;
@@ -853,14 +857,17 @@ export async function clearOAuthSession(session: any, logger?: Logger): Promise<
 		}
 	}
 
-	// Clear in memory too so the current request sees no identity, regardless of persistence.
-	// Guarded: a frozen or otherwise non-configurable session object would throw here, and that
-	// must not undo the "never rejects" contract above either.
+	// Clear in memory too so the current request sees no identity. Guarded: a frozen or
+	// otherwise non-configurable session object would throw here, and that must neither escape
+	// (breaking the "never rejects" contract above) nor be reported as a clean clear — this
+	// request would still be holding the old identity in memory.
+	let clearedInMemory = true;
 	try {
 		session.user = null;
 		delete session.oauth;
 		delete session.oauthUser;
 	} catch (error) {
+		clearedInMemory = false;
 		logQuietly(() =>
 			logger?.error?.(
 				'Failed to clear in-memory OAuth session fields:',
@@ -869,8 +876,9 @@ export async function clearOAuthSession(session: any, logger?: Logger): Promise<
 		);
 	}
 
-	if (persisted) logQuietly(() => logger?.info?.('OAuth session cleared'));
-	return persisted;
+	const cleared = persisted && clearedInMemory;
+	if (cleared) logQuietly(() => logger?.info?.('OAuth session cleared'));
+	return cleared;
 }
 
 /**
@@ -888,8 +896,8 @@ export function logQuietly(log: () => void): void {
 /**
  * Headers for a response that reports a failed OAuth session invalidation: retriable, and
  * never cached, so an intermediary can't serve a stale "it's done" to a second client. Frozen
- * so a caller spreading this into a response (rather than mutating it directly) is required —
- * see `handleLogout` and `src/index.ts`'s `sessionClearFailedResponse`.
+ * so a caller must spread it into a fresh object (as `handleLogout` and `src/index.ts`'s
+ * `sessionClearFailedResponse` both do) instead of mutating it directly.
  */
 export const SESSION_CLEAR_FAILED_HEADERS = Object.freeze({ 'Cache-Control': 'no-store', 'Pragma': 'no-cache' });
 

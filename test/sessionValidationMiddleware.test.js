@@ -65,7 +65,7 @@ describe('OAuth session-validation middleware — persist-failure handling (#265
 		assert.equal(result.status, 503);
 		assert.equal(result.headers['Cache-Control'], 'no-store');
 		// Raw server.http listener — nothing else serializes this response, so the body must
-		// already be a JSON string (not the plain object literal), same as handleLogout's 503.
+		// already be a JSON string, not the plain object literal.
 		assert.equal(typeof result.body, 'string');
 		assert.deepEqual(JSON.parse(result.body), {
 			error: 'session_invalidation_failed',

@@ -2924,7 +2924,7 @@ describe('OAuth Handlers', () => {
 			assert.equal(mockLogger.error.mock.calls.length, 0);
 		});
 
-		it('resolves (does not reject) when the in-memory clear itself throws', async () => {
+		it('resolves false (does not reject, and does not report success) when the in-memory clear itself throws', async () => {
 			const session = {
 				id: 'session-123',
 				oauth: { accessToken: 'tok' },
@@ -2935,8 +2935,10 @@ describe('OAuth Handlers', () => {
 
 			const result = await clearOAuthSession(session, mockLogger);
 
-			// The store write itself still succeeded; only the best-effort in-memory clear failed.
-			assert.equal(result, true);
+			// The store write succeeded, but this request would still be holding the old
+			// identity in memory — callers must not treat that as a completed clear either.
+			assert.equal(result, false);
+			assert.equal(session.update.mock.calls.length, 1, 'the store write was still attempted');
 			assert.equal(mockLogger.error.mock.calls.length, 1);
 		});
 
