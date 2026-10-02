@@ -2457,12 +2457,16 @@ describe('OAuth Handlers', () => {
 			assert.equal(mockRequest.session.update.mock.calls[0].arguments[0].user, 'work@example.com');
 		});
 
-		it('two verified addresses matching two different existing accounts refuses with email_ambiguous', async () => {
-			stubAccounts(['personal@example.com', 'work@example.com']);
+		it('two verified addresses matching two different existing accounts refuses with email_ambiguous, when neither is the default pick', async () => {
+			// 'personal@example.com' is the default pick (primary) but matches no account —
+			// the ambiguity is between 'work@example.com' and 'other@example.com', neither of
+			// which is the pick that would reproduce today's behavior, so there is no safe default.
+			stubAccounts(['work@example.com', 'other@example.com']);
 			mockHookManager.hasHook = createMockFn(() => false);
 			useCandidateResolvingProvider([
 				{ email: 'personal@example.com', verified: true, primary: true },
 				{ email: 'work@example.com', verified: true, primary: false },
+				{ email: 'other@example.com', verified: true, primary: false },
 			]);
 
 			const result = await handleCallback(
@@ -2480,6 +2484,37 @@ describe('OAuth Handlers', () => {
 			assert.equal(result.status, 302);
 			assert.ok(result.headers.Location.includes('reason=email_ambiguous'), result.headers.Location);
 			assert.equal(mockRequest.session.update.mock.calls.length, 0, 'no session is established on an ambiguous match');
+		});
+
+		it('two verified addresses match different accounts, but the default pick is one of them — adopts the default pick, not ambiguous', async () => {
+			// Account-history shape: this GitHub user changed their primary from A to B. Each
+			// address was the default pick (and so provisioned an hdb_user row) at the time it
+			// was primary. 'work@example.com' (B) is the CURRENT primary/default pick, and is
+			// among the matches, so this reproduces exactly what every login already does today
+			// (adopt B) rather than guessing between two strangers.
+			stubAccounts(['personal@example.com', 'work@example.com']);
+			mockHookManager.hasHook = createMockFn(() => false);
+			useCandidateResolvingProvider(
+				[
+					{ email: 'personal@example.com', verified: true, primary: false }, // A, no longer primary
+					{ email: 'work@example.com', verified: true, primary: true }, // B, the current pick
+				],
+				{ primary: 'work@example.com' }
+			);
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				githubConfig(),
+				mockHookManager,
+				'test-provider',
+				{ logger: mockLogger }
+			);
+
+			assert.equal(result.status, 302);
+			assert.ok(!result.headers.Location.includes('email_ambiguous'), result.headers.Location);
+			assert.equal(mockRequest.session.update.mock.calls[0].arguments[0].user, 'work@example.com');
 		});
 
 		it('no verified address matches an existing account — falls back to the primary (unchanged default)', async () => {

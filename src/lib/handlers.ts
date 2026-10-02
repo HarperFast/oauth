@@ -230,6 +230,12 @@ async function checkHarperUserExists(name: string): Promise<boolean | null> {
  * as a match AND never treated as a confirmed non-match either — it throws `EmailLookupError`
  * rather than risk a wrong pick (mirrors the adoption gate's own `account_lookup_failed`
  * posture, never conflating "unknown" with "no").
+ *
+ * Two or more matches is refused as ambiguous UNLESS the verified profile-or-primary address
+ * (today's original default pick) is among them — that one isn't a guess: it's the same
+ * verified address this GitHub account would already resolve to today, on the same account
+ * every current login already reaches, so choosing it reproduces pre-#228 behavior rather
+ * than picking between equally-plausible strangers.
  */
 async function resolveEmailByExistingAccount(
 	candidates: readonly EmailCandidate[],
@@ -248,6 +254,11 @@ async function resolveEmailByExistingAccount(
 
 	if (matches.size === 0) return undefined;
 	if (matches.size === 1) return [...matches][0];
+
+	const defaultPick = candidates.find((c) => c.profile) ?? candidates.find((c) => c.primary);
+	if (defaultPick?.verified === true && matches.has(defaultPick.email)) {
+		return defaultPick.email;
+	}
 
 	logger?.warn?.(
 		`OAuth: ${matches.size} verified GitHub emails each match a different existing Harper account — refusing the login rather than guessing which one`

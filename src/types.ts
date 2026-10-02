@@ -638,15 +638,22 @@ export interface OAuthHooks {
 	 * GitHub's `/user/emails`); `candidates` is every address it returned, verified or not,
 	 * so the hook can see the full picture (e.g. to prompt for or prefer a specific domain).
 	 *
-	 * Return the chosen address, or `null`/`undefined` for "no preference" — the plugin's
-	 * default selection (today's profile-email-or-primary policy) is used unchanged.
+	 * Return the chosen address, or `null`/`undefined` for "no preference" — the plugin falls
+	 * through to its own built-in default: under `usernameClaim: 'email'`, that's an
+	 * existing-account match (and its own possible refusal) before the original
+	 * profile-email-or-primary policy; under any other `usernameClaim` it's that original
+	 * policy directly. See `docs/configuration.md`'s "GitHub: default email when there are
+	 * several verified addresses" section.
 	 *
 	 * SECURITY: the returned address MUST be one of `candidates` with `verified === true`.
 	 * The plugin enforces this independently of the hook — an address that isn't a verified
 	 * candidate, or any other invalid result, is treated as a hook failure, which **fails the
 	 * login** (does not fall back to the default): falling back silently could establish a
 	 * session for a different account than the one the hook was trying to reach. A thrown
-	 * error, or a hook that does not settle within 5 seconds, fails the login the same way.
+	 * error, or a hook that does not settle within 5 seconds, fails the login the same way —
+	 * all three reject with `ResolveEmailError`. (The built-in default this hook falls through
+	 * to on `null`/`undefined` can separately reject with `AmbiguousEmailError` or
+	 * `EmailLookupError` — this hook cannot prevent that, only pick a specific address.)
 	 * `candidates` is an immutable snapshot; mutating it has no effect on validation.
 	 *
 	 * @param candidates - Every email the provider's authenticated fetch returned
@@ -654,7 +661,7 @@ export interface OAuthHooks {
 	 * @param signal - Aborted when the 5-second deadline is reached. Cooperative: pass it
 	 *   to your own `fetch`/query so a timed-out lookup actually stops, rather than
 	 *   continuing to hold a connection after the login has already failed.
-	 * @returns The chosen (verified) address, or `null`/`undefined` to use the default
+	 * @returns The chosen (verified) address, or `null`/`undefined` to defer to the built-in default
 	 */
 	onResolveEmail?: (
 		candidates: readonly EmailCandidate[],
@@ -765,12 +772,17 @@ export interface GetUserInfoHelpers {
 	getUserInfo: (accessToken: string) => Promise<any>;
 	logger?: Logger;
 	/**
-	 * Present when an `onResolveEmail` hook is registered (#228). Call with every email
-	 * candidate the adapter fetched to get the application's chosen address — already
-	 * validated to be one of the given candidates with `verified === true` — or `undefined`
-	 * when the hook declined (no preference). Rejects (does not resolve to a fallback) on an
-	 * invalid pick, a thrown hook, or a hook that doesn't settle within 5 seconds; an adapter
-	 * must let that rejection propagate rather than catching it and using its own default.
+	 * Always present (#228) — call with every email candidate the adapter fetched to get the
+	 * resolved address, already validated to be one of the given candidates with
+	 * `verified === true`. Composes an `onResolveEmail` hook (if registered and it expresses
+	 * a preference) with the plugin's built-in existing-account default; `undefined` means
+	 * either the hook declined (no preference) or the built-in default found no match — both
+	 * mean the same thing to the caller: use the adapter's own fallback policy. Rejects (does
+	 * not resolve to a fallback) with `ResolveEmailError` (invalid pick, a thrown hook, or a
+	 * hook that doesn't settle within 5 seconds), `AmbiguousEmailError` (two or more verified
+	 * addresses match different existing accounts), or `EmailLookupError` (an account lookup
+	 * failed mid-match); an adapter must let any of these propagate rather than catching them
+	 * and using its own default.
 	 */
 	resolveEmail?: (candidates: readonly EmailCandidate[]) => Promise<string | undefined>;
 }
