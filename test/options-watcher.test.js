@@ -377,10 +377,9 @@ describe('OAuth Plugin Options Watcher', () => {
 			}
 		};
 
-		// Add a second provider whose credentials come from env vars nobody has set yet, and
-		// drop the plugin-level redirectUri in favor of a per-provider one on github — google
-		// then has no redirectUri anywhere, so if the skip ever stopped happening before
-		// redirectUri validation (#238), this reload would be rejected instead of applied.
+		// google's credentials come from unset env vars and it has no redirectUri anywhere
+		// (moved to per-provider on github): a regression in ordering would reject this
+		// reload instead of applying it with google skipped.
 		delete process.env.OAUTH_TEST_RELOAD_GOOGLE_CLIENT_ID;
 		delete process.env.OAUTH_TEST_RELOAD_GOOGLE_CLIENT_SECRET;
 		scope.options._config = {

@@ -686,8 +686,6 @@ function isUnsetCredential(expandedValue: unknown): boolean {
 	return isUnresolvedEnvPlaceholder(expandedValue);
 }
 
-// Names the environment variable when the (already env-expanded) value is itself still an
-// unresolved placeholder, rather than just saying the field is missing.
 function describeUnsetCredential(field: string, expandedValue: unknown): string {
 	if (isUnresolvedEnvPlaceholder(expandedValue)) {
 		return `'${field}' references environment variable ${String(expandedValue).trim()}, which is not set`;
@@ -722,9 +720,8 @@ export function initializeProviders(options: OAuthPluginConfig, logger?: Logger)
 			);
 		}
 
-		// Configured-ness must be decided here, before buildProviderConfig runs — it throws
-		// on a missing/unresolved redirectUri (#238), so an unconfigured provider's redirectUri
-		// must never reach it, or that one provider blocks every other provider (#259).
+		// Must run before buildProviderConfig (#238's redirectUri checks) so an unconfigured
+		// provider's redirectUri is never evaluated (#259).
 		const expandedClientId = expandEnvVar(providerConfig?.clientId);
 		const expandedClientSecret = expandEnvVar(providerConfig?.clientSecret);
 		const clientIdUnset = isUnsetCredential(expandedClientId);

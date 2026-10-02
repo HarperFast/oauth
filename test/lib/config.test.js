@@ -1784,9 +1784,8 @@ describe('OAuth Configuration', () => {
 				const logger = { ...mockLogger, warn: (msg) => warnings.push(msg) };
 
 				const options = {
-					// No plugin-level redirectUri: github has none at all, so if the skip ever
-					// stopped happening before redirectUri validation (#238), this would throw
-					// instead of being skipped with a warning.
+					// No plugin-level redirectUri, and none on github: a regression in ordering
+					// would throw here instead of warning and skipping.
 					providers: {
 						github: {
 							clientId: '${OAUTH_TEST_259_CLIENT_ID}',
