@@ -59,6 +59,20 @@ export function expandEnvVarsDeep<T>(value: T): T {
 }
 
 /**
+ * True when `value` has the shape of an unexpanded `${VAR_NAME}` placeholder
+ * (surrounding whitespace tolerated). This is a SHAPE check only — it cannot
+ * distinguish a placeholder {@link expandEnvVar} left untouched because the
+ * variable was unset from a resolved value that genuinely IS that literal
+ * text (e.g. an environment variable deliberately set to the string
+ * `${X}`). Callers rely on the former being the overwhelmingly common case
+ * when this runs on output that has already passed through
+ * `expandEnvVar`/`expandEnvVarsDeep`.
+ */
+export function isUnresolvedEnvPlaceholder(value: unknown): boolean {
+	return typeof value === 'string' && /^\$\{[^}]*\}$/.test(value.trim());
+}
+
+/**
  * Coerce a config value that documents a boolean but may arrive as an
  * env-expanded string (`enabled: ${FLAG}` → `"false"`). Returns the boolean
  * for `true`/`false` (case-insensitive), otherwise `undefined` (so callers
@@ -77,15 +91,34 @@ export function coerceConfigBoolean(value: unknown): boolean | undefined {
 /**
  * Normalize one documented-boolean config field in place, TOTALLY: after this
  * call the field is either a real boolean or absent. Coercible values
- * (booleans, "true"/"false" strings) are coerced; anything else present —
- * including an unresolved `${ENV_VAR}` placeholder left by expandEnvVarsDeep
- * when the variable is unset — is DELETED with a warning, so the field's
- * documented default applies. Without this, a truthy junk value silently
- * flips whichever direction the consuming gate happens to test (e.g.
- * `refreshTokenRequiresOfflineAccess: ${FLAG}` with FLAG unset would activate
- * a documented default-off gate).
+ * (booleans, "true"/"false" strings) are coerced; a non-boolean, non-
+ * placeholder junk value (e.g. `"yes"`, `1`, `{}`) is DELETED with a warning,
+ * so the field's documented default applies.
+ *
+ * An unresolved `${ENV_VAR}` placeholder left by expandEnvVarsDeep when the
+ * variable is unset THROWS instead, when `failOnPlaceholder` is true (#207):
+ * dropping it to the documented default silently picks a direction the
+ * operator never chose — e.g. `mcp.dynamicClientRegistration.enabled: ${FLAG}`
+ * with `FLAG` unset dropping to "absent" resolves to DCR's default-ENABLED
+ * state (a block with no explicit `enabled: false` is on), the opposite of
+ * what dropping a gate is supposed to achieve. A security gate with a value
+ * the operator can't read back has no safe direction to guess; fail loudly
+ * and name the variable instead, exactly like `mcp.signingKeyPem` and
+ * `redirectUri` do for the same placeholder shape.
+ *
+ * `failOnPlaceholder` defaults to true. The four feature-scoped fields pass
+ * `mcpConfig.enabled === true`, so they stay inert while MCP overall is off
+ * (byte-identical-boot contract) and fail closed once it's on. `mcp.enabled`
+ * itself passes `false` explicitly — see {@link normalizeMcpSecurityConfig}
+ * for why that one field keeps the pre-#207 warn-and-drop behavior.
  */
-function normalizeBooleanField(obj: Record<string, any>, field: string, path: string, logger?: Logger): void {
+function normalizeBooleanField(
+	obj: Record<string, any>,
+	field: string,
+	path: string,
+	logger?: Logger,
+	failOnPlaceholder = true
+): void {
 	const value = obj[field];
 	if (value === undefined || value === null) return; // Absent (or bare YAML key) — default applies already.
 	const coerced = coerceConfigBoolean(value);
@@ -93,7 +126,23 @@ function normalizeBooleanField(obj: Record<string, any>, field: string, path: st
 		obj[field] = coerced;
 		return;
 	}
-	const isUnresolvedPlaceholder = typeof value === 'string' && /^\$\{[^}]*\}$/.test(value.trim());
+	const isUnresolvedPlaceholder = isUnresolvedEnvPlaceholder(value);
+	// Not every substitution mechanism leaves the placeholder text behind when
+	// its variable is unset — docker-compose's `X=${X}` resolves to "" (not the
+	// literal "${X}") for an unset X. That's the same operator-unreadable gate
+	// value as an unresolved placeholder; treat it identically rather than
+	// letting it fall through to "must be a boolean" and get silently dropped.
+	const isEmptyString = typeof value === 'string' && value.trim() === '';
+	if ((isUnresolvedPlaceholder || isEmptyString) && failOnPlaceholder) {
+		throw new Error(
+			isUnresolvedPlaceholder
+				? `${path} is the unresolved env placeholder ${JSON.stringify(value)} (variable unset). ` +
+						`Set the variable to "true" or "false", or remove ${path} to use its documented default.`
+				: `${path} resolved to an empty value (likely an unset environment variable substitution — ` +
+						`e.g. docker-compose's "\${VAR}" resolves to "" when VAR is unset). ` +
+						`Set the variable to "true" or "false", or remove ${path} to use its documented default.`
+		);
+	}
 	logger?.warn?.(
 		isUnresolvedPlaceholder
 			? `MCP: ${path} is the unresolved env placeholder ${JSON.stringify(value)} (variable unset). ` +
@@ -194,7 +243,7 @@ function validateSigningKeyPem(mcpConfig: Record<string, any>): void {
 	// would turn "unpin on reload" into a boot-validation failure.
 	if (!('signingKeyPem' in mcpConfig) || mcpConfig.signingKeyPem === undefined) return;
 	const value = mcpConfig.signingKeyPem;
-	if (typeof value === 'string' && /^\$\{[^}]*\}$/.test(value.trim())) {
+	if (isUnresolvedEnvPlaceholder(value)) {
 		throw new Error(
 			`mcp.signingKeyPem is the unresolved env placeholder ${JSON.stringify(value)} (variable unset). ` +
 				'Set the variable to a PEM-encoded private key, or remove mcp.signingKeyPem to use a self-generated key.'
@@ -222,15 +271,67 @@ function validateSigningKeyPem(mcpConfig: Record<string, any>): void {
 }
 
 /**
+ * Validate `mcp.dynamicClientRegistration.initialAccessToken` when the
+ * operator DECLARED it and DCR is enabled. `checkInitialAccessToken` (dcr.ts)
+ * gates purely on the configured value's truthiness, so two misconfigurations
+ * turn the gate into no gate at all (#240):
+ * - An unresolved `${VAR}` placeholder (the variable is unset) is a non-empty
+ *   string — it IS the "configured" value, and becomes the accepted bearer
+ *   secret. Anyone who can read the committed config (placeholders routinely
+ *   are) can then register MCP clients.
+ * - A set-but-empty value is falsy, so `checkInitialAccessToken` treats the
+ *   token as entirely absent: open registration, silently.
+ * Neither is a deliberate "I want open registration" choice — that's only
+ * expressed by omitting the key. Fail loudly at boot instead:
+ * - declared + unresolved `${VAR}` placeholder → throw naming the variable.
+ * - declared + resolves to an empty or all-whitespace string → throw.
+ * - NOT declared at all (field absent, or `undefined` from a live-reload
+ *   removal) → this function takes no action; open registration proceeds
+ *   exactly as before.
+ */
+function validateDcrInitialAccessToken(dcr: Record<string, any>): void {
+	if (!('initialAccessToken' in dcr) || dcr.initialAccessToken === undefined) return;
+	const value = dcr.initialAccessToken;
+	if (isUnresolvedEnvPlaceholder(value)) {
+		throw new Error(
+			`mcp.dynamicClientRegistration.initialAccessToken is the unresolved env placeholder ${JSON.stringify(value)} ` +
+				'(variable unset). Set the variable to the DCR bearer token, or remove initialAccessToken to allow ' +
+				'open registration.'
+		);
+	}
+	if (typeof value !== 'string') {
+		throw new Error(
+			`mcp.dynamicClientRegistration.initialAccessToken must be a string; got ${typeof value}. ` +
+				'Provide a non-empty bearer token, or remove initialAccessToken to allow open registration.'
+		);
+	}
+	if (value.trim() === '') {
+		throw new Error(
+			'mcp.dynamicClientRegistration.initialAccessToken is configured but resolved to an empty or ' +
+				'whitespace-only value. Provide a non-empty bearer token, or remove initialAccessToken to allow ' +
+				'open registration.'
+		);
+	}
+}
+
+/**
  * Normalize the security-relevant fields of the `mcp` config block in place,
  * so a mis-typed value can never silently flip a gate:
- * - Every documented boolean (`mcp.enabled`,
- *   `mcp.refreshTokenRequiresOfflineAccess`, `mcp.clientCredentials.enabled`,
+ * - The feature-scoped documented booleans
+ *   (`mcp.refreshTokenRequiresOfflineAccess`, `mcp.clientCredentials.enabled`,
+ *   `mcp.clientCredentials.acceptTokenEndpointAudience`,
  *   `mcp.clientIdMetadataDocuments.enabled`,
- *   `mcp.dynamicClientRegistration.enabled`) is normalized totally via
- *   {@link normalizeBooleanField}: coerced to a real boolean, or removed with
- *   a warning so the documented default applies. Consumers may therefore gate
- *   on plain truthiness / `!== false` without re-validating types.
+ *   `mcp.dynamicClientRegistration.enabled`) are normalized totally via
+ *   {@link normalizeBooleanField}: coerced to a real boolean; a non-boolean,
+ *   non-placeholder value is removed with a warning so the documented default
+ *   applies; an unresolved `${VAR}` placeholder throws naming the variable
+ *   (#207) while the surface it gates is active (`mcp.enabled === true`) —
+ *   while it's inactive, the placeholder still drops with a warning so a
+ *   disabled block stays inert. Consumers may therefore gate on plain
+ *   truthiness / `!== false` without re-validating types.
+ * - `mcp.enabled` itself keeps the pre-#207 warn-and-drop behavior (does not
+ *   throw) — see {@link normalizeBooleanField}'s doc for why this one field
+ *   is the exception.
  * - `mcp.clientIdMetadataDocuments.allowedHosts` is normalized to an array of
  *   exact, lowercased hostnames. A scalar string (which `Array.includes` /
  *   `String.includes` would turn into substring matching) is wrapped into a
@@ -240,40 +341,95 @@ function validateSigningKeyPem(mcpConfig: Record<string, any>): void {
  *   boolean; `jwksUriAllowedOrigins` is normalized to exact https origins;
  *   `tokenEndpointAudience` needs exact CIMD client IDs and a parseable
  *   `expiresAt` (normalized to epoch ms). Invalid values throw.
- * - `mcp.clientCredentials.acceptTokenEndpointAudience` is a documented boolean.
  * - `mcp.signingKeyPem`, if declared, must resolve to a parseable key — see
  *   {@link validateSigningKeyPem}. This one throws instead of dropping with a
  *   warning: unlike the booleans above, there is no safe default to fall back
  *   to for a declared-but-broken pin.
+ * - `mcp.dynamicClientRegistration.initialAccessToken`, if declared and DCR is
+ *   enabled, must resolve to a non-empty value — see
+ *   {@link validateDcrInitialAccessToken}. Also throws rather than dropping:
+ *   there is no safe default gate value to fall back to either (open
+ *   registration is only ever chosen by omitting the key).
  */
 export function normalizeMcpSecurityConfig(mcpConfig: Record<string, any>, logger?: Logger): void {
-	normalizeBooleanField(mcpConfig, 'enabled', 'mcp.enabled', logger);
+	// mcp.enabled is the one field kept on the pre-#207 warn-and-drop path (see
+	// normalizeBooleanField's doc); the feature-scoped booleans below fail closed.
+	normalizeBooleanField(mcpConfig, 'enabled', 'mcp.enabled', logger, false);
+	// Feature-scoped fields below only fail closed on their own placeholder when
+	// the surface they gate is actually active (mcp.enabled === true) — a
+	// disabled block must stay inert (byte-identical-boot contract) even if a
+	// placeholder is still sitting in its unused config.
+	const mcpActive = mcpConfig.enabled === true;
 	normalizeBooleanField(
 		mcpConfig,
 		'refreshTokenRequiresOfflineAccess',
 		'mcp.refreshTokenRequiresOfflineAccess',
-		logger
+		logger,
+		mcpActive
 	);
 
 	const clientCredentials = mcpConfig.clientCredentials;
 	if (clientCredentials && typeof clientCredentials === 'object') {
-		normalizeBooleanField(clientCredentials, 'enabled', 'mcp.clientCredentials.enabled', logger);
+		normalizeBooleanField(clientCredentials, 'enabled', 'mcp.clientCredentials.enabled', logger, mcpActive);
 		normalizeBooleanField(
 			clientCredentials,
 			'acceptTokenEndpointAudience',
 			'mcp.clientCredentials.acceptTokenEndpointAudience',
-			logger
+			logger,
+			mcpActive
 		);
 	}
 
 	const dcr = mcpConfig.dynamicClientRegistration;
-	if (dcr && typeof dcr === 'object') {
-		normalizeBooleanField(dcr, 'enabled', 'mcp.dynamicClientRegistration.enabled', logger);
+	if (dcr !== undefined && dcr !== null && (typeof dcr !== 'object' || Array.isArray(dcr))) {
+		// A non-mapping value (`false`, `0`, an unresolved placeholder string, an
+		// array, ...) must not reach dcrEnabled()'s `dcrConfig != null &&
+		// dcrConfig.enabled !== false` predicate — `.enabled` on a non-mapping is
+		// always `undefined` (arrays included), so that check falls through to
+		// its default-ENABLED result and silently turns a would-be "disable DCR"
+		// value into open registration. Fail loudly instead of guessing.
+		if (mcpActive) {
+			throw new Error('mcp.dynamicClientRegistration must be a mapping; use enabled: false to disable');
+		}
+	} else if (dcr && typeof dcr === 'object' && !Array.isArray(dcr)) {
+		normalizeBooleanField(dcr, 'enabled', 'mcp.dynamicClientRegistration.enabled', logger, mcpActive);
+		// Only when MCP itself is enabled and DCR isn't explicitly disabled — a
+		// disabled block must stay inert, matching mcp.signingKeyPem's gating
+		// below and dcrEnabled()'s own predicate (dcr.ts).
+		if (mcpActive && dcr.enabled !== false) {
+			validateDcrInitialAccessToken(dcr);
+		}
+		// allowedRedirectUriHosts is matched with Array.includes in
+		// clientValidator.ts — a scalar string there silently becomes
+		// String.prototype.includes (substring matching) instead of an exact-host
+		// allowlist. Normalize to an array up front, exactly like CIMD's
+		// allowedHosts below (this list is shared by both the DCR and CIMD
+		// redirect-uri checks).
+		if (dcr.allowedRedirectUriHosts !== undefined) {
+			const raw = Array.isArray(dcr.allowedRedirectUriHosts)
+				? dcr.allowedRedirectUriHosts
+				: [dcr.allowedRedirectUriHosts];
+			if (raw.some((h: unknown) => typeof h !== 'string')) {
+				throw new Error(
+					'mcp.dynamicClientRegistration.allowedRedirectUriHosts must be a hostname string or an array of hostname strings'
+				);
+			}
+			dcr.allowedRedirectUriHosts = raw.map((h: string) => h.trim().toLowerCase()).filter((h: string) => h.length > 0);
+		}
 	}
 
 	const cimd = mcpConfig.clientIdMetadataDocuments;
-	if (cimd && typeof cimd === 'object') {
-		normalizeBooleanField(cimd, 'enabled', 'mcp.clientIdMetadataDocuments.enabled', logger);
+	if (cimd !== undefined && cimd !== null && (typeof cimd !== 'object' || Array.isArray(cimd))) {
+		// Same non-mapping guard as dynamicClientRegistration above (arrays
+		// included): CIMD's own `cimdConfig?.enabled !== false` predicate
+		// (cimd.ts) also falls through to its default — for CIMD that default
+		// is already "enabled", so a block meant to disable it would otherwise
+		// be silently ignored rather than taking effect.
+		if (mcpActive) {
+			throw new Error('mcp.clientIdMetadataDocuments must be a mapping; use enabled: false to disable');
+		}
+	} else if (cimd && typeof cimd === 'object' && !Array.isArray(cimd)) {
+		normalizeBooleanField(cimd, 'enabled', 'mcp.clientIdMetadataDocuments.enabled', logger, mcpActive);
 
 		if (cimd.allowedHosts !== undefined) {
 			const raw = Array.isArray(cimd.allowedHosts) ? cimd.allowedHosts : [cimd.allowedHosts];
@@ -311,7 +467,7 @@ export function normalizeMcpSecurityConfig(mcpConfig: Record<string, any>, logge
 	// rely on — e.g. a shipped config carrying `${VAR}` placeholders with
 	// the surface off must not refuse boot). Mirrors the enabled-gating of
 	// the other MCP startup checks in src/index.ts.
-	if (mcpConfig.enabled === true) {
+	if (mcpActive) {
 		validateSigningKeyPem(mcpConfig);
 	}
 }
@@ -371,7 +527,7 @@ export function buildProviderConfig(
 	// (the pattern every doc example uses) would otherwise pass the blank
 	// check above as a non-empty string, match neither rewrite below, and get
 	// sent to the IdP verbatim. Fail closed here too (see HarperFast/oauth#208).
-	if (/^\$\{[^}]*\}$/.test(baseRedirectUri.trim())) {
+	if (isUnresolvedEnvPlaceholder(baseRedirectUri)) {
 		throw new Error(
 			`OAuth provider '${providerName}' has an unresolved 'redirectUri' environment variable placeholder ` +
 				`(${JSON.stringify(baseRedirectUri)}) — the variable is unset. Set the plugin-level 'redirectUri' ` +
