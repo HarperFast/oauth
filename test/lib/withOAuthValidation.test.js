@@ -1076,9 +1076,9 @@ describe('withOAuthValidation', () => {
 		// through to the underlying method, which runs with a session
 		// that's about to be (or has already been) cleaned up.
 		//
-		// clearOAuthSession takes the persist path when session.update exists, otherwise clears in-memory only.
-		// Both paths are exercised below so behavior is pinned down for
-		// integrators.
+		// clearOAuthSession persists via session.update when it's callable; when it isn't, it logs
+		// a failed persist (returns false) and only clears in-memory. Both paths are exercised
+		// below so behavior is pinned down for integrators.
 
 		it('fallback path (session has no update): underlying method runs, oauth fields cleared in-memory', async () => {
 			const calls = [];
@@ -1092,7 +1092,7 @@ describe('withOAuthValidation', () => {
 					return { status: 200, body: { ran: true } };
 				}
 			}
-			// No .update method — exercises the in-memory fallback.
+			// No .update method — clearOAuthSession logs a failed persist and only clears in-memory.
 			const session = makeSession({
 				oauth: {
 					provider: 'github',
