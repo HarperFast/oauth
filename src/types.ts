@@ -648,9 +648,16 @@ export interface OAuthHooks {
 	 *
 	 * @param candidates - Every email the provider's authenticated fetch returned
 	 * @param provider - The provider name (e.g., 'github')
+	 * @param signal - Aborted when the 5-second deadline is reached. Cooperative: pass it
+	 *   to your own `fetch`/query so a timed-out lookup actually stops, rather than
+	 *   continuing to hold a connection after the login has already failed.
 	 * @returns The chosen (verified) address, or `null`/`undefined` to use the default
 	 */
-	onResolveEmail?: (candidates: EmailCandidate[], provider: string) => Promise<string | null | undefined>;
+	onResolveEmail?: (
+		candidates: readonly EmailCandidate[],
+		provider: string,
+		signal: AbortSignal
+	) => Promise<string | null | undefined>;
 
 	/**
 	 * Called before logout, before session is cleared
@@ -762,7 +769,7 @@ export interface GetUserInfoHelpers {
 	 * invalid pick, a thrown hook, or a hook that doesn't settle within 5 seconds; an adapter
 	 * must let that rejection propagate rather than catching it and using its own default.
 	 */
-	resolveEmail?: (candidates: EmailCandidate[]) => Promise<string | undefined>;
+	resolveEmail?: (candidates: readonly EmailCandidate[]) => Promise<string | undefined>;
 }
 
 /**
@@ -921,7 +928,7 @@ export interface IOAuthProvider {
 		accessToken: string,
 		idTokenClaims?: any,
 		idTokenSignatureVerified?: boolean,
-		onResolveEmail?: (candidates: EmailCandidate[]) => Promise<string | null | undefined>
+		onResolveEmail?: (candidates: readonly EmailCandidate[]) => Promise<string | null | undefined>
 	): Promise<any>;
 	/** Map provider user info to Harper user format */
 	mapUserToHarper(userInfo: any): OAuthUser;

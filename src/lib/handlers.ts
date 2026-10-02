@@ -36,6 +36,7 @@ import { isClientAuthMethod } from './mcp/clientAuthMethod.ts';
 import { resolveIssuer } from './mcp/wellKnown.ts';
 import { getRequestHeader } from './requestHeaders.ts';
 import type { HookManager } from './hookManager.ts';
+import { ResolveEmailError } from './resolveEmailError.ts';
 
 /**
  * Sanitize a redirect parameter to prevent open redirect attacks
@@ -442,11 +443,10 @@ export async function handleCallback(
 		// Get user info (will use ID token claims if available and verified).
 		// getUserInfo also sets _emailProvenance on the returned object; pass
 		// idTokenSignatureVerified so it can't stamp 'signed-oidc' on a
-		// decoded-only (no-JWKS) token. onResolveEmail is only built when the
-		// application registered the hook (#228) — its absence leaves a custom
-		// adapter's default email selection unchanged.
+		// decoded-only (no-JWKS) token. resolveEmail stays undefined (#228) unless
+		// the application registered onResolveEmail.
 		const resolveEmail = hookManager.hasHook('onResolveEmail')
-			? (candidates: EmailCandidate[]) => hookManager.callResolveEmail(candidates, providerName)
+			? (candidates: readonly EmailCandidate[]) => hookManager.callResolveEmail(candidates, providerName)
 			: undefined;
 		const userInfo = await provider.getUserInfo(
 			tokenResponse.access_token,
@@ -811,8 +811,10 @@ export async function handleCallback(
 		// Use a safe, generic reason code — details are in the server log
 		const message = error instanceof Error ? error.message : String(error);
 		let reason = 'unknown';
-		if (message.startsWith('Token exchange failed')) reason = 'token_exchange';
-		else if (message.includes('onResolveEmail')) reason = 'email_selection';
+		// Checked by type, not message text: a selector's own error (e.g. 'database
+		// unavailable') carries no identifying substring (#228).
+		if (error instanceof ResolveEmailError) reason = 'email_selection';
+		else if (message.startsWith('Token exchange failed')) reason = 'token_exchange';
 		else if (message.includes('claim')) reason = 'user_mapping';
 		else if (message.includes('user info') || message.includes('userinfo')) reason = 'user_info';
 		else if (message.includes('hook') || message.includes('onLogin')) reason = 'login_hook';

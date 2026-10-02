@@ -5,6 +5,7 @@
 import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { HookManager } from '../../dist/lib/hookManager.js';
+import { ResolveEmailError } from '../../dist/lib/resolveEmailError.js';
 import { createMockFn, createMockLogger } from '../helpers/mockFn.js';
 
 // Note: mock is imported and used by the helper, we only use createMockFn in tests
@@ -417,27 +418,57 @@ describe('HookManager', () => {
 			assert.equal(await hookManager.callResolveEmail(CANDIDATES, 'github'), undefined);
 		});
 
-		it('logs and RE-THROWS when the hook throws (does not fall back silently)', async () => {
+		it('logs and RE-THROWS a ResolveEmailError when the hook throws (does not fall back silently)', async () => {
 			hookManager.register({
 				onResolveEmail: async () => {
 					throw new Error('db unavailable');
 				},
 			});
 
-			await assert.rejects(() => hookManager.callResolveEmail(CANDIDATES, 'github'), /db unavailable/);
+			await assert.rejects(
+				() => hookManager.callResolveEmail(CANDIDATES, 'github'),
+				(error) => {
+					assert.ok(error instanceof ResolveEmailError, 'wraps a thrown hook error as ResolveEmailError');
+					assert.match(error.message, /db unavailable/);
+					assert.match(error.cause.message, /db unavailable/, 'preserves the original error as cause');
+					return true;
+				}
+			);
 			assert.equal(mockLogger.error.mock.calls.length, 1);
 		});
 
-		it('logs and RE-THROWS when the hook does not settle within the timeout', async () => {
+		it('logs and RE-THROWS a ResolveEmailError when the hook does not settle within the timeout, and aborts its signal', async () => {
+			let receivedSignal;
 			hookManager.register({
-				onResolveEmail: () => new Promise(() => {}), // never settles
+				onResolveEmail: (_candidates, _provider, signal) => {
+					receivedSignal = signal;
+					return new Promise(() => {}); // never settles
+				},
 			});
 
 			await assert.rejects(
 				() => hookManager.callResolveEmail(CANDIDATES, 'github', 20),
-				/onResolveEmail hook timed out/
+				(error) => {
+					assert.ok(error instanceof ResolveEmailError);
+					assert.match(error.message, /onResolveEmail hook timed out/);
+					return true;
+				}
 			);
 			assert.equal(mockLogger.error.mock.calls.length, 1);
+			assert.equal(receivedSignal.aborted, true, 'the hook receives a signal that is aborted on timeout');
+		});
+
+		it('passes an unaborted signal through to the hook on the happy path', async () => {
+			let receivedSignal;
+			hookManager.register({
+				onResolveEmail: async (_candidates, _provider, signal) => {
+					receivedSignal = signal;
+					return 'work@example.com';
+				},
+			});
+
+			await hookManager.callResolveEmail(CANDIDATES, 'github');
+			assert.equal(receivedSignal.aborted, false);
 		});
 	});
 });

@@ -5,6 +5,7 @@
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { handleLogin, handleCallback, handleLogout, handleUserInfo, handleTestPage } from '../../dist/lib/handlers.js';
+import { ResolveEmailError } from '../../dist/lib/resolveEmailError.js';
 import { buildProviderConfig } from '../../dist/lib/config.js';
 import { createMockFn, createMockLogger } from '../helpers/mockFn.js';
 
@@ -2336,7 +2337,9 @@ describe('OAuth Handlers', () => {
 			mockProvider.getUserInfo = createMockFn(async (_token, _idTokenClaims, _sigVerified, resolveEmail) => {
 				// Mirrors what the real OAuthProvider throws on an invalid hook pick.
 				await resolveEmail([{ email: 'work@example.com', verified: true, primary: false }]);
-				throw new Error('onResolveEmail hook returned an address that is not one of the verified candidates');
+				throw new ResolveEmailError(
+					'onResolveEmail hook returned an address that is not one of the verified candidates'
+				);
 			});
 			mockHookManager.callResolveEmail = createMockFn(async () => 'attacker@evil.example');
 

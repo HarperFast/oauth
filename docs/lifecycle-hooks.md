@@ -320,7 +320,8 @@ Choose which of several provider-reported emails becomes the login identity ([#2
 ```typescript
 async function onResolveEmail(
 	candidates: Array<{ email: string; verified: boolean; primary: boolean }>,
-	provider: string
+	provider: string,
+	signal: AbortSignal
 ): Promise<string | null | undefined>;
 ```
 
@@ -328,6 +329,7 @@ async function onResolveEmail(
 
 - `candidates` - Every email the provider's authenticated fetch returned, verified or not (so you can see the whole picture — e.g. to prompt a user to verify a preferred but currently-unverified address, while still returning a verified one for this login). An immutable snapshot: mutating it has no effect on anything the plugin validates against.
 - `provider` - Provider name (e.g., `'github'`)
+- `signal` - Aborted when the 5-second deadline is reached. Cancellation is **cooperative**: pass `signal` to your own `fetch`/database call so a timed-out lookup actually stops (e.g. releases a connection) instead of continuing to run after the login has already failed.
 
 **Returns:** The chosen address, or `null`/`undefined` for "no preference" — the plugin falls back to its default selection, unchanged from today's behavior.
 
@@ -336,7 +338,7 @@ async function onResolveEmail(
 **SECURITY — enforced by the plugin, not by convention:**
 
 - The returned address **must** be one of `candidates` with `verified === true`. This is checked against the exact snapshot handed to the hook, not a value the hook could have mutated.
-- An invalid result (not a string, not a verified candidate), a thrown error, or a hook that doesn't settle within 5 seconds, **fails the login** — it does **not** fall back to the default selection. Falling back silently on a failed pick could establish a session for a *different* account than the one the hook was trying to reach (e.g. selecting a work address to adopt an existing work account, but the lookup inside the hook fails) — so an unresolved pick is loud, not quiet.
+- An invalid result (not a string, not a verified candidate), a thrown error, or a hook that doesn't settle within 5 seconds, **fails the login** — it does **not** fall back to the default selection. Falling back silently on a failed pick could establish a session for a _different_ account than the one the hook was trying to reach (e.g. selecting a work address to adopt an existing work account, but the lookup inside the hook fails) — so an unresolved pick is loud, not quiet.
 - The resolved address is exactly what later becomes `authEvidence.email` / `oauthUser.email` — there is no separate path that could key identity on a different, unvalidated address.
 
 **GitHub's default `usernameClaim` is `login` (the handle), not `email`.** Unless you also set `usernameClaim: 'email'` on the GitHub provider config, `onResolveEmail` changes `oauthUser.email` and `authEvidence.email` but **not** `session.user` (still the GitHub handle) — set `usernameClaim: 'email'`, or map the chosen email to a username yourself in `onLogin` (`oauthUser.email` already reflects the resolved address there).
@@ -362,7 +364,11 @@ async function resolveEmail(candidates) {
 }
 ```
 
-**Rollout note:** this hook is opt-in and additive — an instance that never registers it keeps today's selection exactly. Once registered, though, it can change which Harper account a given GitHub login resolves to (relative to the previous default pick): roll it out deliberately, not as an incidental part of an unrelated deploy, and expect any already-established sessions under the old selection to be unaffected (they are not re-evaluated until their next login).
+**Rollout note:** this hook is opt-in and additive — an instance that never registers it keeps today's selection exactly. Once registered, it can change which Harper account a given GitHub login resolves to (relative to the previous default pick), so roll it out deliberately, not as an incidental part of an unrelated deploy:
+
+- **Enable it on every node at once**, not progressively. During a rolling deploy, the same GitHub user hitting an old node (no hook) and a new node (hook registered) can resolve to two different addresses — and, with `usernameClaim: 'email'`, two different Harper accounts — for the same login attempt. A load balancer that isn't sticky per user across the deploy window can bounce between the two outcomes.
+- **Decide what happens to an existing account keyed on the old (default) address** before enabling. This hook changes selection going forward; it does not migrate or link any account already created under the previous default pick. If users should keep their existing account, either keep the hook returning the same address it would have defaulted to for already-provisioned users (e.g. look up the existing account by any of `candidates` first, fall back to your preferred address only for new users), or run your own one-time account-linking step.
+- **Already-established sessions are unaffected either way** — they are not re-evaluated until the next login, so this is only a concern for logins that happen during and after the rollout, not for users already signed in.
 
 ---
 

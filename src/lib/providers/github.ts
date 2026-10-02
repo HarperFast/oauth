@@ -68,7 +68,12 @@ export const GitHubProvider: OAuthProviderConfig = {
 			});
 
 			if (emailResponse.ok) {
-				fetchedEmails = await emailResponse.json();
+				const parsed = await emailResponse.json();
+				if (Array.isArray(parsed) && parsed.every((e) => e && typeof e.email === 'string')) {
+					fetchedEmails = parsed;
+				} else {
+					helpers.logger?.warn?.('GitHub /user/emails returned an unexpected shape — email/email_verified unavailable');
+				}
 			} else {
 				// The case operators actually hit when the user:email scope is missing
 				helpers.logger?.warn?.(
@@ -86,10 +91,8 @@ export const GitHubProvider: OAuthProviderConfig = {
 			);
 		}
 
-		// Selection runs OUTSIDE the fetch's try/catch above: an `onResolveEmail` hook that
-		// rejects (invalid pick, throw, or timeout — see helpers.resolveEmail) must fail this
-		// login, not be swallowed by the fetch error handler and silently fall through to the
-		// default selection below (#228).
+		// Outside the fetch's try/catch above: a resolveEmail rejection (#228) must fail the
+		// login, not be swallowed as an email-fetch failure and fall through to the default.
 		if (fetchedEmails) {
 			const resolved = helpers.resolveEmail
 				? await helpers.resolveEmail(

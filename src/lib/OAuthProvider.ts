@@ -19,6 +19,7 @@ import type {
 } from '../types.ts';
 import { csrfTokenManager } from './CSRFTokenManager.ts';
 import { ADAPTER_EMAIL_PROVENANCE } from './emailProvenance.ts';
+import { ResolveEmailError } from './resolveEmailError.ts';
 
 export class OAuthProvider implements IOAuthProvider {
 	public config: OAuthProviderConfig;
@@ -168,7 +169,7 @@ export class OAuthProvider implements IOAuthProvider {
 		accessToken: string,
 		idTokenClaims: any = null,
 		idTokenSignatureVerified = false,
-		onResolveEmail?: (candidates: EmailCandidate[]) => Promise<string | null | undefined>
+		onResolveEmail?: (candidates: readonly EmailCandidate[]) => Promise<string | null | undefined>
 	): Promise<any> {
 		// Check if provider has custom getUserInfo implementation
 		if (typeof this.config.getUserInfo === 'function') {
@@ -252,25 +253,22 @@ export class OAuthProvider implements IOAuthProvider {
 	}
 
 	/**
-	 * Build `GetUserInfoHelpers.resolveEmail` for a custom adapter (#228). The enforcement
-	 * point for the feature's guardrail: the result is validated against the SAME frozen
-	 * snapshot handed to `onResolveEmail`, never against a reference the hook could have
-	 * mutated, and must be one of its entries with `verified === true`. `onResolveEmail`
-	 * rejecting (hook throw, timeout, or this validation failing) propagates as a rejection
-	 * — it never resolves to a fallback value — so the adapter must not catch it; the login
-	 * fails rather than silently adopting a different (default) account.
+	 * Builds `GetUserInfoHelpers.resolveEmail` (#228): validates the hook's result against
+	 * a frozen snapshot — never a reference the hook could have mutated — requiring
+	 * `verified === true`. A rejection here (invalid pick, hook throw, or timeout) must
+	 * propagate; an adapter must not catch it and fall back on its own.
 	 */
 	private makeResolveEmailHelper(
-		onResolveEmail: (candidates: EmailCandidate[]) => Promise<string | null | undefined>
-	): (candidates: EmailCandidate[]) => Promise<string | undefined> {
-		return async (candidates: EmailCandidate[]): Promise<string | undefined> => {
+		onResolveEmail: (candidates: readonly EmailCandidate[]) => Promise<string | null | undefined>
+	): (candidates: readonly EmailCandidate[]) => Promise<string | undefined> {
+		return async (candidates: readonly EmailCandidate[]): Promise<string | undefined> => {
 			const snapshot: readonly EmailCandidate[] = Object.freeze(
 				candidates.map((c) => Object.freeze({ email: c.email, verified: c.verified, primary: c.primary }))
 			);
-			const chosen = await onResolveEmail(snapshot as EmailCandidate[]);
+			const chosen = await onResolveEmail(snapshot);
 			if (chosen == null) return undefined;
 			if (typeof chosen !== 'string' || !snapshot.some((c) => c.email === chosen && c.verified === true)) {
-				throw new Error(
+				throw new ResolveEmailError(
 					'onResolveEmail hook returned an address that is not one of the verified candidates — refusing to use it'
 				);
 			}

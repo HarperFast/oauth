@@ -674,5 +674,23 @@ describe('GitHub Provider', () => {
 				global.fetch = originalFetch;
 			}
 		});
+
+		it('degrades gracefully (no throw) on a malformed /user/emails body, same as a failed fetch', async () => {
+			const github = getProvider('github');
+			let warned = false;
+			global.fetch = async () => ({ ok: true, json: async () => [null] });
+			try {
+				const info = await github.getUserInfo.call({ config: github }, 'token', {
+					getUserInfo: async () => ({ login: 'user', email: 'profile@example.com' }),
+					logger: { warn: () => (warned = true) },
+				});
+				assert.equal(info.email, 'profile@example.com', 'public profile email is preserved');
+				assert.equal(info.email_verified, undefined);
+				assert.equal(info[ADAPTER_EMAIL_PROVENANCE], 'unauthenticated');
+				assert.equal(warned, true);
+			} finally {
+				global.fetch = originalFetch;
+			}
+		});
 	});
 });

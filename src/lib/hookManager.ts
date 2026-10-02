@@ -13,6 +13,7 @@ import type {
 	OAuthProviderConfig,
 	EmailCandidate,
 } from '../types.ts';
+import { ResolveEmailError } from './resolveEmailError.ts';
 
 /** Bounds `onResolveEmail` so a stalled selector (e.g. a slow DB lookup) can't hold the
  *  OAuth callback open indefinitely — same bound as the GitHub `/user/emails` fetch itself. */
@@ -76,14 +77,14 @@ export class HookManager {
 	 * Call onResolveEmail hook (#228).
 	 *
 	 * Unlike `callOnLogin`/`callOnLogout`/`callOnTokenRefresh`, a failure here is NOT
-	 * swallowed — it is logged and RE-THROWN, the same contract as `callResolveProvider`.
-	 * A hook that cannot resolve the address it was asked to resolve must fail the login,
-	 * never silently fall back to the default (which may be a different account than the
-	 * one the hook was trying to reach). A hook that doesn't settle within
-	 * `ON_RESOLVE_EMAIL_TIMEOUT_MS` fails the same way.
+	 * swallowed: it always surfaces as a `ResolveEmailError` (callers must fail the login
+	 * on it, never fall back to the default — the same contract as `callResolveProvider`).
+	 * A hook that doesn't settle within `timeoutMs` is aborted (`signal`, cooperative —
+	 * the hook must check/pass it along for cancellation to actually stop its work) and
+	 * fails the same way.
 	 */
 	async callResolveEmail(
-		candidates: EmailCandidate[],
+		candidates: readonly EmailCandidate[],
 		provider: string,
 		timeoutMs: number = ON_RESOLVE_EMAIL_TIMEOUT_MS
 	): Promise<string | null | undefined> {
@@ -91,17 +92,26 @@ export class HookManager {
 		if (!hook) return undefined;
 
 		this.logger?.debug?.(`Calling onResolveEmail hook for provider: ${provider}`);
+		const controller = new AbortController();
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		try {
 			return await Promise.race([
-				Promise.resolve(hook(candidates, provider)),
+				Promise.resolve(hook(candidates, provider, controller.signal)),
 				new Promise<never>((_, reject) => {
-					timer = setTimeout(() => reject(new Error(`onResolveEmail hook timed out after ${timeoutMs}ms`)), timeoutMs);
+					timer = setTimeout(() => {
+						controller.abort();
+						reject(new ResolveEmailError(`onResolveEmail hook timed out after ${timeoutMs}ms`));
+					}, timeoutMs);
 				}),
 			]);
 		} catch (error) {
 			this.logger?.error?.('onResolveEmail hook failed:', error instanceof Error ? error.message : String(error));
-			throw error;
+			throw error instanceof ResolveEmailError
+				? error
+				: new ResolveEmailError(
+						`onResolveEmail hook failed: ${error instanceof Error ? error.message : String(error)}`,
+						{ cause: error }
+					);
 		} finally {
 			clearTimeout(timer);
 		}
