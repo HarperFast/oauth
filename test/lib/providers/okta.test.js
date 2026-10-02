@@ -141,6 +141,20 @@ describe('Okta Provider', () => {
 			assert.equal(configured.issuer, 'https://dev-1.okta.com');
 		});
 
+		it('rejects an explicitly empty authServer instead of silently falling back to the org authorization server', () => {
+			// `if (authServer)` would treat '' the same as omitted (undefined) and
+			// silently derive the org AS — losing any custom-AS access policies the
+			// operator thought they were pinning. `authServer !== undefined` makes
+			// an explicit '' reach validateOktaAuthServer, which rejects it.
+			const okta = getProvider('okta');
+			assert.throws(() => okta.configure('dev-1.okta.com', ''), /authServer/);
+		});
+
+		it('rejects an explicit null authServer the same way', () => {
+			const okta = getProvider('okta');
+			assert.throws(() => okta.configure('dev-1.okta.com', null), /authServer/);
+		});
+
 		it('rejects an authServer containing a path separator', () => {
 			const okta = getProvider('okta');
 			assert.throws(() => okta.configure('dev-1.okta.com', 'a/../b'), /authServer/);

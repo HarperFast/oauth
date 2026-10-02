@@ -39,7 +39,7 @@ export const OktaProvider: OAuthProviderConfig = {
 		const ALLOWED_OKTA_DOMAINS = ['.okta.com', '.okta-emea.com', '.oktapreview.com'];
 		validateDomainAllowlist(hostname, ALLOWED_OKTA_DOMAINS, 'Okta');
 
-		if (authServer) {
+		if (authServer !== undefined) {
 			validateOktaAuthServer(authServer);
 			// Custom authorization server: endpoints AND issuer both live under
 			// /oauth2/{authServer} — unlike the org AS, the issuer includes the path.

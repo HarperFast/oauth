@@ -1396,6 +1396,67 @@ describe('OAuth Configuration', () => {
 				assert.ok(config.userInfoUrl.includes('myapp.auth0.com'));
 			});
 
+			it('an explicit, usable issuer pin wins over the domain-derived one (#264)', () => {
+				const providerConfig = {
+					provider: 'auth0',
+					clientId: 'auth0-client',
+					clientSecret: 'auth0-secret',
+					domain: 'myapp.auth0.com',
+					issuer: 'https://custom-issuer.example.com/',
+					redirectUri: 'https://app.test.com/oauth',
+				};
+
+				const config = buildProviderConfig(providerConfig, 'auth0', {});
+
+				assert.equal(config.issuer, 'https://custom-issuer.example.com/');
+			});
+
+			it('an unresolved ${VAR} issuer placeholder does not win over the domain-derived issuer (#264)', () => {
+				delete process.env.OAUTH_TEST_UNSET_ISSUER_VAR;
+				const providerConfig = {
+					provider: 'auth0',
+					clientId: 'auth0-client',
+					clientSecret: 'auth0-secret',
+					domain: 'myapp.auth0.com',
+					issuer: '${OAUTH_TEST_UNSET_ISSUER_VAR}',
+					redirectUri: 'https://app.test.com/oauth',
+				};
+
+				const config = buildProviderConfig(providerConfig, 'auth0', {});
+
+				assert.equal(config.issuer, 'https://myapp.auth0.com/');
+			});
+
+			it('a null issuer does not win over the domain-derived issuer (#264)', () => {
+				const providerConfig = {
+					provider: 'auth0',
+					clientId: 'auth0-client',
+					clientSecret: 'auth0-secret',
+					domain: 'myapp.auth0.com',
+					issuer: null,
+					redirectUri: 'https://app.test.com/oauth',
+				};
+
+				const config = buildProviderConfig(providerConfig, 'auth0', {});
+
+				assert.equal(config.issuer, 'https://myapp.auth0.com/');
+			});
+
+			it('an empty-string issuer does not win over the domain-derived issuer (#264)', () => {
+				const providerConfig = {
+					provider: 'auth0',
+					clientId: 'auth0-client',
+					clientSecret: 'auth0-secret',
+					domain: 'myapp.auth0.com',
+					issuer: '',
+					redirectUri: 'https://app.test.com/oauth',
+				};
+
+				const config = buildProviderConfig(providerConfig, 'auth0', {});
+
+				assert.equal(config.issuer, 'https://myapp.auth0.com/');
+			});
+
 			it('should clean Auth0 domain input', () => {
 				const providerConfig = {
 					provider: 'auth0',
@@ -1561,6 +1622,33 @@ describe('OAuth Configuration', () => {
 				const config = buildProviderConfig(providerConfig, 'azure', {}, true);
 				assert.ok(config.jwksUri);
 				assert.equal(config.issuer, null);
+			});
+
+			it('does not throw for a generic provider manually pointed at an unpinned Azure alias jwksUri — excluded by jwksUri shape, not declared provider type (#264)', () => {
+				// Before the fix, this hard-failed with a misleading "authorizationUrl
+				// is missing or not https" error (authorizationUrl IS https here) —
+				// the real reason was the Azure-host carve-out only firing for
+				// `provider: 'azure'`/`microsoft`, not any config whose jwksUri
+				// happens to be Azure's shared, tenant-independent host.
+				const providerConfig = {
+					provider: 'generic',
+					clientId: 'c',
+					clientSecret: 's',
+					authorizationUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize',
+					tokenUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/token',
+					userInfoUrl: 'https://graph.microsoft.com/v1.0/me',
+					jwksUri: 'https://login.microsoftonline.com/common/discovery/v2.0/keys',
+					redirectUri: 'https://app.test.com/oauth',
+				};
+
+				const config = buildProviderConfig(providerConfig, 'custom-azure', {}, true);
+				assert.equal(config.provider, 'generic');
+				assert.equal(config.issuer, undefined);
+				assert.equal(
+					needsIssuerDiscovery(config),
+					false,
+					'an unpinned alias must never be probed by generic discovery'
+				);
 			});
 
 			it('does not throw when no jwksUri is configured at all (non-OIDC provider)', () => {

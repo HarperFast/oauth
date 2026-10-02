@@ -463,11 +463,27 @@ async function boundedDnsLookup(hostname: string): Promise<ResolvedAddress[]> {
 }
 
 /**
- * DNS SSRF gate: resolves all addresses for `hostname`, rejects if any falls
- * outside the allowed (global unicast) ranges, and returns the validated set so
- * the caller can PIN the connection to it (closing the rebind TOCTOU).
+ * DNS SSRF gate: resolves all addresses for `hostname` and returns the
+ * validated set so the caller can PIN the connection to it (closing the
+ * rebind TOCTOU). Rejects an address outside the allowed (global unicast)
+ * ranges unless `allowPrivateAddresses` is set.
+ *
+ * `allowPrivateAddresses` exists for exactly one caller (OIDC discovery,
+ * `discovery.ts`): that endpoint is already operator-configured input — the
+ * same trust level as `jwksUri`, which `jwks-rsa` fetches with no SSRF gate
+ * at all — not attacker-controlled input the way a CIMD `client_id` is.
+ * Blocking a private/loopback address there only breaks self-hosted IdPs on
+ * a private network (Docker, a VPC) with a misleading "could not be
+ * resolved" message, for no safety benefit over the ungated JWKS fetch the
+ * same config already makes. An unclassified address family still fails
+ * closed either way — that's a resolver-sanity check, not part of the SSRF
+ * range gate itself.
  */
-async function checkHostSsrf(hostname: string, logger?: Logger): Promise<ResolvedAddress[]> {
+async function checkHostSsrf(
+	hostname: string,
+	logger?: Logger,
+	allowPrivateAddresses = false
+): Promise<ResolvedAddress[]> {
 	let addresses: ResolvedAddress[];
 	try {
 		addresses = await boundedDnsLookup(hostname);
@@ -482,8 +498,14 @@ async function checkHostSsrf(hostname: string, logger?: Logger): Promise<Resolve
 	}
 	for (const { address, family } of addresses) {
 		// Fail closed on any family the resolver reports other than 4/6 — an
-		// unclassified address must never skip both range checks.
-		const blocked = family === 4 ? isPrivateIpv4(address) : family === 6 ? isPrivateIpv6(address) : true;
+		// unclassified address must never skip both range checks, regardless
+		// of `allowPrivateAddresses`.
+		if (family !== 4 && family !== 6) {
+			logger?.warn?.(`CIMD: host ${hostname} resolves to a blocked address: ${address} (family ${family})`);
+			throw new CimdClientError('invalid_client', DNS_GATE_REJECTION);
+		}
+		if (allowPrivateAddresses) continue;
+		const blocked = family === 4 ? isPrivateIpv4(address) : isPrivateIpv6(address);
 		if (blocked) {
 			logger?.warn?.(`CIMD: host ${hostname} resolves to a blocked address: ${address} (family ${family})`);
 			throw new CimdClientError('invalid_client', DNS_GATE_REJECTION);
@@ -1074,6 +1096,8 @@ export interface BoundedJsonFetchOptions {
 	/** Maximum body size (bytes). */
 	maxBytes: number;
 	logger?: Logger;
+	/** Skip the private/loopback-address block in the DNS SSRF gate — see {@link checkHostSsrf}. Default `false`. */
+	allowPrivateAddresses?: boolean;
 }
 
 /**
@@ -1090,7 +1114,7 @@ export async function fetchPinnedBoundedJson(
 	url: string,
 	options: BoundedJsonFetchOptions
 ): Promise<BoundedJsonFetchResult> {
-	const { label, tag, accept, contentTypes, timeoutMs, maxBytes, logger } = options;
+	const { label, tag, accept, contentTypes, timeoutMs, maxBytes, logger, allowPrivateAddresses } = options;
 	const parsedUrl = new URL(url);
 
 	// One deadline across DNS gate, connect, headers, AND body read — a
@@ -1105,7 +1129,7 @@ export async function fetchPinnedBoundedJson(
 		// addresses are PINNED into the fetch so the connection can't race a
 		// rebind to a fresh, unvalidated resolution.
 		const validatedAddresses = await withAbort(
-			checkHostSsrf(parsedUrl.hostname, logger),
+			checkHostSsrf(parsedUrl.hostname, logger, allowPrivateAddresses),
 			controller.signal,
 			`${tag} DNS lookup timed out`
 		);

@@ -192,21 +192,21 @@ export OAUTH_REDIRECT_URI="https://yourdomain.com/oauth/callback"
 
 ### Multi-Tenant Apps and Account Adoption
 
-`tenantId` set to a real tenant GUID derives a fixed issuer, same as any other provider. Leaving `tenantId` unset (or set to `common`/`organizations`/`consumers`) accepts sign-ins from any tenant, but — because there's no single fixed issuer for those — ID tokens aren't trusted for [account adoption](./configuration.md#account-adoption-gate) by default: logins work, but a login that would otherwise adopt an existing Harper account is denied instead (or a new login is quarantined), exactly as for any other unverified claim.
+`tenantId` set to a real tenant GUID derives a fixed issuer, same as any other provider. Leaving `tenantId` unset (or set to `common`/`organizations`/`consumers`) accepts sign-ins from any tenant, but — because there's no single fixed issuer for those, and no key set exclusive to one tenant — ID tokens aren't trusted for [account adoption](./configuration.md#account-adoption-gate): logins work, but every login is denied adoption (or quarantined), exactly as for any other unverified claim.
 
-To make a multi-tenant app adoption-eligible for **one specific tenant**, pin `issuer` to that tenant's own issuer URI alongside the multi-tenant `tenantId`:
+Pinning `issuer` alongside a multi-tenant `tenantId` does **not** keep the provider multi-tenant with per-login adoption gating. It turns the provider into a single-tenant one, for exactly the one tenant named by the pin — the plugin redirects verification to that tenant's own, non-shared signing keys and enforces that tenant's issuer, exactly as if you had set `tenantId` to that tenant's GUID directly. Sign-ins from every other tenant stop working outright: ID token verification fails, and the Microsoft Graph `/v1.0/me` fallback can't rescue the login either, since Graph returns `mail`, not `email` — the preset's default `usernameClaim`.
 
 ```yaml
 '@harperfast/oauth':
   providers:
     azure:
-      tenantId: 'common' # still accepts sign-ins from any tenant
-      issuer: 'https://login.microsoftonline.com/<your-tenant-guid>/v2.0' # only this tenant adopts
+      tenantId: 'common' # only used to resolve the pin below to a real tenant
+      issuer: 'https://login.microsoftonline.com/<your-tenant-guid>/v2.0' # provider becomes single-tenant: only this tenant signs in
       clientId: ${OAUTH_AZURE_CLIENT_ID}
       clientSecret: ${OAUTH_AZURE_CLIENT_SECRET}
 ```
 
-The plugin verifies the token against that one tenant's own signing keys (never Microsoft's shared, tenant-independent key set), so this is exactly as safe as configuring a single-tenant app directly. `issuer` must be a single tenant GUID — not an array — since listing more than one tenant here would let those tenants adopt each other's Harper accounts if they ever shared an email; configure a separate provider entry per tenant instead if you need more than one.
+If you need more than one tenant to sign in, configure a separate provider entry per tenant (each pinned to its own tenant GUID) rather than pinning one multi-tenant provider to an array of issuers — an array would let those tenants adopt each other's Harper accounts if they ever shared an email, so it's rejected outright.
 
 ### `userInfoUrl` fetchEmail and the `profile` scope
 
@@ -349,7 +349,7 @@ To include groups in the ID token:
       clientSecret: ${OAUTH_OKTA_CLIENT_SECRET}
 ```
 
-Without `authServer`, pointing `authorizationUrl`/`tokenUrl`/`userInfoUrl`/`jwksUri` at a custom authorization server directly (bypassing `domain`) used to require setting `issuer` explicitly too, or OIDC discovery derives it for you in the background — see [Understanding `issuer`](#understanding-issuer) below.
+Without `authServer`, pointing `authorizationUrl`/`tokenUrl`/`userInfoUrl`/`jwksUri` at a custom authorization server directly (bypassing `domain`) no longer requires setting `issuer` explicitly — OIDC discovery derives it for you in the background instead. See [`issuer` is usually unnecessary](#issuer-is-usually-unnecessary) below.
 
 ---
 

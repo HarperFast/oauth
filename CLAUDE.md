@@ -29,6 +29,8 @@ npm run format:write    # Prettier fix
 5. **Provider registry** (`src/lib/config.ts`) — initializes and manages OAuth providers
 6. **Multi-tenant SSO** (`src/lib/multiTenantResource.ts`, `src/lib/tenantManager.ts`) — dynamic per-tenant provider resolution
 
+See `src/lib/DESIGN.md` for invariants around issuer derivation (OIDC discovery, Azure multi-tenant adoption) that aren't obvious from the code alone.
+
 ### Token refresh
 
 Middleware runs on every HTTP request. Refreshes at 80% of token lifetime. Transparent to application code.

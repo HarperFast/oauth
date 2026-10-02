@@ -220,6 +220,46 @@ describe('OIDC discovery (#264)', () => {
 			assert.ok(calls <= MAX_DISCOVERY_PREFIXES, `expected at most ${MAX_DISCOVERY_PREFIXES} attempts, got ${calls}`);
 		});
 
+		it('root is still tried for a pathological long path even though capped at MAX_DISCOVERY_PREFIXES', async () => {
+			// Before the fix, the cap always kept the MAX_DISCOVERY_PREFIXES
+			// LONGEST prefixes and never reached root (dropping all segments) —
+			// so a document that only exists at root was never found.
+			const segments = Array.from({ length: 30 }, (_, i) => `seg${i}`);
+			const authUrl = `https://idp.example.com/${segments.join('/')}`;
+			_setFetch(
+				fetchFromMap({
+					'https://idp.example.com/.well-known/openid-configuration': {
+						issuer: 'https://idp.example.com',
+						authorization_endpoint: authUrl,
+						token_endpoint: TOKEN_URL,
+						jwks_uri: JWKS_URI,
+					},
+				})
+			);
+			startIssuerDiscovery(authUrl, JWKS_URI, TOKEN_URL, 'deep-idp');
+			const issuer = await awaitDiscoveredIssuer(authUrl, JWKS_URI, TOKEN_URL);
+			assert.equal(issuer, 'https://idp.example.com');
+		});
+
+		it('a root authorizationUrl path ("/") is still a candidate, not skipped entirely', async () => {
+			// `/`'s pathname has zero segments, so the drop-one-segment loop never
+			// ran at all before the fix, and root was never tried.
+			const authUrl = 'https://idp.example.com/';
+			_setFetch(
+				fetchFromMap({
+					'https://idp.example.com/.well-known/openid-configuration': {
+						issuer: 'https://idp.example.com',
+						authorization_endpoint: authUrl,
+						token_endpoint: TOKEN_URL,
+						jwks_uri: JWKS_URI,
+					},
+				})
+			);
+			startIssuerDiscovery(authUrl, JWKS_URI, TOKEN_URL, 'root-idp');
+			const issuer = await awaitDiscoveredIssuer(authUrl, JWKS_URI, TOKEN_URL);
+			assert.equal(issuer, 'https://idp.example.com');
+		});
+
 		it('the overall budget stops trying further candidates once exhausted', async () => {
 			_setDiscoveryTimeouts({ perFetchMs: 500, overallBudgetMs: 30 });
 			let calls = 0;
@@ -282,11 +322,17 @@ describe('OIDC discovery (#264)', () => {
 	});
 
 	describe('boot does not wait; first-caller-only bounded await', () => {
-		it('startIssuerDiscovery returns immediately without waiting for the fetch to resolve', () => {
+		it('startIssuerDiscovery returns immediately without waiting for the fetch to resolve', async () => {
 			_setFetch(() => new Promise(() => {})); // never resolves
 			const start = Date.now();
 			startIssuerDiscovery(AUTH_URL, JWKS_URI, TOKEN_URL, 'custom-idp');
 			assert.ok(Date.now() - start < 50, 'startIssuerDiscovery must not block');
+			// Give the mocked DNS lookup's microtask a tick to resolve and the
+			// (still-mocked, intentionally never-resolving) fetch to actually get
+			// invoked before this test ends and `afterEach` resets the fetch mock
+			// — otherwise that call races the reset and can hit the real network
+			// (against the mocked DNS address) instead of the mock.
+			await new Promise((resolve) => setTimeout(resolve, 10));
 		});
 
 		it('the first caller awaits within the bound and is upgraded if discovery resolves in time', async () => {
@@ -458,6 +504,27 @@ describe('OIDC discovery (#264)', () => {
 			startIssuerDiscovery(AUTH_URL, JWKS_URI, TOKEN_URL, 'custom-idp');
 			const issuer = await awaitDiscoveredIssuer(AUTH_URL, JWKS_URI, TOKEN_URL);
 			assert.equal(issuer, null);
+		});
+	});
+
+	describe('private/loopback IdP endpoints (#264) — operator-configured input, not attacker-controlled', () => {
+		it('succeeds against a host that resolves to a private address, unlike CIMD client_id resolution', async () => {
+			// CIMD's own SSRF gate blocks this; discovery deliberately opts out
+			// (`allowPrivateAddresses`) because the endpoint here is
+			// operator-configured, the same trust level as `jwksUri` itself.
+			_setDnsLookup(async () => [{ address: '10.0.0.5', family: 4 }]);
+			_setFetch(fetchFromMap({ [WELL_KNOWN]: validDoc() }));
+			startIssuerDiscovery(AUTH_URL, JWKS_URI, TOKEN_URL, 'self-hosted-idp');
+			const issuer = await awaitDiscoveredIssuer(AUTH_URL, JWKS_URI, TOKEN_URL);
+			assert.equal(issuer, 'https://idp.example.com');
+		});
+
+		it('succeeds against a loopback-resolving host', async () => {
+			_setDnsLookup(async () => [{ address: '127.0.0.1', family: 4 }]);
+			_setFetch(fetchFromMap({ [WELL_KNOWN]: validDoc() }));
+			startIssuerDiscovery(AUTH_URL, JWKS_URI, TOKEN_URL, 'self-hosted-idp');
+			const issuer = await awaitDiscoveredIssuer(AUTH_URL, JWKS_URI, TOKEN_URL);
+			assert.equal(issuer, 'https://idp.example.com');
 		});
 	});
 });

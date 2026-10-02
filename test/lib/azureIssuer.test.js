@@ -78,10 +78,46 @@ describe('resolveAzureIssuerBinding', () => {
 			assert.equal(config.issuer, `https://login.microsoftonline.com/${GUID_A}/v2.0`);
 		});
 
-		it('leaves a matching explicit pin untouched', () => {
+		it('leaves an already-canonical matching explicit pin untouched', () => {
 			const config = baseConfig({
 				jwksUri: `https://login.microsoftonline.com/${GUID_A}/discovery/v2.0/keys`,
 				issuer: `https://login.microsoftonline.com/${GUID_A}/v2.0`,
+			});
+			resolveAzureIssuerBinding(config, 'azure');
+			assert.equal(config.issuer, `https://login.microsoftonline.com/${GUID_A}/v2.0`);
+		});
+
+		it('canonicalizes a same-tenant pin with a trailing slash — jwt.verify compares issuer strings exactly', () => {
+			const config = baseConfig({
+				jwksUri: `https://login.microsoftonline.com/${GUID_A}/discovery/v2.0/keys`,
+				issuer: `https://login.microsoftonline.com/${GUID_A}/v2.0/`,
+			});
+			resolveAzureIssuerBinding(config, 'azure');
+			assert.equal(config.issuer, `https://login.microsoftonline.com/${GUID_A}/v2.0`);
+		});
+
+		it('canonicalizes a same-tenant pin with an uppercase GUID', () => {
+			const config = baseConfig({
+				jwksUri: `https://login.microsoftonline.com/${GUID_A}/discovery/v2.0/keys`,
+				issuer: `https://login.microsoftonline.com/${GUID_A.toUpperCase()}/v2.0`,
+			});
+			resolveAzureIssuerBinding(config, 'azure');
+			assert.equal(config.issuer, `https://login.microsoftonline.com/${GUID_A}/v2.0`);
+		});
+
+		it('canonicalizes a same-tenant pin given in the older sts.windows.net (v1) form', () => {
+			const config = baseConfig({
+				jwksUri: `https://login.microsoftonline.com/${GUID_A}/discovery/v2.0/keys`,
+				issuer: `https://sts.windows.net/${GUID_A}/`,
+			});
+			resolveAzureIssuerBinding(config, 'azure');
+			assert.equal(config.issuer, `https://login.microsoftonline.com/${GUID_A}/v2.0`);
+		});
+
+		it('canonicalizes a same-tenant pin given as an array mixing the v1 and v2 forms', () => {
+			const config = baseConfig({
+				jwksUri: `https://login.microsoftonline.com/${GUID_A}/discovery/v2.0/keys`,
+				issuer: [`https://login.microsoftonline.com/${GUID_A}/v2.0`, `https://sts.windows.net/${GUID_A}/`],
 			});
 			resolveAzureIssuerBinding(config, 'azure');
 			assert.equal(config.issuer, `https://login.microsoftonline.com/${GUID_A}/v2.0`);
@@ -91,6 +127,14 @@ describe('resolveAzureIssuerBinding', () => {
 			const config = baseConfig({
 				jwksUri: `https://login.microsoftonline.com/${GUID_A}/discovery/v2.0/keys`,
 				issuer: `https://login.microsoftonline.com/${GUID_B}/v2.0`,
+			});
+			assert.throws(() => resolveAzureIssuerBinding(config, 'azure'), /different tenant/);
+		});
+
+		it('throws when an array pin has one element naming a different tenant than the jwksUri', () => {
+			const config = baseConfig({
+				jwksUri: `https://login.microsoftonline.com/${GUID_A}/discovery/v2.0/keys`,
+				issuer: [`https://login.microsoftonline.com/${GUID_A}/v2.0`, `https://sts.windows.net/${GUID_B}/`],
 			});
 			assert.throws(() => resolveAzureIssuerBinding(config, 'azure'), /different tenant/);
 		});
@@ -160,6 +204,21 @@ describe('resolveAzureIssuerBinding', () => {
 				issuer: 'https://sts.example.com/not-azure',
 			});
 			assert.throws(() => resolveAzureIssuerBinding(config, 'azure'), /not a usable Azure tenant issuer/);
+		});
+
+		it('a throwing advisory logger does not abort the pinned-alias rewrite', () => {
+			const config = baseConfig({
+				jwksUri: 'https://login.microsoftonline.com/common/discovery/v2.0/keys',
+				issuer: `https://login.microsoftonline.com/${GUID_A}/v2.0`,
+			});
+			const throwingLogger = {
+				info: () => {
+					throw new Error('logger blew up');
+				},
+			};
+			resolveAzureIssuerBinding(config, 'azure', throwingLogger);
+			assert.equal(config.jwksUri, `https://login.microsoftonline.com/${GUID_A}/discovery/v2.0/keys`);
+			assert.equal(config.issuer, `https://login.microsoftonline.com/${GUID_A}/v2.0`);
 		});
 
 		it('rewrite collapses into the tenant-exclusive case: a second call is a no-op', () => {

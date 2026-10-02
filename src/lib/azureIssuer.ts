@@ -31,6 +31,7 @@ import type { Logger, OAuthProviderConfig } from '../types.ts';
 export const AZURE_CONSUMERS_TENANT_ID = '9188040d-6c67-4c5b-b112-36a304b66dad';
 
 const AZURE_HOST = 'login.microsoftonline.com';
+const AZURE_STS_HOST = 'sts.windows.net';
 const GUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ALIAS_SEGMENTS = new Set(['common', 'organizations', 'consumers']);
 
@@ -93,6 +94,45 @@ function hasUsableIssuer(issuer: OAuthProviderConfig['issuer']): boolean {
 }
 
 /**
+ * The tenant GUID of a single Azure v1 (`https://sts.windows.net/{guid}/`)
+ * or v2 (`https://login.microsoftonline.com/{guid}/v2.0`) tenant-exclusive
+ * issuer string, lowercased. `null` for anything else — a different host,
+ * an alias segment, or a malformed value.
+ */
+function azureIssuerGuidAnyVersion(value: unknown): string | null {
+	if (typeof value !== 'string' || value === '') return null;
+	let url: URL;
+	try {
+		url = new URL(value);
+	} catch {
+		return null;
+	}
+	if (url.protocol !== 'https:') return null;
+	if (url.port !== '' || url.username !== '' || url.password !== '' || url.search !== '' || url.hash !== '') {
+		return null;
+	}
+	let match: RegExpExecArray | null = null;
+	if (url.hostname === AZURE_HOST) match = /^\/([^/]+)\/v2\.0\/?$/.exec(url.pathname);
+	else if (url.hostname === AZURE_STS_HOST) match = /^\/([^/]+)\/?$/.exec(url.pathname);
+	if (!match) return null;
+	const guid = match[1].toLowerCase();
+	return GUID_RE.test(guid) ? guid : null;
+}
+
+/**
+ * True when every value of a usable `issuer` (string or array) names the
+ * same tenant `guid`, in either Azure issuer form
+ * (`login.microsoftonline.com/.../v2.0` or `sts.windows.net/...`). Case and
+ * a trailing slash are tolerated — `jwt.verify` itself does exact string
+ * comparison, so this is what lets a pin in either acceptable shape or
+ * casing be canonicalized rather than rejected or left to fail later.
+ */
+function azureIssuerNamesOnlyTenant(issuer: OAuthProviderConfig['issuer'], guid: string): boolean {
+	const values = Array.isArray(issuer) ? issuer : [issuer];
+	return values.every((value) => azureIssuerGuidAnyVersion(value) === guid);
+}
+
+/**
  * Cheap hostname check — true whenever `jwksUri`'s host is Azure's own,
  * regardless of path shape. Generic OIDC discovery (`discovery.ts`) must
  * never run against it: `resolveAzureIssuerBinding` above is the only
@@ -124,20 +164,22 @@ export function resolveAzureIssuerBinding(config: OAuthProviderConfig, providerN
 
 	if (GUID_RE.test(lowerSegment)) {
 		// A real, tenant-exclusive authority: the issuer is fully determined by
-		// the URL itself. An operator-pinned issuer must name the same tenant —
-		// Azure's signing keys are not guaranteed exclusive to one tenant-specific
-		// endpoint over time, so a mismatched pin paired with this endpoint could
-		// otherwise accept a different tenant's token.
-		if (hasUsableIssuer(config.issuer)) {
-			const pinnedGuid = azureIssuerGuid(config.issuer);
-			if (pinnedGuid !== lowerSegment) {
-				throw new Error(
-					`OAuth provider '${providerName}' (azure) has a jwksUri for tenant '${lowerSegment}' but an ` +
-						`explicit 'issuer' naming a different tenant (${JSON.stringify(config.issuer)}). The jwksUri's ` +
-						`tenant and the pinned issuer's tenant must be the same GUID.`
-				);
-			}
-			return;
+		// the URL itself. An operator-pinned issuer must name only that same
+		// tenant (in either Azure issuer form, string or array) — Azure's
+		// signing keys are not guaranteed exclusive to one tenant-specific
+		// endpoint over time, so a pin naming a different tenant could otherwise
+		// accept a different tenant's token. A same-tenant pin is replaced with
+		// the canonical v2 issuer rather than left as-is: `jwt.verify` compares
+		// issuer strings exactly, so a differently-cased GUID, a trailing slash,
+		// the older `sts.windows.net` form, or an array mixing those would
+		// otherwise fail verification for a real, correctly signed token.
+		if (hasUsableIssuer(config.issuer) && !azureIssuerNamesOnlyTenant(config.issuer, lowerSegment)) {
+			throw new Error(
+				`OAuth provider '${providerName}' (azure) has a jwksUri for tenant '${lowerSegment}' but an ` +
+					`explicit 'issuer' naming a different tenant, or an unrecognized value, ` +
+					`(${JSON.stringify(config.issuer)}). Every value of the pinned issuer's tenant and the jwksUri's ` +
+					`tenant must be the same GUID.`
+			);
 		}
 		config.issuer = azureTenantUri('issuer', lowerSegment);
 		return;
@@ -174,10 +216,15 @@ export function resolveAzureIssuerBinding(config: OAuthProviderConfig, providerN
 
 	// Collapse into the tenant-exclusive case above: verify against that one
 	// tenant's own, non-shared JWKS endpoint — never the shared alias pool.
-	logger?.info?.(
-		`OAuth provider '${providerName}' (azure): pinned issuer resolves to tenant '${pinnedGuid}'; verifying ` +
-			`against that tenant's own JWKS endpoint instead of the shared '${lowerSegment}' key set.`
-	);
+	// Advisory only: a throwing logger must not abort issuer binding.
+	try {
+		logger?.info?.(
+			`OAuth provider '${providerName}' (azure): pinned issuer resolves to tenant '${pinnedGuid}'; verifying ` +
+				`against that tenant's own JWKS endpoint instead of the shared '${lowerSegment}' key set.`
+		);
+	} catch {
+		/* advisory log only */
+	}
 	config.jwksUri = azureTenantUri('keys', pinnedGuid);
 	config.issuer = azureTenantUri('issuer', pinnedGuid);
 }

@@ -676,15 +676,19 @@ export function buildProviderConfig(
 		}
 
 		if (derivedConfig) {
-			// An explicit operator `issuer` always wins over a shortcut-derived
+			// An explicit, usable operator `issuer` wins over a shortcut-derived
 			// one (#264) — narrowly: every other `configure()`-returned field
 			// (the endpoint URLs) keeps today's unconditional-overwrite behavior,
 			// so a `domain`/`tenantId` shortcut's endpoints stay mutually
 			// coherent rather than mixing a stale explicit endpoint with
-			// freshly-derived others.
+			// freshly-derived others. "Usable" excludes `null`/`''`/an
+			// all-empty array (same as `hasUsableIssuer` below) and an
+			// unresolved `${VAR}` placeholder left by `expandEnvVar` when the
+			// variable is unset — otherwise that literal placeholder string would
+			// win over the shortcut-derived issuer and fail every login.
 			const pinnedIssuer = expandedOptions.issuer;
 			Object.assign(config, derivedConfig);
-			if (pinnedIssuer !== undefined) {
+			if (isPinnedIssuerUsable(pinnedIssuer)) {
 				config.issuer = pinnedIssuer;
 			}
 		}
@@ -699,7 +703,7 @@ export function buildProviderConfig(
 	resolveAzureIssuerBinding(config, providerName, logger);
 
 	if (enforceIssuerForJwks) {
-		validateIssuerForJwks(config, providerName, providerPreset);
+		validateIssuerForJwks(config, providerName);
 		checkGraphProfileScope(config, providerName, logger);
 	}
 
@@ -714,6 +718,19 @@ export function buildProviderConfig(
 function hasUsableIssuer(issuer: OAuthProviderConfig['issuer']): boolean {
 	if (Array.isArray(issuer)) return issuer.some((value) => typeof value === 'string' && value !== '');
 	return typeof issuer === 'string' && issuer !== '';
+}
+
+/**
+ * {@link hasUsableIssuer}, plus rejecting an unresolved `${VAR}` placeholder
+ * (string, or any array element) — used only for the explicit-pin-wins-over-
+ * shortcut check above, so a placeholder `expandEnvVar` left untouched
+ * because the variable is unset can't win over a `domain`/`tenantId`
+ * shortcut's derived issuer and then fail every login against that literal
+ * placeholder text.
+ */
+function isPinnedIssuerUsable(issuer: OAuthProviderConfig['issuer']): boolean {
+	const values = Array.isArray(issuer) ? issuer : [issuer];
+	return values.some((value) => typeof value === 'string' && value !== '' && !isUnresolvedEnvPlaceholder(value));
 }
 
 /**
@@ -752,22 +769,20 @@ export function needsIssuerDiscovery(config: OAuthProviderConfig): boolean {
  * *independent* of the network (no `authorizationUrl`, or a non-`https` one)
  * still hard-fails here, exactly as before #264.
  *
- * Azure is excluded by provider type, not just its `/common` default: an
- * *unpinned* alias authority is intentionally issuer-less (HarperFast/oauth#264
- * §"adoption requires a pin") and must not hard-fail; a pinned one, or a real
- * tenant GUID, already has a usable issuer by this point. Checked against the
- * preset's own `provider` field (`providerPreset`), not `config.provider` —
- * the `microsoft` alias resolves to the Azure preset but an explicit
- * `provider: 'microsoft'` option carries that string into `config.provider`.
+ * Excluded by `jwksUri` shape, not declared provider type: any Azure-host
+ * `jwksUri` that still has no usable `issuer` at this point can only be an
+ * *unpinned* alias authority — `resolveAzureIssuerBinding` above already
+ * resolved a pinned alias or a real tenant GUID to a usable issuer, or
+ * thrown for anything unsafe/malformed. An unpinned alias is intentionally
+ * issuer-less (HarperFast/oauth#264 §"adoption requires a pin") and must not
+ * hard-fail here — regardless of whether the config says `provider: azure`,
+ * uses the `microsoft` alias, or is a `generic`/explicit-endpoint provider
+ * manually pointed at the same host.
  */
-function validateIssuerForJwks(
-	config: OAuthProviderConfig,
-	providerName: string,
-	providerPreset: OAuthProviderConfig | null
-): void {
+function validateIssuerForJwks(config: OAuthProviderConfig, providerName: string): void {
 	if (!config.jwksUri) return;
-	if (config.provider === 'azure' || providerPreset?.provider === 'azure') return;
 	if (hasUsableIssuer(config.issuer)) return;
+	if (isAzureJwksUri(config.jwksUri)) return;
 	if (needsIssuerDiscovery(config)) return;
 
 	throw new Error(

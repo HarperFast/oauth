@@ -22,15 +22,9 @@ export const AzureADProvider: OAuthProviderConfig = {
 	emailClaim: 'email',
 	nameClaim: 'displayName',
 
-	// Azure-specific: configure endpoints based on tenant. `tenantId` may be a
-	// real tenant GUID (single-tenant: the issuer is fully determined by it)
-	// or one of the shared, tenant-independent aliases 'common'/'organizations'/
-	// 'consumers' (multi-tenant: no single fixed issuer exists for them).
-	// `resolveAzureIssuerBinding` (HarperFast/oauth#264) derives the issuer for
-	// the real-GUID case, and resolves — or leaves intentionally unset — the
-	// alias case, depending on whether the operator also pins one; setting a
-	// literal issuer here for an alias would be wrong for every real token
-	// (its `iss` is never literally "common"/"organizations"/"consumers").
+	// Azure-specific: configure endpoints based on tenant (`tenantId`: a real
+	// tenant GUID, or one of the shared aliases 'common'/'organizations'/
+	// 'consumers' — see `resolveAzureIssuerBinding`, HarperFast/oauth#264).
 	configure: (tenantId: string): Partial<OAuthProviderConfig> => {
 		// Validate Azure tenant ID format
 		validateAzureTenantId(tenantId);
@@ -41,12 +35,10 @@ export const AzureADProvider: OAuthProviderConfig = {
 			jwksUri: `https://login.microsoftonline.com/${tenantId}/discovery/v2.0/keys`,
 		};
 
-		// A real tenant GUID's issuer is fully determined by it — set it
-		// directly, as before. The shared aliases have no single fixed
-		// issuer (a real token's `iss` is never literally "common"/
-		// "organizations"/"consumers"); leave it unset and let
-		// `resolveAzureIssuerBinding` (HarperFast/oauth#264) resolve — or
-		// intentionally leave unresolved — the alias case instead.
+		// A real tenant GUID's issuer is fully determined by it. The shared
+		// aliases have no single fixed issuer — leave unset for
+		// `resolveAzureIssuerBinding` to resolve (or intentionally leave
+		// unresolved).
 		if (!/^(common|organizations|consumers)$/i.test(tenantId)) {
 			config.issuer = `https://login.microsoftonline.com/${tenantId}/v2.0`;
 		}

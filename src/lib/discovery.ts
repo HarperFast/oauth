@@ -5,8 +5,13 @@
  * issuer directly for the common shortcuts; this module covers the case
  * where an operator bypassed those shortcuts with explicit endpoints.
  *
- * Fetch safety: reuses `fetchPinnedBoundedJson` (SSRF-gated, pinned-connect,
- * no-redirect, size- and time-bounded) as-is — no new fetch primitive.
+ * Fetch safety: reuses `fetchPinnedBoundedJson` (pinned-connect, no-redirect,
+ * size- and time-bounded) — no new fetch primitive. Opts out of its
+ * private/loopback-address block (`allowPrivateAddresses`): the endpoints
+ * discovered against here are operator-configured, not attacker-controlled,
+ * the same trust level as `jwksUri` itself (which `jwks-rsa` fetches with no
+ * SSRF gate at all) — unlike CIMD's own `client_id` input, which that block
+ * exists for.
  *
  * Validation (per OIDC Discovery 1.0 §4.3 and #264's own design): a
  * candidate issuer is accepted only when its document's `issuer` equals the
@@ -101,15 +106,24 @@ export function _clearDiscoveryCache(): void {
  * Ancestor path-prefixes of `pathname`, longest first, root last (`''`),
  * capped at `MAX_DISCOVERY_PREFIXES`. E.g. `/oauth2/id/v1/authorize` ->
  * `['/oauth2/id/v1', '/oauth2/id', '/oauth2', '']`.
+ *
+ * Root (`''`) is always included, even when capping: a `pathname` of `/`
+ * itself has zero segments, so the drop-one-segment-at-a-time loop below
+ * would otherwise never run at all and skip root entirely; a `pathname`
+ * deeper than the cap would otherwise only ever try its longest prefixes
+ * and never reach root, which is often exactly where a provider's discovery
+ * document actually lives.
  */
 function candidatePrefixes(pathname: string): string[] {
 	const segments = pathname.split('/').filter(Boolean);
-	const prefixes: string[] = [];
-	for (let drop = 1; drop <= segments.length && prefixes.length < MAX_DISCOVERY_PREFIXES; drop++) {
+	if (segments.length === 0) return [''];
+	const all: string[] = [];
+	for (let drop = 1; drop <= segments.length; drop++) {
 		const remaining = segments.slice(0, segments.length - drop);
-		prefixes.push(remaining.length === 0 ? '' : '/' + remaining.join('/'));
+		all.push(remaining.length === 0 ? '' : '/' + remaining.join('/'));
 	}
-	return prefixes;
+	if (all.length <= MAX_DISCOVERY_PREFIXES) return all;
+	return [...all.slice(0, MAX_DISCOVERY_PREFIXES - 1), all[all.length - 1]];
 }
 
 async function fetchDiscoveryDocument(discoveryUrl: string, timeoutMs: number, logger?: Logger): Promise<any | null> {
@@ -122,6 +136,13 @@ async function fetchDiscoveryDocument(discoveryUrl: string, timeoutMs: number, l
 			timeoutMs,
 			maxBytes: DEFAULT_MAX_DOCUMENT_BYTES,
 			logger,
+			// `authorizationUrl`/`jwksUri` are operator-configured, not
+			// attacker-controlled (unlike CIMD's own `client_id`) — the same
+			// trust level as `jwksUri` itself, which `jwks-rsa` already fetches
+			// with no SSRF gate at all. Blocking a private/loopback address here
+			// would only break discovery for a self-hosted IdP on a private
+			// network for no safety benefit over that already-ungated fetch.
+			allowPrivateAddresses: true,
 		});
 		const doc = JSON.parse(body);
 		return doc && typeof doc === 'object' && !Array.isArray(doc) ? doc : null;
