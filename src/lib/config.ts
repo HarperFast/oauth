@@ -692,7 +692,8 @@ function hasUsableIssuer(issuer: OAuthProviderConfig['issuer']): boolean {
  *
  * Azure is excluded by provider type, not just its `/common` default: single-
  * tenant Azure configs with explicit endpoints and no `issuer` are unchanged
- * by this PR (tracked as a known gap, not fixed here). Checked against the
+ * by this PR (tracked as a known gap in HarperFast/oauth#264, not fixed
+ * here). Checked against the
  * preset's own `provider` field (`providerPreset`), not `config.provider` —
  * the `microsoft` alias resolves to the Azure preset but an explicit
  * `provider: 'microsoft'` option carries that string into `config.provider`.
