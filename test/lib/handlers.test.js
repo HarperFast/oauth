@@ -2713,6 +2713,67 @@ describe('OAuth Handlers', () => {
 			assert.ok(!result.headers.Location?.includes('email_ambiguous'), result.headers.Location);
 			assert.equal(mockRequest.session.update.mock.calls[0].arguments[0].user, 'personal@example.com');
 		});
+
+		it('an unverified primary plus a single different verified address matching an account adopts that address', async () => {
+			// The default pick (primary) is UNVERIFIED, so it is never a candidate to read —
+			// the lone verified address 'work@example.com' is read on its own merits, and
+			// matching an existing account wins even though it isn't the default pick.
+			stubAccounts(['work@example.com']);
+			mockHookManager.hasHook = createMockFn(() => false);
+			useCandidateResolvingProvider(
+				[
+					{ email: 'personal@example.com', verified: false, primary: true },
+					{ email: 'work@example.com', verified: true, primary: false },
+				],
+				{ primary: 'personal@example.com' }
+			);
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				githubConfig(),
+				mockHookManager,
+				'test-provider',
+				{
+					logger: mockLogger,
+				}
+			);
+
+			assert.equal(result.status, 302);
+			assert.equal(mockRequest.session.update.mock.calls[0].arguments[0].user, 'work@example.com');
+			// One read from the built-in default (the lone verified candidate) and one from
+			// the adoption gate's own check of the resolved username — both for 'work@example.com'.
+			assert.deepEqual(getCalls, ['work@example.com', 'work@example.com']);
+		});
+
+		it('a single verified candidate that IS the verified default pick reads nothing', async () => {
+			stubAccounts(['personal@example.com']);
+			mockHookManager.hasHook = createMockFn(() => false);
+			useCandidateResolvingProvider([{ email: 'personal@example.com', verified: true, primary: true }]);
+
+			await handleCallback(mockRequest, mockTarget, mockProvider, githubConfig(), mockHookManager, 'test-provider', {
+				logger: mockLogger,
+			});
+
+			// Exactly one read: the adoption gate's own check of the resolved username. The
+			// built-in default adds none when the lone verified candidate is the default pick.
+			assert.deepEqual(getCalls, ['personal@example.com']);
+		});
+
+		it('zero verified candidates reads nothing', async () => {
+			stubAccounts([]);
+			mockHookManager.hasHook = createMockFn(() => false);
+			useCandidateResolvingProvider([{ email: 'personal@example.com', verified: false, primary: true }]);
+
+			await handleCallback(mockRequest, mockTarget, mockProvider, githubConfig(), mockHookManager, 'test-provider', {
+				logger: mockLogger,
+			});
+
+			// The adoption gate's own check still runs once; the built-in default adds no
+			// reads of its own when there is nothing verified to match.
+			assert.deepEqual(getCalls, ['personal@example.com']);
+		});
 	});
 
 	describe('handleCallback — onLogin outcome gating (#174)', () => {

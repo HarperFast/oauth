@@ -242,7 +242,15 @@ async function resolveEmailByExistingAccount(
 	logger?: Logger
 ): Promise<string | undefined> {
 	const verified = candidates.filter((c) => c.verified === true);
-	if (verified.length <= 1) return undefined;
+	if (verified.length === 0) return undefined;
+	const defaultPick = candidates.find((c) => c.profile) ?? candidates.find((c) => c.primary);
+	const defaultPickVerified = defaultPick?.verified === true;
+	// The lone verified candidate IS the default pick (profile-or-primary) — nothing to
+	// disambiguate, so no read: this is the common case and must stay exactly as cheap as
+	// before #228. A lone verified candidate that ISN'T the default pick (the default pick
+	// is unverified, or unset) still needs the read below — that's the GitHub-account shape
+	// #228 is actually about: an unverified primary with a single different verified address.
+	if (verified.length === 1 && defaultPickVerified) return undefined;
 
 	const results = await Promise.all(
 		verified.map((c) => checkHarperUserExists(c.email).then((r) => ({ email: c.email, r })))
@@ -255,8 +263,7 @@ async function resolveEmailByExistingAccount(
 	if (matches.size === 0) return undefined;
 	if (matches.size === 1) return [...matches][0];
 
-	const defaultPick = candidates.find((c) => c.profile) ?? candidates.find((c) => c.primary);
-	if (defaultPick?.verified === true && matches.has(defaultPick.email)) {
+	if (defaultPickVerified && defaultPick && matches.has(defaultPick.email)) {
 		return defaultPick.email;
 	}
 
