@@ -820,21 +820,45 @@ export async function handleCallback(
  * Harper 5's request.session is a shallow copy with only `.update` (a full-replace put) and
  * no `.delete`; in-memory mutation never persists — so invalidate by persisting `{ user: null }`,
  * mirroring Harper's own logout().
+ *
+ * Returns `true` when there was nothing to persist (no session, or an anonymous session with
+ * no `id` — the intentional quiet no-op) or the persist succeeded. Returns `false` when an
+ * *existing* session (has an `id`) couldn't be persisted, either because `.update` isn't
+ * callable or because it rejected — that case had a session to clear and didn't, so callers
+ * must not treat it like a completed logout/invalidation. A boolean (not a thrown error) is
+ * deliberate: callers that forget to catch would turn a persistence hiccup into an unhandled
+ * rejection, the exact failure mode this guards against.
  */
-export async function clearOAuthSession(session: any, logger?: Logger): Promise<void> {
-	if (!session) return;
+export async function clearOAuthSession(session: any, logger?: Logger): Promise<boolean> {
+	if (!session) return true;
 
 	// Persist only for an existing session: `.update` on an anonymous request would mint a
 	// fresh, non-expiring hdb_session row.
-	if (session.id && typeof session.update === 'function') {
-		await session.update({ user: null });
+	let persisted = true;
+	if (session.id) {
+		if (typeof session.update === 'function') {
+			try {
+				await session.update({ user: null });
+			} catch (error) {
+				logger?.error?.(
+					'Failed to persist OAuth session clear:',
+					error instanceof Error ? error.message : String(error)
+				);
+				persisted = false;
+			}
+		} else {
+			logger?.error?.('Failed to persist OAuth session clear: session.update is not callable');
+			persisted = false;
+		}
 	}
-	// Clear in memory too so the current request sees no identity.
+
+	// Clear in memory too so the current request sees no identity, regardless of persistence.
 	session.user = null;
 	delete session.oauth;
 	delete session.oauthUser;
 
-	logger?.info?.('OAuth session cleared');
+	if (persisted) logger?.info?.('OAuth session cleared');
+	return persisted;
 }
 
 /**
@@ -845,7 +869,20 @@ export async function handleLogout(request: Request, hookManager: HookManager, l
 	await hookManager.callOnLogout(request.session, request);
 
 	// Clear the OAuth session
-	await clearOAuthSession(request.session, logger);
+	const cleared = await clearOAuthSession(request.session, logger);
+
+	if (!cleared) {
+		// There was a session to clear and the store write failed — the stored session may
+		// still carry the old identity. Reporting success here would tell the client (and any
+		// shared cache sitting in front of this response) that the old identity is gone when it
+		// might not be, which is worse than making the client retry: 503 + no-store is honest
+		// about "not done yet" and safe to retry.
+		return {
+			status: 503,
+			headers: { 'Cache-Control': 'no-store', 'Pragma': 'no-cache' },
+			body: { error: 'logout_failed', message: 'Unable to complete logout, please try again' },
+		};
+	}
 
 	return {
 		status: 200,

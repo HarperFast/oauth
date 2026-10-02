@@ -5,6 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { validateAndRefreshSession, hasValidOAuthSession } from '../../dist/lib/sessionValidator.js';
+import { createMockLogger } from '../helpers/mockFn.js';
 
 /**
  * Create a mock OAuth provider
@@ -331,6 +332,42 @@ test('should handle refresh failure for expired token', async () => {
 	assert.ok(result.error.includes('Token refresh failed'));
 	// Session invalidated after failed refresh — persisted { user: null }, oauth dropped
 	assert.strictEqual(session.oauth, undefined);
+});
+
+// #265: the refresh-failure branch's own clearOAuthSession call must not escape unhandled
+// when the session store write also fails.
+test('should return a controlled result, not reject, when the post-refresh-failure clear also fails to persist', async () => {
+	const provider = createMockProvider({
+		refreshAccessToken: async () => {
+			throw new Error('Refresh failed');
+		},
+	});
+	const logger = createMockLogger();
+	const session = createMockSession({
+		oauth: {
+			provider: 'google',
+			accessToken: 'old_token',
+			refreshToken: 'old_refresh',
+			expiresAt: Date.now() - 1000, // Expired
+		},
+	});
+	// createMockSession's default `update` never rejects — override after creation so the
+	// session store write fails, simulating #265's "second clear also throws" scenario.
+	session.update = async () => {
+		throw new Error('session store unavailable');
+	};
+
+	const result = await validateAndRefreshSession({ session }, provider, logger);
+
+	assert.strictEqual(result.valid, false);
+	assert.ok(result.error.includes('Token refresh failed'));
+	// In-memory clear still happened even though persistence failed.
+	assert.strictEqual(session.oauth, undefined);
+	assert.ok(logger.error.mock.calls.length >= 1, 'the persist failure must be logged');
+	// No token values in any logged message.
+	const loggedText = logger.error.mock.calls.map((call) => call.arguments.map(String).join(' ')).join(' ');
+	assert.ok(!loggedText.includes('old_token'), 'access token must not be logged');
+	assert.ok(!loggedText.includes('old_refresh'), 'refresh token must not be logged');
 });
 
 test('should not logout when refresh fails for non-expired token', async () => {

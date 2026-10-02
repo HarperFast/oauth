@@ -195,9 +195,20 @@ export async function validateAndRefreshSession(
 	} catch (error) {
 		logger?.error?.('OAuth token refresh failed:', error instanceof Error ? error.message : String(error));
 
-		// If token was expired and refresh failed, log out
+		// If token was expired and refresh failed, log out. This second clear can itself fail
+		// (store write error) — it must never escape as an unhandled rejection on top of the
+		// refresh failure we're already handling, so it gets its own catch (#265) in addition to
+		// clearOAuthSession's own internal one; either way the outcome is the same controlled
+		// `{ valid: false }`.
 		if (isExpired) {
-			await clearOAuthSession(session, logger);
+			try {
+				await clearOAuthSession(session, logger);
+			} catch (clearError) {
+				logger?.error?.(
+					'OAuth session clear failed after refresh failure:',
+					clearError instanceof Error ? clearError.message : String(clearError)
+				);
+			}
 			return { valid: false, error: `Token refresh failed: ${error instanceof Error ? error.message : String(error)}` };
 		}
 

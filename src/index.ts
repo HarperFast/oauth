@@ -470,7 +470,10 @@ export async function handleApplication(scope: Scope): Promise<void> {
 
 		if (!providerData) {
 			logger?.warn?.(`OAuth provider config '${providerConfigId}' not found, logging out user`);
-			// Provider no longer exists - complete logout
+			// Provider no longer exists - complete logout. clearOAuthSession logs its own
+			// persistence failures (#266); this path already makes no success claim to deny
+			// (it just continues to next(request) either way) — reliably clearing
+			// request.user for *this* request is #213's scope, not fixed here.
 			await clearOAuthSession(request.session, logger);
 			return next(request);
 		}
