@@ -24,7 +24,7 @@ import { registerWellKnownHandlers } from './lib/mcp/wellKnown.ts';
 import { interactivePrivateKeyJwtEnabled } from './lib/mcp/clientAuthMethod.ts';
 import { algFromPrivateKeyPem } from './lib/mcp/keyStore.ts';
 import { redactSecrets } from './lib/redact.ts';
-import type { Scope, OAuthPluginConfig, ProviderRegistry, OAuthHooks } from './types.ts';
+import type { Scope, OAuthPluginConfig, ProviderRegistry, OAuthHooks, OAuthProviderConfig } from './types.ts';
 
 // Export HookManager class, OAuthResource class, and types
 export { HookManager } from './lib/hookManager.ts';
@@ -468,8 +468,19 @@ export async function handleApplication(scope: Scope): Promise<void> {
 		const providerConfigId = request.session.oauth.providerConfigId || request.session.oauth.provider;
 		let providerData = providers[providerConfigId] ?? dynamicProviderCache.get(providerConfigId);
 
-		// If still not found, try to resolve via hook
-		if (!providerData && hookManager?.hasHook('onResolveProvider')) {
+		// If still not found, try to resolve via hook — unless a recent attempt
+		// for this exact provider already failed on an invalid Azure issuer pin
+		// (HarperFast/oauth#264/#271): skip straight to treating this session
+		// the same as "provider not found" below (logging it out) rather than
+		// re-running the hook and rebuilding the config only to re-throw the
+		// same AzureIssuerBindingError on every request carrying this session.
+		const cachedAzurePinFailure = dynamicProviderCache.getAzurePinFailure(providerConfigId);
+		if (!providerData && cachedAzurePinFailure) {
+			logger?.error?.(
+				`OAuth provider '${providerConfigId}' (dynamic resolution, session validation) still has an invalid ` +
+					`Azure issuer pin (cooling down, not re-resolving): ${cachedAzurePinFailure}`
+			);
+		} else if (!providerData && hookManager?.hasHook('onResolveProvider')) {
 			try {
 				logger?.debug?.(
 					`Provider config "${providerConfigId}" not in registry or cache, attempting dynamic resolution`
@@ -480,13 +491,31 @@ export async function handleApplication(scope: Scope): Promise<void> {
 				if (hookConfig) {
 					const { OAuthProvider } = await import('./lib/OAuthProvider.ts');
 					const { buildProviderConfig } = await import('./lib/config.ts');
+					const { AzureIssuerBindingError } = await import('./lib/azureIssuer.ts');
 
-					const config = buildProviderConfig(hookConfig, providerConfigId, pluginDefaults);
-					const provider = new OAuthProvider(config, logger);
+					let config: OAuthProviderConfig | undefined;
+					try {
+						config = buildProviderConfig(hookConfig, providerConfigId, pluginDefaults);
+					} catch (buildError) {
+						if (buildError instanceof AzureIssuerBindingError) {
+							dynamicProviderCache.recordAzurePinFailure(providerConfigId, buildError.message);
+							logger?.error?.(
+								`OAuth provider '${providerConfigId}' (dynamic resolution, session validation) has an invalid ` +
+									`Azure issuer pin: ${buildError.message}`
+							);
+							config = undefined;
+						} else {
+							throw buildError;
+						}
+					}
 
-					providerData = { provider, config };
-					logger?.info?.(`Dynamically resolved provider for session validation: ${providerConfigId}`);
-					dynamicProviderCache.set(providerConfigId, providerData);
+					if (config) {
+						const provider = new OAuthProvider(config, logger);
+						providerData = { provider, config };
+						logger?.info?.(`Dynamically resolved provider for session validation: ${providerConfigId}`);
+						dynamicProviderCache.set(providerConfigId, providerData);
+						dynamicProviderCache.clearAzurePinFailure(providerConfigId);
+					}
 				}
 			} catch (error) {
 				logger?.error?.(

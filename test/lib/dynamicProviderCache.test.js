@@ -306,4 +306,58 @@ describe('DynamicProviderCache', () => {
 			}
 		});
 	});
+
+	describe('Azure issuer-pin failure cooldown (#264/#271)', () => {
+		it('returns undefined when no failure has been recorded', () => {
+			const cache = new DynamicProviderCache();
+			assert.equal(cache.getAzurePinFailure('azure-tenant-a'), undefined);
+		});
+
+		it('returns the recorded message within the cooldown window', () => {
+			const cache = new DynamicProviderCache();
+			cache.recordAzurePinFailure('azure-tenant-a', 'issuer names a different tenant');
+			assert.equal(cache.getAzurePinFailure('azure-tenant-a'), 'issuer names a different tenant');
+		});
+
+		it('expires after the fixed 30s cooldown, independent of the success TTL', () => {
+			// A long success TTL must not also extend the failure cooldown — a
+			// fixed config should recover fast, not wait for a long/forever TTL.
+			const cache = new DynamicProviderCache(true);
+			cache.recordAzurePinFailure('azure-tenant-a', 'issuer names a different tenant');
+
+			const restoreWithin = advanceTime(29_000);
+			try {
+				assert.equal(cache.getAzurePinFailure('azure-tenant-a'), 'issuer names a different tenant');
+			} finally {
+				restoreWithin();
+			}
+
+			const restoreAfter = advanceTime(31_000);
+			try {
+				assert.equal(cache.getAzurePinFailure('azure-tenant-a'), undefined);
+			} finally {
+				restoreAfter();
+			}
+		});
+
+		it('is cleared by clearAzurePinFailure (a subsequent successful resolution)', () => {
+			const cache = new DynamicProviderCache();
+			cache.recordAzurePinFailure('azure-tenant-a', 'issuer names a different tenant');
+			cache.clearAzurePinFailure('azure-tenant-a');
+			assert.equal(cache.getAzurePinFailure('azure-tenant-a'), undefined);
+		});
+
+		it('is scoped per provider name', () => {
+			const cache = new DynamicProviderCache();
+			cache.recordAzurePinFailure('azure-tenant-a', 'tenant A pin invalid');
+			assert.equal(cache.getAzurePinFailure('azure-tenant-b'), undefined);
+		});
+
+		it('clear() also clears recorded Azure-pin failures', () => {
+			const cache = new DynamicProviderCache();
+			cache.recordAzurePinFailure('azure-tenant-a', 'tenant A pin invalid');
+			cache.clear();
+			assert.equal(cache.getAzurePinFailure('azure-tenant-a'), undefined);
+		});
+	});
 });

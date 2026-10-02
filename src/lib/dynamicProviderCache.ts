@@ -30,14 +30,30 @@ import type { ProviderRegistryEntry } from '../types.ts';
  */
 export const DEFAULT_DYNAMIC_PROVIDER_CACHE_TTL_SECONDS = 300;
 
+/**
+ * Fixed, short cooldown for a dynamically-resolved provider's invalid Azure
+ * issuer pin (HarperFast/oauth#264/#271) — independent of the success TTL
+ * above, and not configurable: a config error should recover fast once
+ * fixed, which the (often much longer, or infinite) success TTL is wrong
+ * for. Without this, a bad pin re-runs the resolve hook and re-throws on
+ * every single request for that provider until an operator notices.
+ */
+const AZURE_PIN_FAILURE_COOLDOWN_MS = 30_000;
+
 interface CacheEntry {
 	entry: ProviderRegistryEntry;
 	cachedAt: number;
 }
 
+interface AzurePinFailure {
+	message: string;
+	failedAt: number;
+}
+
 export class DynamicProviderCache {
 	private cache = new Map<string, CacheEntry>();
 	private ttlMs: number;
+	private azurePinFailures = new Map<string, AzurePinFailure>();
 
 	constructor(ttl: boolean | number = DEFAULT_DYNAMIC_PROVIDER_CACHE_TTL_SECONDS) {
 		this.ttlMs = DynamicProviderCache.parseTTL(ttl);
@@ -70,6 +86,7 @@ export class DynamicProviderCache {
 
 	clear(): void {
 		this.cache.clear();
+		this.azurePinFailures.clear();
 	}
 
 	updateTTL(ttl: boolean | number): void {
@@ -79,5 +96,31 @@ export class DynamicProviderCache {
 
 	get size(): number {
 		return this.cache.size;
+	}
+
+	/**
+	 * Record a dynamically-resolved provider's `AzureIssuerBindingError` so
+	 * {@link getAzurePinFailure} can short-circuit the resolve hook for
+	 * `AZURE_PIN_FAILURE_COOLDOWN_MS` instead of re-running (and re-throwing)
+	 * it on every request for `name` until the cooldown elapses.
+	 */
+	recordAzurePinFailure(name: string, message: string): void {
+		this.azurePinFailures.set(name, { message, failedAt: Date.now() });
+	}
+
+	/** The still-cooling-down `AzureIssuerBindingError` message for `name`, or `undefined` if there isn't one or it has expired. */
+	getAzurePinFailure(name: string): string | undefined {
+		const failure = this.azurePinFailures.get(name);
+		if (!failure) return undefined;
+		if (Date.now() - failure.failedAt > AZURE_PIN_FAILURE_COOLDOWN_MS) {
+			this.azurePinFailures.delete(name);
+			return undefined;
+		}
+		return failure.message;
+	}
+
+	/** Clear any cooling-down Azure-pin failure for `name` — called on a successful resolution. */
+	clearAzurePinFailure(name: string): void {
+		this.azurePinFailures.delete(name);
 	}
 }

@@ -188,4 +188,98 @@ describe('OAuthResource - cacheDynamicProviders', () => {
 			}
 		});
 	});
+
+	describe('dynamic resolution — invalid Azure issuer pin (#264/#271)', () => {
+		const badAzureHookConfig = {
+			provider: 'azure',
+			clientId: 'c',
+			clientSecret: 's',
+			// A stale pin that doesn't name the configured tenant — buildProviderConfig throws AzureIssuerBindingError.
+			tenantId: '12345678-1234-1234-1234-123456789012',
+			issuer: 'https://login.microsoftonline.com/87654321-4321-4321-4321-210987654321/v2.0',
+			redirectUri: 'https://app.test.com/oauth',
+		};
+
+		it('returns 500 and does not cache a provider, naming the real cause in the log', async () => {
+			const callResolveProvider = createMockFn(async () => badAzureHookConfig);
+			const mockHookManager = {
+				hasHook: (name) => name === 'onResolveProvider',
+				callResolveProvider,
+			};
+
+			const cache = new DynamicProviderCache(true);
+			OAuthResource.configure({}, false, mockHookManager, {}, mockLogger, cache);
+
+			const resource = new OAuthResource();
+			resource.getContext = () => ({ session: { id: 'session-123' }, headers: {} });
+			const target = { id: 'bad-azure-tenant/login', get: () => null };
+
+			const result = await resource.get(target);
+			assert.equal(result.status, 500);
+			assert.equal(cache.get('bad-azure-tenant'), undefined, 'no provider is cached for a failed resolution');
+			assert.ok(
+				mockLogger.error.mock.calls.some((call) =>
+					call.arguments.some(
+						(arg) =>
+							typeof arg === 'string' && arg.includes('invalid Azure issuer pin') && arg.includes('different tenant')
+					)
+				),
+				'the log names the real cause, not a generic "Error resolving provider"'
+			);
+		});
+
+		it('does not re-run the resolve hook for the same provider within the cooldown — short-circuits to the same 500', async () => {
+			const callResolveProvider = createMockFn(async () => badAzureHookConfig);
+			const mockHookManager = {
+				hasHook: (name) => name === 'onResolveProvider',
+				callResolveProvider,
+			};
+
+			const cache = new DynamicProviderCache(true);
+			OAuthResource.configure({}, false, mockHookManager, {}, mockLogger, cache);
+
+			const resource = new OAuthResource();
+			resource.getContext = () => ({ session: { id: 'session-123' }, headers: {} });
+			const target = { id: 'bad-azure-tenant/login', get: () => null };
+
+			const first = await resource.get(target);
+			assert.equal(first.status, 500);
+			assert.equal(callResolveProvider.mock.calls.length, 1);
+
+			const second = await resource.get(target);
+			assert.equal(second.status, 500);
+			assert.equal(
+				callResolveProvider.mock.calls.length,
+				1,
+				'the hook must not be re-run while the failure is cooling down'
+			);
+		});
+
+		it('re-runs the resolve hook once the cooldown elapses', async () => {
+			const callResolveProvider = createMockFn(async () => badAzureHookConfig);
+			const mockHookManager = {
+				hasHook: (name) => name === 'onResolveProvider',
+				callResolveProvider,
+			};
+
+			const cache = new DynamicProviderCache(true);
+			OAuthResource.configure({}, false, mockHookManager, {}, mockLogger, cache);
+
+			const resource = new OAuthResource();
+			resource.getContext = () => ({ session: { id: 'session-123' }, headers: {} });
+			const target = { id: 'bad-azure-tenant/login', get: () => null };
+
+			await resource.get(target);
+			assert.equal(callResolveProvider.mock.calls.length, 1);
+
+			const realNow = Date.now;
+			Date.now = () => realNow() + 31_000;
+			try {
+				await resource.get(target);
+				assert.equal(callResolveProvider.mock.calls.length, 2, 'the hook runs again once the 30s cooldown elapses');
+			} finally {
+				Date.now = realNow;
+			}
+		});
+	});
 });

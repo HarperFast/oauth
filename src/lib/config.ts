@@ -966,7 +966,11 @@ export function initializeProviders(options: OAuthPluginConfig, logger?: Logger)
 			);
 		} catch (error) {
 			if (error instanceof AzureIssuerBindingError) {
-				logger?.error?.(`OAuth provider '${providerName}' skipped — invalid Azure issuer pin:`, error);
+				try {
+					logger?.error?.(`OAuth provider '${providerName}' skipped — invalid Azure issuer pin:`, error);
+				} catch {
+					/* advisory log only — a throwing logger must not turn a skip into a failed initializeProviders */
+				}
 				continue;
 			}
 			throw error;

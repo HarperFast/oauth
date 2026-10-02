@@ -24,9 +24,14 @@ function baseConfig(overrides = {}) {
 }
 
 describe('isAzureJwksUri', () => {
-	it('is true for any login.microsoftonline.com jwksUri regardless of path shape', () => {
+	it('is true only for the exact v2.0 keys-endpoint shape (GUID or alias segment)', () => {
 		assert.equal(isAzureJwksUri('https://login.microsoftonline.com/common/discovery/v2.0/keys'), true);
-		assert.equal(isAzureJwksUri('https://login.microsoftonline.com/anything/at/all'), true);
+		assert.equal(isAzureJwksUri(`https://login.microsoftonline.com/${GUID_A}/discovery/v2.0/keys`), true);
+	});
+
+	it('is false for an Azure-host jwksUri in an unrecognized shape — resolveAzureIssuerBinding never touches it, so it must not be silently exempted from #231 §4/discovery', () => {
+		assert.equal(isAzureJwksUri('https://login.microsoftonline.com/common/discovery/keys'), false); // the older, non-v2.0 shape
+		assert.equal(isAzureJwksUri('https://login.microsoftonline.com/anything/at/all'), false);
 	});
 
 	it('is false for a different host, malformed URL, or absent value', () => {
@@ -105,11 +110,14 @@ describe('resolveAzureIssuerBinding', () => {
 			assert.equal(config.issuer, `https://login.microsoftonline.com/${GUID_A}/v2.0`);
 		});
 
-		it('keeps a same-tenant pin given in the older sts.windows.net (v1) form AS v1 — a v1 authorize endpoint issues sts.windows.net tokens', () => {
+		it('keeps a same-tenant pin given in the older sts.windows.net (v1) form AS v1 — when authorizationUrl is ALSO a v1 authorize endpoint', () => {
 			// Which `iss` form a real token carries depends on the authorize
 			// endpoint, not the jwksUri — collapsing this to v2 would break
-			// verification for every real v1 token.
+			// verification for every real v1 token. But the pin must actually
+			// match that endpoint's form (see the mismatch tests below) — a v1
+			// pin is only safe when `authorizationUrl` really is v1.
 			const config = baseConfig({
+				authorizationUrl: `https://login.microsoftonline.com/${GUID_A}/oauth2/authorize`,
 				jwksUri: `https://login.microsoftonline.com/${GUID_A}/discovery/v2.0/keys`,
 				issuer: `https://sts.windows.net/${GUID_A}/`,
 			});
@@ -119,6 +127,7 @@ describe('resolveAzureIssuerBinding', () => {
 
 		it('canonicalizes a v1 pin’s case and trailing slash without changing its form', () => {
 			const config = baseConfig({
+				authorizationUrl: `https://login.microsoftonline.com/${GUID_A}/oauth2/authorize`,
 				jwksUri: `https://login.microsoftonline.com/${GUID_A}/discovery/v2.0/keys`,
 				issuer: `https://sts.windows.net/${GUID_A.toUpperCase()}`,
 			});
@@ -126,16 +135,43 @@ describe('resolveAzureIssuerBinding', () => {
 			assert.equal(config.issuer, `https://sts.windows.net/${GUID_A}/`);
 		});
 
-		it('canonicalizes a same-tenant pin given as an array mixing the v1 and v2 forms, keeping each element in its own form', () => {
+		it('rejects a v1 pin when authorizationUrl is a v2 authorize endpoint — the preset always generates v2, so a stray v1 pin would fail jwt.verify on every real token', () => {
 			const config = baseConfig({
+				authorizationUrl: `https://login.microsoftonline.com/${GUID_A}/oauth2/v2.0/authorize`,
+				jwksUri: `https://login.microsoftonline.com/${GUID_A}/discovery/v2.0/keys`,
+				issuer: `https://sts.windows.net/${GUID_A}/`,
+			});
+			assert.throws(() => resolveAzureIssuerBinding(config, 'azure'), /wrong Azure issuer form/);
+		});
+
+		it('rejects a v2 pin when authorizationUrl is a v1 authorize endpoint', () => {
+			const config = baseConfig({
+				authorizationUrl: `https://login.microsoftonline.com/${GUID_A}/oauth2/authorize`,
+				jwksUri: `https://login.microsoftonline.com/${GUID_A}/discovery/v2.0/keys`,
+				issuer: `https://login.microsoftonline.com/${GUID_A}/v2.0`,
+			});
+			assert.throws(() => resolveAzureIssuerBinding(config, 'azure'), /wrong Azure issuer form/);
+		});
+
+		it('rejects a same-tenant array mixing v1 and v2 forms when authorizationUrl has a recognized (v2) shape — one element always names the wrong form', () => {
+			const config = baseConfig({
+				authorizationUrl: `https://login.microsoftonline.com/${GUID_A}/oauth2/v2.0/authorize`,
 				jwksUri: `https://login.microsoftonline.com/${GUID_A}/discovery/v2.0/keys`,
 				issuer: [`https://login.microsoftonline.com/${GUID_A}/v2.0`, `https://sts.windows.net/${GUID_A}/`],
 			});
+			assert.throws(() => resolveAzureIssuerBinding(config, 'azure'), /wrong Azure issuer form/);
+		});
+
+		it('does not additionally constrain the pin’s form when authorizationUrl is an unrecognized Azure shape — only the tenant is checked there', () => {
+			const config = baseConfig({
+				// Neither the v1 (`/oauth2/authorize`) nor v2 (`/oauth2/v2.0/authorize`)
+				// suffix — a shape this module doesn't classify.
+				authorizationUrl: `https://login.microsoftonline.com/${GUID_A}/custom/authorize-path`,
+				jwksUri: `https://login.microsoftonline.com/${GUID_A}/discovery/v2.0/keys`,
+				issuer: `https://sts.windows.net/${GUID_A}/`,
+			});
 			resolveAzureIssuerBinding(config, 'azure');
-			assert.deepEqual(config.issuer, [
-				`https://login.microsoftonline.com/${GUID_A}/v2.0`,
-				`https://sts.windows.net/${GUID_A}/`,
-			]);
+			assert.equal(config.issuer, `https://sts.windows.net/${GUID_A}/`);
 		});
 
 		it('throws when an explicit pin names a different tenant than the jwksUri', () => {

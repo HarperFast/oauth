@@ -360,7 +360,25 @@ export class OAuthResource extends Resource {
 		// Check if provider exists in static registry or dynamic cache
 		let providerData = providers[providerName] ?? OAuthResource.dynamicProviderCache?.get(providerName);
 
-		// If not found, try to resolve via hook
+		// If not found, try to resolve via hook — unless a recent attempt for
+		// this exact provider already failed on an invalid Azure issuer pin
+		// (HarperFast/oauth#264/#271): re-running the hook and rebuilding the
+		// config would just re-throw the same AzureIssuerBindingError, so skip
+		// straight to the same response every other request gets during the
+		// cooldown, rather than hammering the hook (and re-logging the same
+		// cause) on every single request for a config that hasn't changed.
+		const cachedAzurePinFailure = OAuthResource.dynamicProviderCache?.getAzurePinFailure(providerName);
+		if (!providerData && cachedAzurePinFailure) {
+			logger?.error?.(
+				`OAuth provider '${providerName}' (dynamic resolution) still has an invalid Azure issuer pin ` +
+					`(cooling down, not re-resolving): ${cachedAzurePinFailure}`
+			);
+			return {
+				status: 500,
+				body: { error: 'Failed to resolve OAuth provider' },
+			};
+		}
+
 		if (!providerData && OAuthResource.hookManager?.hasHook('onResolveProvider')) {
 			try {
 				logger?.debug?.(`Provider "${providerName}" not found in registry or cache, calling onResolveProvider hook`);
@@ -370,15 +388,32 @@ export class OAuthResource extends Resource {
 				if (hookConfig) {
 					const { OAuthProvider } = await import('./OAuthProvider.ts');
 					const { buildProviderConfig } = await import('./config.ts');
+					const { AzureIssuerBindingError } = await import('./azureIssuer.ts');
 
 					const pluginDefaults = OAuthResource.pluginDefaults || {};
-					const config = buildProviderConfig(hookConfig, providerName, pluginDefaults);
+					let config: OAuthProviderConfig;
+					try {
+						config = buildProviderConfig(hookConfig, providerName, pluginDefaults);
+					} catch (buildError) {
+						if (buildError instanceof AzureIssuerBindingError) {
+							OAuthResource.dynamicProviderCache?.recordAzurePinFailure(providerName, buildError.message);
+							logger?.error?.(
+								`OAuth provider '${providerName}' (dynamic resolution) has an invalid Azure issuer pin: ${buildError.message}`
+							);
+							return {
+								status: 500,
+								body: { error: 'Failed to resolve OAuth provider' },
+							};
+						}
+						throw buildError;
+					}
 
 					const provider = new OAuthProvider(config, logger);
 
 					providerData = { provider, config };
 					logger?.info?.(`Dynamically resolved provider: ${providerName}`);
 					OAuthResource.dynamicProviderCache?.set(providerName, providerData);
+					OAuthResource.dynamicProviderCache?.clearAzurePinFailure(providerName);
 				}
 			} catch (error) {
 				logger?.error?.(
