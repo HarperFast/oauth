@@ -217,6 +217,60 @@ function normalizeTokenEndpointAudience(value: unknown, logger?: Logger): { clie
 }
 
 /**
+ * Normalize a declared hostname allowlist (`dcr.allowedRedirectUriHosts`,
+ * `cimd.allowedHosts`): wrap a scalar into a single-element array, trim +
+ * lowercase each entry, and drop blanks — exactly as before. Two failure
+ * modes now throw instead of silently producing a list the gate can't use
+ * as intended:
+ * - An unresolved `${VAR}` placeholder entry is a non-empty string, so
+ *   without this check it would survive normalization as a literal,
+ *   unmatchable hostname (e.g. the literal text `${trusted_host}`) — the
+ *   allowlist looks populated but silently never matches real traffic.
+ *   That's a misconfiguration the operator can't see; fail loudly instead.
+ * - A declared list whose entries all resolve blank (every placeholder
+ *   unset, or all-whitespace) normalizes to `[]`, which `validateRedirectUri`
+ *   (clientValidator.ts) and CIMD's `allowedHosts.length > 0` check both read
+ *   as "no allowlist" — the exact opposite of what the operator declared
+ *   (#249, the same fail-open shape #240/#207 closed for initialAccessToken
+ *   and the MCP feature booleans). An explicit empty list (`allowedHosts: []`)
+ *   is treated the same way: this allowlist's only documented way to express
+ *   "no restriction" is omitting the key entirely (clientValidator.ts has no
+ *   "explicit empty list denies every host" mode), so a present-but-empty
+ *   array can't be a deliberate "allow nothing" choice — it reads as the same
+ *   declared-but-unusable state as the blank-entries case.
+ *
+ * Both checks are gated by `guard` (`mcpActive && <block>.enabled !== false`,
+ * matching {@link validateDcrInitialAccessToken}'s own gate): while the
+ * surface this list protects is inert, stale placeholders in unused config
+ * must not block boot (the byte-identical-boot contract every other MCP
+ * security field honors).
+ */
+function normalizeHostAllowlist(value: unknown, path: string, guard: boolean): string[] {
+	const raw: unknown[] = Array.isArray(value) ? value : [value];
+	if (raw.some((h) => typeof h !== 'string')) {
+		throw new Error(`${path} must be a hostname string or an array of hostname strings`);
+	}
+	const entries = raw as string[];
+	if (guard) {
+		const placeholder = entries.find((h) => isUnresolvedEnvPlaceholder(h));
+		if (placeholder !== undefined) {
+			throw new Error(
+				`${path} contains the unresolved env placeholder ${JSON.stringify(placeholder)} (variable unset). ` +
+					`Set the variable, remove that entry, or omit ${path} entirely to allow any host.`
+			);
+		}
+	}
+	const normalized = entries.map((h) => h.trim().toLowerCase()).filter((h) => h.length > 0);
+	if (guard && normalized.length === 0) {
+		throw new Error(
+			`${path} is configured but resolved to an empty list (e.g. blank entries or an unset environment ` +
+				`variable substitution). Provide at least one hostname, or omit ${path} entirely to allow any host.`
+		);
+	}
+	return normalized;
+}
+
+/**
  * Validate `mcp.signingKeyPem` when the operator DECLARED it — i.e. the field
  * is present on the config object at all, regardless of what it resolved to.
  * Unlike the documented booleans above, an unresolved/empty pin does NOT get
@@ -332,11 +386,16 @@ function validateDcrInitialAccessToken(dcr: Record<string, any>): void {
  * - `mcp.enabled` itself keeps the pre-#207 warn-and-drop behavior (does not
  *   throw) — see {@link normalizeBooleanField}'s doc for why this one field
  *   is the exception.
- * - `mcp.clientIdMetadataDocuments.allowedHosts` is normalized to an array of
- *   exact, lowercased hostnames. A scalar string (which `Array.includes` /
- *   `String.includes` would turn into substring matching) is wrapped into a
- *   single-element array; anything that isn't a string or array of strings is
- *   rejected rather than treated as "no restriction".
+ * - `mcp.clientIdMetadataDocuments.allowedHosts` and
+ *   `mcp.dynamicClientRegistration.allowedRedirectUriHosts` are normalized to
+ *   an array of exact, lowercased hostnames via {@link normalizeHostAllowlist}.
+ *   A scalar string (which `Array.includes` / `String.includes` would turn
+ *   into substring matching) is wrapped into a single-element array; anything
+ *   that isn't a string or array of strings is rejected. A declared list that
+ *   resolves empty (blank entries, an unset env placeholder, or an explicit
+ *   `[]`) throws naming the key instead of silently becoming "no restriction"
+ *   (#249) — while the block it gates is active; omitting the key entirely
+ *   keeps the documented no-allowlist default.
  * - `mcp.clientIdMetadataDocuments.privateKeyJwt`: `enabled` is a documented
  *   boolean; `jwksUriAllowedOrigins` is normalized to exact https origins;
  *   `tokenEndpointAudience` needs exact CIMD client IDs and a parseable
@@ -406,15 +465,11 @@ export function normalizeMcpSecurityConfig(mcpConfig: Record<string, any>, logge
 		// allowedHosts below (this list is shared by both the DCR and CIMD
 		// redirect-uri checks).
 		if (dcr.allowedRedirectUriHosts !== undefined) {
-			const raw = Array.isArray(dcr.allowedRedirectUriHosts)
-				? dcr.allowedRedirectUriHosts
-				: [dcr.allowedRedirectUriHosts];
-			if (raw.some((h: unknown) => typeof h !== 'string')) {
-				throw new Error(
-					'mcp.dynamicClientRegistration.allowedRedirectUriHosts must be a hostname string or an array of hostname strings'
-				);
-			}
-			dcr.allowedRedirectUriHosts = raw.map((h: string) => h.trim().toLowerCase()).filter((h: string) => h.length > 0);
+			dcr.allowedRedirectUriHosts = normalizeHostAllowlist(
+				dcr.allowedRedirectUriHosts,
+				'mcp.dynamicClientRegistration.allowedRedirectUriHosts',
+				mcpActive && dcr.enabled !== false
+			);
 		}
 	}
 
@@ -432,13 +487,11 @@ export function normalizeMcpSecurityConfig(mcpConfig: Record<string, any>, logge
 		normalizeBooleanField(cimd, 'enabled', 'mcp.clientIdMetadataDocuments.enabled', logger, mcpActive);
 
 		if (cimd.allowedHosts !== undefined) {
-			const raw = Array.isArray(cimd.allowedHosts) ? cimd.allowedHosts : [cimd.allowedHosts];
-			if (raw.some((h: unknown) => typeof h !== 'string')) {
-				throw new Error(
-					'mcp.clientIdMetadataDocuments.allowedHosts must be a hostname string or an array of hostname strings'
-				);
-			}
-			cimd.allowedHosts = raw.map((h: string) => h.trim().toLowerCase()).filter((h: string) => h.length > 0);
+			cimd.allowedHosts = normalizeHostAllowlist(
+				cimd.allowedHosts,
+				'mcp.clientIdMetadataDocuments.allowedHosts',
+				mcpActive && cimd.enabled !== false
+			);
 		}
 
 		const privateKeyJwt = cimd.privateKeyJwt;
