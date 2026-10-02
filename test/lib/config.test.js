@@ -1862,12 +1862,15 @@ describe('OAuth Configuration', () => {
 					},
 				};
 
-				assert.throws(() => initializeProviders(options, mockLogger), (error) => {
-					assert.match(error.message, /github/);
-					assert.match(error.message, /half configured/);
-					assert.match(error.message, /OAUTH_TEST_259_CLIENT_SECRET_2/);
-					return true;
-				});
+				assert.throws(
+					() => initializeProviders(options, mockLogger),
+					(error) => {
+						assert.match(error.message, /github/);
+						assert.match(error.message, /half configured/);
+						assert.match(error.message, /OAUTH_TEST_259_CLIENT_SECRET_2/);
+						return true;
+					}
+				);
 			});
 
 			it('5. both credentials unset placeholders and redirectUri an unset placeholder: skipped with a warning', () => {

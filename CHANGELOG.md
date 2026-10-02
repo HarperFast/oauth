@@ -2,6 +2,12 @@
 
 All notable changes to `@harperfast/oauth` are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Entries prior to 2.2.0 were backfilled from the [GitHub release notes](https://github.com/HarperFast/oauth/releases).
 
+## [Unreleased]
+
+### Fixed
+
+- **An unconfigured provider no longer stops every other provider from starting (#259).** Since #238 (2.7.0), `initializeProviders` called `buildProviderConfig` — which throws on a missing or unresolved-placeholder `redirectUri` — before its own "not configured" check, so one provider left unconfigured (e.g. credentials sourced from environment variables an operator hasn't set yet) prevented the plugin from starting at all, and blocked an otherwise-valid live-reload update to every other provider too. Configured-ness is now decided from each provider's raw, env-expanded `clientId`/`clientSecret` before `redirectUri` is ever evaluated: both absent, empty, or an unresolved `${VAR}` placeholder skips the provider with a warning (unchanged outcome, now reached safely); one set and the other not throws, naming the unset field or the unresolved environment variable; both set proceeds to build and validate the provider as before. Dynamically resolved providers (`onResolveProvider`) are unaffected — `buildProviderConfig` itself, which they call directly, keeps its existing behavior.
+
 ## [2.8.0] - 2026-10-01
 
 ### Added

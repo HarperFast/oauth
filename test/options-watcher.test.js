@@ -362,6 +362,46 @@ describe('OAuth Plugin Options Watcher', () => {
 		);
 	});
 
+	it('a live reload adding a newly-unconfigured provider does not drop the already-configured ones (#259)', async () => {
+		await handleApplication(scope);
+		assert.ok(OAuthResource.getProviders().github, 'github starts configured');
+
+		let errorLogged = false;
+		scope.logger.error = (msg) => {
+			if (typeof msg === 'string' && msg.includes('Failed to update OAuth configuration')) errorLogged = true;
+		};
+		let warnedAboutGoogle = false;
+		scope.logger.warn = (msg) => {
+			if (typeof msg === 'string' && msg.includes('google') && msg.includes('not configured')) {
+				warnedAboutGoogle = true;
+			}
+		};
+
+		// Add a second provider whose credentials come from env vars nobody has set
+		// yet — initializeProviders must skip it with a warning, not reject the
+		// whole reload (previously: buildProviderConfig threw on its missing
+		// redirectUri before the "not configured" check ever ran).
+		delete process.env.OAUTH_TEST_RELOAD_GOOGLE_CLIENT_ID;
+		delete process.env.OAUTH_TEST_RELOAD_GOOGLE_CLIENT_SECRET;
+		scope.options._config = {
+			...scope.options._config,
+			providers: {
+				...scope.options._config.providers,
+				google: {
+					provider: 'google',
+					clientId: '${OAUTH_TEST_RELOAD_GOOGLE_CLIENT_ID}',
+					clientSecret: '${OAUTH_TEST_RELOAD_GOOGLE_CLIENT_SECRET}',
+				},
+			},
+		};
+		configChangeListeners[0]();
+		await waitFor(() => warnedAboutGoogle);
+
+		assert.equal(errorLogged, false, 'the reload must not be rejected over the unconfigured provider');
+		assert.ok(OAuthResource.getProviders().github, 'the already-configured provider survives the reload');
+		assert.equal(OAuthResource.getProviders().google, undefined, 'the unconfigured provider is skipped');
+	});
+
 	it('a live reload with an unresolved DCR initialAccessToken placeholder is rejected and the previous config keeps serving (#240)', async () => {
 		scope.options._config.mcp = {
 			enabled: true,
