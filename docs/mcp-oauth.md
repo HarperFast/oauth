@@ -850,10 +850,9 @@ refused (`invalid_client`) until the exception is renewed.
 
 **Troubleshooting: ChatGPT gets an audience error.** When a signature-verified interactive
 assertion names the token endpoint URL as `aud` and the audience check refuses
-it, an available warning logger names the client ID, explains why the exception
-did not apply, and shows `mcp.clientIdMetadataDocuments.privateKeyJwt.tokenEndpointAudience`
-with `{ clientIds: [...], expiresAt }` and an expiry you choose. It warns at most
-once per client ID per five minutes on each node; the client still receives the
+it, an available warning logger can name the client ID, explain why the exception
+did not apply, and show `mcp.clientIdMetadataDocuments.privateKeyJwt.tokenEndpointAudience`
+with `{ clientIds: [...], expiresAt }` and an expiry you choose. Each node warns at most once per client ID per five minutes. When its 1,024 slots are full, it suppresses warnings for new IDs until an expired slot is cleared by a later refusal. The client still receives the
 generic `invalid_client` audience error.
 
 ### Presented client authentication at the token endpoint

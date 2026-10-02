@@ -69,13 +69,25 @@ export function _resetAudienceWarningLimiter(): void {
 	audienceWarningTimes.clear();
 }
 
+/** Number of occupied diagnostic warning slots (for testing). @internal */
+export function _audienceWarningLimiterSize(): number {
+	return audienceWarningTimes.size;
+}
+
+function logSafeClientId(clientId: string): string {
+	return JSON.stringify(clientId).replace(
+		/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g,
+		(char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`
+	);
+}
+
 function warnRejectedTokenEndpointAudience(
 	client: MCPClientRecord,
 	mcpConfig: MCPConfig | undefined,
-	logger: Logger | undefined,
-	nowMs: number
+	logger: Logger | undefined
 ): void {
 	if (!logger?.warn) return;
+	const nowMs = Date.now();
 	const clientId = client.client_id;
 	const lastWarning = audienceWarningTimes.get(clientId);
 	if (lastWarning !== undefined && nowMs - lastWarning < AUDIENCE_WARNING_INTERVAL_MS) return;
@@ -103,9 +115,10 @@ function warnRejectedTokenEndpointAudience(
 			diagnosis = 'The configured exception requires keys on the client ID origin.';
 		}
 	}
+	const logSafeId = logSafeClientId(clientId);
 	logger.warn(
-		`MCP token: interactive CIMD client ${JSON.stringify(clientId)} presented a client_assertion aud equal to the token-endpoint URL rather than the issuer; assertion refused. ${diagnosis} ` +
-			`Set mcp.clientIdMetadataDocuments.privateKeyJwt.tokenEndpointAudience to { clientIds: [${JSON.stringify(clientId)}], expiresAt: "<ISO 8601 date-time with timezone>" } with an expiry you choose.`
+		`MCP token: interactive CIMD client ${logSafeId} presented a client_assertion aud equal to the token-endpoint URL rather than the issuer; assertion refused. ${diagnosis} ` +
+			`Set mcp.clientIdMetadataDocuments.privateKeyJwt.tokenEndpointAudience to { clientIds: [${logSafeId}], expiresAt: "<ISO 8601 date-time with timezone>" } with an expiry you choose.`
 	);
 }
 
@@ -537,14 +550,13 @@ async function verifyPresentedAssertion(
 ): Promise<{ audienceForm: AudienceForm } | { error: TokenResponse }> {
 	const issuer = resolveIssuer(request as any, mcpConfig ?? {});
 	const tokenEndpoint = tokenEndpointUrl(issuer);
-	const nowMs = Date.now();
 	let policy: AssertionPolicy;
 	if (isHeadlessCimdClient(client)) {
 		policy = headlessAssertionPolicy(mcpConfig, issuer, tokenEndpoint);
 	} else if (isInteractiveCimdClient(client)) {
 		const keyIssue = interactiveKeyIssue(client, mcpConfig);
 		if (keyIssue) return invalidClient(`client keys are unusable: ${keyIssue}`);
-		policy = interactiveAssertionPolicy(client, mcpConfig, issuer, tokenEndpoint, nowMs);
+		policy = interactiveAssertionPolicy(client, mcpConfig, issuer, tokenEndpoint);
 	} else {
 		return invalidClient('private_key_jwt is supported only for CIMD clients');
 	}
@@ -589,7 +601,7 @@ async function verifyPresentedAssertion(
 	}
 	if (!result.valid) {
 		if (isInteractiveCimdClient(client) && result.rejectedTokenEndpointAudience) {
-			warnRejectedTokenEndpointAudience(client, mcpConfig, logger, nowMs);
+			warnRejectedTokenEndpointAudience(client, mcpConfig, logger);
 		} else {
 			logger?.warn?.(`MCP token: client_assertion rejected for ${JSON.stringify(client.client_id)}: ${result.reason}`);
 		}

@@ -9,7 +9,12 @@
 import { describe, it, before, after, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, generateKeyPairSync, randomBytes, sign } from 'node:crypto';
-import { _resetAudienceWarningLimiter, _resetGrantRateLimiter, handleToken } from '../../../dist/lib/mcp/token.js';
+import {
+	_audienceWarningLimiterSize,
+	_resetAudienceWarningLimiter,
+	_resetGrantRateLimiter,
+	handleToken,
+} from '../../../dist/lib/mcp/token.js';
 import { MAX_ASSERTION_LENGTH } from '../../../dist/lib/mcp/clientAssertion.js';
 import { buildAuthorizationServerMetadata } from '../../../dist/lib/mcp/wellKnown.js';
 import { resetMCPAssertionJtisTableCache } from '../../../dist/lib/mcp/assertionJtiStore.js';
@@ -653,6 +658,8 @@ describe('handleToken — shared client authenticator', () => {
 
 	describe('interactive private_key_jwt where it is the permitted method', () => {
 		const TYPE = 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer';
+		const inlineDoc = { ...ASSISTANT_DOC };
+		delete inlineDoc.jwks_uri;
 		const body = (assertion, extra = {}) => ({
 			client_id: ASSISTANT,
 			redirect_uri: ASSISTANT_REDIRECT,
@@ -743,6 +750,89 @@ describe('handleToken — shared client authenticator', () => {
 				/signature verification failed/
 			);
 			assert.ok(!warningLines.some((line) => line.includes('tokenEndpointAudience')));
+		});
+
+		it('suppresses a new ID at capacity, keeps the map bounded, and admits it after a slot expires', async (t) => {
+			let nowMs = Date.now();
+			t.mock.method(Date, 'now', () => nowMs);
+			const refusalFor = async (clientId) => {
+				served[clientId] = { ...inlineDoc, client_id: clientId, jwks: { keys: [KEY_1.jwk] } };
+				const assertion = signAssertion({ claims: { iss: clientId, sub: clientId, aud: TOKEN_ENDPOINT } });
+				assertInvalidClient(
+					await exchange(body(assertion, { client_id: clientId }), { config: MIXED }),
+					/aud does not match/
+				);
+			};
+			for (let i = 0; i < 1024; i++) {
+				await refusalFor(`https://assistant.example.com/oauth/client-${i}.json`);
+				assert.ok(_audienceWarningLimiterSize() <= 1024, `warning map exceeded capacity after client ${i}`);
+			}
+			assert.equal(_audienceWarningLimiterSize(), 1024);
+			assert.equal(warningLines.length, 1024);
+
+			const nextId = 'https://assistant.example.com/oauth/client-next.json';
+			await refusalFor(nextId);
+			assert.equal(warningLines.length, 1024, 'the next new ID is suppressed while every slot is live');
+			assert.equal(_audienceWarningLimiterSize(), 1024);
+
+			nowMs += 5 * 60_000;
+			await refusalFor(nextId);
+			assert.equal(warningLines.length, 1025, 'a later refusal clears expired slots and warns for the new ID');
+			assert.equal(_audienceWarningLimiterSize(), 1);
+		});
+
+		it('starts the warning interval after delayed key retrieval', async (t) => {
+			const startMs = Date.now();
+			let nowMs = startMs;
+			t.mock.method(Date, 'now', () => nowMs);
+			let releaseKeys;
+			let enteredKeys;
+			const keysHeld = new Promise((resolve) => (releaseKeys = resolve));
+			const keysEntered = new Promise((resolve) => (enteredKeys = resolve));
+			let delayFirstKeys = true;
+			_setFetch(async (url) => {
+				fetches.push(url);
+				if (url === ASSISTANT_JWKS && delayFirstKeys) {
+					delayFirstKeys = false;
+					enteredKeys();
+					await keysHeld;
+				}
+				return jsonResponse(served[url]);
+			});
+
+			const verifiedAt = startMs + 5 * 60_000 - 1;
+			const issuedAt = Math.floor(verifiedAt / 1000);
+			const first = exchange(
+				body(signAssertion({ claims: { aud: TOKEN_ENDPOINT, iat: issuedAt, exp: issuedAt + 60 } })),
+				{ config: MIXED }
+			);
+			await keysEntered;
+			nowMs = verifiedAt;
+			releaseKeys();
+			assertInvalidClient(await first, /aud does not match/);
+			assert.equal(warningLines.length, 1);
+
+			nowMs = startMs + 5 * 60_000 + 1;
+			assertInvalidClient(
+				await exchange(body(signAssertion({ claims: { aud: TOKEN_ENDPOINT } })), { config: MIXED }),
+				/aud does not match/
+			);
+			assert.equal(warningLines.length, 1, 'two emitted warnings must be five minutes apart');
+		});
+
+		it('escapes Unicode line separators and C1 controls in both client ID log locations', async () => {
+			const clientId = 'https://assistant.example.com/oauth/client-\u2028\u0085.json';
+			served[clientId] = { ...inlineDoc, client_id: clientId, jwks: { keys: [KEY_1.jwk] } };
+			const assertion = signAssertion({ claims: { iss: clientId, sub: clientId, aud: TOKEN_ENDPOINT } });
+			assertInvalidClient(
+				await exchange(body(assertion, { client_id: clientId }), { config: MIXED }),
+				/aud does not match/
+			);
+			assert.equal(warningLines.length, 1);
+			assert.equal(warningLines[0].split('\\u2028').length - 1, 2);
+			assert.equal(warningLines[0].split('\\u0085').length - 1, 2);
+			assert.ok(!warningLines[0].includes('\u2028'));
+			assert.ok(!warningLines[0].includes('\u0085'));
 		});
 
 		describe('opt-in token-endpoint audience exception', () => {
