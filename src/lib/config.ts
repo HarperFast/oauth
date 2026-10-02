@@ -413,11 +413,28 @@ export function normalizeMcpSecurityConfig(mcpConfig: Record<string, any>, logge
 		);
 	}
 
+	// CIMD's enabled state is normalized here, ahead of the DCR block below,
+	// so cimdActive (used by DCR's allowedRedirectUriHosts guard) reflects the
+	// coerced value — e.g. an env-substituted `enabled: "false"` must count as
+	// disabled, not as the still-truthy raw string.
+	const cimd = mcpConfig.clientIdMetadataDocuments;
+	if (cimd !== undefined && cimd !== null && (typeof cimd !== 'object' || Array.isArray(cimd))) {
+		// Same non-mapping guard as dynamicClientRegistration below (arrays
+		// included): CIMD's own `cimdConfig?.enabled !== false` predicate
+		// (cimd.ts) also falls through to its default — for CIMD that default
+		// is already "enabled", so a block meant to disable it would otherwise
+		// be silently ignored rather than taking effect.
+		if (mcpActive) {
+			throw new Error('mcp.clientIdMetadataDocuments must be a mapping; use enabled: false to disable');
+		}
+	} else if (cimd && typeof cimd === 'object' && !Array.isArray(cimd)) {
+		normalizeBooleanField(cimd, 'enabled', 'mcp.clientIdMetadataDocuments.enabled', logger, mcpActive);
+	}
+
 	// CIMD reads allowedRedirectUriHosts independently of dcr.enabled (cimd.ts);
 	// precompute its active state here (shared `cimdEnabled` predicate — also
-	// used at request time by `resolveClient`), before cimd.enabled is
-	// normalized below.
-	const cimdActive = cimdEnabled(mcpConfig.clientIdMetadataDocuments);
+	// used at request time by `resolveClient`) for the DCR guard below.
+	const cimdActive = cimdEnabled(cimd);
 
 	const dcr = mcpConfig.dynamicClientRegistration;
 	if (dcr !== undefined && dcr !== null && (typeof dcr !== 'object' || Array.isArray(dcr))) {
@@ -447,19 +464,10 @@ export function normalizeMcpSecurityConfig(mcpConfig: Record<string, any>, logge
 		}
 	}
 
-	const cimd = mcpConfig.clientIdMetadataDocuments;
-	if (cimd !== undefined && cimd !== null && (typeof cimd !== 'object' || Array.isArray(cimd))) {
-		// Same non-mapping guard as dynamicClientRegistration above (arrays
-		// included): CIMD's own `cimdConfig?.enabled !== false` predicate
-		// (cimd.ts) also falls through to its default — for CIMD that default
-		// is already "enabled", so a block meant to disable it would otherwise
-		// be silently ignored rather than taking effect.
-		if (mcpActive) {
-			throw new Error('mcp.clientIdMetadataDocuments must be a mapping; use enabled: false to disable');
-		}
-	} else if (cimd && typeof cimd === 'object' && !Array.isArray(cimd)) {
-		normalizeBooleanField(cimd, 'enabled', 'mcp.clientIdMetadataDocuments.enabled', logger, mcpActive);
-
+	// cimd's non-mapping guard and `enabled` normalization already ran above,
+	// before the DCR block; this continues processing the same mapping (if
+	// it is one) for its other fields.
+	if (cimd && typeof cimd === 'object' && !Array.isArray(cimd)) {
 		if (cimd.allowedHosts !== undefined) {
 			cimd.allowedHosts = normalizeHostAllowlist(
 				cimd.allowedHosts,

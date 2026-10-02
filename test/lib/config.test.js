@@ -524,6 +524,39 @@ describe('OAuth Configuration', () => {
 					})
 				);
 			});
+
+			it('DCR: an env-substituted clientIdMetadataDocuments.enabled: "false" string counts as disabled, not truthy raw text', () => {
+				// cimdActive must be computed from cimd.enabled AFTER normalizeBooleanField
+				// coerces this string — not from the pre-normalization raw value, which a
+				// naive `!== false` would read as still-active (string !== boolean).
+				assert.doesNotThrow(() =>
+					normalizeMcpSecurityConfig({
+						enabled: true,
+						dynamicClientRegistration: { enabled: false, allowedRedirectUriHosts: [] },
+						clientIdMetadataDocuments: { enabled: 'false' },
+					})
+				);
+			});
+
+			it('DCR: clientIdMetadataDocuments.enabled: "true" (or absent) still forces the guard active', () => {
+				assert.throws(
+					() =>
+						normalizeMcpSecurityConfig({
+							enabled: true,
+							dynamicClientRegistration: { enabled: false, allowedRedirectUriHosts: [] },
+							clientIdMetadataDocuments: { enabled: 'true' },
+						}),
+					/mcp\.dynamicClientRegistration\.allowedRedirectUriHosts.*resolved to an empty list/s
+				);
+				assert.throws(
+					() =>
+						normalizeMcpSecurityConfig({
+							enabled: true,
+							dynamicClientRegistration: { enabled: false, allowedRedirectUriHosts: [] },
+						}),
+					/mcp\.dynamicClientRegistration\.allowedRedirectUriHosts.*resolved to an empty list/s
+				);
+			});
 		});
 
 		describe('interactive private_key_jwt settings', () => {
