@@ -101,24 +101,29 @@ function warnRejectedTokenEndpointAudience(
 	audienceWarningTimes.set(clientId, nowMs);
 
 	const exception = mcpConfig?.clientIdMetadataDocuments?.privateKeyJwt?.tokenEndpointAudience;
-	let diagnosis = 'No token-endpoint audience exception is configured.';
-	if (exception) {
-		diagnosis = 'The configured token-endpoint audience exception did not apply.';
+	const logSafeId = logSafeClientId(clientId);
+	let remediation: string;
+	if (client.jwks_uri !== undefined && !isJwksUriOnClientOrigin(client.jwks_uri, clientId)) {
+		remediation =
+			'The token-endpoint audience exception cannot admit this client because its keys are not on its client-ID origin; use inline keys or a jwks_uri on that origin before configuring or using the exception.';
+	} else if (!exception) {
+		remediation = `No token-endpoint audience exception is configured. Set mcp.clientIdMetadataDocuments.privateKeyJwt.tokenEndpointAudience to { clientIds: [${logSafeId}], expiresAt: "<ISO 8601 date-time with timezone>" } with an expiry you choose.`;
+	} else {
 		const expiresAt = typeof exception.expiresAt === 'number' ? exception.expiresAt : Date.parse(exception.expiresAt);
 		if (!Number.isFinite(expiresAt)) {
-			diagnosis = 'The configured token-endpoint audience exception has an invalid expiry.';
+			remediation =
+				'The configured token-endpoint audience exception has an invalid expiry. Set mcp.clientIdMetadataDocuments.privateKeyJwt.tokenEndpointAudience.expiresAt to an ISO 8601 date-time with timezone (an expiry you choose), keeping the configured clientIds.';
 		} else if (nowMs >= expiresAt) {
-			diagnosis = 'The configured token-endpoint audience exception has expired.';
+			remediation =
+				'The configured token-endpoint audience exception has expired. Renew mcp.clientIdMetadataDocuments.privateKeyJwt.tokenEndpointAudience.expiresAt to a future ISO 8601 date-time with timezone (an expiry you choose), keeping the configured clientIds.';
 		} else if (!Array.isArray(exception.clientIds) || !exception.clientIds.includes(clientId)) {
-			diagnosis = 'The configured token-endpoint audience exception does not list this client ID.';
-		} else if (client.jwks_uri !== undefined && !isJwksUriOnClientOrigin(client.jwks_uri, clientId)) {
-			diagnosis = 'The configured exception requires keys on the client ID origin.';
+			remediation = `The configured token-endpoint audience exception does not list this client ID. Add ${logSafeId} to the existing mcp.clientIdMetadataDocuments.privateKeyJwt.tokenEndpointAudience.clientIds, keeping its configured expiresAt.`;
+		} else {
+			remediation = 'The configured token-endpoint audience exception did not apply.';
 		}
 	}
-	const logSafeId = logSafeClientId(clientId);
 	logger.warn(
-		`MCP token: interactive CIMD client ${logSafeId} presented a client_assertion aud equal to the token-endpoint URL rather than the issuer; assertion refused. ${diagnosis} ` +
-			`Set mcp.clientIdMetadataDocuments.privateKeyJwt.tokenEndpointAudience to { clientIds: [${logSafeId}], expiresAt: "<ISO 8601 date-time with timezone>" } with an expiry you choose.`
+		`MCP token: interactive CIMD client ${logSafeId} presented a client_assertion aud equal to the token-endpoint URL rather than the issuer; assertion refused. ${remediation}`
 	);
 }
 
