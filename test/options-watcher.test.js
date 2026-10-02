@@ -463,9 +463,6 @@ describe('OAuth Plugin Options Watcher', () => {
 			if (typeof msg === 'string' && msg.includes('Failed to update OAuth configuration')) errorLogged = true;
 		};
 
-		// DCR explicitly disabled, but CIMD (default-enabled, not declared here)
-		// still consults allowedRedirectUriHosts for its own clients' redirect_uris
-		// (cimd.ts) — a declared-but-empty list must still be rejected.
 		scope.options._config = {
 			...scope.options._config,
 			mcp: {

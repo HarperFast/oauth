@@ -219,18 +219,11 @@ function normalizeTokenEndpointAudience(value: unknown, logger?: Logger): { clie
 /**
  * Normalize a declared hostname allowlist (`dcr.allowedRedirectUriHosts`,
  * `cimd.allowedHosts`): wrap a scalar into a single-element array, trim,
- * lowercase, and drop blanks. When `guard` is true (the surface this list
- * gates is active — the caller decides which block(s) that is), a result
- * that normalizes to zero usable hosts throws naming `path` instead of
- * silently becoming "no restriction" to `validateRedirectUri` / CIMD's own
- * length check (#249, the same fail-open shape #240/#207 closed for
- * initialAccessToken and the MCP feature booleans) — including an explicit
- * `[]`, since neither validator has a mode where an empty list means "deny
- * every host," so omitting the key is the only way to get that default. A
- * single unresolved `${VAR}` entry also throws rather than surviving as a
- * literal, unmatchable hostname. `guard` false (surface inert) skips both
- * checks, matching every other MCP security field's byte-identical-boot
- * contract.
+ * lowercase, and drop blanks. While `guard` is true (caller-determined: the
+ * surface this list gates is active), a result with zero usable hosts, or
+ * any unresolved `${VAR}` entry, throws naming `path` instead of silently
+ * reading as "no restriction" downstream (#249) — `guard` false leaves both
+ * checks inert so a disabled block can carry stale config.
  */
 function normalizeHostAllowlist(value: unknown, path: string, guard: boolean): string[] {
 	const raw: unknown[] = Array.isArray(value) ? value : [value];
@@ -374,16 +367,9 @@ function validateDcrInitialAccessToken(dcr: Record<string, any>): void {
  *   throw) — see {@link normalizeBooleanField}'s doc for why this one field
  *   is the exception.
  * - `mcp.clientIdMetadataDocuments.allowedHosts` and
- *   `mcp.dynamicClientRegistration.allowedRedirectUriHosts` are normalized to
- *   an array of exact, lowercased hostnames via {@link normalizeHostAllowlist}
- *   (a scalar string is wrapped into a single-element array; anything that
- *   isn't a string or array of strings is rejected). A declared list that
- *   resolves to zero usable hosts throws naming the key instead of silently
- *   becoming "no restriction" (#249); omitting the key keeps that default.
- *   `allowedRedirectUriHosts` is read by both DCR and CIMD redirect-uri
- *   checks (cimd.ts), so its guard is active whenever EITHER block is —
- *   `dcr.enabled !== false` alone would miss a CIMD-forward deployment with
- *   DCR disabled.
+ *   `mcp.dynamicClientRegistration.allowedRedirectUriHosts` are normalized via
+ *   {@link normalizeHostAllowlist}; the latter is read by both DCR and CIMD
+ *   (cimd.ts), so its guard covers either block being active, not DCR alone.
  * - `mcp.clientIdMetadataDocuments.privateKeyJwt`: `enabled` is a documented
  *   boolean; `jwksUriAllowedOrigins` is normalized to exact https origins;
  *   `tokenEndpointAudience` needs exact CIMD client IDs and a parseable
@@ -427,13 +413,8 @@ export function normalizeMcpSecurityConfig(mcpConfig: Record<string, any>, logge
 		);
 	}
 
-	// CIMD's redirect-uri check (cimd.ts) reads this same allowedRedirectUriHosts
-	// list independently of dcr.enabled — CIMD defaults to enabled and consults
-	// the list whenever it resolves a client, whether or not DCR itself is on.
-	// So the list's empty/placeholder guard below must fire whenever EITHER
-	// consumer is active, not just DCR; computed here (matching cimd.enabled's
-	// own default-enabled, false-only-disables coercion) so it's available
-	// before the cimd block below normalizes that field.
+	// CIMD reads allowedRedirectUriHosts independently of dcr.enabled (cimd.ts);
+	// precompute its active state here, before cimd.enabled is normalized below.
 	const cimdConfigForGate = mcpConfig.clientIdMetadataDocuments;
 	const cimdActive =
 		coerceConfigBoolean(
@@ -461,13 +442,6 @@ export function normalizeMcpSecurityConfig(mcpConfig: Record<string, any>, logge
 		if (mcpActive && dcr.enabled !== false) {
 			validateDcrInitialAccessToken(dcr);
 		}
-		// allowedRedirectUriHosts is matched with Array.includes in
-		// clientValidator.ts — a scalar string there silently becomes
-		// String.prototype.includes (substring matching) instead of an exact-host
-		// allowlist. Normalize to an array up front, exactly like CIMD's
-		// allowedHosts below (this list is shared by both the DCR and CIMD
-		// redirect-uri checks, so its guard below is DCR-or-CIMD, not DCR alone —
-		// see cimdActive above).
 		if (dcr.allowedRedirectUriHosts !== undefined) {
 			dcr.allowedRedirectUriHosts = normalizeHostAllowlist(
 				dcr.allowedRedirectUriHosts,
