@@ -530,6 +530,52 @@ describe('OAuth Plugin Options Watcher', () => {
 		);
 	});
 
+	it('a reload that ENABLES allowUnverifiedClaimInheritance must NOT apply early when the same snapshot errors (fail-open guard)', async () => {
+		// The mirror image of the test above: applying the new value early must be
+		// safe in only one direction. If an enabling value landed immediately and
+		// initializeProviders then threw, the OLD (still-serving) providers would
+		// gain the escape hatch they never had — a rejected reload must change
+		// nothing observable, not loosen trust for currently active providers.
+		scope.options._config.allowUnverifiedClaimInheritance = false;
+		await handleApplication(scope);
+		assert.equal(OAuthResource.allowUnverifiedClaimInheritance, false, 'escape hatch should start disabled');
+
+		let errorLogged = false;
+		scope.logger.error = (msg) => {
+			if (typeof msg === 'string' && msg.includes('Failed to update OAuth configuration')) errorLogged = true;
+		};
+
+		scope.options._config = {
+			...scope.options._config,
+			allowUnverifiedClaimInheritance: true,
+			providers: {
+				...scope.options._config.providers,
+				mcp: { provider: 'generic', clientId: 'x', clientSecret: 'y' },
+			},
+		};
+		configChangeListeners[0]();
+		await waitFor(() => errorLogged);
+
+		assert.ok(errorLogged, 'the rejected reload should be logged');
+		assert.equal(
+			OAuthResource.allowUnverifiedClaimInheritance,
+			false,
+			'a rejected reload must not enable the escape hatch for the still-serving (old) providers'
+		);
+	});
+
+	it('a successful reload still applies an ENABLING allowUnverifiedClaimInheritance value', async () => {
+		scope.options._config.allowUnverifiedClaimInheritance = false;
+		await handleApplication(scope);
+		assert.equal(OAuthResource.allowUnverifiedClaimInheritance, false);
+
+		scope.options._config = { ...scope.options._config, allowUnverifiedClaimInheritance: true };
+		configChangeListeners[0]();
+		await waitFor(() => OAuthResource.allowUnverifiedClaimInheritance === true);
+
+		assert.equal(OAuthResource.allowUnverifiedClaimInheritance, true);
+	});
+
 	describe('reload ordering vs. a per-key OptionsWatcher merge', () => {
 		// Harper's real OptionsWatcher#merge writes a multi-key edit into the
 		// live config ONE KEY AT A TIME and emits 'change' synchronously after

@@ -450,8 +450,9 @@ export async function handleCallback(
 
 		// Expose authenticated-source evidence to onLogin only (non-enumerable, so it is
 		// not persisted into the session). Normalize provenance: 'signed-oidc' requires a
-		// verified signature AND validated issuer — getUserInfo labels even a decoded-only
-		// token 'signed-oidc', which must not be exported as trusted.
+		// verified signature AND validated issuer — getUserInfo's label already requires
+		// signatureVerified (#231 §5d), but not issuerValidated, so that check still gates
+		// here before this evidence is exported as trusted.
 		if (hookManager.hasHook('onLogin')) {
 			const provenance: EmailProvenance =
 				emailProvenance === 'signed-oidc' && idTokenSignatureVerified && idTokenIssuerValidated
@@ -608,21 +609,14 @@ export async function handleCallback(
 					}
 				}
 			} else if (!claimIsTrusted) {
-				// userExists is `false` (confirmed no account) or `null` (the lookup
-				// itself failed, e.g. a transient hdb_user read error) and the claim is
-				// not from an authenticated source. Persist an unpredictable,
-				// non-resolvable quarantine principal: because a later hdb_user cannot
-				// be created to match the random suffix, this login can never adopt a
-				// privileged account of the claim's name — confirmed not to exist yet,
-				// or unknown because the lookup failed. The session is roleless (the
-				// principal resolves to no hdb_user), and `oauthUser` — incl. any
-				// app-level role claim — is preserved for the application's own authz.
-				//
-				// Quarantining on a lookup error (rather than denying, as before) is
-				// exactly as secure as denying — the quarantine principal can't match
-				// any hdb_user name whether or not the account actually exists — and
-				// more available: a transient read error no longer fails the login for
-				// an unverified claim that was never going to adopt anything anyway.
+				// userExists is `false` (confirmed no account) or `null` (lookup error,
+				// e.g. transient). Either way the claim is not from an authenticated
+				// source, so quarantine under a non-resolvable principal rather than
+				// adopt: the random suffix means no later hdb_user can ever be created
+				// to match it, so this is exactly as secure as denying regardless of
+				// whether the account actually exists — and, on a lookup error, more
+				// available than denying outright. `oauthUser` (incl. any app-level role
+				// claim) is preserved for the application's own authz.
 				const quarantinePrincipal = makeQuarantinePrincipal(resolvedUser);
 				if (userExists === null) {
 					logger?.warn?.(

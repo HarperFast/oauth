@@ -1410,7 +1410,7 @@ describe('OAuth Configuration', () => {
 			});
 		});
 
-		describe('issuer required for JWKS-enabled providers (#231 §4)', () => {
+		describe('issuer required for JWKS-enabled providers, static startup only (#231 §4)', () => {
 			it('throws naming the provider and key when a generic provider sets jwksUri but no issuer', () => {
 				const providerConfig = {
 					provider: 'generic',
@@ -1424,7 +1424,7 @@ describe('OAuth Configuration', () => {
 				};
 
 				assert.throws(
-					() => buildProviderConfig(providerConfig, 'custom-idp', {}),
+					() => buildProviderConfig(providerConfig, 'custom-idp', {}, true),
 					(error) => {
 						assert.match(error.message, /custom-idp/);
 						assert.match(error.message, /issuer/);
@@ -1448,7 +1448,28 @@ describe('OAuth Configuration', () => {
 					redirectUri: 'https://app.test.com/oauth',
 				};
 
-				assert.throws(() => buildProviderConfig(providerConfig, 'okta-custom-as', {}), /issuer/);
+				assert.throws(() => buildProviderConfig(providerConfig, 'okta-custom-as', {}, true), /issuer/);
+			});
+
+			it('does NOT throw the same config without enforceIssuerForJwks — the dynamic/request-time path (#231 follow-up)', () => {
+				// onResolveProvider's dynamic resolution (index.ts session middleware,
+				// resource.ts) calls buildProviderConfig without the 4th argument. A
+				// per-tenant row with jwksUri and no issuer must not throw on every
+				// request for that tenant — only the static startup path enforces this.
+				const providerConfig = {
+					provider: 'generic',
+					clientId: 'c',
+					clientSecret: 's',
+					authorizationUrl: 'https://idp.example.com/authorize',
+					tokenUrl: 'https://idp.example.com/token',
+					userInfoUrl: 'https://idp.example.com/userinfo',
+					jwksUri: 'https://idp.example.com/jwks',
+					redirectUri: 'https://app.test.com/oauth',
+				};
+
+				const config = buildProviderConfig(providerConfig, 'custom-idp', {});
+				assert.equal(config.jwksUri, 'https://idp.example.com/jwks');
+				assert.equal(config.issuer, undefined);
 			});
 
 			it('does not throw when Okta is configured via domain (issuer derived by configure())', () => {
@@ -1460,7 +1481,7 @@ describe('OAuth Configuration', () => {
 					redirectUri: 'https://app.test.com/oauth',
 				};
 
-				const config = buildProviderConfig(providerConfig, 'okta', {});
+				const config = buildProviderConfig(providerConfig, 'okta', {}, true);
 				assert.equal(config.issuer, 'https://dev-12345.okta.com');
 			});
 
@@ -1477,7 +1498,7 @@ describe('OAuth Configuration', () => {
 					redirectUri: 'https://app.test.com/oauth',
 				};
 
-				const config = buildProviderConfig(providerConfig, 'okta-custom-as', {});
+				const config = buildProviderConfig(providerConfig, 'okta-custom-as', {}, true);
 				assert.equal(config.issuer, 'https://dev-1.okta.com/oauth2/aus1abc');
 			});
 
@@ -1493,7 +1514,7 @@ describe('OAuth Configuration', () => {
 					redirectUri: 'https://app.test.com/oauth',
 				};
 
-				const config = buildProviderConfig(providerConfig, 'microsoft', {});
+				const config = buildProviderConfig(providerConfig, 'microsoft', {}, true);
 				assert.equal(config.provider, 'microsoft');
 				assert.ok(config.jwksUri);
 				assert.equal(config.issuer, null);
@@ -1510,7 +1531,7 @@ describe('OAuth Configuration', () => {
 					redirectUri: 'https://app.test.com/oauth',
 				};
 
-				const config = buildProviderConfig(providerConfig, 'azure', {});
+				const config = buildProviderConfig(providerConfig, 'azure', {}, true);
 				assert.ok(config.jwksUri);
 				assert.equal(config.issuer, null);
 			});
@@ -1526,7 +1547,7 @@ describe('OAuth Configuration', () => {
 					redirectUri: 'https://app.test.com/oauth',
 				};
 
-				const config = buildProviderConfig(providerConfig, 'plain-oauth2', {});
+				const config = buildProviderConfig(providerConfig, 'plain-oauth2', {}, true);
 				assert.equal(config.jwksUri, undefined);
 			});
 
@@ -1538,8 +1559,24 @@ describe('OAuth Configuration', () => {
 					redirectUri: 'https://app.test.com/oauth',
 				};
 
-				const config = buildProviderConfig(providerConfig, 'github', {});
+				const config = buildProviderConfig(providerConfig, 'github', {}, true);
 				assert.ok(!config.jwksUri, 'GitHub preset has no jwksUri (null)');
+			});
+
+			it('a non-empty issuer array with only blank entries is NOT usable (hasUsableIssuer)', () => {
+				const providerConfig = {
+					provider: 'generic',
+					clientId: 'c',
+					clientSecret: 's',
+					authorizationUrl: 'https://idp.example.com/authorize',
+					tokenUrl: 'https://idp.example.com/token',
+					userInfoUrl: 'https://idp.example.com/userinfo',
+					jwksUri: 'https://idp.example.com/jwks',
+					issuer: [''],
+					redirectUri: 'https://app.test.com/oauth',
+				};
+
+				assert.throws(() => buildProviderConfig(providerConfig, 'custom-idp', {}, true), /issuer/);
 			});
 
 			it('initializeProviders propagates the throw (fails fast at startup, not a silent per-login deny)', () => {

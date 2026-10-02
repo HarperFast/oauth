@@ -550,11 +550,21 @@ export function skipUndefined(source: Record<string, any> | null | undefined): R
  * this matters for a dynamically resolved config (e.g. from `onResolveProvider`)
  * that passes through an unset field such as `scope: row.scope`. `null` and
  * `''` are explicit values and are kept as-is.
+ *
+ * `enforceIssuerForJwks` runs {@link validateIssuerForJwks} (#231 §4) — pass
+ * `true` only from a static, startup-time build (`initializeProviders`). A
+ * dynamically resolved provider (`onResolveProvider`, called from the request
+ * path in `index.ts`'s session middleware and `resource.ts`) must NOT throw
+ * here: an operator's per-tenant row with a stale/missing `issuer` would
+ * otherwise fail every request for that tenant (logging out live sessions,
+ * 500ing new logins) instead of just not being adoption-eligible, and with no
+ * caching of the failure, on every single request.
  */
 export function buildProviderConfig(
 	providerConfig: Record<string, any>,
 	providerName: string,
-	pluginDefaults: Partial<OAuthProviderConfig> = {}
+	pluginDefaults: Partial<OAuthProviderConfig> = {},
+	enforceIssuerForJwks = false
 ): OAuthProviderConfig {
 	const options = providerConfig || {};
 
@@ -660,7 +670,9 @@ export function buildProviderConfig(
 		}
 	}
 
-	validateIssuerForJwks(config, providerName, providerPreset);
+	if (enforceIssuerForJwks) {
+		validateIssuerForJwks(config, providerName, providerPreset);
+	}
 
 	return config;
 }
@@ -671,17 +683,18 @@ export function buildProviderConfig(
  * normalizes to "no issuer configured", same as OAuthProvider.verifyIdToken).
  */
 function hasUsableIssuer(issuer: OAuthProviderConfig['issuer']): boolean {
-	if (Array.isArray(issuer)) return issuer.length > 0;
+	if (Array.isArray(issuer)) return issuer.some((value) => typeof value === 'string' && value !== '');
 	return typeof issuer === 'string' && issuer !== '';
 }
 
 /**
- * Fail fast at config-build time when a provider is JWKS-enabled (so its id
- * tokens are signature-verified and can in principle be trusted for account
- * adoption — see HarperFast/oauth#231 §4) but has no usable `issuer`. Without
- * this, `issuerValidated` is silently `false` forever and a hookless login
- * that should adopt an existing account is denied at login time, with no
- * indication of why.
+ * Fail fast at **static, startup-time** config-build (`initializeProviders`
+ * only — see `enforceIssuerForJwks` on {@link buildProviderConfig}) when a
+ * provider is JWKS-enabled (so its id tokens are signature-verified and can
+ * in principle be trusted for account adoption — see HarperFast/oauth#231
+ * §4) but has no usable `issuer`. Without this, `issuerValidated` is
+ * silently `false` forever and a hookless login that should adopt an
+ * existing account is denied at login time, with no indication of why.
  *
  * Okta and Auth0 ship an empty-string `issuer` placeholder that their preset's
  * `configure(domain)` fills in alongside `jwksUri` — using `domain` (or
@@ -763,7 +776,7 @@ export function initializeProviders(options: OAuthPluginConfig, logger?: Logger)
 			);
 		}
 
-		const config = buildProviderConfig(providerConfig, providerName, pluginDefaults);
+		const config = buildProviderConfig(providerConfig, providerName, pluginDefaults, /* enforceIssuerForJwks */ true);
 
 		// Check if this provider is properly configured
 		const requiredFields = ['clientId', 'clientSecret', 'authorizationUrl', 'tokenUrl', 'userInfoUrl'];

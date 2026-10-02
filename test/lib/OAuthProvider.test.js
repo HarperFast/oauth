@@ -981,7 +981,7 @@ describe('OAuthProvider', () => {
 			const originalFetch = global.fetch;
 			global.fetch = async () => {
 				fetchCalled = true;
-				return { ok: true, json: async () => ({ email: 'fetched@example.com', name: 'Fetched User' }) };
+				return { ok: true, json: async () => ({ sub: '123', email: 'fetched@example.com', name: 'Fetched User' }) };
 			};
 
 			const configWithFetchEmail = {
@@ -1044,6 +1044,32 @@ describe('OAuthProvider', () => {
 				assert.equal(userInfo.sub, 'victim-sub', 'sub must stay the id token subject');
 				assert.equal(userInfo.email, undefined, "the mismatched subject's email must not be merged in");
 				assert.equal(userInfo.name, 'Victim Name', "the mismatched subject's name must not override the id token's");
+				assert.equal(userInfo._emailProvenance, 'unauthenticated');
+			} finally {
+				global.fetch = originalFetch;
+			}
+		});
+
+		it('discards UserInfo that omits sub entirely on the fetchEmail path (OIDC Core 5.3.2 requires sub)', async () => {
+			// A UserInfo response with no `sub` at all is non-conformant and gets no
+			// benefit of the doubt — treated the same as a mismatch, not skipped.
+			const originalFetch = global.fetch;
+			global.fetch = async () => ({
+				ok: true,
+				json: async () => ({ email: 'attacker@example.com', name: 'Attacker Name' }),
+			});
+
+			const configWithFetchEmail = {
+				...mockConfig,
+				fetchEmail: true,
+			};
+			provider = new OAuthProvider(configWithFetchEmail, mockLogger);
+
+			try {
+				const idTokenClaimsNoEmail = { sub: 'victim-sub', iss: 'https://issuer.example.com', name: 'Victim Name' };
+				const userInfo = await provider.getUserInfo('access-token', idTokenClaimsNoEmail);
+				assert.equal(userInfo.email, undefined, "a sub-less userinfo's email must not be merged in");
+				assert.equal(userInfo.name, 'Victim Name');
 				assert.equal(userInfo._emailProvenance, 'unauthenticated');
 			} finally {
 				global.fetch = originalFetch;

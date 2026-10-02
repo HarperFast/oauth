@@ -392,6 +392,7 @@ There are exactly **two** trusted email sources. A login may adopt an existing a
 - The token's `iss` was validated against the provider's **expected issuer** (`config.issuer`). Providers without a known issuer — Azure `/common` (multi-tenant) — are not trusted for adoption.
 
   Any other JWKS-enabled provider (Okta, Auth0, or a `generic` OIDC config) that sets `jwksUri` but has no usable `issuer` fails at startup instead, naming the provider and the `issuer` key — this is almost always a bypassed shortcut (Okta/Auth0's `domain` option, which derives `issuer` for you) rather than an intentionally issuer-less provider. Set `issuer` explicitly, or use `domain`/`tenantId`.
+
 - `email_verified === true` for the **standard `email` claim**. Providers that use a custom `emailClaim` cannot earn adoption trust because `email_verified` only attests the standard claim.
 - The verified email equals the resolved username (`usernameClaim === 'email'`).
 
