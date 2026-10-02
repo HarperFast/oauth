@@ -443,8 +443,7 @@ export async function handleCallback(
 		// Get user info (will use ID token claims if available and verified).
 		// getUserInfo also sets _emailProvenance on the returned object; pass
 		// idTokenSignatureVerified so it can't stamp 'signed-oidc' on a
-		// decoded-only (no-JWKS) token. resolveEmail stays undefined (#228) unless
-		// the application registered onResolveEmail.
+		// decoded-only (no-JWKS) token.
 		const resolveEmail = hookManager.hasHook('onResolveEmail')
 			? (candidates: readonly EmailCandidate[]) => hookManager.callResolveEmail(candidates, providerName)
 			: undefined;
@@ -811,8 +810,7 @@ export async function handleCallback(
 		// Use a safe, generic reason code — details are in the server log
 		const message = error instanceof Error ? error.message : String(error);
 		let reason = 'unknown';
-		// Checked by type, not message text: a selector's own error (e.g. 'database
-		// unavailable') carries no identifying substring (#228).
+		// Typed, not message-matched: a selector's own error has no identifying substring.
 		if (error instanceof ResolveEmailError) reason = 'email_selection';
 		else if (message.startsWith('Token exchange failed')) reason = 'token_exchange';
 		else if (message.includes('claim')) reason = 'user_mapping';

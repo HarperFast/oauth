@@ -470,5 +470,23 @@ describe('HookManager', () => {
 			await hookManager.callResolveEmail(CANDIDATES, 'github');
 			assert.equal(receivedSignal.aborted, false);
 		});
+
+		it('still rejects with ResolveEmailError even if the hook resolves(undefined) from its own abort listener', async () => {
+			hookManager.register({
+				onResolveEmail: (_candidates, _provider, signal) =>
+					new Promise((resolve) => {
+						signal.addEventListener('abort', () => resolve(undefined));
+					}),
+			});
+
+			await assert.rejects(
+				() => hookManager.callResolveEmail(CANDIDATES, 'github', 20),
+				(error) => {
+					assert.ok(error instanceof ResolveEmailError);
+					assert.match(error.message, /onResolveEmail hook timed out/);
+					return true;
+				}
+			);
+		});
 	});
 });

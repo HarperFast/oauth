@@ -319,7 +319,7 @@ Choose which of several provider-reported emails becomes the login identity ([#2
 
 ```typescript
 async function onResolveEmail(
-	candidates: Array<{ email: string; verified: boolean; primary: boolean }>,
+	candidates: ReadonlyArray<{ email: string; verified: boolean; primary: boolean }>,
 	provider: string,
 	signal: AbortSignal
 ): Promise<string | null | undefined>;

@@ -98,9 +98,13 @@ export class HookManager {
 			return await Promise.race([
 				Promise.resolve(hook(candidates, provider, controller.signal)),
 				new Promise<never>((_, reject) => {
+					// Reject BEFORE aborting: aborting can synchronously settle the hook's own
+					// promise (e.g. an abort listener that resolves(undefined)) and Promise.race
+					// takes whichever operand settles first — reject first so the timeout always
+					// wins the race regardless of how the hook reacts to the signal.
 					timer = setTimeout(() => {
-						controller.abort();
 						reject(new ResolveEmailError(`onResolveEmail hook timed out after ${timeoutMs}ms`));
+						controller.abort();
 					}, timeoutMs);
 				}),
 			]);
