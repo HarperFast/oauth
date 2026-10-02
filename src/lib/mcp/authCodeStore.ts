@@ -49,6 +49,7 @@ function encodeRecord(record: MCPAuthCodeRecord): Record<string, any> {
 		code_challenge_method: record.code_challenge_method,
 		redirect_uri: record.redirect_uri,
 		scope: record.scope,
+		client_auth_method: record.client_auth_method,
 	};
 }
 
@@ -62,6 +63,7 @@ function decodeRecord(raw: Record<string, any>): MCPAuthCodeRecord {
 		code_challenge_method: raw.code_challenge_method,
 		redirect_uri: raw.redirect_uri,
 		scope: raw.scope ?? undefined,
+		client_auth_method: raw.client_auth_method ?? undefined,
 	};
 }
 
@@ -83,18 +85,24 @@ export class MCPAuthCodeStore {
 		}
 	}
 
+	/**
+	 * Returns null when no such code is stored. A read failure is logged
+	 * and rethrown, so the token endpoint answers server_error rather than
+	 * invalid_grant.
+	 */
 	async get(code: string): Promise<MCPAuthCodeRecord | null> {
 		const table = getAuthCodesTable();
+		let raw;
 		try {
-			const raw = await table.get(code);
-			if (!raw || !raw.code) {
-				return null;
-			}
-			return decodeRecord(raw);
+			raw = await table.get(code);
 		} catch (error) {
 			this.logger?.error?.('Failed to retrieve MCP auth code:', error);
+			throw error;
+		}
+		if (!raw || !raw.code) {
 			return null;
 		}
+		return decodeRecord(raw);
 	}
 
 	async delete(code: string): Promise<void> {

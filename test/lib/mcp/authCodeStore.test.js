@@ -91,11 +91,11 @@ describe('MCPAuthCodeStore', () => {
 		assert.equal(storedRecords.size, 0);
 	});
 
-	it('returns null when the underlying get throws', async () => {
+	it('propagates get() errors, so a read failure is never reported as a missing code', async () => {
 		mockTable.get = async () => {
 			throw new Error('db failure');
 		};
-		assert.equal(await store.get('whatever'), null);
+		await assert.rejects(() => store.get('whatever'), /db failure/);
 	});
 
 	it('propagates set() errors so callers can fail the request', async () => {

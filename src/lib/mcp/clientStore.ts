@@ -134,21 +134,23 @@ export class MCPClientStore {
 	}
 
 	/**
-	 * Look up a client by client_id. Returns null if not found or on read error
-	 * (errors logged; we don't surface storage failures to OAuth clients).
+	 * Look up a client by client_id. Returns null when no such client is
+	 * stored. A read failure is logged and rethrown, so callers answer with a
+	 * server error rather than reporting an unknown client.
 	 */
 	async get(clientId: string): Promise<MCPClientRecord | null> {
 		const table = getMCPClientsTable();
+		let raw;
 		try {
-			const raw = await table.get(clientId);
-			if (!raw || !raw.client_id) {
-				return null;
-			}
-			return decodeRecord(raw);
+			raw = await table.get(clientId);
 		} catch (error) {
 			this.logger?.error?.('Failed to retrieve MCP client:', error);
+			throw error;
+		}
+		if (!raw || !raw.client_id) {
 			return null;
 		}
+		return decodeRecord(raw);
 	}
 
 	/**

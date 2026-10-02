@@ -18,12 +18,30 @@ import { MCPAssertionJtiStore } from './assertionJtiStore.ts';
 import { MCPAuthCodeStore } from './authCodeStore.ts';
 import { CimdClientError, MAX_CLIENT_ID_LENGTH, resolveClient } from './cimd.ts';
 import { allowsGrant } from './clientValidator.ts';
-import { CLIENT_ASSERTION_TYPE_JWT_BEARER, verifyClientAssertion } from './clientAssertion.ts';
+import {
+	type AssertionPolicy,
+	type ClientAuthMethod,
+	headlessAssertionPolicy,
+	interactiveAssertionPolicy,
+	interactiveKeyIssue,
+	isClientAuthMethod,
+	isHeadlessCimdClient,
+	isInteractiveCimdClient,
+	permittedAuthMethod,
+} from './clientAuthMethod.ts';
+import {
+	type AudienceForm,
+	CLIENT_ASSERTION_TYPE_JWT_BEARER,
+	MAX_ASSERTION_LENGTH,
+	verifyClientAssertion,
+} from './clientAssertion.ts';
+import { getClientJwks } from './jwksFetcher.ts';
 import { MCPKeyStore } from './keyStore.ts';
 import { createRateLimiter, type RateLimiter } from './rateLimit.ts';
 import { getRequestHeader } from '../requestHeaders.ts';
 import {
 	hashRefreshToken,
+	isBoundFamilyId,
 	isProvenancedFamilyId,
 	makeRefreshToken,
 	MCPRefreshFamilyStore,
@@ -31,7 +49,7 @@ import {
 	parseRefreshToken,
 } from './refreshTokenStore.ts';
 import { signAccessToken } from './tokenIssuer.ts';
-import { resolveIssuer, resolveResource } from './wellKnown.ts';
+import { resolveIssuer, resolveResource, tokenEndpointUrl } from './wellKnown.ts';
 
 const DEFAULT_ACCESS_TOKEN_TTL = 3600; // 1 hour
 const DEFAULT_REFRESH_TOKEN_TTL = 2592000; // 30 days
@@ -74,6 +92,14 @@ function cimdErrorResponse(err: CimdClientError): TokenResponse {
 	}
 	return response;
 }
+
+/**
+ * The handler's line when a superseded family's revocation cannot be written:
+ * single-line, with the family id and without the error text or the token. The store's own
+ * write-error log still carries the underlying error.
+ */
+const REVOCATION_NOT_PERSISTED_LOG = (familyId: string) =>
+	`MCP token: refresh replay detected for family ${familyId}, but its revocation could not be persisted; the request was refused with invalid_grant and the family stays live`;
 
 function nowSeconds(): number {
 	return Math.floor(Date.now() / 1000);
@@ -174,36 +200,168 @@ function formUrlDecode(field: string): string | null {
 	}
 }
 
-/** @internal — exported for tests. */
-export function parseBasicAuth(authHeader: string | undefined): { clientId: string; clientSecret: string } | null {
+/** Strict base64 (standard alphabet, optional padding) for Basic credentials. */
+const BASIC_CREDENTIALS_PATTERN = /^[A-Za-z0-9+/]+={0,2}$/;
+
+type BasicAuth = { absent: true } | { malformed: true } | { clientId: string; clientSecret: string };
+
+/**
+ * Read an `Authorization: Basic` header: absent when there is no header or it
+ * uses another scheme; malformed when the Basic scheme carries no credentials,
+ * or credentials that don't decode to a non-empty client_id and a secret
+ * (possibly empty) separated by `:`.
+ */
+function readBasicAuth(authHeader: string | undefined): BasicAuth {
+	if (!authHeader) return { absent: true };
+	// A bare `Basic` scheme with no credentials is malformed, not absent.
+	if (/^basic$/i.test(authHeader.trim())) return { malformed: true };
 	// Scheme name is case-insensitive (RFC 9110 §11.1) — matches the `/^basic\s/i`
 	// check on the client_credentials path.
-	if (!authHeader || !/^basic\s/i.test(authHeader)) return null;
-	let decoded: string;
-	try {
-		decoded = Buffer.from(authHeader.slice('Basic '.length).trim(), 'base64').toString('utf8');
-	} catch {
-		return null;
-	}
+	if (!/^basic\s/i.test(authHeader)) return { absent: true };
+	const encoded = authHeader.slice('Basic '.length).trim();
+	if (!BASIC_CREDENTIALS_PATTERN.test(encoded)) return { malformed: true };
+	const decoded = Buffer.from(encoded, 'base64').toString('utf8');
 	// RFC 6749 §2.3.1: each field is form-urlencoded before base64, so the first
 	// literal `:` separates them (a `:` inside a field is `%3A`). Split there,
 	// then form-decode both — otherwise a URL-shaped CIMD client_id is looked up
 	// with its `%3A`/`%2F` literal, or an unencoded one splits at its scheme colon.
 	const sep = decoded.indexOf(':');
-	if (sep < 0) return null;
+	if (sep < 0) return { malformed: true };
 	const clientId = formUrlDecode(decoded.slice(0, sep));
 	const clientSecret = formUrlDecode(decoded.slice(sep + 1));
-	if (clientId === null || clientSecret === null) return null;
+	if (clientId === null || clientSecret === null || clientId.length === 0) return { malformed: true };
 	return { clientId, clientSecret };
 }
 
-type ClientAuthResult = { client: MCPClientRecord } | { error: TokenResponse };
+/** @internal — exported for tests. Null when absent or malformed. */
+export function parseBasicAuth(authHeader: string | undefined): { clientId: string; clientSecret: string } | null {
+	const basic = readBasicAuth(authHeader);
+	return 'clientId' in basic ? basic : null;
+}
 
 /**
- * Authenticate the client per its registered `token_endpoint_auth_method`.
- * Credentials come from the Authorization: Basic header (client_secret_basic)
- * or the body (client_secret_post); public clients (`none`) present only a
- * client_id and rely on PKCE. Mixing methods is rejected (RFC 6749 §2.3).
+ * One body parameter's value: `{}` when absent, `{ value }` for a single
+ * non-empty string, `{ invalid: true }` when present but empty or not a
+ * string (an array, for example).
+ */
+function singleParameter(body: any, name: string): { value?: string } | { invalid: true } {
+	const raw = body?.[name];
+	if (raw === undefined) return {};
+	if (typeof raw !== 'string' || raw.length === 0) return { invalid: true };
+	return { value: raw };
+}
+
+/**
+ * The single-valued token request parameters. RFC 6749 §3.2: request
+ * parameters must not be included more than once, and unrecognized ones are
+ * ignored. `resource` may repeat (RFC 8707 §2).
+ */
+const SINGLE_VALUED_PARAMETERS = [
+	'grant_type',
+	'code',
+	'redirect_uri',
+	'code_verifier',
+	'refresh_token',
+	'client_id',
+	'client_secret',
+	'client_assertion',
+	'client_assertion_type',
+	'scope',
+] as const;
+
+/**
+ * The first single-valued parameter whose value in the body is an array, if
+ * any. See docs/mcp-oauth.md on HarperFast/harper#2953.
+ */
+function repeatedParameter(body: any): string | undefined {
+	if (!body || typeof body !== 'object') return undefined;
+	return SINGLE_VALUED_PARAMETERS.find((name) => Array.isArray(body[name]));
+}
+
+/** The body's `resource` values: none when absent, each element when an array. */
+function requestedResources(body: any): unknown[] {
+	const value = body?.resource;
+	if (value === undefined) return [];
+	return Array.isArray(value) ? value : [value];
+}
+
+/** The client's identity from an assertion's unverified `sub`, when no client_id was sent (RFC 7521 §4.2). */
+function unverifiedAssertionSubject(assertion: string): string | undefined {
+	const payloadSegment = assertion.split('.')[1];
+	if (!payloadSegment || !/^[A-Za-z0-9_-]+$/.test(payloadSegment)) return undefined;
+	try {
+		const payload = JSON.parse(Buffer.from(payloadSegment, 'base64url').toString('utf8'));
+		const sub = payload?.sub;
+		return typeof sub === 'string' && sub.length > 0 && sub.length <= MAX_CLIENT_ID_LENGTH ? sub : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+type PresentedCredentials =
+	| { method: 'none' }
+	| { method: 'client_secret_basic'; secret: string }
+	| { method: 'client_secret_post'; secret: string }
+	| { method: 'private_key_jwt'; assertion: string };
+
+type ClientAuthResult =
+	| { client: MCPClientRecord; method: ClientAuthMethod; audienceForm?: AudienceForm }
+	| { error: TokenResponse };
+
+/** The verifier's wording for an over-length assertion, reused where the token endpoint rejects one early. */
+const ASSERTION_TOO_LONG = 'client_assertion verification failed: client_assertion exceeds the maximum allowed length';
+
+function invalidClient(description: string): { error: TokenResponse } {
+	return { error: errorResponse(401, 'invalid_client', description) };
+}
+
+/** RFC 6749 §5.2's error for a malformed request. */
+function invalidRequest(description: string): { error: TokenResponse } {
+	return { error: errorResponse(400, 'invalid_request', description) };
+}
+
+/** RFC 6749 §5.2: a 401 answering a request that used `Authorization: Basic` carries a Basic challenge. */
+const BASIC_CHALLENGE = 'Basic realm="oauth"';
+
+/** The error for a presentation that differs from the permitted method. */
+function methodMismatch(
+	permitted: ClientAuthMethod,
+	presented: PresentedCredentials['method']
+): { error: TokenResponse } {
+	if (permitted === 'none') {
+		return invalidClient(
+			presented === 'private_key_jwt'
+				? 'Public client must not present a client assertion'
+				: 'Public client must not present a secret'
+		);
+	}
+	if (permitted === 'client_secret_basic') return invalidClient('client_secret_basic requires Authorization: Basic');
+	if (permitted === 'client_secret_post') return invalidClient('client_secret_post requires client_secret in body');
+	return invalidClient('This client must authenticate with a client_assertion (private_key_jwt)');
+}
+
+/**
+ * Authenticate the client at the token endpoint (authorization_code and
+ * refresh_token grants). The client presents at most one mechanism; the
+ * server computes the one method it permits for this client
+ * (`permittedAuthMethod`) and rejects any other presentation:
+ *
+ * - `client_assertion` + `client_assertion_type` → private_key_jwt, which is
+ *   verified or rejected, never ignored (OAuth 2.1 §3.2.2 "authenticate the
+ *   client if client authentication is included").
+ * - `Authorization: Basic` with a non-empty secret → client_secret_basic;
+ *   body `client_secret` → client_secret_post.
+ * - nothing (or an empty-secret Basic header carrying only the client_id, as
+ *   some public clients send) → none; PKCE is the proof.
+ *
+ * Rejected before any lookup with invalid_request (RFC 6749 §5.2): a
+ * client_id or credential parameter that is empty or not a single string,
+ * half an assertion pair, and more than one mechanism (RFC 6749 §2.3, RFC 7521
+ * §4.2.1), counting any Basic header, malformed or not. Otherwise rejected
+ * before any lookup with invalid_client: malformed Basic credentials, an
+ * unknown client_assertion_type, and an assertion longer than the verifier
+ * accepts. `dispatchToken` has already refused a single-valued parameter
+ * whose value is an array.
  */
 async function authenticateClient(
 	request: Request | undefined,
@@ -211,21 +369,60 @@ async function authenticateClient(
 	mcpConfig: MCPConfig | undefined,
 	logger?: Logger
 ): Promise<ClientAuthResult> {
-	const basic = parseBasicAuth(getRequestHeader(request?.headers, 'authorization'));
-	const bodyClientId = typeof body?.client_id === 'string' ? body.client_id : undefined;
-	const bodyClientSecret = typeof body?.client_secret === 'string' ? body.client_secret : undefined;
+	const basic = readBasicAuth(getRequestHeader(request?.headers, 'authorization'));
+	const basicPresented = !('absent' in basic);
 
-	if (basic && bodyClientSecret) {
-		return { error: errorResponse(400, 'invalid_request', 'Multiple client authentication methods') };
+	const clientIdParam = singleParameter(body, 'client_id');
+	const secretParam = singleParameter(body, 'client_secret');
+	const assertionParam = singleParameter(body, 'client_assertion');
+	const assertionTypeParam = singleParameter(body, 'client_assertion_type');
+	for (const [name, param] of [
+		['client_id', clientIdParam],
+		['client_secret', secretParam],
+		['client_assertion', assertionParam],
+		['client_assertion_type', assertionTypeParam],
+	] as const) {
+		if ('invalid' in param) return invalidRequest(`${name} must be a single non-empty value`);
 	}
-	if (basic && bodyClientId && bodyClientId !== basic.clientId) {
-		return { error: errorResponse(400, 'invalid_request', 'client_id mismatch between header and body') };
+	const secret = (secretParam as { value?: string }).value;
+	const assertion = (assertionParam as { value?: string }).value;
+	const assertionType = (assertionTypeParam as { value?: string }).value;
+	if ((assertion === undefined) !== (assertionType === undefined)) {
+		return invalidRequest('client_assertion and client_assertion_type must be presented together');
+	}
+	// Any Basic header counts as a mechanism, malformed or not.
+	const mechanisms = [basicPresented, secret !== undefined, assertion !== undefined].filter(Boolean).length;
+	if (mechanisms > 1) return invalidRequest('Multiple client authentication methods');
+
+	if ('malformed' in basic) return invalidClient('Malformed Basic client credentials');
+	const hasBasic = 'clientId' in basic;
+	if (assertion !== undefined) {
+		if (assertionType !== CLIENT_ASSERTION_TYPE_JWT_BEARER) {
+			return invalidClient(`client_assertion_type must be ${CLIENT_ASSERTION_TYPE_JWT_BEARER}`);
+		}
+		// The verifier's length bound, applied before the assertion is parsed for a
+		// client_id candidate or any client lookup begins.
+		if (assertion.length > MAX_ASSERTION_LENGTH) return invalidClient(ASSERTION_TOO_LONG);
+	}
+	const bodyClientId = (clientIdParam as { value?: string }).value;
+	if (hasBasic && bodyClientId !== undefined && bodyClientId !== basic.clientId) {
+		return invalidRequest('client_id mismatch between header and body');
 	}
 
-	const clientId = basic?.clientId ?? bodyClientId;
-	if (!clientId) {
-		return { error: errorResponse(400, 'invalid_request', 'client_id is required') };
-	}
+	const clientId =
+		(hasBasic ? basic.clientId : undefined) ??
+		bodyClientId ??
+		(assertion !== undefined ? unverifiedAssertionSubject(assertion) : undefined);
+	if (!clientId) return invalidRequest('client_id is required');
+
+	const presented: PresentedCredentials =
+		assertion !== undefined
+			? { method: 'private_key_jwt', assertion }
+			: hasBasic && basic.clientSecret
+				? { method: 'client_secret_basic', secret: basic.clientSecret }
+				: secret !== undefined
+					? { method: 'client_secret_post', secret }
+					: { method: 'none' };
 
 	let client;
 	try {
@@ -238,42 +435,110 @@ async function authenticateClient(
 		return { error: errorResponse(500, 'server_error', 'Client lookup failed') };
 	}
 	if (!client) {
-		return { error: errorResponse(401, 'invalid_client', 'Unknown client') };
+		return invalidClient('Unknown client');
 	}
 
-	const method = client.token_endpoint_auth_method ?? 'none';
+	const permitted = permittedAuthMethod(client, mcpConfig);
+	if ('error' in permitted) return invalidClient(permitted.error);
+	if (presented.method !== permitted.method) return methodMismatch(permitted.method, presented.method);
 
-	if (method === 'none') {
-		// Public client: PKCE is the proof. A presented *non-empty* secret signals
-		// misuse and is rejected. An empty Basic secret — `Authorization: Basic
-		// base64("<client_id>:")` — carries only the client_id and is how some
-		// clients convey it; tolerate it as "no secret presented" so those public
-		// clients aren't rejected. (Empty values are falsy here.)
-		if (basic?.clientSecret || bodyClientSecret) {
-			return { error: errorResponse(401, 'invalid_client', 'Public client must not present a secret') };
-		}
-		return { client };
+	if (presented.method === 'none') return { client, method: 'none' };
+	if (presented.method === 'private_key_jwt') {
+		const verified = await verifyPresentedAssertion(client, presented.assertion, request, mcpConfig, logger);
+		if ('error' in verified) return verified;
+		return { client, method: 'private_key_jwt', audienceForm: verified.audienceForm };
 	}
+	if (!client.client_secret || !safeEqual(presented.secret, client.client_secret)) {
+		return invalidClient('Invalid client credentials');
+	}
+	return { client, method: presented.method };
+}
 
-	let presentedSecret: string | undefined;
-	if (method === 'client_secret_basic') {
-		if (!basic) {
-			return { error: errorResponse(401, 'invalid_client', 'client_secret_basic requires Authorization: Basic') };
-		}
-		presentedSecret = basic.clientSecret;
-	} else if (method === 'client_secret_post') {
-		if (!bodyClientSecret) {
-			return { error: errorResponse(401, 'invalid_client', 'client_secret_post requires client_secret in body') };
-		}
-		presentedSecret = bodyClientSecret;
+/**
+ * Verify a private_key_jwt assertion presented on the authorization_code or
+ * refresh_token grant, then record its jti. Headless records use their
+ * client_credentials policy (EdDSA, inline keys); interactive CIMD records
+ * use theirs (RS256/ES256/EdDSA narrowed by the document's pin, inline `jwks`
+ * or `jwks_uri`, issuer audience plus the opt-in exception). A stored (DCR)
+ * record never authenticates this way.
+ */
+async function verifyPresentedAssertion(
+	client: MCPClientRecord,
+	assertion: string,
+	request: Request | undefined,
+	mcpConfig: MCPConfig | undefined,
+	logger?: Logger
+): Promise<{ audienceForm: AudienceForm } | { error: TokenResponse }> {
+	const issuer = resolveIssuer(request as any, mcpConfig ?? {});
+	const tokenEndpoint = tokenEndpointUrl(issuer);
+	let policy: AssertionPolicy;
+	if (isHeadlessCimdClient(client)) {
+		policy = headlessAssertionPolicy(mcpConfig, issuer, tokenEndpoint);
+	} else if (isInteractiveCimdClient(client)) {
+		const keyIssue = interactiveKeyIssue(client, mcpConfig);
+		if (keyIssue) return invalidClient(`client keys are unusable: ${keyIssue}`);
+		policy = interactiveAssertionPolicy(client, mcpConfig, issuer, tokenEndpoint);
 	} else {
-		return { error: errorResponse(401, 'invalid_client', 'Unsupported token endpoint auth method') };
+		return invalidClient('private_key_jwt is supported only for CIMD clients');
 	}
 
-	if (!presentedSecret || !client.client_secret || !safeEqual(presentedSecret, client.client_secret)) {
-		return { error: errorResponse(401, 'invalid_client', 'Invalid client credentials') };
+	const loadKeys = async (
+		refetchForUnknownKid: boolean
+	): Promise<Record<string, unknown>[] | { error: TokenResponse }> => {
+		if (client.jwks_uri === undefined) return client.jwks?.keys ?? [];
+		try {
+			return await getClientJwks(
+				client.client_id,
+				client.jwks_uri,
+				mcpConfig?.clientIdMetadataDocuments,
+				{ refetchForUnknownKid },
+				logger
+			);
+		} catch (err) {
+			if (err instanceof CimdClientError) return { error: cimdErrorResponse(err) };
+			logger?.error?.('MCP token: client key retrieval failed:', err instanceof Error ? err.message : String(err));
+			return { error: errorResponse(500, 'server_error', 'Client key retrieval failed') };
+		}
+	};
+
+	let keys = await loadKeys(false);
+	if (!Array.isArray(keys)) return keys;
+	const verify = (jwks: Record<string, unknown>[]) =>
+		verifyClientAssertion({
+			assertion,
+			clientId: client.client_id,
+			audiences: policy.audiences,
+			jwks,
+			allowedAlgorithms: policy.algorithms,
+			maxExpiresInSeconds: policy.maxLifetimeSeconds,
+		});
+	let result = verify(keys);
+	if (!result.valid && result.unknownKid && client.jwks_uri !== undefined) {
+		// An unknown kid may mean the client rotated: refetch at most once (rate-limited).
+		keys = await loadKeys(true);
+		if (!Array.isArray(keys)) return keys;
+		result = verify(keys);
 	}
-	return { client };
+	if (!result.valid) {
+		logger?.warn?.(`MCP token: client_assertion rejected for ${JSON.stringify(client.client_id)}: ${result.reason}`);
+		return invalidClient(`client_assertion verification failed: ${result.reason}`);
+	}
+
+	// Replay guard: a storage failure THROWS to the top-level 500 handler —
+	// "could not check" must never degrade to "not seen" (fail closed).
+	const fresh = await new MCPAssertionJtiStore(logger).checkAndRecord(
+		client.client_id,
+		result.claims.jti,
+		result.claims.exp
+	);
+	if (!fresh) return invalidClient('client_assertion jti has already been used');
+
+	// Record which audience form was accepted; never the assertion itself.
+	logger?.info?.(
+		`MCP token: client ${JSON.stringify(client.client_id)} authenticated with private_key_jwt ` +
+			`(alg ${result.alg}, aud form ${result.audienceForm})`
+	);
+	return { audienceForm: result.audienceForm };
 }
 
 /** PKCE S256: base64url(sha256(code_verifier)) must equal the stored challenge. */
@@ -295,6 +560,8 @@ async function mintTokenPair(
 		accessTtl?: number;
 		/** Hook event type; defaults to 'access' (authorization_code). */
 		hookType?: 'access' | 'client_credentials';
+		/** Token-endpoint authentication method bound to the refresh family. */
+		clientAuthMethod?: ClientAuthMethod;
 	},
 	hookManager?: HookManager,
 	logger?: Logger
@@ -338,6 +605,7 @@ async function mintTokenPair(
 			resource: grant.resource,
 			scope: grant.scope,
 			expires_at: now + refreshTtl,
+			client_auth_method: grant.clientAuthMethod,
 		});
 		responseBody.refresh_token = refreshToken;
 	}
@@ -378,6 +646,7 @@ async function handleAuthorizationCodeGrant(
 	request: Request | undefined,
 	body: any,
 	client: MCPClientRecord,
+	clientAuthMethod: ClientAuthMethod,
 	mcpConfig: MCPConfig,
 	hookManager?: HookManager,
 	logger?: Logger
@@ -407,6 +676,23 @@ async function handleAuthorizationCodeGrant(
 	if (record.client_id !== client.client_id) {
 		return errorResponse(400, 'invalid_grant', 'Authorization code was issued to a different client');
 	}
+	// Client-authentication binding, checked before the code is consumed: the
+	// exchange must use exactly the method bound at authorization. A code
+	// without a binding predates it; both cases require reauthorization.
+	if (!isClientAuthMethod(record.client_auth_method)) {
+		return errorResponse(
+			400,
+			'invalid_grant',
+			'Authorization code predates client authentication binding; reauthorize'
+		);
+	}
+	if (record.client_auth_method !== clientAuthMethod) {
+		return errorResponse(
+			400,
+			'invalid_grant',
+			'Authorization code is bound to a different client authentication method; reauthorize'
+		);
+	}
 	if (record.redirect_uri !== redirectUri) {
 		return errorResponse(400, 'invalid_grant', 'redirect_uri does not match the authorization request');
 	}
@@ -435,6 +721,7 @@ async function handleAuthorizationCodeGrant(
 			scope: record.scope,
 			clientId: client.client_id,
 			issueRefresh: shouldIssueRefresh(client, record.scope, mcpConfig),
+			clientAuthMethod,
 		},
 		hookManager,
 		logger
@@ -445,6 +732,7 @@ async function handleRefreshTokenGrant(
 	request: Request | undefined,
 	body: any,
 	client: MCPClientRecord,
+	clientAuthMethod: ClientAuthMethod,
 	mcpConfig: MCPConfig,
 	hookManager?: HookManager,
 	logger?: Logger
@@ -471,39 +759,36 @@ async function handleRefreshTokenGrant(
 	if (!safeEqual(hashRefreshToken(presented), family.current_token_hash)) {
 		// A superseded (already-rotated) token was replayed — revoke the family.
 		// Rejecting the replay must not depend on the revoke write succeeding: a
-		// hash mismatch NEVER reissues, and we still try to persist the
-		// revocation (logging if that fails) so a transient write error can't
-		// leave the family live for a retry.
-		family.revoked = true;
+		// hash mismatch NEVER reissues, and a failed write still answers
+		// invalid_grant. Only a persisted revocation is claimed, in the response
+		// and in this handler's log line. After a failed write the handler logs
+		// one line naming the family and failure, without the error text or the token
+		// (the store's own write-error log still carries the error), and the
+		// family stays live until a later presentation retires or revokes it, or
+		// it expires.
 		try {
-			await familyStore.set(family);
-		} catch (error) {
-			logger?.error?.(
-				`MCP token: failed to persist revocation for family ${family.family_id}:`,
-				error instanceof Error ? error.message : String(error)
-			);
+			await familyStore.revoke(family.family_id);
+		} catch {
+			logger?.error?.(REVOCATION_NOT_PERSISTED_LOG(family.family_id));
+			return errorResponse(400, 'invalid_grant', 'Refresh token has been superseded');
 		}
 		logger?.warn?.(`MCP token: refresh replay detected; revoked family ${family.family_id}`);
 		return errorResponse(400, 'invalid_grant', 'Refresh token has been superseded; family revoked');
 	}
 
-	// Defense in depth (#229): a family minted before provenance stamping is
-	// retired the first time it is presented for refresh, rather than rotated.
-	// Lazy, per-family — no startup sweep. Provenance lives in the family id
-	// itself (see FAMILY_ID_PREFIX in refreshTokenStore.ts), which rotation
-	// reuses (makeRefreshToken(family.family_id) below) and no `put` can
-	// change — so mixed-version rollouts are safe: an old worker or node
-	// rotating a family minted by this version leaves its id, and therefore
-	// its provenance, unchanged. The remaining cost is that every family
-	// minted before this upgrade (bare-UUID id) re-authorizes once at its
-	// next refresh, and after a rollback only families minted while rolled
-	// back re-authorize once after re-upgrading. The client re-authorizes
-	// into a fresh, provenanced family per RFC 6749 §5.2.
+	// Version 2.7.0 introduced provenance stamping. A bare-UUID family from
+	// before 2.7.0 is retired on its next refresh; p1- families from 2.7.x
+	// pass this check. Below, their binding is none for CIMD clients and the
+	// registered method (default none) for stored clients. The check
+	// is lazy, per family, with no startup sweep. Rotation reuses the family id.
+	// On rollback to 2.7.x, p2- families are retired at their next refresh,
+	// while codes in flight can be redeemed without the binding check. Routing
+	// bound grants to a version below 2.7 is unsafe. See Migration and rollback
+	// in docs/mcp-oauth.md before running mixed versions.
 	if (!isProvenancedFamilyId(family.family_id)) {
-		family.revoked = true;
 		let persisted = false;
 		try {
-			await familyStore.set(family);
+			await familyStore.revoke(family.family_id);
 			persisted = true;
 		} catch (error) {
 			logger?.error?.(
@@ -537,6 +822,33 @@ async function handleRefreshTokenGrant(
 		);
 	}
 
+	// Client-authentication binding, checked before rotation: the refresh must
+	// use exactly the method bound to the family. A bound (`p2-`) family
+	// without its binding was rewritten by an older writer and is rejected.
+	// A legacy (`p1-`) family was issued when CIMD clients authenticated as
+	// public clients and stored clients by their registered method, so that
+	// is its binding. Any mismatch fails closed and requires reauthorization.
+	let boundMethod: string | undefined;
+	if (isBoundFamilyId(family.family_id)) {
+		boundMethod = family.client_auth_method;
+		if (!isClientAuthMethod(boundMethod)) {
+			return errorResponse(
+				400,
+				'invalid_grant',
+				'Refresh token family has no client authentication binding; reauthorize'
+			);
+		}
+	} else {
+		boundMethod = client._cimd ? 'none' : (client.token_endpoint_auth_method ?? 'none');
+	}
+	if (boundMethod !== clientAuthMethod) {
+		return errorResponse(
+			400,
+			'invalid_grant',
+			'Refresh token is bound to a different client authentication method; reauthorize'
+		);
+	}
+
 	// Sign the access token BEFORE committing the rotation. If key fetch or
 	// signing throws, the family is left untouched so the client's current
 	// refresh token still works on retry — otherwise a transient failure would
@@ -556,10 +868,11 @@ async function handleRefreshTokenGrant(
 		key
 	);
 
-	// Rotate only once the new access token is in hand (keep the original expiry).
+	// Rotate only once the new access token is in hand. Only the hash is
+	// written, so a revocation committed meanwhile by a concurrent request
+	// stays in force.
 	const { token: newRefreshToken, hash: newHash } = makeRefreshToken(family.family_id);
-	family.current_token_hash = newHash;
-	await familyStore.set(family);
+	await familyStore.rotate(family.family_id, newHash);
 
 	// Emit audit event + fire hook after the token is signed and rotation is
 	// committed. Failures are fire-and-forget: must not block the response.
@@ -631,6 +944,9 @@ async function handleClientCredentialsGrant(
 	if (!assertion) {
 		return errorResponse(400, 'invalid_request', 'client_assertion is required');
 	}
+	if (assertion.length > MAX_ASSERTION_LENGTH) {
+		return errorResponse(401, 'invalid_client', ASSERTION_TOO_LONG);
+	}
 	// Proof of key possession is the ONLY accepted authentication for this
 	// grant — a Basic header or client_secret must not ride along (#159 req 6:
 	// no credential type may substitute for the private key). Scheme match is
@@ -676,15 +992,31 @@ async function handleClientCredentialsGrant(
 
 	const issuer = resolveIssuer(request as any, mcpConfig);
 	const keys = Array.isArray(client.jwks?.keys) ? client.jwks.keys : [];
+	// EdDSA with inline keys; the issuer is accepted, and the token-endpoint
+	// URL too unless clientCredentials.acceptTokenEndpointAudience is false.
+	const policy = headlessAssertionPolicy(mcpConfig, issuer, tokenEndpointUrl(issuer));
 	const result = verifyClientAssertion({
 		assertion,
 		clientId,
-		tokenEndpoint: `${issuer}/oauth/mcp/token`,
+		audiences: policy.audiences,
 		jwks: keys,
+		allowedAlgorithms: policy.algorithms,
+		maxExpiresInSeconds: policy.maxLifetimeSeconds,
 	});
 	if (!result.valid) {
 		logger?.warn?.(`MCP token: client_assertion rejected for ${clientId}: ${result.reason}`);
 		return errorResponse(401, 'invalid_client', `client_assertion verification failed: ${result.reason}`);
+	}
+
+	// RFC 8707 resource binding: each `resource` value (`requestedResources`;
+	// RFC 8707 §2 lets it repeat) must exactly match the canonical MCP
+	// resource, fail closed — no prefix or wildcard comparisons (#159 req 3).
+	// Checked BEFORE the issuance rate limit, so an `invalid_target` refusal is
+	// not charged to it, and BEFORE the jti is consumed: a recoverable
+	// request-param mistake must not burn the single-use assertion.
+	const canonicalResource = resolveResource(request as any, mcpConfig);
+	if (requestedResources(body).some((resource) => resource !== canonicalResource)) {
+		return errorResponse(400, 'invalid_target', 'resource does not match the configured MCP resource');
 	}
 
 	// Issuance rate limit (#163, #159 req 5): applied AFTER proof-of-possession,
@@ -704,22 +1036,11 @@ async function handleClientCredentialsGrant(
 		}
 	}
 
-	// RFC 8707 resource binding: exact match against the canonical MCP
-	// resource, fail closed — no prefix or wildcard comparisons (#159 req 3).
-	// Checked BEFORE the jti is consumed: a recoverable request-param mistake
-	// must not burn the single-use assertion.
-	const canonicalResource = resolveResource(request as any, mcpConfig);
-	const requestedResource = typeof body?.resource === 'string' ? body.resource : undefined;
-	if (requestedResource !== undefined && requestedResource !== canonicalResource) {
-		return errorResponse(400, 'invalid_target', 'resource does not match the configured MCP resource');
-	}
-
 	// Replay guard: a storage failure here THROWS to the top-level 500 handler
 	// — "could not check" must never degrade to "not seen" (fail closed). Runs
 	// LAST: consuming the jti is the one irreversible step before minting.
-	// Single-use is best-effort under concurrency — see the bound documented in
-	// assertionJtiStore.ts and docs/mcp-oauth.md (atomic reserve: harper#1745).
-	const fresh = await new MCPAssertionJtiStore(logger).checkAndRecord(clientId, result.claims.jti);
+	// Single use holds per node; see assertionJtiStore.ts.
+	const fresh = await new MCPAssertionJtiStore(logger).checkAndRecord(clientId, result.claims.jti, result.claims.exp);
 	if (!fresh) {
 		return errorResponse(400, 'invalid_grant', 'client_assertion jti has already been used');
 	}
@@ -758,12 +1079,32 @@ export async function handleToken(
 	hookManager?: HookManager,
 	logger?: Logger
 ): Promise<TokenResponse> {
+	const response = await dispatchToken(request, body, mcpConfig, hookManager, logger);
+	if (response.status === 401 && /^\s*basic(\s|$)/i.test(getRequestHeader(request?.headers, 'authorization') ?? '')) {
+		response.headers = { ...response.headers, 'WWW-Authenticate': BASIC_CHALLENGE };
+	}
+	return response;
+}
+
+async function dispatchToken(
+	request: Request | undefined,
+	body: any,
+	mcpConfig: MCPConfig,
+	hookManager?: HookManager,
+	logger?: Logger
+): Promise<TokenResponse> {
 	// Top-level guard: any unexpected throw (a signing failure, a store
 	// timeout, etc.) must become a structured OAuth error (RFC 6749 §5.2), not
 	// propagate to the framework's default 500 handler — which could surface a
 	// stack trace or raw error message. The per-grant handlers already return
 	// their own 4xx errors; this only catches the unexpected.
 	try {
+		// A single-valued parameter whose value is an array is refused on every
+		// grant, before any grant reads the body.
+		const repeated = repeatedParameter(body);
+		if (repeated !== undefined) {
+			return errorResponse(400, 'invalid_request', `${repeated} must not be repeated`);
+		}
 		const grantType = typeof body?.grant_type === 'string' ? body.grant_type : undefined;
 		// client_credentials is explicit opt-in (default OFF); when disabled it
 		// is indistinguishable from any other unsupported grant.
@@ -787,9 +1128,17 @@ export async function handleToken(
 		}
 
 		if (grantType === 'authorization_code') {
-			return await handleAuthorizationCodeGrant(request, body, auth.client, mcpConfig, hookManager, logger);
+			return await handleAuthorizationCodeGrant(
+				request,
+				body,
+				auth.client,
+				auth.method,
+				mcpConfig,
+				hookManager,
+				logger
+			);
 		}
-		return await handleRefreshTokenGrant(request, body, auth.client, mcpConfig, hookManager, logger);
+		return await handleRefreshTokenGrant(request, body, auth.client, auth.method, mcpConfig, hookManager, logger);
 	} catch (error) {
 		logger?.error?.(
 			'MCP token: unexpected error during token issuance:',

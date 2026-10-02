@@ -1,0 +1,6 @@
+{
+	"name": "mcp-runtime-fixture",
+	"private": true,
+	"type": "module",
+	"description": "Integration-test fixture for MCP replay-retention and refresh-rotation runtime characterization. The @harperfast/oauth dep is installed at test setup time via scripts/install-fixtures.js (npm pack + install); harper is resolved from the repo root."
+}

@@ -8,6 +8,7 @@ import { OAuthProvider } from './OAuthProvider.ts';
 import { getProvider } from './providers/index.ts';
 import { redactSecrets } from './redact.ts';
 import { algFromPrivateKeyPem } from './mcp/keyStore.ts';
+import { isCimdClientId } from './mcp/cimd.ts';
 import type { OAuthProviderConfig, OAuthPluginConfig, ProviderRegistry, Logger } from '../types.ts';
 
 /**
@@ -153,6 +154,69 @@ function normalizeBooleanField(
 }
 
 /**
+ * Normalize a list of https origins (a scalar string is wrapped): each entry
+ * must be an https URL with no path, query, fragment or userinfo; it is stored
+ * as its exact `URL.origin`. Anything else throws, naming the option.
+ */
+function normalizeHttpsOrigins(value: unknown, path: string): string[] {
+	const raw = Array.isArray(value) ? value : [value];
+	return raw.map((entry: unknown) => {
+		let url: URL | undefined;
+		if (typeof entry === 'string') {
+			try {
+				url = new URL(entry.trim());
+			} catch {
+				url = undefined;
+			}
+		}
+		const valid =
+			url !== undefined &&
+			url.protocol === 'https:' &&
+			url.username === '' &&
+			url.password === '' &&
+			(url.pathname === '' || url.pathname === '/') &&
+			url.search === '' &&
+			url.hash === '';
+		if (!valid) {
+			throw new Error(
+				`${path} entries must be https origins like "https://keys.example.com"; got ${JSON.stringify(entry)}`
+			);
+		}
+		return url!.origin;
+	});
+}
+
+/**
+ * Normalize `mcp.clientIdMetadataDocuments.privateKeyJwt.tokenEndpointAudience`:
+ * `clientIds` must be a non-empty list of exact CIMD client IDs, and
+ * `expiresAt` must parse as a date (normalized to epoch ms). An exception with
+ * no usable expiry is refused rather than left open-ended.
+ */
+function normalizeTokenEndpointAudience(value: unknown, logger?: Logger): { clientIds: string[]; expiresAt: number } {
+	const path = 'mcp.clientIdMetadataDocuments.privateKeyJwt.tokenEndpointAudience';
+	if (!value || typeof value !== 'object' || Array.isArray(value)) {
+		throw new Error(`${path} must be an object with clientIds and expiresAt`);
+	}
+	const { clientIds, expiresAt } = value as { clientIds?: unknown; expiresAt?: unknown };
+	if (
+		!Array.isArray(clientIds) ||
+		clientIds.length === 0 ||
+		clientIds.some((id) => typeof id !== 'string' || !isCimdClientId(id))
+	) {
+		throw new Error(`${path}.clientIds must be a non-empty list of exact CIMD client IDs (https URLs with a path)`);
+	}
+	const expiresAtMs =
+		typeof expiresAt === 'number' ? expiresAt : typeof expiresAt === 'string' ? Date.parse(expiresAt) : Number.NaN;
+	if (!Number.isFinite(expiresAtMs)) {
+		throw new Error(`${path}.expiresAt must be an ISO 8601 date-time; the exception requires an expiry`);
+	}
+	if (expiresAtMs <= Date.now()) {
+		logger?.warn?.(`MCP: ${path} expired at ${new Date(expiresAtMs).toISOString()}; the exception no longer applies.`);
+	}
+	return { clientIds: [...clientIds] as string[], expiresAt: expiresAtMs };
+}
+
+/**
  * Validate `mcp.signingKeyPem` when the operator DECLARED it — i.e. the field
  * is present on the config object at all, regardless of what it resolved to.
  * Unlike the documented booleans above, an unresolved/empty pin does NOT get
@@ -253,8 +317,9 @@ function validateDcrInitialAccessToken(dcr: Record<string, any>): void {
 /**
  * Normalize the security-relevant fields of the `mcp` config block in place,
  * so a mis-typed value can never silently flip a gate:
- * - The four feature-scoped documented booleans
+ * - The feature-scoped documented booleans
  *   (`mcp.refreshTokenRequiresOfflineAccess`, `mcp.clientCredentials.enabled`,
+ *   `mcp.clientCredentials.acceptTokenEndpointAudience`,
  *   `mcp.clientIdMetadataDocuments.enabled`,
  *   `mcp.dynamicClientRegistration.enabled`) are normalized totally via
  *   {@link normalizeBooleanField}: coerced to a real boolean; a non-boolean,
@@ -272,6 +337,10 @@ function validateDcrInitialAccessToken(dcr: Record<string, any>): void {
  *   `String.includes` would turn into substring matching) is wrapped into a
  *   single-element array; anything that isn't a string or array of strings is
  *   rejected rather than treated as "no restriction".
+ * - `mcp.clientIdMetadataDocuments.privateKeyJwt`: `enabled` is a documented
+ *   boolean; `jwksUriAllowedOrigins` is normalized to exact https origins;
+ *   `tokenEndpointAudience` needs exact CIMD client IDs and a parseable
+ *   `expiresAt` (normalized to epoch ms). Invalid values throw.
  * - `mcp.signingKeyPem`, if declared, must resolve to a parseable key — see
  *   {@link validateSigningKeyPem}. This one throws instead of dropping with a
  *   warning: unlike the booleans above, there is no safe default to fall back
@@ -302,6 +371,13 @@ export function normalizeMcpSecurityConfig(mcpConfig: Record<string, any>, logge
 	const clientCredentials = mcpConfig.clientCredentials;
 	if (clientCredentials && typeof clientCredentials === 'object') {
 		normalizeBooleanField(clientCredentials, 'enabled', 'mcp.clientCredentials.enabled', logger, mcpActive);
+		normalizeBooleanField(
+			clientCredentials,
+			'acceptTokenEndpointAudience',
+			'mcp.clientCredentials.acceptTokenEndpointAudience',
+			logger,
+			mcpActive
+		);
 	}
 
 	const dcr = mcpConfig.dynamicClientRegistration;
@@ -363,6 +439,26 @@ export function normalizeMcpSecurityConfig(mcpConfig: Record<string, any>, logge
 				);
 			}
 			cimd.allowedHosts = raw.map((h: string) => h.trim().toLowerCase()).filter((h: string) => h.length > 0);
+		}
+
+		const privateKeyJwt = cimd.privateKeyJwt;
+		if (privateKeyJwt !== undefined) {
+			if (!privateKeyJwt || typeof privateKeyJwt !== 'object' || Array.isArray(privateKeyJwt)) {
+				throw new Error('mcp.clientIdMetadataDocuments.privateKeyJwt must be an object');
+			}
+			normalizeBooleanField(privateKeyJwt, 'enabled', 'mcp.clientIdMetadataDocuments.privateKeyJwt.enabled', logger);
+			if (privateKeyJwt.jwksUriAllowedOrigins !== undefined) {
+				privateKeyJwt.jwksUriAllowedOrigins = normalizeHttpsOrigins(
+					privateKeyJwt.jwksUriAllowedOrigins,
+					'mcp.clientIdMetadataDocuments.privateKeyJwt.jwksUriAllowedOrigins'
+				);
+			}
+			if (privateKeyJwt.tokenEndpointAudience !== undefined) {
+				privateKeyJwt.tokenEndpointAudience = normalizeTokenEndpointAudience(
+					privateKeyJwt.tokenEndpointAudience,
+					logger
+				);
+			}
 		}
 	}
 

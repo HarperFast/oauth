@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign } from 'node:crypto';
 import { logger as harperMockLogger } from 'harper';
 import { handleToken, parseBasicAuth, _resetGrantRateLimiter } from '../../../dist/lib/mcp/token.js';
+import { MAX_ASSERTION_LENGTH } from '../../../dist/lib/mcp/clientAssertion.js';
 import { resetMCPAssertionJtisTableCache } from '../../../dist/lib/mcp/assertionJtiStore.js';
 import { resetMCPAuthCodesTableCache } from '../../../dist/lib/mcp/authCodeStore.js';
 import { _clearCimdCache, _setDnsLookup, _setFetch } from '../../../dist/lib/mcp/cimd.js';
@@ -42,6 +43,14 @@ function makeTable(map, pkField) {
 		},
 		put: async (rec) => {
 			map.set(rec[pkField], rec);
+		},
+		// Harper's partial update: only the given fields, on top of the stored record.
+		patch: async (id, update) => {
+			const next = { ...map.get(id) };
+			for (const [name, value] of Object.entries(update)) {
+				next[name] = value?.__op__ === 'add' ? (Number(next[name]) || 0) + value.value : value;
+			}
+			map.set(id, next);
 		},
 		delete: async (id) => {
 			map.delete(id);
@@ -170,7 +179,12 @@ describe('handleToken', () => {
 		};
 	});
 
+	// Codes carry the client-authentication binding captured at authorize: the
+	// method each fixture client is registered with.
+	const BOUND_METHOD = { 'conf-1': 'client_secret_basic', 'post-1': 'client_secret_post' };
+
 	function seedCode(code, overrides = {}) {
+		const clientId = overrides.client_id ?? 'public-1';
 		codes.set(code, {
 			code,
 			client_id: 'public-1',
@@ -181,6 +195,7 @@ describe('handleToken', () => {
 			redirect_uri: REDIRECT,
 			scope: 'mcp:read',
 			created_at: 1700000000,
+			client_auth_method: BOUND_METHOD[clientId] ?? 'none',
 			...overrides,
 		});
 	}
@@ -557,7 +572,7 @@ describe('handleToken', () => {
 		assert.equal(res.body.error, 'invalid_client');
 	});
 
-	it('rejects mixing Basic header with a body client_secret', async () => {
+	it('rejects mixing Basic header with a body client_secret as invalid_request (RFC 6749 §5.2)', async () => {
 		seedCode('code-1', { client_id: 'conf-1' });
 		const res = await handleToken(
 			{ headers: basicHeader('conf-1', CONF_SECRET) },
@@ -572,6 +587,7 @@ describe('handleToken', () => {
 		);
 		assert.equal(res.status, 400);
 		assert.equal(res.body.error, 'invalid_request');
+		assert.match(res.body.error_description, /Multiple client authentication methods/);
 	});
 
 	it('authenticates client_secret_basic when headers use the Harper `.asObject` wrapper (runtime shape)', async () => {
@@ -726,24 +742,100 @@ describe('handleToken', () => {
 		assert.equal(afterRevoke.body.error, 'invalid_grant');
 	});
 
-	it('still rejects a replayed token when persisting the revocation fails', async () => {
+	it('keeps a revocation committed while a concurrent refresh is rotating the family', async () => {
 		const oldToken = seedFamily('fam-1');
-		await handleToken(
-			{ headers: {} },
-			{ grant_type: 'refresh_token', refresh_token: oldToken, client_id: 'public-1' },
-			mcpConfig
-		); // rotate, superseding oldToken
-		// A write failure during revocation must not turn the rejection into a 500.
-		global.databases.oauth.mcp_refresh_families.put = async () => {
-			throw new Error('write failed');
-		};
-		const res = await handleToken(
+		const rotated = await handleToken(
 			{ headers: {} },
 			{ grant_type: 'refresh_token', refresh_token: oldToken, client_id: 'public-1' },
 			mcpConfig
 		);
+		const currentToken = rotated.body.refresh_token;
+		const familyId = `${FAMILY_ID_PREFIX}fam-1`;
+		const table = global.databases.oauth.mcp_refresh_families;
+		const realGet = table.get;
+		let replay;
+		// Request A reads the family; before A writes, request B presents the
+		// superseded token and its revocation commits.
+		table.get = async (id) => {
+			const snapshot = await realGet(id);
+			table.get = realGet;
+			replay = await handleToken(
+				{ headers: {} },
+				{ grant_type: 'refresh_token', refresh_token: oldToken, client_id: 'public-1' },
+				mcpConfig
+			);
+			return snapshot;
+		};
+		const raced = await handleToken(
+			{ headers: {} },
+			{ grant_type: 'refresh_token', refresh_token: currentToken, client_id: 'public-1' },
+			mcpConfig
+		);
+		assert.match(replay.body.error_description, /superseded; family revoked/);
+		assert.equal(raced.status, 200, 'A had read the family before the revocation');
+		assert.equal(families.get(familyId).revoked, true, "A's rotation does not undo B's revocation");
+		const next = await handleToken(
+			{ headers: {} },
+			{ grant_type: 'refresh_token', refresh_token: raced.body.refresh_token, client_id: 'public-1' },
+			mcpConfig
+		);
+		assert.equal(next.body.error, 'invalid_grant', 'the token A received refreshes nothing');
+	});
+
+	it('still rejects a replayed token when persisting the revocation fails', async () => {
+		const oldToken = seedFamily('fam-1');
+		const rotated = await handleToken(
+			{ headers: {} },
+			{ grant_type: 'refresh_token', refresh_token: oldToken, client_id: 'public-1' },
+			mcpConfig
+		); // rotate, superseding oldToken
+		assert.equal(rotated.status, 200);
+		const familyId = `${FAMILY_ID_PREFIX}fam-1`;
+		const hashBefore = families.get(familyId).current_token_hash;
+		const realPatch = global.databases.oauth.mcp_refresh_families.patch;
+		// A write failure during revocation must not turn the rejection into a 500.
+		global.databases.oauth.mcp_refresh_families.patch = async () => {
+			throw new Error(`write failed ${'x'.repeat(500)}`);
+		};
+		const lines = [];
+		const capture = (...args) => lines.push(args.join(' '));
+		const logger = { error: capture, warn: capture, info: capture, debug: capture };
+		const res = await handleToken(
+			{ headers: {} },
+			{ grant_type: 'refresh_token', refresh_token: oldToken, client_id: 'public-1' },
+			mcpConfig,
+			undefined,
+			logger
+		);
 		assert.equal(res.status, 400);
 		assert.equal(res.body.error, 'invalid_grant', 'replay rejected even though revoke persist failed');
+		assert.equal(res.body.access_token, undefined, 'nothing issued');
+		assert.equal(res.body.refresh_token, undefined, 'nothing issued');
+		assert.doesNotMatch(res.body.error_description, /revoked/, 'the response claims no revocation');
+		assert.equal(families.get(familyId).revoked, false, 'the store still holds the live family');
+		assert.equal(families.get(familyId).current_token_hash, hashBefore, 'no rotation');
+		// Every captured line, the store's own write-error line included.
+		assert.ok(!lines.some((l) => /revoked family/.test(l)), 'no line claims the revocation');
+		assert.ok(!lines.some((l) => l.includes(oldToken)), 'no line carries the presented token');
+		assert.deepEqual(
+			lines.filter((l) => l.startsWith('MCP token:')),
+			[
+				`MCP token: refresh replay detected for family ${familyId}, but its revocation could not be persisted; the request was refused with invalid_grant and the family stays live`,
+			],
+			'the handler logs one line with the family id and without the error text'
+		);
+
+		// Once the store accepts writes, the same presentation revokes the family.
+		global.databases.oauth.mcp_refresh_families.patch = realPatch;
+		const retried = await handleToken(
+			{ headers: {} },
+			{ grant_type: 'refresh_token', refresh_token: oldToken, client_id: 'public-1' },
+			mcpConfig
+		);
+		assert.equal(retried.status, 400);
+		assert.equal(retried.body.error, 'invalid_grant');
+		assert.match(retried.body.error_description, /superseded; family revoked/);
+		assert.equal(families.get(familyId).revoked, true);
 	});
 
 	it('rejects a refresh token presented by a different client', async () => {
@@ -875,8 +967,8 @@ describe('handleToken', () => {
 		withAuditSpy(async (infoCalls) => {
 			const legacyFamilyId = randomUUID();
 			const token = seedFamily('fam-legacy-3', { family_id: legacyFamilyId });
-			const originalPut = global.databases.oauth.mcp_refresh_families.put;
-			global.databases.oauth.mcp_refresh_families.put = async () => {
+			const originalPatch = global.databases.oauth.mcp_refresh_families.patch;
+			global.databases.oauth.mcp_refresh_families.patch = async () => {
 				throw new Error('simulated storage failure');
 			};
 			try {
@@ -896,7 +988,7 @@ describe('handleToken', () => {
 				const auditLog = infoCalls.find((args) => args[0]?.includes('oauth.mcp.token.retired'));
 				assert.equal(auditLog, undefined, 'no retired event when the retirement write did not persist');
 			} finally {
-				global.databases.oauth.mcp_refresh_families.put = originalPut;
+				global.databases.oauth.mcp_refresh_families.patch = originalPatch;
 			}
 		}));
 
@@ -1129,17 +1221,7 @@ describe('handleToken — client_credentials grant (#162)', () => {
 			oauth: {
 				harper_oauth_mcp_clients: makeTable(clients, 'client_id'),
 				harper_oauth_mcp_keys: makeTable(keys, 'kid'),
-				mcp_assertion_jtis: {
-					...makeTable(jtis, 'id'),
-					create: async (record) => {
-						if (jtis.has(record.id)) {
-							const err = new Error('Record already exists');
-							err.statusCode = 409;
-							throw err;
-						}
-						jtis.set(record.id, record);
-					},
-				},
+				mcp_assertion_jtis: makeTable(jtis, 'id'),
 			},
 		};
 
@@ -1165,6 +1247,33 @@ describe('handleToken — client_credentials grant (#162)', () => {
 				},
 			};
 		});
+	});
+
+	it('accepts the issuer and, by default, the token endpoint as the assertion audience', async () => {
+		for (const aud of [ISSUER, TOKEN_ENDPOINT]) {
+			const res = await handleToken({ headers: {} }, grantBody({ client_assertion: signAssertion({ aud }) }), ccConfig);
+			assert.equal(res.status, 200, `${aud}: ${JSON.stringify(res.body)}`);
+		}
+	});
+
+	it('accepts only the issuer once acceptTokenEndpointAudience is false', async () => {
+		const issuerOnly = {
+			...ccConfig,
+			clientCredentials: { ...ccConfig.clientCredentials, acceptTokenEndpointAudience: false },
+		};
+		const viaEndpoint = await handleToken(
+			{ headers: {} },
+			grantBody({ client_assertion: signAssertion({ aud: TOKEN_ENDPOINT }) }),
+			issuerOnly
+		);
+		assert.equal(viaEndpoint.status, 401);
+		assert.match(viaEndpoint.body.error_description, /aud does not match/);
+		const viaIssuer = await handleToken(
+			{ headers: {} },
+			grantBody({ client_assertion: signAssertion({ aud: ISSUER }) }),
+			issuerOnly
+		);
+		assert.equal(viaIssuer.status, 200, JSON.stringify(viaIssuer.body));
 	});
 
 	it('issues a short-TTL token with no refresh token (sub = client identity)', async () => {
@@ -1291,6 +1400,34 @@ describe('handleToken — client_credentials grant (#162)', () => {
 		assert.equal(lowercase.body.error, 'invalid_request');
 	});
 
+	it('rejects an assertion over the verifier bound before resolving the client', async () => {
+		let lookups = 0;
+		_setDnsLookup(async () => {
+			lookups += 1;
+			return [{ address: '93.184.216.34', family: 4 }];
+		});
+		const real = signAssertion();
+		const [h, p] = real.split('.');
+		const at = (length) => `${h}.${p}.${'A'.repeat(length - h.length - p.length - 2)}`;
+		const over = await handleToken(
+			{ headers: {} },
+			grantBody({ client_assertion: at(MAX_ASSERTION_LENGTH + 1) }),
+			ccConfig
+		);
+		assert.equal(over.status, 401);
+		assert.equal(over.body.error, 'invalid_client');
+		assert.match(over.body.error_description, /exceeds the maximum allowed length/);
+		assert.equal(lookups, 0, 'no document resolution');
+		// At the bound, the request proceeds to resolution (and then fails verification).
+		const atBound = await handleToken(
+			{ headers: {} },
+			grantBody({ client_assertion: at(MAX_ASSERTION_LENGTH) }),
+			ccConfig
+		);
+		assert.equal(atBound.status, 401);
+		assert.equal(lookups, 1);
+	});
+
 	it('rejects a stored (DCR) client on this grant', async () => {
 		const res = await handleToken({ headers: {} }, grantBody({ client_id: 'public-1' }), ccConfig);
 		assert.equal(res.status, 400);
@@ -1346,5 +1483,16 @@ describe('handleToken — client_credentials grant (#162)', () => {
 		// The genuine agent’s quota is untouched: two valid mints still succeed.
 		assert.equal((await handleToken({ headers: {} }, grantBody(), limited)).status, 200);
 		assert.equal((await handleToken({ headers: {} }, grantBody(), limited)).status, 200);
+	});
+
+	it('invalid_target refusals are not charged to the issuance limit', async () => {
+		const limited = { ...ccConfig, clientCredentials: { ...ccConfig.clientCredentials, rateLimit: 2 } };
+		for (const resource of [`${RESOURCE}/sub`, [RESOURCE, `${RESOURCE}/sub`]]) {
+			const refused = await handleToken({ headers: {} }, grantBody({ resource }), limited);
+			assert.equal(refused.status, 400, JSON.stringify(refused.body));
+			assert.equal(refused.body.error, 'invalid_target');
+		}
+		const valid = await handleToken({ headers: {} }, grantBody({ resource: RESOURCE }), limited);
+		assert.equal(valid.status, 200, JSON.stringify(valid.body));
 	});
 });

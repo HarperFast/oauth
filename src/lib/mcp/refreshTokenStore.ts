@@ -7,17 +7,19 @@
  * refresh the hash is overwritten (rotation); a presented token whose hash no
  * longer matches is a replay of a superseded token, which revokes the family.
  *
- * This keeps replay revocation O(1) with a get/put-only table abstraction: we
- * store family state, not individual tokens, so it stays correct even after
- * old tokens age out of any per-token store. Tokens are never stored in the
+ * This keeps replay revocation O(1): we store family state, not individual
+ * tokens, so it stays correct even after old tokens age out of any per-token
+ * store. Tokens are never stored in the
  * clear.
  *
- * Rotation is not atomic (no compare-and-set on the table, same constraint as
- * authCodeStore.consume): two concurrent refreshes of the same current token
- * both pass the hash check before either write lands, so one of the two new
- * tokens is orphaned (last write wins). The orphan fails safe — its next use is
- * a hash mismatch, which revokes the family. Benign under the real
- * single-client-per-refresh pattern; accepted for v1.
+ * Rotation and revocation are partial updates (`rotate`, `revoke`): each
+ * writes only its own field, so a revocation committed by one request
+ * survives a concurrent rotation by another. Rotation is not atomic (no
+ * compare-and-set on the table, same constraint as authCodeStore.consume):
+ * two concurrent refreshes of the same current token both pass the hash check
+ * before either write lands, so one of the two new tokens is orphaned (last
+ * write wins). The orphan fails safe — its next use is a hash mismatch, which
+ * revokes the family.
  *
  * Explicit field access on encode/decode (no `{ ...raw }`) — Harper
  * tracked-object Proxies return empty own-keys. See CLAUDE.md gotcha.
@@ -77,18 +79,32 @@ export function parseRefreshToken(token: unknown): { familyId: string } | null {
 // record field) survives rotation, since rotation reuses the family id
 // (makeRefreshToken(family.family_id)) and no `put` can touch it. A family
 // minted before this version has a bare-UUID id and reads back unprefixed —
-// that absence IS the pre-provenance signal. A future provenance bump changes
-// this prefix. Must not contain '.' — parseRefreshToken splits on the first dot.
+// that absence IS the pre-provenance signal. Must not contain '.' —
+// parseRefreshToken splits on the first dot.
+//
+// `p1-` families predate the client-authentication binding (legacy). `p2-`
+// families are minted with a bound `client_auth_method`; a `p2-` family whose
+// binding is missing (e.g. rewritten by an older node, whose full-record put
+// drops unknown fields) is rejected rather than treated as legacy. Version
+// 2.7.x treats `p2-` ids as pre-provenance and retires them, so a rollback to
+// 2.7 fails closed for bound families; versions before 2.7 have no such check,
+// so bound grants must never be served by them.
 export const FAMILY_ID_PREFIX = 'p1-';
+export const BOUND_FAMILY_ID_PREFIX = 'p2-';
 
-/** Generate a new, unique family id, carrying the current provenance marker. */
+/** Generate a new, unique family id, carrying the current (bound) marker. */
 export function newFamilyId(): string {
-	return `${FAMILY_ID_PREFIX}${randomUUID()}`;
+	return `${BOUND_FAMILY_ID_PREFIX}${randomUUID()}`;
 }
 
 /** Whether a family id was minted by a version that stamps provenance (#229). */
 export function isProvenancedFamilyId(id: string): boolean {
-	return id.startsWith(FAMILY_ID_PREFIX);
+	return id.startsWith(FAMILY_ID_PREFIX) || id.startsWith(BOUND_FAMILY_ID_PREFIX);
+}
+
+/** Whether a family id was minted with a client-authentication binding. */
+export function isBoundFamilyId(id: string): boolean {
+	return id.startsWith(BOUND_FAMILY_ID_PREFIX);
 }
 
 function encodeRecord(record: MCPRefreshFamilyRecord): Record<string, any> {
@@ -101,6 +117,7 @@ function encodeRecord(record: MCPRefreshFamilyRecord): Record<string, any> {
 		resource: record.resource,
 		scope: record.scope,
 		expires_at: record.expires_at,
+		client_auth_method: record.client_auth_method,
 	};
 }
 
@@ -114,6 +131,7 @@ function decodeRecord(raw: Record<string, any>): MCPRefreshFamilyRecord {
 		resource: raw.resource,
 		scope: raw.scope ?? undefined,
 		expires_at: raw.expires_at,
+		client_auth_method: raw.client_auth_method ?? undefined,
 	};
 }
 
@@ -134,18 +152,47 @@ export class MCPRefreshFamilyStore {
 		}
 	}
 
-	async get(familyId: string): Promise<MCPRefreshFamilyRecord | null> {
+	/**
+	 * Point the family at a new token hash, leaving every other field as
+	 * stored. Write errors are logged and rethrown.
+	 */
+	async rotate(familyId: string, currentTokenHash: string): Promise<void> {
+		await this.patch(familyId, { current_token_hash: currentTokenHash });
+	}
+
+	/** Mark the family revoked, leaving every other field as stored. Write errors are logged and rethrown. */
+	async revoke(familyId: string): Promise<void> {
+		await this.patch(familyId, { revoked: true });
+	}
+
+	private async patch(familyId: string, update: Record<string, unknown>): Promise<void> {
 		const table = getFamiliesTable();
 		try {
-			const raw = await table.get(familyId);
-			if (!raw || !raw.family_id) {
-				return null;
-			}
-			return decodeRecord(raw);
+			await table.patch(familyId, update, {});
+		} catch (error) {
+			this.logger?.error?.('Failed to update MCP refresh family:', error);
+			throw error;
+		}
+	}
+
+	/**
+	 * Returns null when no such family is stored. A read failure is logged
+	 * and rethrown, so the token endpoint answers server_error rather than
+	 * invalid_grant.
+	 */
+	async get(familyId: string): Promise<MCPRefreshFamilyRecord | null> {
+		const table = getFamiliesTable();
+		let raw;
+		try {
+			raw = await table.get(familyId);
 		} catch (error) {
 			this.logger?.error?.('Failed to retrieve MCP refresh family:', error);
+			throw error;
+		}
+		if (!raw || !raw.family_id) {
 			return null;
 		}
+		return decodeRecord(raw);
 	}
 
 	async delete(familyId: string): Promise<void> {

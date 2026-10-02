@@ -58,6 +58,14 @@ function makeTable(map, pkField) {
 		put: async (rec) => {
 			map.set(rec[pkField], rec);
 		},
+		// Harper's partial update: only the given fields, on top of the stored record.
+		patch: async (id, update) => {
+			const next = { ...map.get(id) };
+			for (const [name, value] of Object.entries(update)) {
+				next[name] = value?.__op__ === 'add' ? (Number(next[name]) || 0) + value.value : value;
+			}
+			map.set(id, next);
+		},
 		delete: async (id) => {
 			map.delete(id);
 		},
@@ -150,6 +158,7 @@ describe('handleToken — audit events and onMCPTokenIssued hook', () => {
 			redirect_uri: REDIRECT,
 			scope: 'mcp:read',
 			created_at: 1700000000,
+			client_auth_method: 'none',
 			...overrides,
 		});
 	}

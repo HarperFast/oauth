@@ -20,6 +20,7 @@
 import { randomBytes } from 'node:crypto';
 import type { Logger, MCPAuthCodeRecord, MCPAuthorizeState, MCPConfig, Request } from '../../types.ts';
 import { MCPAuthCodeStore } from './authCodeStore.ts';
+import { isClientAuthMethod } from './clientAuthMethod.ts';
 import { redactQuarantinePrincipal } from '../quarantinePrincipal.ts';
 import { resolveIssuer } from './wellKnown.ts';
 
@@ -74,6 +75,17 @@ export async function handleMCPCallback(
 	logger?: Logger
 ): Promise<Redirect> {
 	const issuer = resolveIssuer(request as any, mcpConfig);
+	// Defense in depth: the caller rejects unbound (pre-activation) states
+	// before the upstream exchange; never mint an unbound code.
+	if (!isClientAuthMethod(mcpState.clientAuthMethod)) {
+		return buildErrorRedirect(
+			mcpState.redirectUri,
+			'invalid_request',
+			'Authorization request predates client authentication binding; start authorization again',
+			mcpState.clientState,
+			issuer
+		);
+	}
 	const code = randomBytes(32).toString('base64url');
 	const record: MCPAuthCodeRecord = {
 		code,
@@ -84,6 +96,7 @@ export async function handleMCPCallback(
 		code_challenge_method: mcpState.codeChallengeMethod,
 		redirect_uri: mcpState.redirectUri,
 		scope: mcpState.scope,
+		client_auth_method: mcpState.clientAuthMethod,
 	};
 
 	const store = new MCPAuthCodeStore(logger);

@@ -160,12 +160,11 @@ describe('MCPClientStore', () => {
 			assert.deepEqual(retrieved.redirect_uris, ['https://example.com/cb']);
 		});
 
-		it('returns null when the underlying get call throws', async () => {
+		it('propagates get() errors, so a read failure is never reported as an unknown client', async () => {
 			mockTable.get = async () => {
 				throw new Error('db read failure');
 			};
-			const result = await store.get('whatever');
-			assert.equal(result, null);
+			await assert.rejects(() => store.get('whatever'), /db read failure/);
 		});
 
 		it('propagates errors on set() so callers can fail registration with 500', async () => {
