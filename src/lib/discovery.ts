@@ -58,6 +58,20 @@ export const RETRY_COOLDOWN_MS = 5 * 60_000;
 /** Discovery attempts allowed in flight at once, across every provider. */
 export const MAX_CONCURRENT_DISCOVERY_ATTEMPTS = 8;
 
+// --- Injected timeouts for testing (mirrors cimd.ts's _setFetch/_setDnsLookup seams) ---
+let _perFetchTimeoutMs = DEFAULT_FETCH_TIMEOUT_MS;
+let _overallBudgetMs = DISCOVERY_OVERALL_BUDGET_MS;
+let _retryCooldownMs = RETRY_COOLDOWN_MS;
+
+/** Override the per-fetch, overall-budget, and retry-cooldown timeouts (tests only); `null` restores the defaults. @internal */
+export function _setDiscoveryTimeouts(
+	overrides: { perFetchMs?: number; overallBudgetMs?: number; retryCooldownMs?: number } | null
+): void {
+	_perFetchTimeoutMs = overrides?.perFetchMs ?? DEFAULT_FETCH_TIMEOUT_MS;
+	_overallBudgetMs = overrides?.overallBudgetMs ?? DISCOVERY_OVERALL_BUDGET_MS;
+	_retryCooldownMs = overrides?.retryCooldownMs ?? RETRY_COOLDOWN_MS;
+}
+
 interface DiscoveryEntry {
 	promise: Promise<string | null>;
 	/** `undefined` while pending; the settled value (success or `null`) once known. */
@@ -132,7 +146,7 @@ async function discoverIssuerUnsafe(
 	const startedAt = Date.now();
 	let lastMismatch: string | undefined;
 	for (const prefix of candidatePrefixes(url.pathname)) {
-		const remaining = DISCOVERY_OVERALL_BUDGET_MS - (Date.now() - startedAt);
+		const remaining = _overallBudgetMs - (Date.now() - startedAt);
 		if (remaining <= 0) break;
 		const issuerCandidates = prefix === '' ? [url.origin, `${url.origin}/`] : [`${url.origin}${prefix}`];
 		const discoveryUrl =
@@ -140,7 +154,7 @@ async function discoverIssuerUnsafe(
 				? `${url.origin}/.well-known/openid-configuration`
 				: `${url.origin}${prefix}/.well-known/openid-configuration`;
 
-		const doc = await fetchDiscoveryDocument(discoveryUrl, Math.min(DEFAULT_FETCH_TIMEOUT_MS, remaining), logger);
+		const doc = await fetchDiscoveryDocument(discoveryUrl, Math.min(_perFetchTimeoutMs, remaining), logger);
 		if (!doc) continue;
 
 		if (!issuerCandidates.includes(doc.issuer)) {
@@ -234,7 +248,7 @@ export function startIssuerDiscovery(
 			const stale =
 				existing.result === null &&
 				existing.settledAt !== undefined &&
-				Date.now() - existing.settledAt >= RETRY_COOLDOWN_MS;
+				Date.now() - existing.settledAt >= _retryCooldownMs;
 			if (!stale) return;
 		}
 
