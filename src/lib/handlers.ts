@@ -36,7 +36,7 @@ import { isClientAuthMethod } from './mcp/clientAuthMethod.ts';
 import { resolveIssuer } from './mcp/wellKnown.ts';
 import { getRequestHeader } from './requestHeaders.ts';
 import type { HookManager } from './hookManager.ts';
-import { ResolveEmailError } from './resolveEmailError.ts';
+import { ResolveEmailError, AmbiguousEmailError } from './resolveEmailError.ts';
 
 /**
  * Sanitize a redirect parameter to prevent open redirect attacks
@@ -207,6 +207,44 @@ async function checkHarperUserExists(name: string): Promise<boolean | null> {
 	} catch {
 		return null;
 	}
+}
+
+/**
+ * Built-in default email resolution, applied when no `onResolveEmail` hook is registered or
+ * the hook declines (#228): a user whose GitHub primary/profile address differs from the
+ * address their existing Harper account was created under could previously never reach that
+ * account through the plugin's old profile-or-primary default. Matches each VERIFIED candidate
+ * against `hdb_user` with the exact same lookup the adoption gate itself uses
+ * (`checkHarperUserExists` — exact match, no normalization); `null` (lookup error) is treated
+ * as "no match", never promoted to a match or an ambiguity.
+ *
+ * - 0 or 1 verified candidates: returns `undefined` immediately, with NO reads — this is the
+ *   common case and must stay exactly as cheap as before #228.
+ * - Exactly one verified candidate matches an existing account: returns that address.
+ * - Two or more verified candidates match DIFFERENT existing accounts: throws
+ *   `AmbiguousEmailError` rather than guessing; the log names the match count, never the
+ *   addresses.
+ * - None match: returns `undefined` — the caller's own default (profile-or-primary) applies,
+ *   unchanged, so a GitHub account with no existing Harper account keeps today's behavior.
+ */
+async function resolveEmailByExistingAccount(
+	candidates: readonly EmailCandidate[],
+	logger?: Logger
+): Promise<string | undefined> {
+	const verified = candidates.filter((c) => c.verified === true);
+	if (verified.length <= 1) return undefined;
+
+	const matches = (
+		await Promise.all(verified.map(async (c) => ((await checkHarperUserExists(c.email)) === true ? c.email : null)))
+	).filter((email): email is string => email !== null);
+
+	if (matches.length === 0) return undefined;
+	if (matches.length === 1) return matches[0];
+
+	logger?.warn?.(
+		`OAuth: ${matches.length} verified GitHub emails each match a different existing Harper account — refusing the login rather than guessing which one`
+	);
+	throw new AmbiguousEmailError(`${matches.length} verified emails match different existing Harper accounts`);
 }
 
 export async function handleCallback(
@@ -444,9 +482,16 @@ export async function handleCallback(
 		// getUserInfo also sets _emailProvenance on the returned object; pass
 		// idTokenSignatureVerified so it can't stamp 'signed-oidc' on a
 		// decoded-only (no-JWKS) token.
-		const resolveEmail = hookManager.hasHook('onResolveEmail')
-			? (candidates: readonly EmailCandidate[]) => hookManager.callResolveEmail(candidates, providerName)
-			: undefined;
+		// An onResolveEmail hook always wins when it expresses a preference (#228); absent
+		// that, the built-in existing-account default runs before falling through to the
+		// adapter's own legacy default — see resolveEmailByExistingAccount.
+		const resolveEmail = async (candidates: readonly EmailCandidate[]): Promise<string | null | undefined> => {
+			if (hookManager.hasHook('onResolveEmail')) {
+				const fromHook = await hookManager.callResolveEmail(candidates, providerName);
+				if (fromHook != null) return fromHook;
+			}
+			return resolveEmailByExistingAccount(candidates, logger);
+		};
 		const userInfo = await provider.getUserInfo(
 			tokenResponse.access_token,
 			idTokenClaims,
@@ -811,7 +856,8 @@ export async function handleCallback(
 		const message = error instanceof Error ? error.message : String(error);
 		let reason = 'unknown';
 		// Typed, not message-matched: a selector's own error has no identifying substring.
-		if (error instanceof ResolveEmailError) reason = 'email_selection';
+		if (error instanceof AmbiguousEmailError) reason = 'email_ambiguous';
+		else if (error instanceof ResolveEmailError) reason = 'email_selection';
 		else if (message.startsWith('Token exchange failed')) reason = 'token_exchange';
 		else if (message.includes('claim')) reason = 'user_mapping';
 		else if (message.includes('user info') || message.includes('userinfo')) reason = 'user_info';
