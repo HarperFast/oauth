@@ -2304,4 +2304,146 @@ describe('OAuth Configuration', () => {
 			});
 		});
 	});
+
+	describe('Graph profile-scope warning (#264)', () => {
+		function graphProvider(overrides = {}) {
+			return {
+				provider: 'azure',
+				clientId: 'c',
+				clientSecret: 's',
+				fetchEmail: true,
+				redirectUri: 'https://app.test.com/oauth',
+				...overrides,
+			};
+		}
+
+		it('warns when fetchEmail is enabled on an Azure provider with scope missing profile', () => {
+			const warnings = [];
+			const logger = { ...mockLogger, warn: (msg) => warnings.push(msg) };
+
+			const options = {
+				redirectUri: 'https://app.test.com/oauth',
+				providers: { azure: graphProvider({ scope: 'openid email' }) },
+			};
+			initializeProviders(options, logger);
+
+			assert.ok(
+				warnings.some((msg) => msg.includes('azure') && msg.includes('profile')),
+				'expected a warning naming the provider and the fix'
+			);
+		});
+
+		it('warns for a generic provider pointed at graph.microsoft.com too (host-based, not provider-name-based)', () => {
+			const warnings = [];
+			const logger = { ...mockLogger, warn: (msg) => warnings.push(msg) };
+
+			const options = {
+				redirectUri: 'https://app.test.com/oauth',
+				providers: {
+					'custom-graph': {
+						provider: 'generic',
+						clientId: 'c',
+						clientSecret: 's',
+						authorizationUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize',
+						tokenUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/token',
+						userInfoUrl: 'https://graph.microsoft.com/v1.0/me',
+						fetchEmail: true,
+						scope: 'openid email',
+						redirectUri: 'https://app.test.com/oauth',
+					},
+				},
+			};
+			initializeProviders(options, logger);
+
+			assert.ok(warnings.some((msg) => msg.includes('custom-graph') && msg.includes('profile')));
+		});
+
+		it('warns for an azure provider with a non-Graph userInfoUrl override too (provider===azure is sufficient on its own)', () => {
+			const warnings = [];
+			const logger = { ...mockLogger, warn: (msg) => warnings.push(msg) };
+
+			const options = {
+				redirectUri: 'https://app.test.com/oauth',
+				providers: {
+					azure: graphProvider({
+						userInfoUrl: 'https://idp.example.com/userinfo',
+						scope: 'openid email',
+					}),
+				},
+			};
+			initializeProviders(options, logger);
+
+			assert.ok(warnings.some((msg) => msg.includes('azure') && msg.includes('profile')));
+		});
+
+		it('does NOT warn when scope already includes profile', () => {
+			const warnings = [];
+			const logger = { ...mockLogger, warn: (msg) => warnings.push(msg) };
+
+			const options = {
+				redirectUri: 'https://app.test.com/oauth',
+				providers: { azure: graphProvider({ scope: 'openid profile email' }) },
+			};
+			initializeProviders(options, logger);
+
+			assert.ok(!warnings.some((msg) => msg.includes('profile')));
+		});
+
+		it('does NOT warn when fetchEmail is not enabled', () => {
+			const warnings = [];
+			const logger = { ...mockLogger, warn: (msg) => warnings.push(msg) };
+
+			const options = {
+				redirectUri: 'https://app.test.com/oauth',
+				providers: { azure: graphProvider({ fetchEmail: false, scope: 'openid email' }) },
+			};
+			initializeProviders(options, logger);
+
+			assert.ok(!warnings.some((msg) => msg.includes('profile')));
+		});
+
+		it('does NOT warn for a non-Azure, non-Graph provider', () => {
+			const warnings = [];
+			const logger = { ...mockLogger, warn: (msg) => warnings.push(msg) };
+
+			const options = {
+				redirectUri: 'https://app.test.com/oauth',
+				providers: {
+					'custom-idp': {
+						provider: 'generic',
+						clientId: 'c',
+						clientSecret: 's',
+						authorizationUrl: 'https://idp.example.com/authorize',
+						tokenUrl: 'https://idp.example.com/token',
+						userInfoUrl: 'https://idp.example.com/userinfo',
+						fetchEmail: true,
+						scope: 'openid email',
+						redirectUri: 'https://app.test.com/oauth',
+					},
+				},
+			};
+			initializeProviders(options, logger);
+
+			assert.ok(!warnings.some((msg) => msg.includes('profile')));
+		});
+
+		it('a throwing logger does not abort provider initialization', () => {
+			const throwingLogger = {
+				...mockLogger,
+				warn: () => {
+					throw new Error('boom');
+				},
+			};
+
+			const options = {
+				redirectUri: 'https://app.test.com/oauth',
+				providers: { azure: graphProvider({ scope: 'openid email' }) },
+			};
+
+			assert.doesNotThrow(() => {
+				const providers = initializeProviders(options, throwingLogger);
+				assert.ok(providers.azure, 'provider still initializes despite the throwing logger');
+			});
+		});
+	});
 });

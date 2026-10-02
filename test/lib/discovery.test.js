@@ -151,7 +151,8 @@ describe('OIDC discovery (#264)', () => {
 		});
 
 		it('a document that omits token_endpoint entirely refuses rather than bypassing the check', async () => {
-			const { token_endpoint, ...doc } = validDoc();
+			const doc = validDoc();
+			delete doc.token_endpoint;
 			_setFetch(fetchFromMap({ [WELL_KNOWN]: doc }));
 			startIssuerDiscovery(AUTH_URL, JWKS_URI, TOKEN_URL, 'custom-idp');
 			const issuer = await awaitDiscoveredIssuer(AUTH_URL, JWKS_URI, TOKEN_URL);
@@ -289,12 +290,18 @@ describe('OIDC discovery (#264)', () => {
 		});
 
 		it('the first caller awaits within the bound and is upgraded if discovery resolves in time', async () => {
-			_setFetch(async (url) => {
+			_setFetch(async () => {
 				await new Promise((resolve) => setTimeout(resolve, 20));
 				return jsonResponse(validDoc());
 			});
 			startIssuerDiscovery(AUTH_URL, JWKS_URI, TOKEN_URL, 'custom-idp');
-			const issuer = await awaitDiscoveredIssuer(AUTH_URL, JWKS_URI, TOKEN_URL, undefined, DISCOVERY_LOGIN_AWAIT_BOUND_MS);
+			const issuer = await awaitDiscoveredIssuer(
+				AUTH_URL,
+				JWKS_URI,
+				TOKEN_URL,
+				undefined,
+				DISCOVERY_LOGIN_AWAIT_BOUND_MS
+			);
 			assert.equal(issuer, 'https://idp.example.com');
 		});
 
@@ -316,7 +323,11 @@ describe('OIDC discovery (#264)', () => {
 
 			resolveFetch();
 			const firstCallerResult = await firstCallerPromise;
-			assert.equal(firstCallerResult, 'https://idp.example.com', 'the first caller is upgraded once discovery resolves');
+			assert.equal(
+				firstCallerResult,
+				'https://idp.example.com',
+				'the first caller is upgraded once discovery resolves'
+			);
 		});
 	});
 

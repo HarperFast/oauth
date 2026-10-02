@@ -11,7 +11,7 @@ import { OAuthProvider } from '../../dist/lib/OAuthProvider.js';
 import { GitHubProvider } from '../../dist/lib/providers/github.js';
 import { AzureADProvider } from '../../dist/lib/providers/azure.js';
 import { resetCSRFTableCache } from '../../dist/lib/CSRFTokenManager.js';
-import { startIssuerDiscovery, awaitDiscoveredIssuer, _clearDiscoveryCache } from '../../dist/lib/discovery.js';
+import { startIssuerDiscovery, _clearDiscoveryCache } from '../../dist/lib/discovery.js';
 import { _setFetch, _setDnsLookup } from '../../dist/lib/mcp/cimd.js';
 
 describe('OAuthProvider', () => {
@@ -1569,8 +1569,6 @@ describe('OAuthProvider', () => {
 				redirectUri: 'https://app.test.com/oauth',
 				issuer: undefined,
 			};
-			const WELL_KNOWN = 'https://idp.example.com/.well-known/openid-configuration';
-
 			function discoveryDoc() {
 				return {
 					issuer: 'https://idp.example.com',
@@ -1593,7 +1591,13 @@ describe('OAuthProvider', () => {
 				attachRealJwksClient(p);
 
 				const now = Math.floor(Date.now() / 1000);
-				const token = sign({ iss: 'https://idp.example.com', sub: 'user-1', aud: discoveryConfig.clientId, iat: now, exp: now + 3600 });
+				const token = sign({
+					iss: 'https://idp.example.com',
+					sub: 'user-1',
+					aud: discoveryConfig.clientId,
+					iat: now,
+					exp: now + 3600,
+				});
 
 				const result = await p.verifyIdToken(token);
 				assert.equal(result.signatureVerified, true);
@@ -1629,7 +1633,13 @@ describe('OAuthProvider', () => {
 
 				// A genuinely valid token right after it must still be the one that
 				// gets to wait — proving the forged call above never consumed the slot.
-				const validToken = sign({ iss: 'https://idp.example.com', sub: 'user-1', aud: discoveryConfig.clientId, iat: now, exp: now + 3600 });
+				const validToken = sign({
+					iss: 'https://idp.example.com',
+					sub: 'user-1',
+					aud: discoveryConfig.clientId,
+					iat: now,
+					exp: now + 3600,
+				});
 				const result = await p.verifyIdToken(validToken);
 				assert.equal(result.signatureVerified, true);
 				assert.equal(result.issuerValidated, true, 'the valid call was still the first caller and got upgraded');
@@ -1678,8 +1688,20 @@ describe('OAuthProvider', () => {
 				attachRealJwksClient(p);
 
 				const now = Math.floor(Date.now() / 1000);
-				const tokenA = sign({ iss: 'https://idp.example.com', sub: 'user-a', aud: discoveryConfig.clientId, iat: now, exp: now + 3600 });
-				const tokenB = sign({ iss: 'https://idp.example.com', sub: 'user-b', aud: discoveryConfig.clientId, iat: now, exp: now + 3600 });
+				const tokenA = sign({
+					iss: 'https://idp.example.com',
+					sub: 'user-a',
+					aud: discoveryConfig.clientId,
+					iat: now,
+					exp: now + 3600,
+				});
+				const tokenB = sign({
+					iss: 'https://idp.example.com',
+					sub: 'user-b',
+					aud: discoveryConfig.clientId,
+					iat: now,
+					exp: now + 3600,
+				});
 
 				const firstCall = p.verifyIdToken(tokenA);
 				await new Promise((resolve) => setTimeout(resolve, 5)); // let the first call claim the await slot

@@ -4,11 +4,7 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import {
-	AZURE_CONSUMERS_TENANT_ID,
-	isAzureJwksUri,
-	resolveAzureIssuerBinding,
-} from '../../dist/lib/azureIssuer.js';
+import { AZURE_CONSUMERS_TENANT_ID, isAzureJwksUri, resolveAzureIssuerBinding } from '../../dist/lib/azureIssuer.js';
 
 const GUID_A = '12345678-1234-1234-1234-123456789012';
 const GUID_B = '87654321-4321-4321-4321-210987654321';

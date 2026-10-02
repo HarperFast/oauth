@@ -908,7 +908,7 @@ describe('OAuth Plugin Options Watcher', () => {
 					},
 					// ...processed in the same providers map as a reserved name that
 					// makes the whole build throw, before `providers` is ever published.
-					mcp: {
+					'mcp': {
 						provider: 'generic',
 						clientId: 'c',
 						clientSecret: 's',

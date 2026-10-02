@@ -5,6 +5,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { TenantManager } from '../../dist/lib/tenantManager.js';
+import { OAuthProvider } from '../../dist/lib/OAuthProvider.js';
 
 describe('TenantManager', () => {
 	describe('Okta tenant registration', () => {
@@ -46,6 +47,41 @@ describe('TenantManager', () => {
 				},
 				{ message: /okta provider requires domain configuration/i }
 			);
+		});
+
+		it('passes authServer through to Okta configure() for a custom authorization server (#264)', () => {
+			const manager = new TenantManager();
+
+			manager.registerTenant({
+				tenantId: 'acme-corp',
+				name: 'Acme Corporation',
+				provider: 'okta',
+				domain: 'acme.okta.com',
+				authServer: 'default',
+				clientId: 'okta-client-id',
+				clientSecret: 'okta-secret',
+			});
+
+			const tenant = manager.getTenant('acme-corp');
+			assert.equal(tenant.providerConfig.authorizationUrl, 'https://acme.okta.com/oauth2/default/v1/authorize');
+			assert.equal(tenant.providerConfig.issuer, 'https://acme.okta.com/oauth2/default');
+		});
+
+		it('omitted authServer keeps the org authorization server, unchanged', () => {
+			const manager = new TenantManager();
+
+			manager.registerTenant({
+				tenantId: 'acme-corp',
+				name: 'Acme Corporation',
+				provider: 'okta',
+				domain: 'acme.okta.com',
+				clientId: 'okta-client-id',
+				clientSecret: 'okta-secret',
+			});
+
+			const tenant = manager.getTenant('acme-corp');
+			assert.equal(tenant.providerConfig.authorizationUrl, 'https://acme.okta.com/oauth2/v1/authorize');
+			assert.equal(tenant.providerConfig.issuer, 'https://acme.okta.com');
 		});
 
 		it('should throw error for a mixed-case "Okta" tenant without domain', () => {
@@ -136,6 +172,62 @@ describe('TenantManager', () => {
 			const tenant = manager.getTenant('initech');
 			assert.ok(tenant);
 			assert.equal(tenant.config.provider, 'microsoft');
+		});
+
+		it('a tenant built here (bypassing buildProviderConfig entirely) still gets the safe Azure binding once an OAuthProvider is constructed from it (#264)', () => {
+			// TenantManager assembles OAuthProviderConfig directly and never calls
+			// config.ts's buildProviderConfig — resolveAzureIssuerBinding must
+			// still run, at OAuthProvider construction time, for this path.
+			const manager = new TenantManager();
+			const guid = '12345678-1234-1234-1234-123456789012';
+
+			manager.registerTenant({
+				tenantId: 'globex-corp',
+				name: 'Globex Corporation',
+				provider: 'azure',
+				azureTenantId: 'common',
+				clientId: 'azure-client-id',
+				clientSecret: 'azure-secret',
+				additionalConfig: {
+					issuer: `https://login.microsoftonline.com/${guid}/v2.0`,
+					redirectUri: 'https://app.test.com/oauth',
+				},
+			});
+
+			const config = manager.getTenant('globex-corp').providerConfig;
+			assert.ok(config);
+			// Still the shared, unrewritten alias endpoint at this point —
+			// TenantManager itself does nothing Azure-specific.
+			assert.ok(config.jwksUri.includes('/common/'));
+
+			const provider = new OAuthProvider(config, undefined);
+			assert.equal(provider.config.jwksUri, `https://login.microsoftonline.com/${guid}/discovery/v2.0/keys`);
+			assert.equal(provider.config.issuer, `https://login.microsoftonline.com/${guid}/v2.0`);
+		});
+
+		it('an array pin on a tenant built here still throws once an OAuthProvider is constructed (no silent shared-pool fallback)', () => {
+			const manager = new TenantManager();
+			const guidA = '12345678-1234-1234-1234-123456789012';
+			const guidB = '87654321-4321-4321-4321-210987654321';
+
+			manager.registerTenant({
+				tenantId: 'globex-corp',
+				name: 'Globex Corporation',
+				provider: 'azure',
+				azureTenantId: 'common',
+				clientId: 'azure-client-id',
+				clientSecret: 'azure-secret',
+				additionalConfig: {
+					issuer: [
+						`https://login.microsoftonline.com/${guidA}/v2.0`,
+						`https://login.microsoftonline.com/${guidB}/v2.0`,
+					],
+					redirectUri: 'https://app.test.com/oauth',
+				},
+			});
+
+			const { providerConfig } = manager.getTenant('globex-corp');
+			assert.throws(() => new OAuthProvider(providerConfig, undefined), /array/);
 		});
 	});
 
