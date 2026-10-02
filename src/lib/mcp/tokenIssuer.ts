@@ -34,13 +34,9 @@ function keyAlg(key: { alg?: string }): SupportedSigningAlg {
 
 /**
  * `typ` acceptance for production verification (RFC 9068 §4: the RS MUST
- * verify `typ`). Accepts `at+jwt`, plus the bare `JWT` `signAccessToken` used
- * to emit, so a token minted before this check shipped keeps verifying for
- * the rest of its (short) access-token TTL. This repo's own signer never
- * emits anything else, so there's no cross-profile confusion risk — but
- * nothing here time-boxes the `jwt` branch; it stays until a maintainer
- * deletes it (#258). Case-insensitive with an optional `application/`
- * prefix, per RFC 9068's note that either form is acceptable.
+ * verify `typ`). Accepts `at+jwt`, plus legacy `JWT` until #258 removes that
+ * branch. Case-insensitive with an optional `application/` prefix, per RFC
+ * 9068's note that either form is acceptable.
  */
 function typAccepted(typ: unknown): boolean {
 	if (typeof typ !== 'string') return false;
@@ -147,9 +143,8 @@ export function verifyAccessTokenWithKeySet(
 		throw new Error('no signing keys available');
 	}
 
-	// Decode (without verifying) only to read the header's `kid`/`typ` for key
-	// selection and the typ check below. The signature is still verified below
-	// against the selected key.
+	// Decode (without verifying) to read the header's `kid` (key selection) and
+	// `typ` (checked below); the signature itself is verified further down.
 	const decoded = jwt.decode(token, { complete: true });
 	if (!decoded || typeof decoded === 'string') {
 		throw new Error('malformed token');
