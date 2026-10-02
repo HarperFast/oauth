@@ -2,6 +2,8 @@ import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { handleApplication } from '../dist/index.js';
 import { OAuthResource } from '../dist/lib/resource.js';
+import { _clearDiscoveryCache } from '../dist/lib/discovery.js';
+import { _setFetch, _setDnsLookup } from '../dist/lib/mcp/cimd.js';
 
 /**
  * Poll `condition` instead of sleeping a fixed delay after firing a config
@@ -867,5 +869,113 @@ describe('OAuth Plugin Options Watcher', () => {
 			(err) => /scope\.resources or scope\.server is unavailable/.test(err.message),
 			'expected an error citing the missing scope field'
 		);
+	});
+
+	describe('OIDC issuer discovery scheduling (#264)', () => {
+		beforeEach(() => {
+			_clearDiscoveryCache();
+			_setDnsLookup(async () => [{ address: '93.184.216.34', family: 4 }]);
+		});
+
+		it('a reload rejected before publication (the reserved "mcp" provider name) starts no discovery', async () => {
+			let fetchCount = 0;
+			_setFetch(async () => {
+				fetchCount++;
+				throw new Error('must never fetch for a discarded reload');
+			});
+
+			await handleApplication(scope);
+
+			let errorLogged = false;
+			scope.logger.error = (msg) => {
+				if (typeof msg === 'string' && msg.includes('Failed to update OAuth configuration')) errorLogged = true;
+			};
+
+			scope.options._config = {
+				debug: false,
+				redirectUri: 'https://app.test.com/oauth',
+				providers: {
+					// A valid, issuer-less, https explicit-endpoint provider that would
+					// otherwise be eligible for background discovery...
+					'custom-idp': {
+						provider: 'generic',
+						clientId: 'c',
+						clientSecret: 's',
+						authorizationUrl: 'https://idp.example.com/authorize',
+						tokenUrl: 'https://idp.example.com/token',
+						userInfoUrl: 'https://idp.example.com/userinfo',
+						jwksUri: 'https://idp.example.com/jwks',
+					},
+					// ...processed in the same providers map as a reserved name that
+					// makes the whole build throw, before `providers` is ever published.
+					mcp: {
+						provider: 'generic',
+						clientId: 'c',
+						clientSecret: 's',
+					},
+				},
+			};
+			configChangeListeners[0]();
+			await waitFor(() => errorLogged);
+
+			assert.ok(errorLogged, 'the rejected reload is logged');
+			await new Promise((resolve) => setTimeout(resolve, 20));
+			assert.equal(fetchCount, 0, 'no discovery fetch was ever attempted for the discarded reload');
+		});
+
+		it('a reload whose later log call throws still schedules discovery for the already-published registry', async () => {
+			let fetchCount = 0;
+			_setFetch(async () => {
+				fetchCount++;
+				return {
+					ok: false,
+					status: 404,
+					headers: new Map([['content-type', 'application/json']]),
+					body: {
+						getReader: () => ({ read: async () => ({ done: true, value: undefined }), cancel: () => {} }),
+					},
+				};
+			});
+
+			scope.options._config.providers = {
+				'custom-idp': {
+					provider: 'generic',
+					clientId: 'c',
+					clientSecret: 's',
+					authorizationUrl: 'https://idp.example.com/authorize',
+					tokenUrl: 'https://idp.example.com/token',
+					userInfoUrl: 'https://idp.example.com/userinfo',
+					jwksUri: 'https://idp.example.com/jwks',
+				},
+			};
+			await handleApplication(scope);
+			const publishedProviders = OAuthResource.getProviders();
+			assert.ok(publishedProviders['custom-idp'], 'the issuer-less provider is published on first boot');
+
+			let errorLogged = false;
+			scope.logger.error = (msg) => {
+				if (typeof msg === 'string' && msg.includes('Failed to update OAuth configuration')) errorLogged = true;
+			};
+			// Throws specifically on the LAST statement `updateConfiguration` can
+			// reach (the debug-mode-change message) — well after the registry
+			// swap (`Object.assign`) that this feature schedules discovery from.
+			scope.logger.info = (msg) => {
+				if (typeof msg === 'string' && msg.startsWith('OAuth debug mode')) {
+					throw new Error('boom');
+				}
+			};
+
+			// debug: true (changed from the initial false) is required to make
+			// the debug-mode-change log line fire at all.
+			scope.options._config = { ...scope.options._config, debug: true };
+			configChangeListeners[0]();
+			await waitFor(() => errorLogged);
+
+			assert.ok(errorLogged, 'the reload is still reported as failed overall');
+			// The registry swap (and therefore discovery scheduling) already
+			// happened before the throwing log call — a later failure must not
+			// suppress it.
+			await waitFor(() => fetchCount > 0);
+		});
 	});
 });
