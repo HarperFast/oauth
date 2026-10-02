@@ -823,11 +823,10 @@ export async function handleCallback(
  *
  * Returns `true` when there was nothing to persist (no session, or an anonymous session with
  * no `id` — the intentional quiet no-op) or the persist succeeded. Returns `false` when an
- * *existing* session (has an `id`) couldn't be persisted, either because `.update` isn't
- * callable or because it rejected — that case had a session to clear and didn't, so callers
- * must not treat it like a completed logout/invalidation. A boolean (not a thrown error) is
- * deliberate: callers that forget to catch would turn a persistence hiccup into an unhandled
- * rejection, the exact failure mode this guards against.
+ * *existing* session (has an `id`) couldn't be persisted — `.update` wasn't callable, or it
+ * rejected — so callers must not treat that like a completed logout/invalidation. Reports this
+ * as a boolean rather than throwing: a caller that forgets to catch a thrown error would turn a
+ * persistence hiccup into an unhandled rejection instead.
  */
 export async function clearOAuthSession(session: any, logger?: Logger): Promise<boolean> {
 	if (!session) return true;
@@ -864,10 +863,10 @@ export async function clearOAuthSession(session: any, logger?: Logger): Promise<
 }
 
 /**
- * Runs a logging call without letting a throwing logger turn the already-decided outcome
- * above (`persisted`) into a rejection — the point of returning a boolean in the first place.
+ * Runs a logging call without letting a throwing logger turn an already-decided result into
+ * an unhandled rejection.
  */
-function logQuietly(log: () => void): void {
+export function logQuietly(log: () => void): void {
 	try {
 		log();
 	} catch {

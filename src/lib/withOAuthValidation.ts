@@ -244,11 +244,9 @@ async function validateOAuthForRequest(context: MaybeContext, options: OAuthVali
  *   config issue.
  * - Expired-token path (`validateAndRefreshSession` returns `{valid: false}`):
  *   `clearOAuthSession` persists `{ user: null }` and clears in-memory fields when it can —
- *   terminal logout. If persistence itself fails, it still clears in-memory fields and
- *   reports the failure (`SessionValidationResult.persistFailed`); this wrapper doesn't act on
- *   that flag for `requireAuth: false` (deliberate pass-through either way). `requireAuth: false`
- *   resources pass through but observe an invalidated (or, on a persist failure, best-effort
- *   cleared) session.
+ *   terminal logout. On a persist failure it still clears in-memory fields and reports
+ *   `SessionValidationResult.persistFailed`; this wrapper doesn't act on that flag — unlike the
+ *   global middleware, `requireAuth: false` passes through on any invalidation either way.
  */
 export function withOAuthValidation<T extends abstract new (...args: any[]) => any>(
 	ResourceClass: T,

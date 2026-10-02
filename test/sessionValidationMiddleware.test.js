@@ -1,10 +1,8 @@
 /**
  * OAuth session-validation HTTP middleware (src/index.ts) — persist-failure handling.
  *
- * #265/#266 fixed clearOAuthSession to report (not throw on, not silently swallow) a failed
- * persist. This covers the middleware's own reaction to that report: a persist failure must
- * deny the request rather than continue to `next()` serving the stale, supposedly-revoked
- * identity Harper already resolved onto `request`.
+ * A clearOAuthSession persist failure must deny the request rather than continue to `next()`
+ * serving the stale, supposedly-revoked identity Harper already resolved onto `request`.
  */
 import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
@@ -66,6 +64,14 @@ describe('OAuth session-validation middleware — persist-failure handling (#265
 
 		assert.equal(result.status, 503);
 		assert.equal(result.headers['Cache-Control'], 'no-store');
+		// Raw server.http listener — nothing else serializes this response, so the body must
+		// already be a JSON string (not the plain object literal), same as handleLogout's 503.
+		assert.equal(typeof result.body, 'string');
+		assert.deepEqual(JSON.parse(result.body), {
+			error: 'session_invalidation_failed',
+			message: 'Unable to validate session, please retry',
+		});
+		assert.equal(result.headers['Content-Type'], 'application/json');
 	});
 
 	it('still continues to next() when the provider-not-found clear persists fine', async () => {
@@ -103,6 +109,21 @@ describe('OAuth session-validation middleware — persist-failure handling (#265
 
 		assert.equal(result.status, 503);
 		assert.equal(result.headers['Cache-Control'], 'no-store');
+		assert.equal(typeof result.body, 'string');
+	});
+
+	it('gives each 503 response its own headers object (no cross-request shared state)', async () => {
+		const request = () => ({
+			session: { id: 'sess-1', oauth: { providerConfigId: 'unknown-provider', accessToken: 'tok' } },
+		});
+		const next = () => ({ status: 200, body: { ran: true } });
+
+		const first = await middleware(request(), next);
+		const second = await middleware(request(), next);
+
+		assert.notEqual(first.headers, second.headers, 'each response must get its own headers object');
+		first.headers['X-Mutated-By-Test'] = 'true';
+		assert.equal(second.headers['X-Mutated-By-Test'], undefined);
 	});
 
 	it('still continues to next() when an expired session is cleanly invalidated (persists fine)', async () => {

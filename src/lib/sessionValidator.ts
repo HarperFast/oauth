@@ -5,7 +5,7 @@
  */
 
 import type { Request, IOAuthProvider, Logger, OAuthSessionMetadata } from '../types.ts';
-import { clearOAuthSession } from './handlers.ts';
+import { clearOAuthSession, logQuietly } from './handlers.ts';
 import type { HookManager } from './hookManager.ts';
 
 export interface SessionValidationResult {
@@ -205,24 +205,23 @@ export async function validateAndRefreshSession(
 
 		return { valid: true, refreshed: true };
 	} catch (error) {
-		logger?.error?.('OAuth token refresh failed:', error instanceof Error ? error.message : String(error));
+		logQuietly(() =>
+			logger?.error?.('OAuth token refresh failed:', error instanceof Error ? error.message : String(error))
+		);
 
 		// If token was expired and refresh failed, log out. clearOAuthSession itself never
-		// rejects (#266); the try/catch is defense-in-depth against the in-memory mutation
-		// throwing, so this resolution (#265) doesn't depend on that invariant holding forever.
+		// rejects; the try/catch here is defense-in-depth against the in-memory mutation throwing.
 		if (isExpired) {
 			let cleared = false;
 			try {
 				cleared = await clearOAuthSession(session, logger);
 			} catch (clearError) {
-				try {
+				logQuietly(() =>
 					logger?.error?.(
 						'OAuth session clear failed after refresh failure:',
 						clearError instanceof Error ? clearError.message : String(clearError)
-					);
-				} catch {
-					// A throwing logger must not block resolving to the controlled result below.
-				}
+					)
+				);
 			}
 			return {
 				valid: false,
