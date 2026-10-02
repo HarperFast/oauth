@@ -51,7 +51,7 @@ A separate OAuth 2.1 AS surface for MCP clients (Claude Desktop, ChatGPT, headle
 ## Config conventions
 
 - `isUnresolvedEnvPlaceholder()` and the security-setting fail-closed rule (`src/lib/config.ts`): an unresolved `${VAR}`, an empty value, or (for list/mapping fields) a non-mapping block on a security-relevant setting throws at startup naming the key, instead of silently changing a gate.
-- `normalizeBooleanField(obj, key, path, logger, mcpActive)` coerces a declared boolean field, falling back to `mcpActive` (whether `mcp.enabled` resolved true) rather than a fixed default — most MCP sub-feature booleans default to following the parent flag.
+- `normalizeBooleanField(obj, key, path, logger, failOnPlaceholder, requireBoolean)` coerces a declared boolean field. An unresolved placeholder or empty string **throws** when `failOnPlaceholder` is true, or warns and deletes the field (falling back to its own documented default) when false. The four MCP sub-feature booleans pass `mcpConfig.enabled === true` as `failOnPlaceholder` — inert while MCP is off, fail-closed once it's on; `mcp.enabled` itself always passes `false` (kept on the pre-#207 warn-and-drop path).
 - An unconfigured or half-configured provider is detected (and skipped) **before** `buildProviderConfig()` runs — that function throws on a missing `redirectUri`, so checking configured-ness first keeps one unset provider from blocking every other provider's config from building (#259).
 
 ## Testing
@@ -64,10 +64,10 @@ No central `errors.ts` — error classes are defined locally near where they're 
 
 ## Code conventions
 
-- TypeScript strict mode, ES modules (`.js` extensions in imports), named exports only
+- TypeScript strict mode, ES modules (`.ts` extensions in relative imports), named exports only
 - `logger?.info?.()` pattern — the logger is optional everywhere
 - CSRF: all flows use state tokens, 10-minute expiry (`CSRFTokenManager`)
-- Security invariants for any new endpoint: context validation in `get()`/`post()`, path length ≤ 2048 chars, cross-provider CSRF redirects with an error (never a bare 403)
+- Security invariants for any new endpoint: context validation in `get()`/`post()`, path length ≤ 2048 chars, cross-provider CSRF redirects with an error (never a bare 403), debug-only routes gated by IP (`isDebugOnlyRoute` in `src/lib/resource.ts`; `DEBUG_ALLOWED_IPS`, default `127.0.0.1,::1`)
 
 ## Where design decisions live
 
