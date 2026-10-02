@@ -497,9 +497,9 @@ export async function handleApplication(scope: Scope): Promise<void> {
 		if (!validation.valid) {
 			// Session is no longer valid (already cleaned up by validator)
 			logger?.debug?.(`OAuth session invalidated: ${validation.error}`);
-			if (validation.persistFailed) {
-				// The invalidation didn't persist, so Harper's already-resolved request.user may
-				// still be the old identity — deny the request rather than continue to next().
+			if (validation.clearFailed) {
+				// The invalidation didn't fully go through, so Harper's already-resolved
+				// request.user may still be the old identity — deny rather than continue to next().
 				return sessionClearFailedResponse();
 			}
 		} else if (validation.refreshed) {

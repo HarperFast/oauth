@@ -306,7 +306,7 @@ test('should logout when token expired and no refresh token', async () => {
 
 	assert.strictEqual(result.valid, false);
 	assert.strictEqual(result.error, 'Token expired and no refresh token available');
-	assert.strictEqual(result.persistFailed, false, 'the clear persisted fine');
+	assert.strictEqual(result.clearFailed, false, 'the clear persisted fine');
 	// clearOAuthSession persisted { user: null }, dropping oauth.
 	assert.strictEqual(session.user, null);
 	assert.strictEqual(session.oauth, undefined);
@@ -331,7 +331,7 @@ test('should handle refresh failure for expired token', async () => {
 
 	assert.strictEqual(result.valid, false);
 	assert.ok(result.error.includes('Token refresh failed'));
-	assert.strictEqual(result.persistFailed, false, 'the clear persisted fine');
+	assert.strictEqual(result.clearFailed, false, 'the clear persisted fine');
 	// Session invalidated after failed refresh — persisted { user: null }, oauth dropped
 	assert.strictEqual(session.oauth, undefined);
 });
@@ -363,7 +363,7 @@ test('should return a controlled result, not reject, when the post-refresh-failu
 
 	assert.strictEqual(result.valid, false);
 	assert.ok(result.error.includes('Token refresh failed'));
-	assert.strictEqual(result.persistFailed, true, 'the middleware must deny the request on this flag');
+	assert.strictEqual(result.clearFailed, true, 'the middleware must deny the request on this flag');
 	// In-memory clear still happened even though persistence failed.
 	assert.strictEqual(session.oauth, undefined);
 	assert.ok(logger.error.mock.calls.length >= 1, 'the persist failure must be logged');
@@ -399,7 +399,7 @@ test('should still resolve to a controlled result when the logger itself throws 
 
 	assert.strictEqual(result.valid, false);
 	assert.ok(result.error.includes('Token refresh failed'));
-	assert.strictEqual(result.persistFailed, false, 'the clear itself still persisted fine');
+	assert.strictEqual(result.clearFailed, false, 'the clear itself still persisted fine');
 	assert.strictEqual(session.oauth, undefined);
 });
 

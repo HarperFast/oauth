@@ -16,13 +16,14 @@ export interface SessionValidationResult {
 	/** Error message if validation failed */
 	error?: string;
 	/**
-	 * Set when `valid` is `false` because the invalidation itself (clearOAuthSession)
-	 * couldn't persist — the store write failed, not just the token. Distinct from an
-	 * ordinary invalidation (expired/revoked token, successfully cleared): a caller that
-	 * passes through on `valid: false` must not do so here, since the stored session may
-	 * still carry the old identity.
+	 * Set when `valid` is `false` because the invalidation itself (`clearOAuthSession`) didn't
+	 * fully go through — either the store write failed, or it succeeded but the in-memory clear
+	 * that follows threw. Distinct from an ordinary invalidation (expired/revoked token,
+	 * successfully cleared): a caller that passes through on `valid: false` must not do so
+	 * here, since this request (and, on a store-write failure, every future one) may still see
+	 * the old identity.
 	 */
-	persistFailed?: boolean;
+	clearFailed?: boolean;
 }
 
 /**
@@ -67,7 +68,7 @@ export async function validateAndRefreshSession(
 	if (!oauthMetadata.accessToken) {
 		logger?.warn?.('OAuth session missing access token, logging out');
 		const cleared = await clearOAuthSession(session, logger);
-		return { valid: false, error: 'OAuth session missing access token', persistFailed: !cleared };
+		return { valid: false, error: 'OAuth session missing access token', clearFailed: !cleared };
 	}
 
 	const now = Date.now();
@@ -92,7 +93,7 @@ export async function validateAndRefreshSession(
 					return {
 						valid: false,
 						error: 'Token validation failed - token may have been revoked',
-						persistFailed: !cleared,
+						clearFailed: !cleared,
 					};
 				}
 
@@ -139,7 +140,7 @@ export async function validateAndRefreshSession(
 		if (isExpired) {
 			logger?.warn?.('OAuth token expired and no refresh token available, logging out');
 			const cleared = await clearOAuthSession(session, logger);
-			return { valid: false, error: 'Token expired and no refresh token available', persistFailed: !cleared };
+			return { valid: false, error: 'Token expired and no refresh token available', clearFailed: !cleared };
 		}
 		// Token approaching expiration but no refresh token - still valid for now
 		return { valid: true, refreshed: false };
@@ -158,7 +159,7 @@ export async function validateAndRefreshSession(
 			logger?.warn?.('OAuth provider does not support token refresh');
 			if (isExpired) {
 				const cleared = await clearOAuthSession(session, logger);
-				return { valid: false, error: 'Token expired and provider does not support refresh', persistFailed: !cleared };
+				return { valid: false, error: 'Token expired and provider does not support refresh', clearFailed: !cleared };
 			}
 			return { valid: true, refreshed: false };
 		}
@@ -226,7 +227,7 @@ export async function validateAndRefreshSession(
 			return {
 				valid: false,
 				error: `Token refresh failed: ${error instanceof Error ? error.message : String(error)}`,
-				persistFailed: !cleared,
+				clearFailed: !cleared,
 			};
 		}
 

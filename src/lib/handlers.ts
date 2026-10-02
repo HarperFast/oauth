@@ -823,14 +823,10 @@ export async function handleCallback(
  *
  * Returns `true` when there was nothing to persist (no session, or an anonymous session with
  * no `id` — the intentional quiet no-op) or the clear fully succeeded. Returns `false` when an
- * *existing* session (has an `id`) couldn't be reliably cleared — the store write failed
- * (`.update` wasn't callable, or it rejected), or it succeeded but the in-memory clear that
- * follows threw — so callers must not treat that like a completed logout/invalidation. A store
- * write failure leaves the stored row stale for every future request; an in-memory-only failure
- * leaves just this one already-in-flight request seeing the old identity — either way, `false`
- * means don't trust this request's session as cleared. Reports this as a boolean rather than
- * throwing: a caller that forgets to catch a thrown error would turn a persistence hiccup into
- * an unhandled rejection instead.
+ * *existing* session couldn't be reliably cleared — the store write failed, or it succeeded but
+ * the in-memory clear afterward threw — so callers must not treat `false` like a completed
+ * logout/invalidation. Reports this as a boolean rather than throwing, so a caller that forgets
+ * to catch a thrown error can't turn either failure into an unhandled rejection.
  */
 export async function clearOAuthSession(session: any, logger?: Logger): Promise<boolean> {
 	if (!session) return true;
@@ -857,10 +853,9 @@ export async function clearOAuthSession(session: any, logger?: Logger): Promise<
 		}
 	}
 
-	// Clear in memory too so the current request sees no identity. Guarded: a frozen or
-	// otherwise non-configurable session object would throw here, and that must neither escape
-	// (breaking the "never rejects" contract above) nor be reported as a clean clear — this
-	// request would still be holding the old identity in memory.
+	// Clear in memory too so the current request sees no identity. A frozen or otherwise
+	// non-configurable session object would throw here — guarded so that can't escape or be
+	// mistaken for a clean clear.
 	let clearedInMemory = true;
 	try {
 		session.user = null;
@@ -912,7 +907,7 @@ export async function handleLogout(request: Request, hookManager: HookManager, l
 	const cleared = await clearOAuthSession(request.session, logger);
 
 	if (!cleared) {
-		// There was a session to clear and the store write failed — reporting success would
+		// There was a session to clear and it didn't fully go through — reporting success would
 		// tell the client the old identity is gone when it might not be. 503 + no-store asks
 		// for a retry instead of claiming a logout that didn't happen.
 		return {
