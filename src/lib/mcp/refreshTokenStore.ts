@@ -22,7 +22,7 @@
  * revokes the family.
  *
  * Explicit field access on encode/decode (no `{ ...raw }`) — Harper
- * tracked-object Proxies return empty own-keys. See CLAUDE.md gotcha.
+ * tracked-object Proxies return empty own-keys. See AGENTS.md gotcha.
  */
 
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
