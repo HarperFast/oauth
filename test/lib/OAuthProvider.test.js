@@ -1606,12 +1606,24 @@ describe('OAuthProvider', () => {
 			});
 
 			it('a forged/invalid-signature token never consumes the bounded first-login discovery wait', async () => {
-				// A fetch that resolves after a short, real delay so there is a
-				// genuine pending window the bogus call could (incorrectly) consume.
-				_setFetch(async () => {
-					await new Promise((resolve) => setTimeout(resolve, 30));
-					return jsonResponse(discoveryDoc());
-				});
+				// A fetch a short real delay (the previous version of this test)
+				// does NOT pin the ordering: by the time the valid call ran,
+				// discovery had already SETTLED either way, and
+				// `awaitDiscoveredIssuer` returns a settled entry's cached result
+				// immediately regardless of which call "consumed" the one bounded
+				// wait — the `awaited` flag only matters while the entry is still
+				// PENDING. So this holds the fetch open on a promise released by
+				// hand, keeping discovery pending across every step below, and
+				// checks the actual ordering effect (does the valid call get
+				// upgraded, or does it see `awaited` already set and get `null`)
+				// instead of a timing proxy for it.
+				let releaseFetch;
+				_setFetch(
+					() =>
+						new Promise((resolve) => {
+							releaseFetch = () => resolve(jsonResponse(discoveryDoc()));
+						})
+				);
 				startIssuerDiscovery(
 					discoveryConfig.authorizationUrl,
 					discoveryConfig.jwksUri,
@@ -1629,10 +1641,16 @@ describe('OAuthProvider', () => {
 					{ key: otherKeyPair.privateKey } // signed with a key NOT in the JWKS response
 				);
 
+				// 1. The forged call must reject while discovery is still pending —
+				// the fetch has not been released, so if `verifyIdToken` awaited
+				// discovery before checking the signature, this would not settle
+				// until the bounded wait times out (seconds, not the test's normal
+				// runtime) rather than rejecting promptly on the bad signature.
 				await assert.rejects(() => p.verifyIdToken(forgedToken));
 
-				// A genuinely valid token right after it must still be the one that
-				// gets to wait — proving the forged call above never consumed the slot.
+				// 2. Start the valid call (don't await it yet) — with the correct
+				// ordering, the forged call above never touched discovery, so this
+				// is the first real awaiter and should genuinely wait on it.
 				const validToken = sign({
 					iss: 'https://idp.example.com',
 					sub: 'user-1',
@@ -1640,7 +1658,33 @@ describe('OAuthProvider', () => {
 					iat: now,
 					exp: now + 3600,
 				});
-				const result = await p.verifyIdToken(validToken);
+				const validPromise = p.verifyIdToken(validToken);
+
+				// 3. Before releasing the fetch, confirm the valid call is still
+				// genuinely pending — not settled early. With the correct ordering,
+				// its own discovery-await is a fresh wait on the still-unresolved
+				// entry, so it cannot have settled yet. With the ordering reversed,
+				// the forged call already consumed the one bounded-await slot
+				// (`entry.awaited`); this call's own discovery-await would then see
+				// `awaited` already set and return `null` IMMEDIATELY (no I/O wait
+				// at all, since the entry is checked, not awaited, once `awaited` is
+				// already true), so the whole call would settle fast — with
+				// `issuerValidated: false` — well before the fetch is ever released.
+				const STILL_PENDING = Symbol('still-pending');
+				const racedResult = await Promise.race([
+					validPromise,
+					new Promise((resolve) => setTimeout(() => resolve(STILL_PENDING), 100)),
+				]);
+				assert.equal(
+					racedResult,
+					STILL_PENDING,
+					'the valid call must still be genuinely waiting on discovery, not already settled before the fetch is released'
+				);
+
+				// 4. Release the fetch; the valid call's genuine wait resolves, and
+				// it gets upgraded.
+				releaseFetch();
+				const result = await validPromise;
 				assert.equal(result.signatureVerified, true);
 				assert.equal(result.issuerValidated, true, 'the valid call was still the first caller and got upgraded');
 			});

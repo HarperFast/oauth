@@ -49,7 +49,12 @@
  *   rejection or let a throwing logger escape a caller.
  */
 
-import { fetchPinnedBoundedJson, DEFAULT_FETCH_TIMEOUT_MS, DEFAULT_MAX_DOCUMENT_BYTES } from './mcp/cimd.ts';
+import {
+	fetchPinnedBoundedJson,
+	CimdClientError,
+	DEFAULT_FETCH_TIMEOUT_MS,
+	DEFAULT_MAX_DOCUMENT_BYTES,
+} from './mcp/cimd.ts';
 import type { Logger } from '../types.ts';
 
 /** Bound on a first adoption-eligible login awaiting an in-flight discovery attempt. */
@@ -63,18 +68,28 @@ export const RETRY_COOLDOWN_MS = 5 * 60_000;
 /** Discovery attempts allowed in flight at once, across every provider. */
 export const MAX_CONCURRENT_DISCOVERY_ATTEMPTS = 8;
 
+/** Delay before retrying a fetch that only failed because CIMD's shared DNS-lookup permit (2, process-wide) was busy — never a "no document here" signal. */
+export const CAPACITY_RETRY_DELAY_MS = 50;
+
 // --- Injected timeouts for testing (mirrors cimd.ts's _setFetch/_setDnsLookup seams) ---
 let _perFetchTimeoutMs = DEFAULT_FETCH_TIMEOUT_MS;
 let _overallBudgetMs = DISCOVERY_OVERALL_BUDGET_MS;
 let _retryCooldownMs = RETRY_COOLDOWN_MS;
+let _capacityRetryDelayMs = CAPACITY_RETRY_DELAY_MS;
 
-/** Override the per-fetch, overall-budget, and retry-cooldown timeouts (tests only); `null` restores the defaults. @internal */
+/** Override the per-fetch, overall-budget, retry-cooldown, and capacity-retry-delay timeouts (tests only); `null` restores the defaults. @internal */
 export function _setDiscoveryTimeouts(
-	overrides: { perFetchMs?: number; overallBudgetMs?: number; retryCooldownMs?: number } | null
+	overrides: {
+		perFetchMs?: number;
+		overallBudgetMs?: number;
+		retryCooldownMs?: number;
+		capacityRetryDelayMs?: number;
+	} | null
 ): void {
 	_perFetchTimeoutMs = overrides?.perFetchMs ?? DEFAULT_FETCH_TIMEOUT_MS;
 	_overallBudgetMs = overrides?.overallBudgetMs ?? DISCOVERY_OVERALL_BUDGET_MS;
 	_retryCooldownMs = overrides?.retryCooldownMs ?? RETRY_COOLDOWN_MS;
+	_capacityRetryDelayMs = overrides?.capacityRetryDelayMs ?? CAPACITY_RETRY_DELAY_MS;
 }
 
 interface DiscoveryEntry {
@@ -126,28 +141,70 @@ function candidatePrefixes(pathname: string): string[] {
 	return [...all.slice(0, MAX_DISCOVERY_PREFIXES - 1), all[all.length - 1]];
 }
 
-async function fetchDiscoveryDocument(discoveryUrl: string, timeoutMs: number, logger?: Logger): Promise<any | null> {
-	try {
-		const { body } = await fetchPinnedBoundedJson(discoveryUrl, {
-			label: 'OIDC discovery document',
-			tag: 'OIDC discovery',
-			accept: 'application/json',
-			contentTypes: ['application/json'],
-			timeoutMs,
-			maxBytes: DEFAULT_MAX_DOCUMENT_BYTES,
-			logger,
-			// `authorizationUrl`/`jwksUri` are operator-configured, not
-			// attacker-controlled (unlike CIMD's own `client_id`) — the same
-			// trust level as `jwksUri` itself, which `jwks-rsa` already fetches
-			// with no SSRF gate at all. Blocking a private/loopback address here
-			// would only break discovery for a self-hosted IdP on a private
-			// network for no safety benefit over that already-ungated fetch.
-			allowPrivateAddresses: true,
-		});
-		const doc = JSON.parse(body);
-		return doc && typeof doc === 'object' && !Array.isArray(doc) ? doc : null;
-	} catch {
-		return null; // Transport, timeout, non-JSON, oversize, etc. — try the next (shorter) prefix.
+/** `true` only for CIMD's shared, process-wide DNS-lookup-permit rejection — never a real transport/validation failure. */
+function isDnsCapacityRejection(error: unknown): boolean {
+	return error instanceof CimdClientError && error.oauthError === 'temporarily_unavailable';
+}
+
+/**
+ * Fetch one discovery document, deadlined at `deadlineAt` (an absolute
+ * `Date.now()`-style timestamp — not a duration, so retries below share one
+ * budget instead of each restarting a fresh per-fetch timeout). A DNS
+ * capacity rejection (CIMD's `checkHostSsrf` shares a process-wide,
+ * 2-permit DNS-lookup gate with every other CIMD/discovery caller; with
+ * several discovery attempts started at once, the 3rd and later synchronously
+ * see the permit already taken) retries the SAME fetch after a short delay
+ * instead of being treated as "no document at this prefix" — that gate is a
+ * transient capacity signal, not a result about this endpoint, so advancing
+ * to the next (shorter) prefix on it would reach a wrong, and wrongly
+ * CACHED, "not found" outcome purely from how many other discovery attempts
+ * happened to start at the same moment. Returns `null` for every other
+ * failure (transport, timeout, non-JSON, oversize, a genuinely exhausted
+ * deadline) exactly as before.
+ */
+interface DiscoveryDocumentResult {
+	doc: any | null;
+	/** `true` only when the deadline ran out while every attempt was still hitting the DNS capacity gate — never a real negative result about this endpoint. */
+	capacityExhausted: boolean;
+}
+
+async function fetchDiscoveryDocument(
+	discoveryUrl: string,
+	deadlineAt: number,
+	logger?: Logger
+): Promise<DiscoveryDocumentResult> {
+	while (true) {
+		const remaining = deadlineAt - Date.now();
+		if (remaining <= 0) return { doc: null, capacityExhausted: false };
+		try {
+			const { body } = await fetchPinnedBoundedJson(discoveryUrl, {
+				label: 'OIDC discovery document',
+				tag: 'OIDC discovery',
+				accept: 'application/json',
+				contentTypes: ['application/json'],
+				timeoutMs: Math.min(_perFetchTimeoutMs, remaining),
+				maxBytes: DEFAULT_MAX_DOCUMENT_BYTES,
+				logger,
+				// `authorizationUrl`/`jwksUri` are operator-configured, not
+				// attacker-controlled (unlike CIMD's own `client_id`) — the same
+				// trust level as `jwksUri` itself, which `jwks-rsa` already fetches
+				// with no SSRF gate at all. Blocking a private/loopback address here
+				// would only break discovery for a self-hosted IdP on a private
+				// network for no safety benefit over that already-ungated fetch.
+				allowPrivateAddresses: true,
+			});
+			const doc = JSON.parse(body);
+			return { doc: doc && typeof doc === 'object' && !Array.isArray(doc) ? doc : null, capacityExhausted: false };
+		} catch (error) {
+			if (isDnsCapacityRejection(error)) {
+				if (remaining > _capacityRetryDelayMs) {
+					await new Promise((resolve) => setTimeout(resolve, _capacityRetryDelayMs));
+					continue;
+				}
+				return { doc: null, capacityExhausted: true };
+			}
+			return { doc: null, capacityExhausted: false }; // Transport, timeout, non-JSON, oversize, etc.
+		}
 	}
 }
 
@@ -165,18 +222,23 @@ async function discoverIssuerUnsafe(
 		return null;
 	}
 	const startedAt = Date.now();
+	const deadlineAt = startedAt + _overallBudgetMs;
 	let lastMismatch: string | undefined;
+	let lastCapacityExhausted = false;
 	for (const prefix of candidatePrefixes(url.pathname)) {
-		const remaining = _overallBudgetMs - (Date.now() - startedAt);
-		if (remaining <= 0) break;
+		if (Date.now() >= deadlineAt) break;
 		const issuerCandidates = prefix === '' ? [url.origin, `${url.origin}/`] : [`${url.origin}${prefix}`];
 		const discoveryUrl =
 			prefix === ''
 				? `${url.origin}/.well-known/openid-configuration`
 				: `${url.origin}${prefix}/.well-known/openid-configuration`;
 
-		const doc = await fetchDiscoveryDocument(discoveryUrl, Math.min(_perFetchTimeoutMs, remaining), logger);
-		if (!doc) continue;
+		const { doc, capacityExhausted } = await fetchDiscoveryDocument(discoveryUrl, deadlineAt, logger);
+		if (!doc) {
+			lastCapacityExhausted = capacityExhausted;
+			continue;
+		}
+		lastCapacityExhausted = false;
 
 		if (!issuerCandidates.includes(doc.issuer)) {
 			lastMismatch = `issuer ${JSON.stringify(doc.issuer)} does not match ${JSON.stringify(issuerCandidates[0])}`;
@@ -209,9 +271,11 @@ async function discoverIssuerUnsafe(
 	}
 
 	try {
+		const cause = lastCapacityExhausted
+			? "the shared DNS-resolution capacity (CIMD's process-wide lookup permit) never freed up within the discovery budget — likely several discovery attempts starting at once; this will retry on the next reload"
+			: (lastMismatch ?? 'no .well-known/openid-configuration document was found matching the configured endpoints');
 		logger?.warn?.(
-			`OIDC discovery failed for provider '${providerName}' at ${url.origin}: ` +
-				`${lastMismatch ?? 'no .well-known/openid-configuration document was found matching the configured endpoints'}. ` +
+			`OIDC discovery failed for provider '${providerName}' at ${url.origin}: ${cause}. ` +
 				`Set 'issuer' explicitly on provider '${providerName}' to your OIDC server's issuer URI.`
 		);
 	} catch {

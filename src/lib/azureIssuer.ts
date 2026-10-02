@@ -30,6 +30,15 @@ import type { Logger, OAuthProviderConfig } from '../types.ts';
 /** Entra ID's documented, permanent nickname for the "personal Microsoft accounts" tenant. */
 export const AZURE_CONSUMERS_TENANT_ID = '9188040d-6c67-4c5b-b112-36a304b66dad';
 
+/**
+ * A configured, but invalid, Azure `issuer` pin — distinguished from any
+ * other `buildProviderConfig` failure so `initializeProviders` (#259/#260's
+ * "skip the bad provider, keep the others" pattern) can treat it the same
+ * way: this one provider's own pin is wrong, which says nothing about
+ * whether every OTHER declared provider is safe to start.
+ */
+export class AzureIssuerBindingError extends Error {}
+
 const AZURE_HOST = 'login.microsoftonline.com';
 const AZURE_STS_HOST = 'sts.windows.net';
 const GUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -133,6 +142,26 @@ function azureIssuerNamesOnlyTenant(issuer: OAuthProviderConfig['issuer'], guid:
 }
 
 /**
+ * Canonicalize one already-validated (`azureIssuerGuidAnyVersion(value) ===
+ * guid`) issuer value to its own form's exact string — case and a trailing
+ * slash only. Which `iss` form a real token carries depends on the
+ * *authorize* endpoint, not the JWKS URL (a v1 `/oauth2/authorize` issues
+ * `sts.windows.net` tokens; v2 issues `login.microsoftonline.com` tokens),
+ * so a v1 pin must stay v1 and a v2 pin must stay v2 — collapsing both to
+ * one form would silently break whichever form the operator's real tokens
+ * actually use.
+ */
+function azureCanonicalIssuerForm(value: string, guid: string): string {
+	return new URL(value).hostname === AZURE_HOST ? azureTenantUri('issuer', guid) : `https://${AZURE_STS_HOST}/${guid}/`;
+}
+
+/** {@link azureCanonicalIssuerForm}, applied to every value of a string-or-array issuer, preserving its shape. */
+function normalizeAzureIssuerPin(issuer: OAuthProviderConfig['issuer'], guid: string): OAuthProviderConfig['issuer'] {
+	if (Array.isArray(issuer)) return issuer.map((value) => azureCanonicalIssuerForm(value as string, guid));
+	return azureCanonicalIssuerForm(issuer as string, guid);
+}
+
+/**
  * Cheap hostname check — true whenever `jwksUri`'s host is Azure's own,
  * regardless of path shape. Generic OIDC discovery (`discovery.ts`) must
  * never run against it: `resolveAzureIssuerBinding` above is the only
@@ -168,18 +197,27 @@ export function resolveAzureIssuerBinding(config: OAuthProviderConfig, providerN
 		// tenant (in either Azure issuer form, string or array) — Azure's
 		// signing keys are not guaranteed exclusive to one tenant-specific
 		// endpoint over time, so a pin naming a different tenant could otherwise
-		// accept a different tenant's token. A same-tenant pin is replaced with
-		// the canonical v2 issuer rather than left as-is: `jwt.verify` compares
-		// issuer strings exactly, so a differently-cased GUID, a trailing slash,
-		// the older `sts.windows.net` form, or an array mixing those would
-		// otherwise fail verification for a real, correctly signed token.
-		if (hasUsableIssuer(config.issuer) && !azureIssuerNamesOnlyTenant(config.issuer, lowerSegment)) {
-			throw new Error(
-				`OAuth provider '${providerName}' (azure) has a jwksUri for tenant '${lowerSegment}' but an ` +
-					`explicit 'issuer' naming a different tenant, or an unrecognized value, ` +
-					`(${JSON.stringify(config.issuer)}). Every value of the pinned issuer's tenant and the jwksUri's ` +
-					`tenant must be the same GUID.`
-			);
+		// accept a different tenant's token. A same-tenant pin is canonicalized
+		// (case, trailing slash) within its OWN form rather than left as-is —
+		// `jwt.verify` compares issuer strings exactly, so a differently-cased
+		// GUID or a trailing slash would otherwise fail verification for a
+		// real, correctly signed token — but never rewritten to a DIFFERENT
+		// form: which `iss` a real token carries depends on the authorize
+		// endpoint (v1 `/oauth2/authorize` issues `sts.windows.net` tokens, v2
+		// issues `login.microsoftonline.com` ones), so collapsing a v1 pin to
+		// v2 (or vice versa) would break verification for whichever form the
+		// operator's real tokens actually use.
+		if (hasUsableIssuer(config.issuer)) {
+			if (!azureIssuerNamesOnlyTenant(config.issuer, lowerSegment)) {
+				throw new AzureIssuerBindingError(
+					`OAuth provider '${providerName}' (azure) has a jwksUri for tenant '${lowerSegment}' but an ` +
+						`explicit 'issuer' naming a different tenant, or an unrecognized value, ` +
+						`(${JSON.stringify(config.issuer)}). Every value of the pinned issuer's tenant and the jwksUri's ` +
+						`tenant must be the same GUID.`
+				);
+			}
+			config.issuer = normalizeAzureIssuerPin(config.issuer, lowerSegment);
+			return;
 		}
 		config.issuer = azureTenantUri('issuer', lowerSegment);
 		return;
@@ -194,7 +232,7 @@ export function resolveAzureIssuerBinding(config: OAuthProviderConfig, providerN
 	if (!hasUsableIssuer(config.issuer)) return;
 
 	if (Array.isArray(config.issuer)) {
-		throw new Error(
+		throw new AzureIssuerBindingError(
 			`OAuth provider '${providerName}' (azure) pins 'issuer' to an array on a shared authority ` +
 				`('${lowerSegment}'). Pin exactly one Azure tenant issuer (e.g. ` +
 				`'https://login.microsoftonline.com/<tenant-guid>/v2.0') — an array would make every listed tenant ` +
@@ -206,7 +244,7 @@ export function resolveAzureIssuerBinding(config: OAuthProviderConfig, providerN
 
 	const pinnedGuid = azureIssuerGuid(config.issuer);
 	if (!pinnedGuid) {
-		throw new Error(
+		throw new AzureIssuerBindingError(
 			`OAuth provider '${providerName}' (azure) pins 'issuer' to ${JSON.stringify(config.issuer)} on a shared ` +
 				`authority ('${lowerSegment}'), which is not a usable Azure tenant issuer. Set 'issuer' to exactly one ` +
 				`tenant issuer URI, e.g. 'https://login.microsoftonline.com/<tenant-guid>/v2.0' (use ` +

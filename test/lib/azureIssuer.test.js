@@ -105,22 +105,37 @@ describe('resolveAzureIssuerBinding', () => {
 			assert.equal(config.issuer, `https://login.microsoftonline.com/${GUID_A}/v2.0`);
 		});
 
-		it('canonicalizes a same-tenant pin given in the older sts.windows.net (v1) form', () => {
+		it('keeps a same-tenant pin given in the older sts.windows.net (v1) form AS v1 — a v1 authorize endpoint issues sts.windows.net tokens', () => {
+			// Which `iss` form a real token carries depends on the authorize
+			// endpoint, not the jwksUri — collapsing this to v2 would break
+			// verification for every real v1 token.
 			const config = baseConfig({
 				jwksUri: `https://login.microsoftonline.com/${GUID_A}/discovery/v2.0/keys`,
 				issuer: `https://sts.windows.net/${GUID_A}/`,
 			});
 			resolveAzureIssuerBinding(config, 'azure');
-			assert.equal(config.issuer, `https://login.microsoftonline.com/${GUID_A}/v2.0`);
+			assert.equal(config.issuer, `https://sts.windows.net/${GUID_A}/`);
 		});
 
-		it('canonicalizes a same-tenant pin given as an array mixing the v1 and v2 forms', () => {
+		it('canonicalizes a v1 pin’s case and trailing slash without changing its form', () => {
+			const config = baseConfig({
+				jwksUri: `https://login.microsoftonline.com/${GUID_A}/discovery/v2.0/keys`,
+				issuer: `https://sts.windows.net/${GUID_A.toUpperCase()}`,
+			});
+			resolveAzureIssuerBinding(config, 'azure');
+			assert.equal(config.issuer, `https://sts.windows.net/${GUID_A}/`);
+		});
+
+		it('canonicalizes a same-tenant pin given as an array mixing the v1 and v2 forms, keeping each element in its own form', () => {
 			const config = baseConfig({
 				jwksUri: `https://login.microsoftonline.com/${GUID_A}/discovery/v2.0/keys`,
 				issuer: [`https://login.microsoftonline.com/${GUID_A}/v2.0`, `https://sts.windows.net/${GUID_A}/`],
 			});
 			resolveAzureIssuerBinding(config, 'azure');
-			assert.equal(config.issuer, `https://login.microsoftonline.com/${GUID_A}/v2.0`);
+			assert.deepEqual(config.issuer, [
+				`https://login.microsoftonline.com/${GUID_A}/v2.0`,
+				`https://sts.windows.net/${GUID_A}/`,
+			]);
 		});
 
 		it('throws when an explicit pin names a different tenant than the jwksUri', () => {

@@ -9,7 +9,7 @@ import { getProvider } from './providers/index.ts';
 import { redactSecrets } from './redact.ts';
 import { algFromPrivateKeyPem } from './mcp/keyStore.ts';
 import { isCimdClientId, cimdEnabled } from './mcp/cimd.ts';
-import { resolveAzureIssuerBinding, isAzureJwksUri } from './azureIssuer.ts';
+import { resolveAzureIssuerBinding, isAzureJwksUri, AzureIssuerBindingError } from './azureIssuer.ts';
 import type { OAuthProviderConfig, OAuthPluginConfig, ProviderRegistry, Logger } from '../types.ts';
 
 /**
@@ -945,13 +945,32 @@ export function initializeProviders(options: OAuthPluginConfig, logger?: Logger)
 		// enforceIssuerForJwks (#231 §4) only runs here, after the configured-ness
 		// precheck above (#259/#260) — an unconfigured or half-configured provider
 		// is already skipped and never reaches the issuer check.
-		const config = buildProviderConfig(
-			providerConfig,
-			providerName,
-			pluginDefaults,
-			/* enforceIssuerForJwks */ true,
-			logger
-		);
+		//
+		// An AzureIssuerBindingError means only THIS provider's own `issuer` pin
+		// is invalid (a stale pin, one copied from docs, one missing `/v2.0`) —
+		// it says nothing about whether every other declared provider is safe to
+		// start, so it gets the same "skip the bad one, keep the others" ##259/
+		// #260 already established, logged as an error rather than silently
+		// dropped. Every other `buildProviderConfig` failure (e.g. #231 §4's
+		// issuer-required check, a bad `redirectUri`) is unrelated to this one
+		// provider's pin and keeps today's fail-the-whole-reload behavior —
+		// only this specific, newly-introduced failure mode is downgraded.
+		let config: OAuthProviderConfig;
+		try {
+			config = buildProviderConfig(
+				providerConfig,
+				providerName,
+				pluginDefaults,
+				/* enforceIssuerForJwks */ true,
+				logger
+			);
+		} catch (error) {
+			if (error instanceof AzureIssuerBindingError) {
+				logger?.error?.(`OAuth provider '${providerName}' skipped — invalid Azure issuer pin:`, error);
+				continue;
+			}
+			throw error;
+		}
 
 		// Check if this provider is properly configured
 		const requiredFields = ['clientId', 'clientSecret', 'authorizationUrl', 'tokenUrl', 'userInfoUrl'];

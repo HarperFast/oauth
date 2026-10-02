@@ -276,18 +276,33 @@ describe('OIDC discovery (#264)', () => {
 	});
 
 	describe('concurrency cap', () => {
-		it('caps simultaneous discovery attempts at MAX_CONCURRENT_DISCOVERY_ATTEMPTS', async () => {
+		it('caps simultaneous discovery attempts at MAX_CONCURRENT_DISCOVERY_ATTEMPTS, and every target still resolves to its own issuer', async () => {
+			// More targets than CIMD's real, shared 2-permit DNS gate, started
+			// synchronously — several will see `temporarily_unavailable` on their
+			// first lookup. A short capacity-retry delay keeps that from
+			// depending on a race against this test's own drain timing.
+			_setDiscoveryTimeouts({ capacityRetryDelayMs: 5 });
 			let inFlight = 0;
 			let maxObservedInFlight = 0;
 			let pendingResolvers = [];
 			_setFetch(
-				() =>
+				(url) =>
 					new Promise((resolve) => {
 						inFlight++;
 						maxObservedInFlight = Math.max(maxObservedInFlight, inFlight);
 						pendingResolvers.push(() => {
 							inFlight--;
-							resolve(jsonResponse(validDoc()));
+							// Per-target document, not a fixed one — a target's own
+							// authorizationUrl/jwksUri/tokenUrl must validate against it.
+							const origin = new URL(url).origin;
+							resolve(
+								jsonResponse({
+									issuer: origin,
+									authorization_endpoint: `${origin}/authorize`,
+									jwks_uri: `${origin}/jwks`,
+									token_endpoint: `${origin}/token`,
+								})
+							);
 						});
 					})
 			);
@@ -317,7 +332,79 @@ describe('OIDC discovery (#264)', () => {
 				toResolve.forEach((resolve) => resolve());
 				await new Promise((resolve) => setTimeout(resolve, 5));
 			}
-			await Promise.all(targets.map((t) => awaitDiscoveredIssuer(t.authUrl, t.jwksUri, t.tokenUrl)));
+			const issuers = await Promise.all(targets.map((t) => awaitDiscoveredIssuer(t.authUrl, t.jwksUri, t.tokenUrl)));
+			targets.forEach((t, i) => {
+				assert.equal(
+					issuers[i],
+					new URL(t.authUrl).origin,
+					`target ${i} (${t.authUrl}) must resolve to its own issuer`
+				);
+			});
+		});
+
+		it('a DNS-capacity rejection (CIMD’s shared, process-wide 2-permit lookup gate) retries instead of being cached as "not found" (#271 follow-up)', async () => {
+			// Two deliberately-held-open "slot holders" exhaust CIMD's real
+			// (unmocked) MAX_CONCURRENT_DNS=2 permit; a third target started
+			// while both slots are held synchronously sees `temporarily_unavailable`
+			// on its first lookup. Before the fix, that was treated identically to
+			// "no document at this prefix" and cached as a definitive failure.
+			_setDiscoveryTimeouts({ overallBudgetMs: 2000, capacityRetryDelayMs: 10 });
+			const pendingDnsResolvers = [];
+			_setDnsLookup(() => new Promise((resolve) => pendingDnsResolvers.push(resolve)));
+			const fetchedOrigins = [];
+			_setFetch(
+				(url) =>
+					new Promise((resolve) => {
+						const origin = new URL(url).origin;
+						fetchedOrigins.push(origin);
+						resolve(
+							jsonResponse({
+								issuer: origin,
+								authorization_endpoint: `${origin}/authorize`,
+								jwks_uri: `${origin}/jwks`,
+								token_endpoint: `${origin}/token`,
+							})
+						);
+					})
+			);
+
+			const slotHolder = (i) => ({
+				authUrl: `https://slot${i}.example.com/authorize`,
+				jwksUri: `https://slot${i}.example.com/jwks`,
+				tokenUrl: `https://slot${i}.example.com/token`,
+			});
+			const holders = [slotHolder(0), slotHolder(1)];
+			const contender = {
+				authUrl: 'https://contender.example.com/authorize',
+				jwksUri: 'https://contender.example.com/jwks',
+				tokenUrl: 'https://contender.example.com/token',
+			};
+
+			// Synchronous, back-to-back: the first two calls take CIMD's two real
+			// DNS permits and hold them (their `_setDnsLookup` promise is never
+			// resolved yet); the third's own `boundedDnsLookup` call synchronously
+			// observes both permits already taken.
+			startIssuerDiscovery(holders[0].authUrl, holders[0].jwksUri, holders[0].tokenUrl, 'slot-0');
+			startIssuerDiscovery(holders[1].authUrl, holders[1].jwksUri, holders[1].tokenUrl, 'slot-1');
+			startIssuerDiscovery(contender.authUrl, contender.jwksUri, contender.tokenUrl, 'contender');
+
+			// The contender must still be retrying (never reached `_fetch`, never
+			// cached a result) while both real permits stay held — checked by
+			// fetch-call tracking rather than `awaitDiscoveredIssuer`, since that
+			// call itself consumes the one-time bounded-await slot for this key.
+			await new Promise((resolve) => setTimeout(resolve, 60));
+			assert.ok(
+				!fetchedOrigins.includes('https://contender.example.com'),
+				'contender must still be retrying the DNS capacity gate, not have reached the fetch step yet'
+			);
+
+			// Free both held permits (and auto-resolve every lookup from here on,
+			// including the contender's own first real one); the contender's
+			// retry loop should now pick up a free slot and resolve to its issuer.
+			pendingDnsResolvers.forEach((resolve) => resolve([PUBLIC_IP]));
+			_setDnsLookup(makeDnsOk());
+			const issuer = await awaitDiscoveredIssuer(contender.authUrl, contender.jwksUri, contender.tokenUrl);
+			assert.equal(issuer, 'https://contender.example.com');
 		});
 	});
 

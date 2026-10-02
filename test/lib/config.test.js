@@ -1752,6 +1752,69 @@ describe('OAuth Configuration', () => {
 				assert.throws(() => initializeProviders(options, undefined), /issuer/);
 			});
 
+			it('a provider with an invalid Azure issuer pin is skipped with a logged error — every other provider still initializes (#271 follow-up)', () => {
+				const warnings = [];
+				const logger = {
+					error: (...args) => warnings.push(args.join(' ')),
+					warn: () => {},
+					info: () => {},
+					debug: () => {},
+				};
+				const options = {
+					providers: {
+						// A stale pin left over after switching tenantId, or copied from
+						// docs — does not name the configured tenant.
+						'bad-azure': {
+							provider: 'azure',
+							clientId: 'c',
+							clientSecret: 's',
+							tenantId: '12345678-1234-1234-1234-123456789012',
+							issuer: 'https://login.microsoftonline.com/87654321-4321-4321-4321-210987654321/v2.0',
+							redirectUri: 'https://app.test.com/oauth',
+						},
+						'github': {
+							provider: 'github',
+							clientId: 'github-client',
+							clientSecret: 'github-secret',
+							redirectUri: 'https://app.test.com/oauth',
+						},
+					},
+				};
+
+				const providers = initializeProviders(options, logger);
+				assert.ok(!providers['bad-azure'], 'the misconfigured provider is skipped, not published');
+				assert.ok(providers['github'], 'every other provider still initializes');
+				assert.ok(
+					warnings.some((w) => w.includes('bad-azure') && w.includes('invalid Azure issuer pin')),
+					'the skip is logged as an error naming the provider'
+				);
+			});
+
+			it('a non-Azure buildProviderConfig failure still aborts every provider — only the Azure-pin case is downgraded to skip-with-error', () => {
+				const options = {
+					providers: {
+						'custom-idp': {
+							provider: 'generic',
+							clientId: 'c',
+							clientSecret: 's',
+							authorizationUrl: 'http://idp.example.com/authorize', // non-https: #231 §4 hard-fail, unrelated to Azure
+							tokenUrl: 'http://idp.example.com/token',
+							userInfoUrl: 'http://idp.example.com/userinfo',
+							jwksUri: 'https://idp.example.com/jwks',
+							redirectUri: 'https://app.test.com/oauth',
+						},
+						'github': {
+							provider: 'github',
+							clientId: 'github-client',
+							clientSecret: 'github-secret',
+							redirectUri: 'https://app.test.com/oauth',
+						},
+					},
+				};
+
+				assert.throws(() => initializeProviders(options, undefined), /issuer/);
+			});
+
 			it('an unconfigured provider with jwksUri + explicit endpoints + no issuer is skipped, not an issuer error (#259/#260 interaction)', () => {
 				// The configured-ness precheck (#259/#260) runs before enforceIssuerForJwks
 				// (#231 §4), so a provider whose credentials are unset never reaches the
