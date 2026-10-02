@@ -61,6 +61,12 @@ describe('tokenIssuer', () => {
 		assert.equal(header.alg, 'RS256');
 	});
 
+	it('sets typ: at+jwt in the JWT header (RFC 9068 §2.1)', () => {
+		const { token } = signAccessToken(baseParams, key);
+		const header = JSON.parse(Buffer.from(token.split('.')[0], 'base64url').toString('utf8'));
+		assert.equal(header.typ, 'at+jwt');
+	});
+
 	it('rejects a token verified against the wrong audience (RFC 8707 binding)', () => {
 		const { token } = signAccessToken(baseParams, key);
 		assert.throws(() => verifyAccessToken(token, key.public_key_pem, { audience: 'https://evil.example.com/mcp' }));
@@ -176,6 +182,47 @@ describe('verifyAccessTokenWithKeySet', () => {
 			() =>
 				verifyAccessTokenWithKeySet('not-a-jwt', [key], { audience: baseParams.audience, issuer: baseParams.issuer }),
 			/malformed token/
+		);
+	});
+
+	it('verifies a token minted with typ: at+jwt (RFC 9068 §4)', () => {
+		const { token } = signAccessToken(baseParams, key);
+		const claims = verifyAccessTokenWithKeySet(token, [key], {
+			audience: baseParams.audience,
+			issuer: baseParams.issuer,
+		});
+		assert.equal(claims.sub, baseParams.subject);
+	});
+
+	it('accepts a transition-era typ: JWT token (pre-#202 tokens, same TTL)', () => {
+		// Default jsonwebtoken header — what older code (before the at+jwt change)
+		// minted. Must keep verifying until those tokens age out.
+		const token = jwt.sign({ client_id: 'c' }, key.private_key_pem, {
+			algorithm: 'RS256',
+			keyid: key.kid,
+			issuer: baseParams.issuer,
+			audience: baseParams.audience,
+			subject: baseParams.subject,
+		});
+		const claims = verifyAccessTokenWithKeySet(token, [key], {
+			audience: baseParams.audience,
+			issuer: baseParams.issuer,
+		});
+		assert.equal(claims.sub, baseParams.subject);
+	});
+
+	it('rejects a token whose typ is neither at+jwt nor JWT', () => {
+		const token = jwt.sign({ client_id: 'c' }, key.private_key_pem, {
+			algorithm: 'RS256',
+			keyid: key.kid,
+			issuer: baseParams.issuer,
+			audience: baseParams.audience,
+			subject: baseParams.subject,
+			header: { typ: 'id_token+jwt' },
+		});
+		assert.throws(
+			() => verifyAccessTokenWithKeySet(token, [key], { audience: baseParams.audience, issuer: baseParams.issuer }),
+			/invalid typ header/
 		);
 	});
 });
