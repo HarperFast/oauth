@@ -169,11 +169,10 @@ export async function handleLogin(
 			browserNonceHash: hashBrowserSecret(browserSecret),
 		});
 	} catch (error) {
-		// State storage failed (e.g. a wedged write queue, #2450) — the sign-in
-		// can't proceed either way, but land on the app's sign-in page with a
-		// reason code instead of core's raw error response. No Set-Cookie: the
-		// browser secret is only useful once a state token exists. Details stay
-		// in the server log via this error; CSRFTokenManager.set already logs too.
+		// Sign-in can't proceed either way, but land on the app's sign-in page
+		// with a reason code instead of letting the raw error escape to the
+		// browser. No Set-Cookie: the browser secret is only useful once a
+		// state token exists.
 		logger?.error?.('OAuth login: failed to store CSRF state:', error);
 		return {
 			status: 302,
