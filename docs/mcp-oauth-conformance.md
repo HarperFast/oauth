@@ -115,9 +115,10 @@ Test files (all under `test/lib/mcp/` unless noted): `wellKnown` · `authorize` 
 
 The two deltas the 2026-07-28 pass surfaced (`typ: at+jwt` and the
 error-response `no-store` test) are closed — see the Token endpoint table
-above. `withMCPAuth`'s production verifier now rejects a `typ` other than
-`at+jwt`/`JWT` (the latter kept only for tokens minted before this change,
-until their TTL expires).
+above. `withMCPAuth`'s production verifier rejects a `typ` other than
+`at+jwt`/`JWT`; `JWT` is kept only so a token minted before this change
+keeps verifying, and isn't itself time-boxed in code — tracked for removal
+in [#258](https://github.com/HarperFast/oauth/issues/258).
 
 Documented-not-yet (see [mcp-oauth.md → Not yet supported](./mcp-oauth.md#not-yet-supported-v11)):
 the 2026-07-28 **step-up authorization flow** (SEP-2350, `403 insufficient_scope` / `scope` challenge) and per-operation scope enforcement are v1.1 forward-work.

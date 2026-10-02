@@ -6,7 +6,7 @@ All notable changes to `@harperfast/oauth` are documented here. The format is ba
 
 ### Changed
 
-- **MCP access tokens now carry `typ: at+jwt` in their JWT header** (RFC 9068 §2.1), closing a gap `docs/mcp-oauth-conformance.md` tracked from the 2026-07-28 conformance pass (#202). `withMCPAuth`'s production verifier (`verifyAccessTokenWithKeySet`) now enforces the header (RFC 9068 §4: the resource server MUST verify `typ`), accepting `at+jwt` and, for a transition window, the prior default `JWT` — tokens already minted with `typ: JWT` stay valid for their TTL rather than being invalidated outright. **Compatibility:** a consumer that pinned `typ: JWT` on these tokens must accept `at+jwt` going forward.
+- **MCP access tokens now carry `typ: at+jwt` in their JWT header** (RFC 9068 §2.1), closing a gap `docs/mcp-oauth-conformance.md` tracked from the 2026-07-28 conformance pass (#202). `withMCPAuth`'s production verifier (`verifyAccessTokenWithKeySet`) now enforces the header (RFC 9068 §4: the resource server MUST verify `typ`), accepting `at+jwt` and the prior default `JWT` — a token already minted with `typ: JWT` keeps verifying rather than being invalidated outright; since every token minted from here on carries `typ: at+jwt`, the `JWT` allowance is self-limiting (it stops mattering once any pre-upgrade token could have expired) but isn't itself time-boxed in code — tracked for removal in #258. **Compatibility:** a consumer that pinned `typ: JWT` on these tokens must accept `at+jwt` going forward.
 
 ### Fixed
 

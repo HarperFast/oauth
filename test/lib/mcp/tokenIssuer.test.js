@@ -195,8 +195,7 @@ describe('verifyAccessTokenWithKeySet', () => {
 	});
 
 	it('accepts a transition-era typ: JWT token (pre-#202 tokens, same TTL)', () => {
-		// Default jsonwebtoken header — what older code (before the at+jwt change)
-		// minted. Must keep verifying until those tokens age out.
+		// jsonwebtoken's default typ, with no `header` override.
 		const token = jwt.sign({ client_id: 'c' }, key.private_key_pem, {
 			algorithm: 'RS256',
 			keyid: key.kid,
@@ -250,11 +249,12 @@ describe('tokenIssuer ES256', () => {
 		assert.equal(claims.jti, jti);
 	});
 
-	it('puts the kid and ES256 alg in the JWT header', () => {
+	it('puts the kid, ES256 alg, and typ: at+jwt in the JWT header', () => {
 		const { token } = signAccessToken(baseParams, ecKey);
 		const header = JSON.parse(Buffer.from(token.split('.')[0], 'base64url').toString('utf8'));
 		assert.equal(header.kid, 'ec-key-1');
 		assert.equal(header.alg, 'ES256');
+		assert.equal(header.typ, 'at+jwt');
 	});
 
 	it('throws on a key record with an unsupported alg', () => {
