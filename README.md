@@ -159,6 +159,7 @@ Complete documentation is available in the [docs](./docs) directory:
 - **[MCP OAuth](./docs/mcp-oauth.md)** - Authorization server for Model Context Protocol clients (experimental)
 - **[API Reference](./docs/api-reference.md)** - Endpoints and programmatic API
 - **[Changelog](./CHANGELOG.md)** - Release history
+- **[Maintaining](./docs/maintaining.md)** - Release process, CI/review automation, and where design decisions live (for maintainers)
 
 ## Development
 

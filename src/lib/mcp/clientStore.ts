@@ -60,7 +60,7 @@ function parseArrayField(value: unknown): string[] | undefined {
 /**
  * Encode the record for storage. Explicit field access (no spread) so we
  * write a well-typed record even if a caller hands us a tracked object —
- * per CLAUDE.md's "GenericTrackedObject + spread" gotcha.
+ * per AGENTS.md's "GenericTrackedObject + spread" gotcha.
  */
 function encodeRecord(record: MCPClientRecord): Record<string, any> {
 	return {
@@ -87,7 +87,7 @@ function encodeRecord(record: MCPClientRecord): Record<string, any> {
  * Decode a stored row. Must use explicit property access — Harper returns
  * GenericTrackedObject Proxies whose own-keys are empty, so { ...raw } drops
  * every scalar field (client_id, client_secret, …) and breaks retrieval.
- * Caught by Gemini review on PR #89; documented in CLAUDE.md.
+ * Caught by Gemini review on PR #89; documented in AGENTS.md.
  */
 function decodeRecord(raw: Record<string, any>): MCPClientRecord {
 	return {
