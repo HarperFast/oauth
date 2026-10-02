@@ -146,6 +146,19 @@ describe('resolveAzureIssuerBinding', () => {
 			assert.equal(warnings.length, 0);
 		});
 
+		it('does not warn when authorizationUrl names a verified tenant DOMAIN (not an alias or a GUID) — we have no offline way to compare a domain name to jwksUri’s GUID, so warning would be a guess, not a finding', () => {
+			const warnings = [];
+			const logger = { warn: (msg) => warnings.push(msg) };
+			const config = baseConfig({
+				authorizationUrl: 'https://login.microsoftonline.com/contoso.onmicrosoft.com/oauth2/v2.0/authorize',
+				jwksUri: `https://login.microsoftonline.com/${GUID_A}/discovery/v2.0/keys`,
+				issuer: null,
+			});
+			resolveAzureIssuerBinding(config, 'azure-provider', logger);
+			assert.equal(config.issuer, `https://login.microsoftonline.com/${GUID_A}/v2.0`);
+			assert.equal(warnings.length, 0);
+		});
+
 		it('a throwing warn logger does not abort the derivation', () => {
 			const config = baseConfig({
 				jwksUri: `https://login.microsoftonline.com/${GUID_A}/discovery/v2.0/keys`,

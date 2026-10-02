@@ -254,6 +254,14 @@ function azureAuthorizeTenantSegment(authorizationUrl: string | null | undefined
  * now only `guid`'s tokens can. The warning exists so an operator who relied
  * on that (deliberately or not) finds out at startup, not from a wave of
  * `jwt issuer invalid` login failures.
+ *
+ * Only fires when `authorizeSegment` is something we can actually compare
+ * against `guid`: an alias (`common`/`organizations`/`consumers`) or another
+ * real tenant GUID. A verified-domain segment (e.g. `contoso.onmicrosoft.com`)
+ * is neither — Azure accepts a tenant's registered domain name here, and we
+ * have no offline way to map that domain to a GUID, so warning on it would be
+ * a guess, not a finding; staying silent there is deliberate, not an
+ * oversight.
  */
 function azureDerivedIssuer(
 	guid: string,
@@ -261,7 +269,11 @@ function azureDerivedIssuer(
 	providerName: string,
 	logger?: Logger
 ): string {
-	const authorizeSegment = azureAuthorizeTenantSegment(authorizationUrl);
+	const rawAuthorizeSegment = azureAuthorizeTenantSegment(authorizationUrl);
+	const authorizeSegment =
+		rawAuthorizeSegment !== null && (ALIAS_SEGMENTS.has(rawAuthorizeSegment) || GUID_RE.test(rawAuthorizeSegment))
+			? rawAuthorizeSegment
+			: null;
 	if (authorizeSegment && authorizeSegment !== guid) {
 		try {
 			logger?.warn?.(

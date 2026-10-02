@@ -399,9 +399,13 @@ export class OAuthResource extends Resource {
 					const { AzureIssuerBindingError } = await import('./azureIssuer.ts');
 
 					const pluginDefaults = OAuthResource.pluginDefaults || {};
+					const dedupedLogger = OAuthResource.dynamicProviderCache?.wrapLoggerForDynamicResolution(
+						providerName,
+						logger
+					);
 					let config: OAuthProviderConfig;
 					try {
-						config = buildProviderConfig(hookConfig, providerName, pluginDefaults);
+						config = buildProviderConfig(hookConfig, providerName, pluginDefaults, false, dedupedLogger);
 					} catch (buildError) {
 						if (buildError instanceof AzureIssuerBindingError) {
 							OAuthResource.dynamicProviderCache?.recordAzurePinFailure(providerName, buildError.message);

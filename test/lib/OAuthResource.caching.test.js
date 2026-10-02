@@ -282,4 +282,71 @@ describe('OAuthResource - cacheDynamicProviders', () => {
 			}
 		});
 	});
+
+	describe('dynamic resolution — Azure tenant-mismatch warning reaches the log, deduped (#271 follow-up)', () => {
+		const mismatchedAzureHookConfig = {
+			provider: 'azure',
+			clientId: 'c',
+			clientSecret: 's',
+			// authorizationUrl names the shared 'common' alias; jwksUri names one real
+			// tenant. Unpinned, buildProviderConfig derives the tenant-exclusive
+			// issuer (the safe direction) but also warns about the mismatch — this
+			// only reaches the log at all once a logger is passed through.
+			authorizationUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize',
+			jwksUri: 'https://login.microsoftonline.com/12345678-1234-1234-1234-123456789012/discovery/v2.0/keys',
+			redirectUri: 'https://app.test.com/oauth',
+		};
+
+		it('passes the logger through so the mismatch warning fires for a dynamically-resolved provider', async () => {
+			const callResolveProvider = createMockFn(async () => mismatchedAzureHookConfig);
+			const mockHookManager = {
+				hasHook: (name) => name === 'onResolveProvider',
+				callResolveProvider,
+			};
+
+			const cache = new DynamicProviderCache(true);
+			OAuthResource.configure({}, false, mockHookManager, {}, mockLogger, cache);
+
+			const resource = new OAuthResource();
+			resource.getContext = () => ({ session: { id: 'session-123' }, headers: {} });
+			const target = { id: 'mismatched-azure/login', get: () => null };
+
+			const result = await resource.get(target);
+			assert.equal(result.status, 302, 'the mismatch is advisory only — the provider still resolves');
+			assert.ok(
+				mockLogger.warn.mock.calls.some((call) =>
+					call.arguments.some((arg) => typeof arg === 'string' && arg.includes('mismatched-azure'))
+				),
+				'the warning reaches the log now that resource.ts passes the logger to buildProviderConfig'
+			);
+		});
+
+		it('does not repeat the same warning on every request — dedup survives even with caching disabled', async () => {
+			const callResolveProvider = createMockFn(async () => mismatchedAzureHookConfig);
+			const mockHookManager = {
+				hasHook: (name) => name === 'onResolveProvider',
+				callResolveProvider,
+			};
+
+			// Cache disabled: every request re-runs the hook and rebuilds the
+			// config, which is exactly the "every request" case the dedup exists
+			// to stop from flooding the log.
+			const cache = new DynamicProviderCache(false);
+			OAuthResource.configure({}, false, mockHookManager, {}, mockLogger, cache);
+
+			const resource = new OAuthResource();
+			resource.getContext = () => ({ session: { id: 'session-123' }, headers: {} });
+			const target = { id: 'mismatched-azure/login', get: () => null };
+
+			await resource.get(target);
+			await resource.get(target);
+			await resource.get(target);
+			assert.equal(callResolveProvider.mock.calls.length, 3, 'the hook does re-run every request (cache disabled)');
+
+			const matchingWarnings = mockLogger.warn.mock.calls.filter((call) =>
+				call.arguments.some((arg) => typeof arg === 'string' && arg.includes('mismatched-azure'))
+			);
+			assert.equal(matchingWarnings.length, 1, 'the warning logs once, not once per request');
+		});
+	});
 });

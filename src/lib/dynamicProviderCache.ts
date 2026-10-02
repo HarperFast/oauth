@@ -21,7 +21,7 @@
  *   (unset)  — DEFAULT_DYNAMIC_PROVIDER_CACHE_TTL_SECONDS (bounded; see below)
  */
 
-import type { ProviderRegistryEntry } from '../types.ts';
+import type { Logger, ProviderRegistryEntry } from '../types.ts';
 
 /**
  * Default TTL (seconds) when `cacheDynamicProviders` is not set. Bounded rather
@@ -54,6 +54,7 @@ export class DynamicProviderCache {
 	private cache = new Map<string, CacheEntry>();
 	private ttlMs: number;
 	private azurePinFailures = new Map<string, AzurePinFailure>();
+	private warnedOnce = new Set<string>();
 
 	constructor(ttl: boolean | number = DEFAULT_DYNAMIC_PROVIDER_CACHE_TTL_SECONDS) {
 		this.ttlMs = DynamicProviderCache.parseTTL(ttl);
@@ -87,6 +88,7 @@ export class DynamicProviderCache {
 	clear(): void {
 		this.cache.clear();
 		this.azurePinFailures.clear();
+		this.warnedOnce.clear();
 	}
 
 	updateTTL(ttl: boolean | number): void {
@@ -122,5 +124,43 @@ export class DynamicProviderCache {
 	/** Clear any cooling-down Azure-pin failure for `name` — called on a successful resolution. */
 	clearAzurePinFailure(name: string): void {
 		this.azurePinFailures.delete(name);
+	}
+
+	/**
+	 * True the first time `name`+`message` is seen, `false` every time after
+	 * (until {@link clear} runs) — records the pair as seen either way. Used
+	 * by {@link wrapLoggerForDynamicResolution} to stop an advisory warning
+	 * from `buildProviderConfig` (e.g. the Azure tenant-mismatch warning)
+	 * from repeating on every dynamic resolution of the same provider — which,
+	 * with `cacheDynamicProviders: false` or a short TTL, can mean every
+	 * single request. Independent of the success-cache TTL and the Azure-pin
+	 * cooldown above: once warned, a provider stays quiet about that exact
+	 * message for the life of this cache instance, not just one TTL window.
+	 */
+	private shouldWarnOnce(name: string, message: string): boolean {
+		const key = `${name}\u0000${message}`;
+		if (this.warnedOnce.has(key)) return false;
+		this.warnedOnce.add(key);
+		return true;
+	}
+
+	/**
+	 * Wrap `logger` so `warn` calls for `providerName` made while building its
+	 * config dynamically (`onResolveProvider`) are deduped via
+	 * {@link shouldWarnOnce} — the first occurrence of each distinct message
+	 * logs; later ones are silently dropped. `info`/`error`/`debug` pass
+	 * through unchanged: those are either one-shot events (a successful
+	 * resolution) or already covered by their own cooldown (`AzureIssuerBindingError`,
+	 * via {@link recordAzurePinFailure}), not messages that repeat identically
+	 * on every request.
+	 */
+	wrapLoggerForDynamicResolution(providerName: string, logger?: Logger): Logger | undefined {
+		if (!logger) return logger;
+		return {
+			...logger,
+			warn: (message: string, ...args: any[]) => {
+				if (this.shouldWarnOnce(providerName, message)) logger.warn?.(message, ...args);
+			},
+		};
 	}
 }

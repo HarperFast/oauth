@@ -360,4 +360,71 @@ describe('DynamicProviderCache', () => {
 			assert.equal(cache.getAzurePinFailure('azure-tenant-a'), undefined);
 		});
 	});
+
+	describe('wrapLoggerForDynamicResolution', () => {
+		it('returns undefined unchanged when no logger is given', () => {
+			const cache = new DynamicProviderCache();
+			assert.equal(cache.wrapLoggerForDynamicResolution('azure-provider', undefined), undefined);
+		});
+
+		it('logs the first warn() call for a provider', () => {
+			const cache = new DynamicProviderCache();
+			const warnings = [];
+			const logger = { warn: (msg) => warnings.push(msg) };
+			const wrapped = cache.wrapLoggerForDynamicResolution('azure-provider', logger);
+			wrapped.warn('tenant mismatch');
+			assert.deepEqual(warnings, ['tenant mismatch']);
+		});
+
+		it('drops a repeat of the exact same message for the same provider — the dynamic-resolution path can otherwise re-log it on every request', () => {
+			const cache = new DynamicProviderCache();
+			const warnings = [];
+			const logger = { warn: (msg) => warnings.push(msg) };
+			const wrapped = cache.wrapLoggerForDynamicResolution('azure-provider', logger);
+			wrapped.warn('tenant mismatch');
+			wrapped.warn('tenant mismatch');
+			wrapped.warn('tenant mismatch');
+			assert.deepEqual(warnings, ['tenant mismatch']);
+		});
+
+		it('logs a DIFFERENT message for the same provider — dedup is keyed by message, not just by provider', () => {
+			const cache = new DynamicProviderCache();
+			const warnings = [];
+			const logger = { warn: (msg) => warnings.push(msg) };
+			const wrapped = cache.wrapLoggerForDynamicResolution('azure-provider', logger);
+			wrapped.warn('tenant mismatch');
+			wrapped.warn('a different warning');
+			assert.deepEqual(warnings, ['tenant mismatch', 'a different warning']);
+		});
+
+		it('is scoped per provider — the same message still logs once for a different provider', () => {
+			const cache = new DynamicProviderCache();
+			const warnings = [];
+			const logger = { warn: (msg) => warnings.push(msg) };
+			cache.wrapLoggerForDynamicResolution('azure-provider-a', logger).warn('tenant mismatch');
+			cache.wrapLoggerForDynamicResolution('azure-provider-b', logger).warn('tenant mismatch');
+			assert.deepEqual(warnings, ['tenant mismatch', 'tenant mismatch']);
+		});
+
+		it('passes info/error/debug through unchanged, with no dedup', () => {
+			const cache = new DynamicProviderCache();
+			const infos = [];
+			const logger = { info: (msg) => infos.push(msg) };
+			const wrapped = cache.wrapLoggerForDynamicResolution('azure-provider', logger);
+			wrapped.info('resolved');
+			wrapped.info('resolved');
+			assert.deepEqual(infos, ['resolved', 'resolved']);
+		});
+
+		it('clear() resets the dedup state, so a warning can log again afterward', () => {
+			const cache = new DynamicProviderCache();
+			const warnings = [];
+			const logger = { warn: (msg) => warnings.push(msg) };
+			const wrapped = cache.wrapLoggerForDynamicResolution('azure-provider', logger);
+			wrapped.warn('tenant mismatch');
+			cache.clear();
+			wrapped.warn('tenant mismatch');
+			assert.deepEqual(warnings, ['tenant mismatch', 'tenant mismatch']);
+		});
+	});
 });

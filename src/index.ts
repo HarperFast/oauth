@@ -503,9 +503,10 @@ export async function handleApplication(scope: Scope): Promise<void> {
 					const { buildProviderConfig } = await import('./lib/config.ts');
 					const { AzureIssuerBindingError } = await import('./lib/azureIssuer.ts');
 
+					const dedupedLogger = dynamicProviderCache.wrapLoggerForDynamicResolution(providerConfigId, logger);
 					let config: OAuthProviderConfig | undefined;
 					try {
-						config = buildProviderConfig(hookConfig, providerConfigId, pluginDefaults);
+						config = buildProviderConfig(hookConfig, providerConfigId, pluginDefaults, false, dedupedLogger);
 					} catch (buildError) {
 						if (buildError instanceof AzureIssuerBindingError) {
 							dynamicProviderCache.recordAzurePinFailure(providerConfigId, buildError.message);
