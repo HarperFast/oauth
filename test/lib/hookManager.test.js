@@ -5,6 +5,7 @@
 import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { HookManager } from '../../dist/lib/hookManager.js';
+import { ResolveEmailError } from '../../dist/lib/resolveEmailError.js';
 import { createMockFn, createMockLogger } from '../helpers/mockFn.js';
 
 // Note: mock is imported and used by the helper, we only use createMockFn in tests
@@ -380,6 +381,112 @@ describe('HookManager', () => {
 			await flushMicrotasks();
 			await flushMicrotasks();
 			assert.ok(true, 'no unhandled rejection escaped the detached chain');
+		});
+	});
+
+	describe('callResolveEmail (#228)', () => {
+		const CANDIDATES = [
+			{ email: 'work@example.com', verified: true, primary: false },
+			{ email: 'personal@example.com', verified: true, primary: true },
+		];
+
+		it('returns undefined when no onResolveEmail hook registered', async () => {
+			const result = await hookManager.callResolveEmail(CANDIDATES, 'github');
+			assert.equal(result, undefined);
+		});
+
+		it('calls the hook with the candidates and provider name', async () => {
+			let received;
+			hookManager.register({
+				onResolveEmail: async (candidates, provider) => {
+					received = { candidates, provider };
+					return 'work@example.com';
+				},
+			});
+
+			const result = await hookManager.callResolveEmail(CANDIDATES, 'github');
+			assert.equal(result, 'work@example.com');
+			assert.deepEqual(received.candidates, CANDIDATES);
+			assert.equal(received.provider, 'github');
+		});
+
+		it('passes through an explicit "no preference" (null/undefined)', async () => {
+			hookManager.register({ onResolveEmail: async () => null });
+			assert.equal(await hookManager.callResolveEmail(CANDIDATES, 'github'), null);
+
+			hookManager.register({ onResolveEmail: async () => undefined });
+			assert.equal(await hookManager.callResolveEmail(CANDIDATES, 'github'), undefined);
+		});
+
+		it('logs and RE-THROWS a ResolveEmailError when the hook throws (does not fall back silently)', async () => {
+			hookManager.register({
+				onResolveEmail: async () => {
+					throw new Error('db unavailable');
+				},
+			});
+
+			await assert.rejects(
+				() => hookManager.callResolveEmail(CANDIDATES, 'github'),
+				(error) => {
+					assert.ok(error instanceof ResolveEmailError, 'wraps a thrown hook error as ResolveEmailError');
+					assert.match(error.message, /db unavailable/);
+					assert.match(error.cause.message, /db unavailable/, 'preserves the original error as cause');
+					return true;
+				}
+			);
+			assert.equal(mockLogger.error.mock.calls.length, 1);
+		});
+
+		it('logs and RE-THROWS a ResolveEmailError when the hook does not settle within the timeout, and aborts its signal', async () => {
+			let receivedSignal;
+			hookManager.register({
+				onResolveEmail: (_candidates, _provider, signal) => {
+					receivedSignal = signal;
+					return new Promise(() => {}); // never settles
+				},
+			});
+
+			await assert.rejects(
+				() => hookManager.callResolveEmail(CANDIDATES, 'github', 20),
+				(error) => {
+					assert.ok(error instanceof ResolveEmailError);
+					assert.match(error.message, /onResolveEmail hook timed out/);
+					return true;
+				}
+			);
+			assert.equal(mockLogger.error.mock.calls.length, 1);
+			assert.equal(receivedSignal.aborted, true, 'the hook receives a signal that is aborted on timeout');
+		});
+
+		it('passes an unaborted signal through to the hook on the happy path', async () => {
+			let receivedSignal;
+			hookManager.register({
+				onResolveEmail: async (_candidates, _provider, signal) => {
+					receivedSignal = signal;
+					return 'work@example.com';
+				},
+			});
+
+			await hookManager.callResolveEmail(CANDIDATES, 'github');
+			assert.equal(receivedSignal.aborted, false);
+		});
+
+		it('still rejects with ResolveEmailError even if the hook resolves(undefined) from its own abort listener', async () => {
+			hookManager.register({
+				onResolveEmail: (_candidates, _provider, signal) =>
+					new Promise((resolve) => {
+						signal.addEventListener('abort', () => resolve(undefined));
+					}),
+			});
+
+			await assert.rejects(
+				() => hookManager.callResolveEmail(CANDIDATES, 'github', 20),
+				(error) => {
+					assert.ok(error instanceof ResolveEmailError);
+					assert.match(error.message, /onResolveEmail hook timed out/);
+					return true;
+				}
+			);
 		});
 	});
 });

@@ -51,10 +51,18 @@ export const GitHubProvider: OAuthProviderConfig = {
 	async getUserInfo(accessToken: string, helpers: GetUserInfoHelpers): Promise<any> {
 		// Get basic user info using the base getUserInfo method
 		const userInfo = await helpers.getUserInfo(accessToken);
+		// A non-object body: nothing can be adopted from it, so bail before any userInfo.* access.
+		if (!userInfo || typeof userInfo !== 'object') {
+			return userInfo;
+		}
+		// Snapshot before any mutation below — needed to mark which candidate is the public
+		// profile address even after the profile-or-primary fallback overwrites userInfo.email.
+		const profileEmail = userInfo.email;
 
 		// Only a genuinely successful /user/emails fetch earns the trusted tag.
 		// On any failure or non-OK response the provenance stays 'unauthenticated'.
 		let emailFetchSucceeded = false;
+		let fetchedEmails: Array<{ email: string; primary: boolean; verified: boolean }> | undefined;
 
 		try {
 			const emailResponse = await fetch('https://api.github.com/user/emails', {
@@ -67,26 +75,11 @@ export const GitHubProvider: OAuthProviderConfig = {
 			});
 
 			if (emailResponse.ok) {
-				const emails = (await emailResponse.json()) as Array<{
-					email: string;
-					primary: boolean;
-					verified: boolean;
-				}>;
-				if (userInfo.email) {
-					// Public profile email: surface its verified status. No match →
-					// leave email_verified unset (unknown), never guess.
-					const match = emails.find((e) => e.email === userInfo.email);
-					if (match) {
-						userInfo.email_verified = match.verified;
-						emailFetchSucceeded = true;
-					}
+				const parsed = await emailResponse.json();
+				if (Array.isArray(parsed) && parsed.every((e) => e && typeof e.email === 'string')) {
+					fetchedEmails = parsed;
 				} else {
-					const primaryEmail = emails.find((e) => e.primary);
-					if (primaryEmail) {
-						userInfo.email = primaryEmail.email;
-						userInfo.email_verified = primaryEmail.verified;
-						emailFetchSucceeded = true;
-					}
+					helpers.logger?.warn?.('GitHub /user/emails returned an unexpected shape — email/email_verified unavailable');
 				}
 			} else {
 				// The case operators actually hit when the user:email scope is missing
@@ -105,6 +98,42 @@ export const GitHubProvider: OAuthProviderConfig = {
 			);
 		}
 
+		// Outside the fetch's try/catch above: a resolveEmail rejection (#228) must fail the
+		// login, not be swallowed as an email-fetch failure and fall through to the default.
+		if (fetchedEmails) {
+			const resolved = helpers.resolveEmail
+				? await helpers.resolveEmail(
+						fetchedEmails.map((e) => ({
+							email: e.email,
+							verified: e.verified === true,
+							primary: e.primary === true,
+							profile: e.email === profileEmail,
+						}))
+					)
+				: undefined;
+			if (resolved) {
+				// helpers.resolveEmail already validated this is one of the verified candidates.
+				userInfo.email = resolved;
+				userInfo.email_verified = true;
+				emailFetchSucceeded = true;
+			} else if (userInfo.email) {
+				// Public profile email: surface its verified status. No match →
+				// leave email_verified unset (unknown), never guess.
+				const match = fetchedEmails.find((e) => e.email === userInfo.email);
+				if (match) {
+					userInfo.email_verified = match.verified;
+					emailFetchSucceeded = true;
+				}
+			} else {
+				const primaryEmail = fetchedEmails.find((e) => e.primary);
+				if (primaryEmail) {
+					userInfo.email = primaryEmail.email;
+					userInfo.email_verified = primaryEmail.verified;
+					emailFetchSucceeded = true;
+				}
+			}
+		}
+
 		// 'github-authenticated' ONLY when the authenticated /user/emails fetch
 		// succeeded AND the resolved email is verified. Both conditions are decided
 		// here, in the code that performed the fetch, and asserted through the
@@ -113,11 +142,6 @@ export const GitHubProvider: OAuthProviderConfig = {
 		// unauthenticated so the adoption gate denies it.
 		const provenance =
 			emailFetchSucceeded && userInfo.email_verified === true ? 'github-authenticated' : 'unauthenticated';
-		// A userinfo endpoint that returns a null/primitive body leaves userInfo non-object;
-		// nothing can be adopted from it, so return it as-is rather than defineProperty-ing.
-		if (!userInfo || typeof userInfo !== 'object') {
-			return userInfo;
-		}
 		// Non-enumerable so a spread — `{ ...adapterResult, email: attacker }` — does not
 		// carry the assertion onto a substituted email; the wrapper reads it by key, which
 		// works regardless of enumerability.

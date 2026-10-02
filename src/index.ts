@@ -27,11 +27,13 @@ import type { Scope, OAuthPluginConfig, ProviderRegistry, OAuthHooks } from './t
 // Export HookManager class, OAuthResource class, and types
 export { HookManager } from './lib/hookManager.ts';
 export { OAuthResource } from './lib/resource.ts';
+export { ResolveEmailError, AmbiguousEmailError, EmailLookupError } from './lib/resolveEmailError.ts';
 export type {
 	OAuthHooks,
 	OAuthUser,
 	OAuthAuthEvidence,
 	EmailProvenance,
+	EmailCandidate,
 	TokenResponse,
 	OnLoginResult,
 	OnLoginResultOk,

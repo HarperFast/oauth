@@ -4,7 +4,20 @@
  * Manages loading and calling lifecycle hooks for the OAuth plugin
  */
 
-import type { OAuthHooks, OAuthUser, OnLoginResult, TokenResponse, Logger, OAuthProviderConfig } from '../types.ts';
+import type {
+	OAuthHooks,
+	OAuthUser,
+	OnLoginResult,
+	TokenResponse,
+	Logger,
+	OAuthProviderConfig,
+	EmailCandidate,
+} from '../types.ts';
+import { ResolveEmailError } from './resolveEmailError.ts';
+
+/** Bounds `onResolveEmail` so a stalled selector (e.g. a slow DB lookup) can't hold the
+ *  OAuth callback open indefinitely — same bound as the GitHub `/user/emails` fetch itself. */
+const ON_RESOLVE_EMAIL_TIMEOUT_MS = 5000;
 
 /**
  * Hook Manager
@@ -57,6 +70,54 @@ export class HookManager {
 			this.logger?.error?.('onLogin hook failed:', error instanceof Error ? error.message : String(error));
 			// Don't throw - hooks should not break the OAuth flow
 			return;
+		}
+	}
+
+	/**
+	 * Call onResolveEmail hook (#228).
+	 *
+	 * Unlike `callOnLogin`/`callOnLogout`/`callOnTokenRefresh`, a failure here is NOT
+	 * swallowed: it always surfaces as a `ResolveEmailError` (callers must fail the login
+	 * on it, never fall back to the default — the same contract as `callResolveProvider`).
+	 * A hook that doesn't settle within `timeoutMs` is aborted (`signal`, cooperative —
+	 * the hook must check/pass it along for cancellation to actually stop its work) and
+	 * fails the same way.
+	 */
+	async callResolveEmail(
+		candidates: readonly EmailCandidate[],
+		provider: string,
+		timeoutMs: number = ON_RESOLVE_EMAIL_TIMEOUT_MS
+	): Promise<string | null | undefined> {
+		const hook = this.hooks.onResolveEmail;
+		if (!hook) return undefined;
+
+		this.logger?.debug?.(`Calling onResolveEmail hook for provider: ${provider}`);
+		const controller = new AbortController();
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		try {
+			return await Promise.race([
+				Promise.resolve(hook(candidates, provider, controller.signal)),
+				new Promise<never>((_, reject) => {
+					// Reject BEFORE aborting: aborting can synchronously settle the hook's own
+					// promise (e.g. an abort listener that resolves(undefined)) and Promise.race
+					// takes whichever operand settles first — reject first so the timeout always
+					// wins the race regardless of how the hook reacts to the signal.
+					timer = setTimeout(() => {
+						reject(new ResolveEmailError(`onResolveEmail hook timed out after ${timeoutMs}ms`));
+						controller.abort();
+					}, timeoutMs);
+				}),
+			]);
+		} catch (error) {
+			this.logger?.error?.('onResolveEmail hook failed:', error instanceof Error ? error.message : String(error));
+			throw error instanceof ResolveEmailError
+				? error
+				: new ResolveEmailError(
+						`onResolveEmail hook failed: ${error instanceof Error ? error.message : String(error)}`,
+						{ cause: error }
+					);
+		} finally {
+			clearTimeout(timer);
 		}
 	}
 
