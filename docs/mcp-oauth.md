@@ -214,23 +214,31 @@ JWKS rather than assuming a fixed key id. Claims:
 | `iat`/`exp` | Issued-at / expiry (`exp` = `iat` + `accessTokenTtl`, default 1 hour)                                                                                                                                                                                                                                                     |
 | `jti`       | Unique token id (used in audit events; safe to log)                                                                                                                                                                                                                                                                       |
 
-Refresh tokens rotate on use: presenting an already-used token from a family
-revokes the whole family (replay defense). Refresh families live for
-`refreshTokenTtl` (default 30 days).
+Refresh tokens rotate on use: a superseded (already-used) refresh token is
+refused with `invalid_grant` and revokes the whole family (replay defense). If
+the revocation write fails, the token is still refused with `invalid_grant` and
+nothing is issued. The response does not claim the revocation; the token
+endpoint's handler logs one line naming the family and failure, without the error
+text or the token; the refresh-family store's own
+write-error log still carries the underlying error. The family stays live until
+a later presentation retires or revokes it, or it expires. Refresh families
+live for `refreshTokenTtl` (default 30 days).
 
-Refresh families minted by this version carry a provenance marker in the
-family id itself; a family from before that (or replicated from an older
-node) is rejected with `invalid_grant` and retired the first time it is
-presented for refresh, so the client re-authorizes into a fresh, provenanced
-family. This is a lazy, per-family check on the existing refresh path — no
-startup sweep. Because the marker lives in the id and rotation reuses the id,
-mixed-version rollouts are safe: an old worker or node rotating a family
-minted by this version leaves its provenance untouched.
+Version 2.7.0 introduced a provenance marker in the refresh-family id. A
+family with a bare UUID id from before 2.7.0 is rejected with `invalid_grant`
+and retired on its next refresh, so its client re-authorizes. If retirement
+cannot be persisted, the request is still rejected, the failure is logged, and
+the family stays live until a later presentation retires or revokes it, or it
+expires. This check runs per family on refresh, with no startup sweep.
 
-Real cost when upgrading: every MCP client holding a refresh token minted
-before this version re-authorizes once, at its next refresh. After a
-rollback, only families minted while rolled back re-authorize once after
-re-upgrading. Nothing else to run — no manual step, no data migration.
+Families with `p1-` ids from 2.7.x keep their provenance: refresh treats them
+as bound to `none` for CIMD clients, or to the registered method (default
+`none`) for stored clients. A different currently permitted method requires
+reauthorization; see [Migration and rollback](#migration-and-rollback).
+On rollback to 2.7.x, `p2-` families are retired at their next refresh, so
+those clients re-authorize; codes in flight can be redeemed there without the
+binding check. Routing bound grants to a version below 2.7 is unsafe. Drain
+older nodes before issuing bound grants as described in that section.
 
 By default any client whose registered `grant_types` include `refresh_token`
 receives a refresh token on the code exchange. The AS metadata advertises
@@ -575,8 +583,9 @@ automatic resolution.
    the hostname is used for TLS SNI and certificate verification, so DNS rebinding
    between the gate and the connection cannot re-target the fetch. It then
    validates the document: `client_id` must match the URL, `client_name` and
-   `redirect_uris` are required, grant types and auth methods must match supported
-   values.
+   `redirect_uris` are required, grant types must include `authorization_code`,
+   and the declared token-endpoint authentication is parsed (see
+   [Token endpoint authentication for CIMD clients](#token-endpoint-authentication-for-cimd-clients)).
 4. Instead of immediately redirecting to the upstream IdP, the AS shows the user an
    **interstitial confirmation page** that displays the `client_id` host (the
    authoritative CIMD identity), the `client_name`, and the redirect URI hostname
@@ -663,12 +672,267 @@ hostname string is accepted and normalized to a one-element list. Omitting
 `allowedHosts` (or an empty list) allows any globally-routable host — the SSRF
 gate still applies.
 
-> **v1 limitation:** only `token_endpoint_auth_method: none` (public clients) is
-> supported for **interactive** CIMD clients. `private_key_jwt` is accepted only
-> in the [headless-agent document shape](#headless-agents-client_credentials) —
-> any other combination is rejected with `invalid_client`.
+### Token endpoint authentication for CIMD clients
 
-### Stored/DCR clients are unchanged
+The client presents a method; the server permits exactly one method per client
+and rejects any other presentation.
+
+**Which method is permitted.** For an interactive CIMD client, the server takes
+the intersection of:
+
+- the methods the document declares: `token_endpoint_auth_methods_supported`
+  when present, else `token_endpoint_auth_method`, else `none`;
+- the methods this server advertises in `token_endpoint_auth_methods_supported`;
+- the methods usable for this client: `none`, and `private_key_jwt` subject to
+  the client's keys.
+  Selection checks the inline key set or the `jwks_uri` location policy and any signing-algorithm pin. For `jwks_uri`, the fetched keys are validated during token exchange.
+
+The document's singular `token_endpoint_auth_method` wins if it is in the
+intersection; otherwise the sole member; otherwise `private_key_jwt` if it is a
+member. An empty intersection refuses the client (`unauthorized_client` at
+`/authorize`, `invalid_client` at `/token`). A client that prefers
+`private_key_jwt`, which this server advertises, but whose keys are unusable is
+refused rather than resolved to `none`.
+
+**What is advertised.** `private_key_jwt` appears in the metadata exactly when
+a verification path for it is enabled:
+
+- the headless path, `mcp.clientCredentials.enabled`, accepts `EdDSA`;
+- the interactive CIMD path accepts `RS256`, `ES256` and `EdDSA`. It is active
+  whenever CIMD resolution is on and `private_key_jwt` is advertised: by
+  `mcp.clientIdMetadataDocuments.privateKeyJwt.enabled`, or by the headless
+  grant, whose advertisement steers interactive clients too.
+
+`token_endpoint_auth_signing_alg_values_supported` is the union of what the
+enabled paths accept: `RS256`, `ES256`, `EdDSA` whenever the interactive path is
+active, and `EdDSA` alone only if CIMD resolution is off.
+
+**Recorded ChatGPT behaviour.** In one session recorded against a test
+authorization server that advertised both `none` and `private_key_jwt`, ChatGPT
+authenticated its code exchange and four refreshes with `private_key_jwt`:
+`RS256` with a 2048-bit key from its same-origin `jwks_uri`, header `typ` `JWT`,
+a 60-second lifetime, and the token endpoint URL as the single `aud`. In a
+second session, offered only `none`, it used `none`. This server's issuer-only
+audience policy refuses those assertions unless the audience exception below
+lists ChatGPT's client ID and has not expired. The recording was not made against this plugin; it
+covers one session per case, shows no key rotation, and does not show whether
+each refresh presented the refresh token returned by the previous one.
+
+| Configuration                                                              | `private_key_jwt` advertised | `token_endpoint_auth_signing_alg_values_supported` | ChatGPT is permitted | ChatGPT's recorded request shape                                  |
+| -------------------------------------------------------------------------- | ---------------------------- | -------------------------------------------------- | -------------------- | ----------------------------------------------------------------- |
+| CIMD on, `privateKeyJwt.enabled` absent or `false`, headless off (default) | no                           | omitted                                            | `none`               | the `none` form is accepted                                       |
+| CIMD on, `privateKeyJwt.enabled: true`                                     | yes                          | `RS256`, `ES256`, `EdDSA`                          | `private_key_jwt`    | refused (`invalid_client`) unless an unexpired exception lists it |
+| CIMD on, headless on, `privateKeyJwt.enabled` any value                    | yes                          | `RS256`, `ES256`, `EdDSA`                          | `private_key_jwt`    | refused (`invalid_client`) unless an unexpired exception lists it |
+| CIMD off, headless off, `privateKeyJwt.enabled` absent or `false`          | no                           | omitted                                            | not resolved         | —                                                                 |
+| CIMD off with headless on, or with `privateKeyJwt.enabled: true`           | startup error                | —                                                  | —                    | —                                                                 |
+
+Enabling or disabling Dynamic Client Registration does not change these arrays:
+stored clients keep authenticating with their registered secrets, so the secret
+methods stay listed. The audience exception changes neither the metadata nor the
+method a client is permitted.
+
+**Document rules.** The document is rejected with `invalid_client` when:
+
+- `token_endpoint_auth_method` is present but not a string;
+- `token_endpoint_auth_methods_supported` is not an array of strings, or omits
+  the singular value;
+- it declares `client_secret_basic`, `client_secret_post` or `client_secret_jwt`;
+- it has both `jwks` and `jwks_uri`, or inline keys with private or symmetric
+  key material;
+- `jwks_uri` or `token_endpoint_auth_signing_alg` is present but not a string.
+
+Unusable keys (no public signature key, a `jwks_uri` outside the location
+policy, or a `token_endpoint_auth_signing_alg` other than `RS256`, `ES256` or
+`EdDSA`) make `private_key_jwt` unusable for that client.
+
+**Keys.** From inline `jwks` or from `jwks_uri`, never both.
+
+- `jwks_uri` must be https, without userinfo, fragment or IP-literal host, and on
+  the client ID's exact origin. `privateKeyJwt.jwksUriAllowedOrigins` admits
+  other exact origins. The policy is re-checked on every use.
+- It is fetched like the document: all resolved addresses validated, connection
+  pinned, no redirects, `fetchTimeoutMs` and `maxDocumentBytes` limits.
+  The response media type, excluding parameters, must be exactly `application/json` or `application/jwk-set+json`.
+- Only key material of public signature keys is cached: RSA (2048 to 8192 bits),
+  EC P-256 and Ed25519. The cache is per client and URL.
+  The caching directives give a lifetime: none for `no-store` or `no-cache`; an explicit `max-age`, counted from the response's HTTP current age (RFC 9111 §4.2.3: from `Age`, and from the response time against `Date`) and capped at 3600 seconds; 300 seconds without a caching directive.
+  A fetched key set is assigned a TTL of that lifetime or 60 seconds, whichever is longer; the bounded cache can evict it sooner.
+  So a key removed from a `no-store` key set can stay accepted for up to 60 seconds after the last fetch.
+  `Age` must be a single delta-seconds value and `Date` an HTTP-date (RFC 9110 §5.6.7); otherwise each is ignored. `max-age` and the current age are compared exactly.
+- Concurrent misses share one fetch; in-flight fetches are capped at 8 per
+  worker; attempts are limited to 10 per minute per client and URL.
+  An unknown `kid` can trigger a refetch only after the previous unknown-`kid` attempt’s one-minute interval, including when that attempt failed.
+  An unknown `kid` seen while a refetch is in flight waits for that refetch.
+
+**Assertion checks** (`private_key_jwt` on `authorization_code` and
+`refresh_token`):
+
+- `alg` is `RS256`, `ES256` or `EdDSA`, narrowed to the document's
+  `token_endpoint_auth_signing_alg` when present. The key's type, and its JWK
+  `alg` when present, must match. `use` must be `sig` when present.
+- `typ` may be absent, or may be `JWT` or `client-authentication+jwt`, compared case-insensitively with an optional `application/` prefix.
+  `crit`, `jku`, `jwk`, `x5u` and `x5c` headers are rejected.
+- `iss` and `sub` equal the client ID. `aud` is the issuer, as a string or a
+  one-element array.
+- `exp` and `iat` are required, with a lifetime of at most 300 seconds and 5
+  seconds of clock skew. `nbf` is honoured.
+- `jti` is required.
+  A `jti` is accepted at most once per node, including when presented concurrently.
+  - Replay records: Expires at the later of assertion `exp` and insertion time, plus 60 seconds.
+
+**Audience exception (opt-in, expiring).** `privateKeyJwt.tokenEndpointAudience`
+also accepts the exact advertised token endpoint URL as the sole `aud`:
+
+- only for the listed CIMD client IDs, matched exactly against the fetched and
+  validated client ID;
+- only while `expiresAt` is in the future, checked on every request;
+- only when the keys come from that client ID's own origin;
+- only on `authorization_code` and `refresh_token`, never for headless or
+  stored clients.
+
+The accepted audience form (`issuer` or `token_endpoint`) is logged; the
+assertion never is. This departs from RFC 7523bis §4, which forbids the token
+endpoint as an audience.
+
+```yaml
+mcp:
+  clientIdMetadataDocuments:
+    privateKeyJwt:
+      enabled: false # default; advertise private_key_jwt for interactive clients
+      jwksUriAllowedOrigins: # optional; exact https origins besides the client ID's own
+        - https://keys.example.com
+      tokenEndpointAudience: # optional, off unless set; requires an expiry
+        clientIds:
+          - https://chatgpt.com/oauth/client.json
+        expiresAt: '2027-01-31T00:00:00Z'
+```
+
+`privateKeyJwt.enabled` requires CIMD resolution and an `https:` issuer (loopback
+`http:` is allowed for development).
+
+#### ChatGPT on a server with headless agents
+
+Enabling `mcp.clientCredentials` advertises `private_key_jwt` and activates the
+interactive verifier, so ChatGPT, which prefers `private_key_jwt`, must present a
+verified assertion on every code exchange and refresh once its host is admitted. Setting
+`privateKeyJwt.enabled: false` does not change that, and ChatGPT's recorded
+assertions use the token endpoint as `aud`, which the issuer-only policy
+refuses. To keep ChatGPT working on such a server, before the cutover:
+
+1. Configure the exact-ID exception with an expiry you choose, as a date-time
+   with an explicit timezone:
+
+   ```yaml
+   mcp:
+     clientIdMetadataDocuments:
+       privateKeyJwt:
+         tokenEndpointAudience:
+           clientIds:
+             - https://chatgpt.com/oauth/client.json
+           expiresAt: '${CHATGPT_AUDIENCE_EXCEPTION_EXPIRES_AT}' # for example 2027-01-31T00:00:00Z
+   ```
+
+   An unset variable leaves the placeholder unparseable, and startup fails.
+
+2. Add `chatgpt.com` to `clientIdMetadataDocuments.allowedHosts`, which headless
+   agents require, and to `dynamicClientRegistration.allowedRedirectUriHosts` if
+   that is set, keeping the existing entries.
+3. Reauthorize ChatGPT links whose grants are bound to `none`; the exception
+   cannot change a grant's binding.
+
+Once `expiresAt` passes, ChatGPT's token-endpoint-audience assertions are
+refused (`invalid_client`) until the exception is renewed.
+
+### Presented client authentication at the token endpoint
+
+These rules apply to every client on `authorization_code` and `refresh_token`:
+
+- `client_assertion` and `client_assertion_type` together present
+  `private_key_jwt`. A `Basic` header with a non-empty secret presents
+  `client_secret_basic`, and a body `client_secret` presents
+  `client_secret_post`. Nothing, or an empty-secret `Basic` header carrying only
+  the `client_id`, presents `none`.
+- These are rejected with `invalid_request` (400) before any client lookup: an
+  array value for `grant_type`, `code`, `redirect_uri`, `code_verifier`,
+  `refresh_token`, `client_id`, `client_secret`, `client_assertion`,
+  `client_assertion_type` or `scope` (on every grant), a `client_id` or
+  credential parameter that is empty or not a single string, half an assertion
+  pair, and more than one mechanism, where any `Basic` header, a body
+  `client_secret` and an assertion each count as one.
+- Otherwise, these are rejected with `invalid_client` (401) before any client
+  lookup: malformed `Basic` credentials, an unknown `client_assertion_type`, and
+  an assertion longer than 8192 characters.
+- A `401` answering a request that carried an `Authorization: Basic` header
+  includes `WWW-Authenticate: Basic`.
+- A presentation that differs from the permitted method is `invalid_client`. A
+  client permitted `none` that sends assertion parameters is rejected rather
+  than having them ignored.
+- With an assertion, `client_id` may be omitted; the client is identified by the
+  assertion's `sub` and verified in full.
+- A storage failure while reading the client, the authorization code or the
+  refresh family returns `server_error` (500); a record that does not exist
+  returns `invalid_client` or `invalid_grant`.
+
+On Harper's old form deserializer (including 5.1.9), a repeated listed
+single-valued parameter or `resource` keeps its first value under its own
+name; later values are not checked there. With the array shape expected after
+HarperFast/harper#2953, the token endpoint refuses an array for a listed
+single-valued parameter, and accepts a `resource` array only when every value is
+acceptable.
+
+### Grant binding
+
+The permitted method is captured at `/authorize`, carried through the flow
+state into the authorization code, and copied into the refresh family. The
+exchange and every refresh must use exactly that method; the check runs before
+the code is consumed or the family rotated.
+A request that authenticates under current policy but conflicts with a bound code or family returns `invalid_grant`; a currently unpermitted presentation returns `invalid_client` before grant lookup.
+The client then reauthorizes. A later document or configuration change therefore
+never weakens a live grant.
+
+Migration and rollback:
+
+- A flow state or authorization code created before this version has no
+  binding: the callback or the exchange rejects it, and the client restarts
+  authorization.
+- New refresh families have `p2-` ids and carry the binding. A `p2-` family
+  without it (for example, rewritten by an older node) is rejected.
+- `p1-` families from earlier versions are bound to the method used then:
+  `none` for CIMD clients, the registered method for stored clients. A CIMD link
+  that must now use `private_key_jwt` reauthorizes.
+- Drain older nodes before issuing bound grants, and never route bound grants to
+  them: 2.7.x retires `p2-` families (fail closed), but versions before 2.7 do
+  not check them.
+- This version binds every new authorization code and refresh family, whether or
+  not `private_key_jwt` is advertised, so the drain applies before it serves any
+  grant. Versions before
+  this one neither write nor read a code's binding, so they do not check it when
+  redeeming a code, and a family rotated by a version before 2.7 loses its
+  binding, after which this version refuses it.
+
+**Refresh bursts.** In the recorded session ChatGPT refreshed four times within
+6.6 seconds of the code exchange, each time with a new assertion. A grant bound
+to `private_key_jwt` needs a new assertion on every refresh, and every refresh
+must present the refresh token returned by the previous one; there is no minimum
+interval between refreshes and no grace period for a superseded token. The same
+assertion presented again is `invalid_client` and rotates nothing; a superseded
+refresh token is `invalid_grant` and revokes the family, and if the revocation
+cannot be written it is still `invalid_grant`, without claiming the revocation,
+with nothing issued and the family left live until a later presentation retires
+or revokes it, or it expires.
+
+**Concurrency.** The replay record is an atomic counter: of concurrent
+presentations of one assertion, at most one is accepted on a node, and possibly
+none. Across nodes, each node can accept one presentation within the
+replication delay. Concurrent refreshes of one token are not serialized: depending on timing, more
+than one can rotate it, after which only the last-written token works and
+presenting any other revokes the family; or the later requests see a superseded
+token and revoke the family at once, and the client reauthorizes. A rotation
+writes only the token hash, so it does not undo a revocation committed by a
+concurrent request. A revocation whose write fails still answers
+`invalid_grant`, without claiming the revocation, and leaves the family live.
+
+### Stored/DCR registration and token-request compatibility
 
 CIMD resolution only applies to URL-shaped client IDs. Any `client_id` that does
 not parse as an HTTPS URL with a non-root path goes directly to the DCR store as
@@ -740,17 +1004,21 @@ resource=https://app.example.com/mcp   (optional; must exactly match when presen
 ```
 
 Assertion requirements: `alg: EdDSA`; `iss` = `sub` = the `client_id`; `aud` =
-the token endpoint URL exactly; `exp` within 60 s of now; `jti` required and
-single-use (a replay is rejected via the shared `mcp_assertion_jtis` table).
+the issuer, or the token endpoint URL exactly unless
+`mcp.clientCredentials.acceptTokenEndpointAudience` is `false` (move signers to
+the issuer, which RFC 7523bis requires); `typ` absent, `JWT` or
+`client-authentication+jwt`; no `jku`, `jwk`, `x5u` or `x5c` header; `exp`
+within 60 s of now; `jti` required, recorded in the shared
+`mcp_assertion_jtis` table.
+A `jti` is accepted at most once per node, including when presented concurrently.
 A `Basic` header or `client_secret` alongside the assertion is rejected — proof
 of key possession is the only accepted authentication for this grant.
 
-> **Replay-guard bound:** `jti` single-use is enforced best-effort under
-> concurrency — Harper's `Table.create()` existence check is not atomic across
-> simultaneous in-flight requests ([harper#1745](https://github.com/HarperFast/harper/issues/1745)
-> tracks the atomic-reserve contract), so concurrent presentations of the same
-> assertion can race; anything after the first row lands is rejected. The
-> residual is deliberately narrow: assertions live ≤ 60 s, the grant requires
+> **Replay-guard bound:** each presentation atomically adds 1 to the replay
+> record's `uses`, and only the presentation that reads back 1 is accepted, so
+> single use holds per node under concurrency. Across nodes, each node can
+> accept one presentation within the replication delay. The residual is
+> deliberately narrow: assertions live ≤ 60 s, the grant requires
 > an `https:` issuer, and capturing a live assertion in transit therefore
 > implies a vantage point (TLS interception, host access) from which the
 > minted bearer token itself is equally exposed.
@@ -770,7 +1038,8 @@ with `error: "slow_down"` and a `Retry-After` header (seconds until a retry can
 succeed). The limit is debited **after** the client assertion is verified, so it
 counts only authenticated issuance — a caller cannot drain a real agent's quota
 by replaying the agent's public `client_id` URL with a bogus assertion (those
-fail verification with `401` and never touch the bucket). Pre-auth work is
+fail verification with `401` and never touch the bucket). An `invalid_target`
+refusal is not counted either. Pre-auth work is
 bounded separately: CIMD metadata fetches are limited at a fixed 10 attempts/min
 per `client_id` URL (cache hits don't consume, so only failing documents
 repeat), and resolution/DNS concurrency is capped globally.

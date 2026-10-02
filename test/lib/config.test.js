@@ -200,6 +200,83 @@ describe('OAuth Configuration', () => {
 			);
 		});
 
+		describe('interactive private_key_jwt settings', () => {
+			it('coerces privateKeyJwt.enabled and acceptTokenEndpointAudience like the other documented booleans', () => {
+				const cfg = {
+					clientIdMetadataDocuments: { privateKeyJwt: { enabled: 'true' } },
+					clientCredentials: { acceptTokenEndpointAudience: 'false' },
+				};
+				normalizeMcpSecurityConfig(cfg);
+				assert.equal(cfg.clientIdMetadataDocuments.privateKeyJwt.enabled, true);
+				assert.equal(cfg.clientCredentials.acceptTokenEndpointAudience, false);
+			});
+
+			it('normalizes jwksUriAllowedOrigins to exact https origins and refuses anything else', () => {
+				const cfg = {
+					clientIdMetadataDocuments: {
+						privateKeyJwt: { jwksUriAllowedOrigins: ['https://Keys.Example.COM', 'https://keys.example.net:8443/'] },
+					},
+				};
+				normalizeMcpSecurityConfig(cfg);
+				assert.deepEqual(cfg.clientIdMetadataDocuments.privateKeyJwt.jwksUriAllowedOrigins, [
+					'https://keys.example.com',
+					'https://keys.example.net:8443',
+				]);
+				for (const bad of [
+					'http://keys.example.com',
+					'https://keys.example.com/jwks.json',
+					'https://u@keys.example.com',
+					42,
+				]) {
+					assert.throws(
+						() =>
+							normalizeMcpSecurityConfig({
+								clientIdMetadataDocuments: { privateKeyJwt: { jwksUriAllowedOrigins: [bad] } },
+							}),
+						/jwksUriAllowedOrigins entries must be https origins/
+					);
+				}
+			});
+
+			it('requires exact CIMD client IDs and a parseable expiry for the audience exception', () => {
+				const cfg = {
+					clientIdMetadataDocuments: {
+						privateKeyJwt: {
+							tokenEndpointAudience: {
+								clientIds: ['https://chatgpt.com/oauth/client.json'],
+								expiresAt: '2027-01-01T00:00:00Z',
+							},
+						},
+					},
+				};
+				normalizeMcpSecurityConfig(cfg);
+				assert.equal(
+					cfg.clientIdMetadataDocuments.privateKeyJwt.tokenEndpointAudience.expiresAt,
+					Date.parse('2027-01-01T00:00:00Z')
+				);
+				const withException = (exception) => ({
+					clientIdMetadataDocuments: { privateKeyJwt: { tokenEndpointAudience: exception } },
+				});
+				assert.throws(
+					() => normalizeMcpSecurityConfig(withException({ clientIds: ['https://chatgpt.com/oauth/client.json'] })),
+					/expiresAt must be an ISO 8601 date-time/
+				);
+				assert.throws(
+					() =>
+						normalizeMcpSecurityConfig(withException({ clientIds: ['https://chatgpt.com'], expiresAt: '2027-01-01' })),
+					/exact CIMD client IDs/
+				);
+				assert.throws(
+					() => normalizeMcpSecurityConfig(withException({ clientIds: [], expiresAt: '2027-01-01' })),
+					/exact CIMD client IDs/
+				);
+				assert.throws(
+					() => normalizeMcpSecurityConfig({ clientIdMetadataDocuments: { privateKeyJwt: 'on' } }),
+					/privateKeyJwt must be an object/
+				);
+			});
+		});
+
 		describe('signingKeyPem (#221 — declared-but-empty must not silently self-generate)', () => {
 			function rsaPem() {
 				return generateKeyPairSync('rsa', {

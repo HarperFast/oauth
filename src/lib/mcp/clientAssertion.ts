@@ -1,24 +1,35 @@
 /**
  * RFC 7523 §3 Client-Assertion Verification (private_key_jwt)
  *
- * Verifies the `client_assertion` JWT a headless agent presents to the token
- * endpoint for the client_credentials grant (#159/#160). EdDSA/Ed25519 only
- * (RFC 8037), verified with `node:crypto` — no new dependency; the plugin's
- * `jsonwebtoken` cannot verify EdDSA. Everything fails closed: any parse,
- * header, key, signature, or claim problem yields `{ valid: false, reason }`,
- * never a throw, so the grant handler can map it straight to an OAuth
- * `invalid_client` error and an audit reason.
+ * Verifies the `client_assertion` JWT a client presents to the token endpoint:
+ * headless agents on the client_credentials grant (#159/#160) and, with
+ * `private_key_jwt` permitted, interactive CIMD clients on the
+ * authorization_code and refresh_token grants. Verified with `node:crypto` —
+ * no new dependency. Everything fails closed: any parse, header, key,
+ * signature, or claim problem yields `{ valid: false, reason }`, never a
+ * throw, so callers can map it straight to an OAuth `invalid_client` error and
+ * an audit reason. Reasons never contain the assertion or key material.
  *
- * Verification contract (see the #159 design review):
- * - header `alg` is exactly `EdDSA`; `typ`, when present, is `JWT`; any `crit`
- *   is rejected (we implement no extensions).
+ * Verification contract:
+ * - header `alg` is one of the algorithms the CALLER allows for this client
+ *   (RS256, ES256, EdDSA; the headless path allows EdDSA only). `none` and
+ *   `HS*` are never accepted. The selected key's type — and its JWK `alg`,
+ *   when present — must match the header `alg` (RFC 8725 §3.1: one key, one
+ *   algorithm).
+ * - `typ`, when present, is `JWT` or `client-authentication+jwt`
+ *   (RFC 7523bis §4; an optional `application/` prefix is tolerated); any
+ *   other explicit type is rejected. `crit` is rejected (no extensions).
+ * - header `jku`, `jwk`, `x5u` and `x5c` are rejected: keys come only from the
+ *   client's registered set, never from the assertion.
  * - key selected from the client's registered JWK Set: `kid` present → must
  *   match exactly one registered key; `kid` absent → the set must hold exactly
- *   one key. Keys must be public OKP/Ed25519 (a private `d` is rejected).
+ *   one key. Keys must be public (no private or symmetric members), `use` sig
+ *   when present, RSA keys at least 2048 bits, EC keys on P-256, OKP keys
+ *   Ed25519.
  * - `iss` = `sub` = the authenticating client_id (all three, exactly).
- * - `aud` equals the resolved token-endpoint URL — a string, or a
- *   single-element array (RFC 7519 allows an array; more than one audience is
- *   rejected as ambiguous).
+ * - `aud` exactly equals one of the caller's accepted audience values — a
+ *   string, or a single-element array (RFC 7519 allows an array; more than one
+ *   audience is rejected as ambiguous). The matched form is reported.
  * - `exp` required, in the future, and no more than `maxExpiresInSeconds`
  *   (default 60) out; `iat` required and not in the future; `nbf`, when
  *   present, must have passed. All checks allow `clockToleranceSeconds`
@@ -32,18 +43,44 @@ import { createPublicKey, verify as verifySignature, type KeyObject } from 'node
 /** RFC 7523 §2.2 value for `client_assertion_type`. */
 export const CLIENT_ASSERTION_TYPE_JWT_BEARER = 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer';
 
+/** RFC 7523bis §4 explicit type for client-authentication JWTs. */
+export const CLIENT_AUTHENTICATION_JWT_TYPE = 'client-authentication+jwt';
+
+/** Signature algorithms a client assertion may use (subject to per-client policy). */
+export type AssertionAlgorithm = 'RS256' | 'ES256' | 'EdDSA';
+export const ASSERTION_ALGORITHMS: readonly AssertionAlgorithm[] = ['RS256', 'ES256', 'EdDSA'];
+
+/** How an accepted `aud` value was matched — recorded by callers, never the assertion itself. */
+export type AudienceForm = 'issuer' | 'token_endpoint';
+
+/** One accepted audience value and the form it represents. Compared by exact string equality. */
+export interface AcceptedAudience {
+	value: string;
+	form: AudienceForm;
+}
+
 const DEFAULT_MAX_EXPIRES_IN_SECONDS = 60;
 const DEFAULT_CLOCK_TOLERANCE_SECONDS = 5;
 /** Bound what a client can force into the replay table. */
 const MAX_JTI_LENGTH = 256;
 /**
  * Cap on the whole compact JWT before any split/decode work — a legitimate
- * Ed25519 assertion with our claim set is well under 1KB, so 8KB is generous.
- * Same defense-in-depth family as the repo's 2048-char request-path cap.
+ * assertion with our claim set (even with an RSA-4096 signature) is well
+ * under 2KB, so 8KB is generous. Same defense-in-depth family as the repo's
+ * 2048-char request-path cap. The token endpoint applies it before any client
+ * lookup or unverified parse, too.
  */
-const MAX_ASSERTION_LENGTH = 8192;
-/** Ed25519 signatures are always exactly 64 bytes (RFC 8032). */
-const ED25519_SIGNATURE_LENGTH = 64;
+export const MAX_ASSERTION_LENGTH = 8192;
+/** Ed25519 signatures are always exactly 64 bytes (RFC 8032); ES256 JWS signatures are r||s, 64 bytes (RFC 7518 §3.4). */
+const FIXED_SIGNATURE_LENGTH: Partial<Record<AssertionAlgorithm, number>> = { EdDSA: 64, ES256: 64 };
+/** RFC 7518 §3.3: RSA keys used with RS256 must be at least 2048 bits. */
+export const MIN_RSA_MODULUS_BITS = 2048;
+/** Upper bound on RSA key size — bounds verification cost for attacker-supplied keys. */
+const MAX_RSA_MODULUS_BITS = 8192;
+/** Private or symmetric JWK members: a key carrying any of them is never usable. */
+const PRIVATE_JWK_MEMBERS = ['d', 'p', 'q', 'dp', 'dq', 'qi', 'oth', 'k'];
+/** Header parameters that carry or point at keys; never trusted (keys come only from the registered set). */
+const KEY_BEARING_HEADER_PARAMETERS = ['jku', 'jwk', 'x5u', 'x5c'];
 
 /**
  * Strict base64url alphabet (RFC 4648 §5, unpadded). `Buffer.from(s,
@@ -51,6 +88,9 @@ const ED25519_SIGNATURE_LENGTH = 64;
  * distinct token strings decode to the same payload — validate first.
  */
 const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/;
+
+/** Human-readable key family per algorithm, used in rejection reasons. */
+const KEY_FAMILY: Record<AssertionAlgorithm, string> = { RS256: 'RSA', ES256: 'EC P-256', EdDSA: 'Ed25519' };
 
 /** Claims of a successfully verified assertion. */
 export interface ClientAssertionClaims {
@@ -63,25 +103,45 @@ export interface ClientAssertionClaims {
 	jti: string;
 }
 
-export type ClientAssertionResult = { valid: true; claims: ClientAssertionClaims } | { valid: false; reason: string };
+export type ClientAssertionResult =
+	| {
+			valid: true;
+			claims: ClientAssertionClaims;
+			/** Which accepted audience matched. */
+			audienceForm: AudienceForm;
+			/** The verified header algorithm. */
+			alg: AssertionAlgorithm;
+	  }
+	| { valid: false; reason: string; unknownKid?: boolean };
 
 export interface VerifyClientAssertionParams {
 	/** The `client_assertion` value — a compact-serialized JWT. */
 	assertion: string;
 	/** The client_id being authenticated; must equal `iss` and `sub`. */
 	clientId: string;
-	/** Resolved token-endpoint URL; must equal `aud` exactly. */
-	tokenEndpoint: string;
-	/** The client's registered public JWK Set keys (OKP/Ed25519). */
+	/**
+	 * Accepted `aud` values. When omitted, `tokenEndpoint` is the sole accepted
+	 * value (the original headless contract).
+	 */
+	audiences?: AcceptedAudience[];
+	/** Resolved token-endpoint URL; the sole accepted `aud` when `audiences` is omitted. */
+	tokenEndpoint?: string;
+	/** The client's registered public JWK Set keys. */
 	jwks: Record<string, unknown>[];
-	/** Maximum allowed `exp - now`. Default 60 (issue req 1). */
+	/**
+	 * Algorithms this client may use: the policy for its shape, narrowed to its
+	 * document's `token_endpoint_auth_signing_alg` when present. Default: EdDSA
+	 * only (the headless contract).
+	 */
+	allowedAlgorithms?: readonly AssertionAlgorithm[];
+	/** Maximum allowed `exp - now`. Default 60. */
 	maxExpiresInSeconds?: number;
 	/** Clock-skew allowance for `exp`/`iat`/`nbf`. Default 5. */
 	clockToleranceSeconds?: number;
 }
 
-function fail(reason: string): ClientAssertionResult {
-	return { valid: false, reason };
+function fail(reason: string, extra?: { unknownKid?: boolean }): ClientAssertionResult {
+	return extra?.unknownKid ? { valid: false, reason, unknownKid: true } : { valid: false, reason };
 }
 
 /**
@@ -114,22 +174,82 @@ function decodeSegment(segment: string): Record<string, unknown> | null {
 		: null;
 }
 
-/**
- * Load a registered JWK as an Ed25519 public KeyObject. Returns null (reject)
- * unless the JWK is exactly a public OKP/Ed25519 key — in particular a key
- * carrying private material (`d`) must never have been registered, and must
- * never verify, so it is rejected here as defense-in-depth against a
- * registration-validation gap.
- */
-function loadEd25519PublicKey(jwk: Record<string, unknown>): KeyObject | null {
-	if (jwk.kty !== 'OKP' || jwk.crv !== 'Ed25519') return null;
-	if (typeof jwk.x !== 'string' || jwk.x.length === 0) return null;
-	if ('d' in jwk) return null;
+/** The algorithm a JWK's key type implies, or null for unsupported key types. */
+export function algorithmForKeyType(jwk: Record<string, unknown>): AssertionAlgorithm | null {
+	if (jwk.kty === 'RSA') return 'RS256';
+	if (jwk.kty === 'EC' && jwk.crv === 'P-256') return 'ES256';
+	if (jwk.kty === 'OKP' && jwk.crv === 'Ed25519') return 'EdDSA';
+	return null;
+}
+
+function isBase64urlString(value: unknown): value is string {
+	return typeof value === 'string' && BASE64URL_PATTERN.test(value);
+}
+
+/** Import the public key for `alg` from its JWK members only (never the whole object). Null on any problem. */
+function importPublicKey(jwk: Record<string, unknown>, alg: AssertionAlgorithm): KeyObject | null {
 	try {
-		return createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: jwk.x }, format: 'jwk' });
+		if (alg === 'RS256') {
+			if (!isBase64urlString(jwk.n) || !isBase64urlString(jwk.e)) return null;
+			const key = createPublicKey({ key: { kty: 'RSA', n: jwk.n, e: jwk.e }, format: 'jwk' });
+			const bits = key.asymmetricKeyDetails?.modulusLength ?? 0;
+			if (key.asymmetricKeyType !== 'rsa' || bits < MIN_RSA_MODULUS_BITS || bits > MAX_RSA_MODULUS_BITS) return null;
+			return key;
+		}
+		if (alg === 'ES256') {
+			if (!isBase64urlString(jwk.x) || !isBase64urlString(jwk.y)) return null;
+			const key = createPublicKey({ key: { kty: 'EC', crv: 'P-256', x: jwk.x, y: jwk.y }, format: 'jwk' });
+			if (key.asymmetricKeyType !== 'ec' || key.asymmetricKeyDetails?.namedCurve !== 'prime256v1') return null;
+			return key;
+		}
+		if (!isBase64urlString(jwk.x) || jwk.x.length !== 43) return null;
+		const key = createPublicKey({ key: { kty: 'OKP', crv: 'Ed25519', x: jwk.x }, format: 'jwk' });
+		return key.asymmetricKeyType === 'ed25519' ? key : null;
 	} catch {
 		return null;
 	}
+}
+
+/**
+ * The imported key and its algorithm when a JWK can serve as a public
+ * signature-verification key, or why it cannot.
+ */
+function inspectPublicSigningKey(jwk: unknown): { key: KeyObject; alg: AssertionAlgorithm } | { issue: string } {
+	if (!jwk || typeof jwk !== 'object' || Array.isArray(jwk)) return { issue: 'key must be a JWK object' };
+	const k = jwk as Record<string, unknown>;
+	for (const member of PRIVATE_JWK_MEMBERS) {
+		if (member in k) return { issue: 'key carries private or symmetric key material' };
+	}
+	if (k.use !== undefined && k.use !== 'sig') return { issue: 'key use must be sig' };
+	if (k.key_ops !== undefined && (!Array.isArray(k.key_ops) || !k.key_ops.includes('verify'))) {
+		return { issue: 'key_ops must include verify' };
+	}
+	if (k.kid !== undefined && (typeof k.kid !== 'string' || k.kid.length === 0 || k.kid.length > 256)) {
+		return { issue: 'kid must be a non-empty string of at most 256 characters' };
+	}
+	const alg = algorithmForKeyType(k);
+	if (!alg) return { issue: 'key type is not supported (RSA, EC P-256 or OKP Ed25519)' };
+	if (k.alg !== undefined && k.alg !== alg) return { issue: `key alg must be ${alg} for its key type` };
+	const key = importPublicKey(k, alg);
+	if (!key) {
+		return {
+			issue:
+				alg === 'RS256'
+					? `key material is malformed or the RSA modulus is outside ${MIN_RSA_MODULUS_BITS}-${MAX_RSA_MODULUS_BITS} bits`
+					: 'key material is malformed',
+		};
+	}
+	return { key, alg };
+}
+
+/**
+ * Why a JWK cannot serve as a public signature-verification key, or null when
+ * it can. Used by key-set validation for inline `jwks` and fetched `jwks_uri`
+ * documents; the verifier applies the same checks.
+ */
+export function publicSigningKeyIssue(jwk: unknown): string | null {
+	const inspected = inspectPublicSigningKey(jwk);
+	return 'issue' in inspected ? inspected.issue : null;
 }
 
 /**
@@ -141,16 +261,19 @@ function loadEd25519PublicKey(jwk: Record<string, unknown>): KeyObject | null {
 function selectKey(
 	jwks: Record<string, unknown>[],
 	kid: unknown
-): { jwk: Record<string, unknown> } | { error: string } {
+): { jwk: Record<string, unknown> } | { error: string; unknownKid?: boolean } {
 	if (!Array.isArray(jwks) || jwks.length === 0) {
 		return { error: 'client has no registered JWKs' };
 	}
-	// Registration (#161) should never store non-object entries, but this
-	// module promises "never throws" — so a null/primitive element must fail
-	// the lookup, not TypeError inside it.
+	// Registration should never store non-object entries, but this module
+	// promises "never throws" — so a null/primitive element must fail the
+	// lookup, not TypeError inside it.
 	if (kid !== undefined) {
 		if (typeof kid !== 'string' || kid.length === 0) return { error: 'assertion kid must be a non-empty string' };
 		const matches = jwks.filter((k) => k !== null && typeof k === 'object' && k.kid === kid);
+		if (matches.length === 0) {
+			return { error: 'assertion kid does not match exactly one registered key', unknownKid: true };
+		}
 		if (matches.length !== 1) return { error: 'assertion kid does not match exactly one registered key' };
 		return { jwk: matches[0] };
 	}
@@ -164,17 +287,39 @@ function selectKey(
 	return { jwk: singleKey };
 }
 
+/** `typ` policy: absent, `JWT`, or `client-authentication+jwt` (case-insensitive, optional `application/`). */
+function typAccepted(typ: unknown): boolean {
+	if (typ === undefined) return true;
+	if (typeof typ !== 'string') return false;
+	const normalized = typ.toLowerCase().replace(/^application\//, '');
+	return normalized === 'jwt' || normalized === CLIENT_AUTHENTICATION_JWT_TYPE;
+}
+
+function verifyWithKey(alg: AssertionAlgorithm, signingInput: Buffer, key: KeyObject, signature: Buffer): boolean {
+	try {
+		if (alg === 'EdDSA') return verifySignature(null, signingInput, key, signature);
+		if (alg === 'ES256') return verifySignature('sha256', signingInput, { key, dsaEncoding: 'ieee-p1363' }, signature);
+		return verifySignature('sha256', signingInput, key, signature);
+	} catch {
+		return false;
+	}
+}
+
 /**
  * Verify a client assertion end-to-end (structure → header → key → signature
  * → claims). Signature is checked before claims so a claims-shaped error can
  * never be probed without possession of the private key.
  */
 export function verifyClientAssertion(params: VerifyClientAssertionParams): ClientAssertionResult {
-	const { assertion, clientId, tokenEndpoint, jwks } = params;
+	const { assertion, clientId, jwks } = params;
 	// Coerce the window options up front — a NaN/Infinity here would make the
 	// time-window comparisons fail open (see coerceWindowSeconds).
 	const maxExpiresIn = coerceWindowSeconds(params.maxExpiresInSeconds, DEFAULT_MAX_EXPIRES_IN_SECONDS, false);
 	const clockTolerance = coerceWindowSeconds(params.clockToleranceSeconds, DEFAULT_CLOCK_TOLERANCE_SECONDS, true);
+	const allowedAlgorithms = (params.allowedAlgorithms ?? ['EdDSA']).filter((a) => ASSERTION_ALGORITHMS.includes(a));
+	const audiences: AcceptedAudience[] =
+		params.audiences ??
+		(typeof params.tokenEndpoint === 'string' ? [{ value: params.tokenEndpoint, form: 'token_endpoint' }] : []);
 
 	if (typeof assertion !== 'string' || assertion.length === 0) {
 		return fail('client_assertion is required');
@@ -184,6 +329,9 @@ export function verifyClientAssertion(params: VerifyClientAssertionParams): Clie
 	}
 	if (typeof clientId !== 'string' || clientId.length === 0) {
 		return fail('client_id is required');
+	}
+	if (allowedAlgorithms.length === 0) {
+		return fail('no client_assertion algorithm is permitted for this client');
 	}
 
 	const segments = assertion.split('.');
@@ -196,46 +344,53 @@ export function verifyClientAssertion(params: VerifyClientAssertionParams): Clie
 	if (!header) {
 		return fail('client_assertion header is malformed');
 	}
-	// Exact-alg pinning: blocks `none` and any RS/HS/ES downgrade before key work.
-	if (header.alg !== 'EdDSA') {
-		return fail('client_assertion alg must be EdDSA');
+	// Exact-alg allowlist: blocks `none`, HS* and any algorithm this client may
+	// not use before any key work.
+	if (typeof header.alg !== 'string' || !allowedAlgorithms.includes(header.alg as AssertionAlgorithm)) {
+		return fail(`client_assertion alg must be ${allowedAlgorithms.join(' or ')}`);
 	}
-	// RFC 7515 §4.1.9: `typ` is optional; when present it must be JWT
-	// (case-insensitive per its definition).
-	if (header.typ !== undefined && (typeof header.typ !== 'string' || header.typ.toUpperCase() !== 'JWT')) {
-		return fail('client_assertion typ must be JWT');
+	const alg = header.alg as AssertionAlgorithm;
+	if (!typAccepted(header.typ)) {
+		return fail(`client_assertion typ must be JWT or ${CLIENT_AUTHENTICATION_JWT_TYPE}`);
 	}
 	// RFC 7515 §4.1.11: `crit` demands the listed extensions be understood; we
 	// implement none, so any `crit` fails closed.
 	if (header.crit !== undefined) {
 		return fail('client_assertion crit extensions are not supported');
 	}
+	// Keys come only from the client's registered set, never from the assertion.
+	for (const parameter of KEY_BEARING_HEADER_PARAMETERS) {
+		if (header[parameter] !== undefined) {
+			return fail(`client_assertion header parameter ${parameter} is not accepted`);
+		}
+	}
 
 	const selected = selectKey(jwks, header.kid);
 	if ('error' in selected) {
-		return fail(selected.error);
+		return fail(selected.error, { unknownKid: selected.unknownKid });
 	}
-	const publicKey = loadEd25519PublicKey(selected.jwk);
-	if (!publicKey) {
-		return fail('registered JWK is not a public Ed25519 key');
+	const inspected = inspectPublicSigningKey(selected.jwk);
+	if ('issue' in inspected) {
+		return fail(`registered JWK is not a public ${KEY_FAMILY[alg]} key: ${inspected.issue}`);
 	}
+	// One key, one algorithm (RFC 8725 §3.1): the key's type must imply the header alg.
+	if (inspected.alg !== alg) {
+		return fail(`registered JWK is not a public ${KEY_FAMILY[alg]} key`);
+	}
+	const publicKey = inspected.key;
 
 	if (!BASE64URL_PATTERN.test(signatureSegment)) {
 		return fail('client_assertion signature is malformed');
 	}
 	const signature = Buffer.from(signatureSegment, 'base64url');
-	if (signature.length !== ED25519_SIGNATURE_LENGTH) {
+	// An RSA signature is as long as the modulus in whole bytes (RFC 8017 §8.2.1).
+	const expectedLength =
+		FIXED_SIGNATURE_LENGTH[alg] ?? Math.ceil((publicKey.asymmetricKeyDetails?.modulusLength ?? 0) / 8);
+	if (signature.length !== expectedLength) {
 		return fail('client_assertion signature is malformed');
 	}
-	// Ed25519 verification takes no digest algorithm (pass null); the signing
-	// input is the raw ASCII of "header.payload" (RFC 7515 §5.1).
-	let signatureOk: boolean;
-	try {
-		signatureOk = verifySignature(null, Buffer.from(`${headerSegment}.${payloadSegment}`), publicKey, signature);
-	} catch {
-		signatureOk = false;
-	}
-	if (!signatureOk) {
+	// The signing input is the raw ASCII of "header.payload" (RFC 7515 §5.1).
+	if (!verifyWithKey(alg, Buffer.from(`${headerSegment}.${payloadSegment}`), publicKey, signature)) {
 		return fail('client_assertion signature verification failed');
 	}
 
@@ -252,12 +407,13 @@ export function verifyClientAssertion(params: VerifyClientAssertionParams): Clie
 		return fail('client_assertion sub does not match client_id');
 	}
 
-	// `aud` must be the token endpoint, exactly — a string or a single-element
-	// array. Multiple audiences are rejected as ambiguous (design review: no
+	// `aud` must exactly equal one accepted value — a string or a
+	// single-element array. Multiple audiences are rejected as ambiguous (no
 	// prefix/wildcard/multi-audience comparisons).
 	const aud = Array.isArray(payload.aud) && payload.aud.length === 1 ? payload.aud[0] : payload.aud;
-	if (typeof aud !== 'string' || aud !== tokenEndpoint) {
-		return fail('client_assertion aud does not match the token endpoint');
+	const matchedAudience = typeof aud === 'string' ? audiences.find((a) => a.value === aud) : undefined;
+	if (!matchedAudience) {
+		return fail('client_assertion aud does not match an accepted audience');
 	}
 
 	const now = Math.floor(Date.now() / 1000);
@@ -291,9 +447,7 @@ export function verifyClientAssertion(params: VerifyClientAssertionParams): Clie
 	}
 	// Strictness bound (defense-in-depth): reject an assertion whose self-declared
 	// lifetime (exp - iat) exceeds the policy window even when `exp` sits inside
-	// the now-relative bound above. Such a token isn't exploitable on its own (the
-	// now-relative cap already limits usable life), but it doesn't honor the
-	// ≤maxExpiresIn assertion contract, so a strict verifier refuses it.
+	// the now-relative bound above.
 	if (exp - iat > maxExpiresIn + clockTolerance) {
 		return fail(`client_assertion lifetime (exp - iat) exceeds the maximum window of ${maxExpiresIn}s`);
 	}
@@ -317,6 +471,8 @@ export function verifyClientAssertion(params: VerifyClientAssertionParams): Clie
 
 	return {
 		valid: true,
-		claims: { iss: clientId, sub: clientId, aud, exp, iat, jti },
+		claims: { iss: clientId, sub: clientId, aud: matchedAudience.value, exp, iat, jti },
+		audienceForm: matchedAudience.form,
+		alg,
 	};
 }

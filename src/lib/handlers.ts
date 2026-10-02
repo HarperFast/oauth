@@ -31,6 +31,7 @@ import {
 } from './mcp/consentBinding.ts';
 import { makeQuarantinePrincipal, isQuarantinePrincipal } from './quarantinePrincipal.ts';
 import { handleMCPCallback } from './mcp/index.ts';
+import { isClientAuthMethod } from './mcp/clientAuthMethod.ts';
 import { resolveIssuer } from './mcp/wellKnown.ts';
 import { getRequestHeader } from './requestHeaders.ts';
 import type { HookManager } from './hookManager.ts';
@@ -360,6 +361,20 @@ export async function handleCallback(
 				'Authorization must complete in the browser that initiated it'
 			);
 		}
+	}
+	// Client-authentication binding: an MCP flow state created before the
+	// binding existed (an older node, or before an upgrade) carries no
+	// permitted method. Reject it before the upstream exchange; the client
+	// starts authorization again and gets a bound state.
+	if (mcpState && !isClientAuthMethod(mcpState.clientAuthMethod)) {
+		logger?.warn?.(
+			`MCP callback: flow state predates client authentication binding for client=${JSON.stringify(mcpState.clientId)}`
+		);
+		return mcpErrorRedirect(
+			mcpState,
+			'invalid_request',
+			'Authorization request predates client authentication binding; start authorization again'
+		);
 	}
 
 	// Now that we know the flow context, handle upstream IdP errors.

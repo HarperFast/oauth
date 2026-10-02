@@ -14,6 +14,8 @@ import {
 	newFamilyId,
 	isProvenancedFamilyId,
 	FAMILY_ID_PREFIX,
+	BOUND_FAMILY_ID_PREFIX,
+	isBoundFamilyId,
 } from '../../../dist/lib/mcp/refreshTokenStore.js';
 
 function asTrackedObject(plain) {
@@ -54,9 +56,13 @@ describe('refresh-token helpers', () => {
 		assert.equal(parseRefreshToken('trailing.'), null);
 	});
 
-	it('mints family ids carrying the provenance prefix (#229)', () => {
+	it('mints bound family ids (p2-) that still count as provenanced (#229)', () => {
 		const familyId = newFamilyId();
-		assert.ok(familyId.startsWith(FAMILY_ID_PREFIX));
+		assert.ok(familyId.startsWith(BOUND_FAMILY_ID_PREFIX));
+		assert.equal(isProvenancedFamilyId(familyId), true);
+		assert.equal(isBoundFamilyId(familyId), true);
+		assert.equal(isBoundFamilyId(`${FAMILY_ID_PREFIX}legacy`), false);
+		assert.equal(isProvenancedFamilyId(`${FAMILY_ID_PREFIX}legacy`), true);
 	});
 
 	it('isProvenancedFamilyId is true for a prefixed id and false for a bare UUID', () => {
@@ -90,6 +96,9 @@ describe('MCPRefreshFamilyStore', () => {
 					},
 					put: async (rec) => {
 						stored.set(rec.family_id, rec);
+					},
+					patch: async (id, update) => {
+						stored.set(id, { ...stored.get(id), ...update });
 					},
 					delete: async (id) => {
 						stored.delete(id);
@@ -129,12 +138,44 @@ describe('MCPRefreshFamilyStore', () => {
 		assert.equal(await store.get('nope'), null);
 	});
 
+	it('propagates get() errors, so a read failure is never reported as a missing family', async () => {
+		global.databases.oauth.mcp_refresh_families.get = async () => {
+			throw new Error('db read failure');
+		};
+		await assert.rejects(() => store.get('fam-1'), /db read failure/);
+	});
+
 	it('decodes a missing revoked flag as false', async () => {
 		const { revoked, ...withoutRevoked } = sample;
 		void revoked;
 		await store.set(withoutRevoked);
 		const got = await store.get('fam-1');
 		assert.equal(got.revoked, false);
+	});
+
+	it('rotate() and revoke() are partial updates of their own field', async () => {
+		const calls = [];
+		global.databases.oauth.mcp_refresh_families.patch = async (id, update, context) => {
+			calls.push([id, update, context]);
+		};
+		await store.rotate('fam-1', 'hash-next');
+		await store.revoke('fam-1');
+		assert.deepEqual(calls, [
+			['fam-1', { current_token_hash: 'hash-next' }, {}],
+			['fam-1', { revoked: true }, {}],
+		]);
+		assert.notStrictEqual(calls[0][2], calls[1][2], 'each patch receives a fresh context');
+		for (const [, , context] of calls) {
+			assert.equal(Object.hasOwn(context, 'transaction'), false, 'the patch does not join the request transaction');
+		}
+	});
+
+	it('propagates rotate() and revoke() errors', async () => {
+		global.databases.oauth.mcp_refresh_families.patch = async () => {
+			throw new Error('db write failure');
+		};
+		await assert.rejects(() => store.rotate('fam-1', 'hash-next'), /db write failure/);
+		await assert.rejects(() => store.revoke('fam-1'), /db write failure/);
 	});
 
 	it('propagates set() errors so the caller can fail the request', async () => {
