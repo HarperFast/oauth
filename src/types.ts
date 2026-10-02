@@ -772,8 +772,14 @@ export interface GetUserInfoHelpers {
 	getUserInfo: (accessToken: string) => Promise<any>;
 	logger?: Logger;
 	/**
-	 * Always present (#228) — call with every email candidate the adapter fetched to get the
-	 * resolved address, already validated to be one of the given candidates with
+	 * Supplied on the plugin's own login callback path (#228) — every `getUserInfo` call
+	 * `handleCallback` makes passes a resolver, whether or not an `onResolveEmail` hook is
+	 * registered, so an adapter invoked that way can treat this as always present. It is
+	 * `undefined` only for a direct `getUserInfo(accessToken)` call made without one (not done
+	 * anywhere in this plugin today) — an adapter that might run outside the callback path
+	 * should still check before calling it. Call with every email candidate the adapter
+	 * fetched to get the resolved address, already validated to be one of the given
+	 * candidates with
 	 * `verified === true`. Composes an `onResolveEmail` hook (if registered and it expresses
 	 * a preference) with the plugin's built-in existing-account default; `undefined` means
 	 * either the hook declined (no preference) or the built-in default found no match — both
