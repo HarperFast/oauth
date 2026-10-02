@@ -825,6 +825,10 @@ function isAzureGraphUserInfoConfig(config: OAuthProviderConfig): boolean {
 function checkGraphProfileScope(config: OAuthProviderConfig, providerName: string, logger?: Logger): void {
 	if (!config.fetchEmail) return;
 	if (!isAzureGraphUserInfoConfig(config)) return;
+	// A YAML list (`scope: [openid, profile, ...]`) survives expandEnvVarsDeep
+	// as an array, not a string — this function is documented as "never
+	// throws", so a non-string `scope` must be skipped, not crash `.split()`.
+	if (config.scope != null && typeof config.scope !== 'string') return;
 	const scopes = (config.scope ?? '').split(/\s+/).filter(Boolean);
 	if (scopes.includes('profile')) return;
 	try {

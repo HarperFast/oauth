@@ -2511,6 +2511,25 @@ describe('OAuth Configuration', () => {
 			);
 		});
 
+		it('does not throw when scope is a non-string (e.g. a YAML list surviving as an array) — this check is documented as never throwing, and must not take down every other provider', () => {
+			const options = {
+				redirectUri: 'https://app.test.com/oauth',
+				providers: {
+					azure: graphProvider({ scope: ['openid', 'profile', 'email', 'User.Read'] }),
+					github: {
+						provider: 'github',
+						clientId: 'github-client',
+						clientSecret: 'github-secret',
+						redirectUri: 'https://app.test.com/oauth',
+					},
+				},
+			};
+
+			const providers = initializeProviders(options, mockLogger);
+			assert.ok(providers['azure'], 'the azure provider still initializes despite the non-string scope');
+			assert.ok(providers['github'], 'every other provider still initializes');
+		});
+
 		it('warns for a generic provider pointed at graph.microsoft.com too (host-based, not provider-name-based)', () => {
 			const warnings = [];
 			const logger = { ...mockLogger, warn: (msg) => warnings.push(msg) };
