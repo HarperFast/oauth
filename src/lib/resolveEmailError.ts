@@ -11,13 +11,8 @@ export class ResolveEmailError extends Error {
 	}
 }
 
-/**
- * Thrown when two or more verified candidate emails each match a DIFFERENT existing Harper
- * account (the built-in default-resolution step, #228) — refuses the login rather than
- * guessing which account the user meant. A sibling of {@link ResolveEmailError}, not a
- * subtype: the two are classified into distinct redirect reasons (`email_selection` vs
- * `email_ambiguous`), and callers should check `instanceof AmbiguousEmailError` first.
- */
+/** Sibling of {@link ResolveEmailError}, not a subtype — two or more verified candidates each
+ *  match a different existing Harper account; refuses rather than guessing which one. */
 export class AmbiguousEmailError extends Error {
 	constructor(message: string, options?: { cause?: unknown }) {
 		super(message, options);
@@ -25,11 +20,8 @@ export class AmbiguousEmailError extends Error {
 	}
 }
 
-/**
- * Thrown when the built-in existing-account default (#228) cannot complete an `hdb_user` read
- * for a verified candidate email. Never conflated with "no match" or "ambiguous match" — the
- * login fails with a retryable reason instead of guessing from incomplete information.
- */
+/** An `hdb_user` read for a verified candidate failed — never treated as a confirmed match or
+ *  non-match, only as "unknown". */
 export class EmailLookupError extends Error {
 	constructor(message: string, options?: { cause?: unknown }) {
 		super(message, options);

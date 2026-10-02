@@ -2626,6 +2626,9 @@ describe('OAuth Handlers', () => {
 
 			assert.equal(result.status, 302);
 			assert.ok(result.headers.Location.includes('reason=email_lookup_failed'), result.headers.Location);
+			// server_error (retryable), matching the adoption gate's own account_lookup_failed
+			// convention — not auth_failed, which a client might treat as final.
+			assert.ok(result.headers.Location.includes('error=server_error'), result.headers.Location);
 			assert.equal(mockRequest.session.update.mock.calls.length, 0, 'never guesses when a read is unknown');
 		});
 

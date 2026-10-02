@@ -476,7 +476,7 @@ export async function handleCallback(
 		// idTokenSignatureVerified so it can't stamp 'signed-oidc' on a
 		// decoded-only (no-JWKS) token.
 		// usernameClaim !== 'email' means hdb_user isn't keyed by email at all, so matching a
-		// candidate email against it would check an unrelated keyspace (#228 domain review).
+		// candidate email against it would check an unrelated keyspace.
 		const resolveEmail = async (candidates: readonly EmailCandidate[]): Promise<string | null | undefined> => {
 			if (hookManager.hasHook('onResolveEmail')) {
 				const fromHook = await hookManager.callResolveEmail(candidates, providerName);
@@ -859,8 +859,11 @@ export async function handleCallback(
 		if (mcpState) {
 			return mcpErrorRedirect(mcpState, 'server_error', reason);
 		}
+		// Matches the adoption gate's own account_lookup_failed convention: a retryable
+		// storage error is server_error, not auth_failed, so a client can tell them apart.
+		const errorCode = error instanceof EmailLookupError ? 'server_error' : 'auth_failed';
 		const errorUrl = buildErrorRedirect(tokenData.originalUrl || config.postLoginRedirect || '/', {
-			error: 'auth_failed',
+			error: errorCode,
 			reason,
 		});
 		return { status: 302, headers: { Location: errorUrl } };

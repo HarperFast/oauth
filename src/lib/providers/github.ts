@@ -51,6 +51,12 @@ export const GitHubProvider: OAuthProviderConfig = {
 	async getUserInfo(accessToken: string, helpers: GetUserInfoHelpers): Promise<any> {
 		// Get basic user info using the base getUserInfo method
 		const userInfo = await helpers.getUserInfo(accessToken);
+		// A userinfo endpoint that returns a null/primitive body: nothing can be adopted from
+		// it, so bail before any further read/write of userInfo.* below (including the fetch
+		// that follows — there is nothing to attach its result to).
+		if (!userInfo || typeof userInfo !== 'object') {
+			return userInfo;
+		}
 		// Snapshot before any mutation below — needed to mark which candidate is the public
 		// profile address even after the profile-or-primary fallback overwrites userInfo.email.
 		const profileEmail = userInfo.email;
@@ -138,11 +144,6 @@ export const GitHubProvider: OAuthProviderConfig = {
 		// unauthenticated so the adoption gate denies it.
 		const provenance =
 			emailFetchSucceeded && userInfo.email_verified === true ? 'github-authenticated' : 'unauthenticated';
-		// A userinfo endpoint that returns a null/primitive body leaves userInfo non-object;
-		// nothing can be adopted from it, so return it as-is rather than defineProperty-ing.
-		if (!userInfo || typeof userInfo !== 'object') {
-			return userInfo;
-		}
 		// Non-enumerable so a spread — `{ ...adapterResult, email: attacker }` — does not
 		// carry the assertion onto a substituted email; the wrapper reads it by key, which
 		// works regardless of enumerability.

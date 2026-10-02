@@ -366,7 +366,7 @@ async function resolveEmail(candidates) {
 }
 ```
 
-**Example — opt out of the built-in existing-account default and reconstruct the plugin's original profile-or-primary pick exactly**, using an `AbortController` wired to `signal` so an interrupted lookup actually stops:
+**Example — opt out of the built-in existing-account default and reconstruct the plugin's original profile-or-primary pick**, using an `AbortController` wired to `signal` so an interrupted lookup actually stops. This reproduces the old pick whenever it was verified; it cannot reproduce an unverified profile/primary pick, because `onResolveEmail` is never allowed to return an unverified address — see [the upgrade note](./configuration.md#github-default-email-when-there-are-several-verified-addresses) for that edge case:
 
 ```javascript
 async function resolveEmail(candidates, provider, signal) {
@@ -374,7 +374,8 @@ async function resolveEmail(candidates, provider, signal) {
 	signal.addEventListener('abort', () => controller.abort());
 	await auditLookup(candidates, { signal: controller.signal }); // your own I/O, cancellable on timeout
 
-	return candidates.find((c) => c.profile)?.email ?? candidates.find((c) => c.primary)?.email;
+	const pick = candidates.find((c) => c.profile) ?? candidates.find((c) => c.primary);
+	return pick?.verified ? pick.email : undefined; // unverified pick: no preference, not a failed login
 }
 ```
 

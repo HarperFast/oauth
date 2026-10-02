@@ -539,6 +539,26 @@ describe('GitHub Provider', () => {
 		}
 	});
 
+	it('a null userinfo body bails out before touching userInfo.* or fetching /user/emails', async () => {
+		const github = getProvider('github');
+		const originalFetch = global.fetch;
+		let fetchCalled = false;
+		global.fetch = async () => {
+			fetchCalled = true;
+			return { ok: true, json: async () => [{ email: 'user@example.com', primary: true, verified: true }] };
+		};
+		try {
+			const info = await github.getUserInfo.call({ config: github }, 'token', {
+				getUserInfo: async () => null, // some userinfo endpoint returning a null/primitive body
+				logger: { warn: () => {} },
+			});
+			assert.equal(info, null, 'returned as-is — nothing can be adopted from a non-object body');
+			assert.equal(fetchCalled, false, 'no email fetch for a body nothing can attach to');
+		} finally {
+			global.fetch = originalFetch;
+		}
+	});
+
 	it('sets the provenance assertion as a non-enumerable symbol a spread cannot carry', async () => {
 		const github = getProvider('github');
 		const originalFetch = global.fetch;
