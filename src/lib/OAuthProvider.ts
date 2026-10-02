@@ -153,8 +153,13 @@ export class OAuthProvider implements IOAuthProvider {
 	 * `_emailProvenance` is ALWAYS assigned by this method, never read from
 	 * adapter/remote output. Any `_emailProvenance` key in adapter or userinfo
 	 * responses is stripped before provenance is determined.
+	 *
+	 * @param idTokenSignatureVerified - Whether `idTokenClaims` was cryptographically
+	 *   verified via JWKS (from `verifyIdToken`'s `signatureVerified`). `'signed-oidc'`
+	 *   requires this to be `true` — otherwise `idTokenClaims` is a decoded-only,
+	 *   unverified payload (no JWKS configured) and must not be labeled as signed.
 	 */
-	async getUserInfo(accessToken: string, idTokenClaims: any = null): Promise<any> {
+	async getUserInfo(accessToken: string, idTokenClaims: any = null, idTokenSignatureVerified = false): Promise<any> {
 		// Check if provider has custom getUserInfo implementation
 		if (typeof this.config.getUserInfo === 'function') {
 			const helpers: GetUserInfoHelpers = {
@@ -184,6 +189,19 @@ export class OAuthProvider implements IOAuthProvider {
 				this.logger?.debug?.('ID token lacks email; fetching from userinfo (unauthenticated)');
 				try {
 					const userInfo = await this.fetchUserInfo(accessToken);
+					// OIDC Core 5.3.2/5.3.4: the UserInfo Response's `sub` MUST match the
+					// `sub` of the ID token used to obtain the access token. A mismatch means
+					// this userinfo describes a different subject (token/session confusion at
+					// the provider, or a misbehaving userinfo endpoint) — discard it entirely
+					// and fall back to the id-token's own claims, exactly like a fetch failure
+					// below, so no field attributable to the wrong subject (name, picture,
+					// role claims, ...) is ever merged into this login.
+					if (userInfo?.sub != null && idTokenClaims.sub != null && userInfo.sub !== idTokenClaims.sub) {
+						this.logger?.warn?.(
+							'userinfo sub does not match id-token sub on the fetchEmail path; discarding userinfo and using id-token claims only'
+						);
+						return { ...idTokenClaims, _emailProvenance: 'unauthenticated' };
+					}
 					const { iss: _iss, sub: _sub, ...mergeableUserInfo } = userInfo;
 					// Drop the token's email AND email_verified so the fetched address keeps its
 					// own flag rather than inheriting the token's unrelated one.
@@ -200,8 +218,11 @@ export class OAuthProvider implements IOAuthProvider {
 					return { ...idTokenClaims, _emailProvenance: 'unauthenticated' };
 				}
 			}
-			this.logger?.debug?.('Using verified ID token claims for user info');
-			return { ...idTokenClaims, _emailProvenance: 'signed-oidc' };
+			this.logger?.debug?.('Using ID token claims for user info');
+			// 'signed-oidc' requires the signature to have actually been verified via
+			// JWKS — the no-JWKS fallback (verifyIdToken with no jwksClient) decodes
+			// claims without any cryptographic check and must not earn this label.
+			return { ...idTokenClaims, _emailProvenance: idTokenSignatureVerified ? 'signed-oidc' : 'unauthenticated' };
 		}
 
 		// Fetch from userinfo endpoint — no id-token correlation, so unauthenticated.

@@ -187,9 +187,12 @@ export async function handleLogin(
 /**
  * Look up whether a Harper `hdb_user` with this exact name exists.
  * Returns true when found, false when not found, null when the lookup
- * cannot be completed (system DB unavailable or error). Callers treat
- * null as fail-closed (same as true) so errors never silently bypass
- * the account-adoption gate.
+ * cannot be completed (system DB unavailable or error). Callers treat null
+ * the same as false (not confirmed to exist) — never the same as true — so
+ * a transient read error can't widen trust to "this is a confirmed existing
+ * account" and adopt one. An unverified claim still can't inherit any
+ * account's role either way: it is quarantined under a non-resolvable
+ * principal, confirmed-existing or not (see `makeQuarantinePrincipal`).
  */
 async function checkHarperUserExists(name: string): Promise<boolean | null> {
 	try {
@@ -434,8 +437,10 @@ export async function handleCallback(
 		}
 
 		// Get user info (will use ID token claims if available and verified).
-		// getUserInfo also sets _emailProvenance on the returned object.
-		const userInfo = await provider.getUserInfo(tokenResponse.access_token, idTokenClaims);
+		// getUserInfo also sets _emailProvenance on the returned object; pass
+		// idTokenSignatureVerified so it can't stamp 'signed-oidc' on a
+		// decoded-only (no-JWKS) token.
+		const userInfo = await provider.getUserInfo(tokenResponse.access_token, idTokenClaims, idTokenSignatureVerified);
 		// Extract provenance before mapUserToHarper discards the meta-field.
 		const emailProvenance: string =
 			typeof userInfo?._emailProvenance === 'string' ? userInfo._emailProvenance : 'unauthenticated';
@@ -573,9 +578,8 @@ export async function handleCallback(
 
 		if (!hookData?.user) {
 			const userExists = await checkHarperUserExists(resolvedUser);
-			if (userExists !== false) {
-				// A resolved account — or a lookup error, treated fail-closed — requires a
-				// trusted claim to adopt.
+			if (userExists === true) {
+				// A confirmed existing account requires a trusted claim to adopt.
 				if (!claimIsTrusted) {
 					if (allowUnverifiedClaimInheritance) {
 						adoptedViaEscapeHatch = true;
@@ -604,17 +608,33 @@ export async function handleCallback(
 					}
 				}
 			} else if (!claimIsTrusted) {
-				// No existing account and the claim is not from an authenticated source.
-				// Persist an unpredictable, non-resolvable quarantine principal: because a
-				// later hdb_user cannot be created to match the random suffix, this login
-				// can never adopt a privileged account of the claim's name. The session is
-				// roleless (the principal resolves to no hdb_user), and `oauthUser` — incl.
-				// any app-level role claim — is preserved for the application's own authz.
+				// userExists is `false` (confirmed no account) or `null` (the lookup
+				// itself failed, e.g. a transient hdb_user read error) and the claim is
+				// not from an authenticated source. Persist an unpredictable,
+				// non-resolvable quarantine principal: because a later hdb_user cannot
+				// be created to match the random suffix, this login can never adopt a
+				// privileged account of the claim's name — confirmed not to exist yet,
+				// or unknown because the lookup failed. The session is roleless (the
+				// principal resolves to no hdb_user), and `oauthUser` — incl. any
+				// app-level role claim — is preserved for the application's own authz.
+				//
+				// Quarantining on a lookup error (rather than denying, as before) is
+				// exactly as secure as denying — the quarantine principal can't match
+				// any hdb_user name whether or not the account actually exists — and
+				// more available: a transient read error no longer fails the login for
+				// an unverified claim that was never going to adopt anything anyway.
 				const quarantinePrincipal = makeQuarantinePrincipal(resolvedUser);
-				logger?.warn?.(
-					`OAuth: no existing account for ${JSON.stringify(resolvedUser)} and the claim is not from an ` +
-						`authenticated source — establishing a roleless, non-adoptable session`
-				);
+				if (userExists === null) {
+					logger?.warn?.(
+						`OAuth: hdb_user lookup failed for ${JSON.stringify(resolvedUser)} and the claim is not from an ` +
+							`authenticated source — establishing a roleless, non-adoptable session rather than denying the login`
+					);
+				} else {
+					logger?.warn?.(
+						`OAuth: no existing account for ${JSON.stringify(resolvedUser)} and the claim is not from an ` +
+							`authenticated source — establishing a roleless, non-adoptable session`
+					);
+				}
 				if (mcpState) {
 					return handleMCPCallback(request, mcpState, quarantinePrincipal, mcpConfig ?? {}, logger);
 				}

@@ -1410,6 +1410,158 @@ describe('OAuth Configuration', () => {
 			});
 		});
 
+		describe('issuer required for JWKS-enabled providers (#231 §4)', () => {
+			it('throws naming the provider and key when a generic provider sets jwksUri but no issuer', () => {
+				const providerConfig = {
+					provider: 'generic',
+					clientId: 'c',
+					clientSecret: 's',
+					authorizationUrl: 'https://idp.example.com/authorize',
+					tokenUrl: 'https://idp.example.com/token',
+					userInfoUrl: 'https://idp.example.com/userinfo',
+					jwksUri: 'https://idp.example.com/jwks',
+					redirectUri: 'https://app.test.com/oauth',
+				};
+
+				assert.throws(
+					() => buildProviderConfig(providerConfig, 'custom-idp', {}),
+					(error) => {
+						assert.match(error.message, /custom-idp/);
+						assert.match(error.message, /issuer/);
+						return true;
+					}
+				);
+			});
+
+			it('throws when Okta is configured with explicit endpoints (bypassing domain) and no issuer', () => {
+				// A custom Okta authorization-server config with explicit endpoints —
+				// the regression this closes: previously issuer stayed '' and adoption
+				// was silently denied at login instead of failing fast at startup.
+				const providerConfig = {
+					provider: 'okta',
+					clientId: 'c',
+					clientSecret: 's',
+					authorizationUrl: 'https://dev-1.okta.com/oauth2/aus1abc/v1/authorize',
+					tokenUrl: 'https://dev-1.okta.com/oauth2/aus1abc/v1/token',
+					userInfoUrl: 'https://dev-1.okta.com/oauth2/aus1abc/v1/userinfo',
+					jwksUri: 'https://dev-1.okta.com/oauth2/aus1abc/v1/keys',
+					redirectUri: 'https://app.test.com/oauth',
+				};
+
+				assert.throws(() => buildProviderConfig(providerConfig, 'okta-custom-as', {}), /issuer/);
+			});
+
+			it('does not throw when Okta is configured via domain (issuer derived by configure())', () => {
+				const providerConfig = {
+					provider: 'okta',
+					clientId: 'c',
+					clientSecret: 's',
+					domain: 'dev-12345.okta.com',
+					redirectUri: 'https://app.test.com/oauth',
+				};
+
+				const config = buildProviderConfig(providerConfig, 'okta', {});
+				assert.equal(config.issuer, 'https://dev-12345.okta.com');
+			});
+
+			it('does not throw when issuer is set explicitly alongside explicit endpoints', () => {
+				const providerConfig = {
+					provider: 'okta',
+					clientId: 'c',
+					clientSecret: 's',
+					authorizationUrl: 'https://dev-1.okta.com/oauth2/aus1abc/v1/authorize',
+					tokenUrl: 'https://dev-1.okta.com/oauth2/aus1abc/v1/token',
+					userInfoUrl: 'https://dev-1.okta.com/oauth2/aus1abc/v1/userinfo',
+					jwksUri: 'https://dev-1.okta.com/oauth2/aus1abc/v1/keys',
+					issuer: 'https://dev-1.okta.com/oauth2/aus1abc',
+					redirectUri: 'https://app.test.com/oauth',
+				};
+
+				const config = buildProviderConfig(providerConfig, 'okta-custom-as', {});
+				assert.equal(config.issuer, 'https://dev-1.okta.com/oauth2/aus1abc');
+			});
+
+			it('does not throw for the Azure "microsoft" alias default (/common) — provider ends up `microsoft`, not `azure`', () => {
+				// buildProviderConfig lets an explicit `provider` option override the
+				// preset's own field, so config.provider is 'microsoft' here, not
+				// 'azure' — the exclusion must key off the resolved preset, not the
+				// final config.provider string.
+				const providerConfig = {
+					provider: 'microsoft',
+					clientId: 'c',
+					clientSecret: 's',
+					redirectUri: 'https://app.test.com/oauth',
+				};
+
+				const config = buildProviderConfig(providerConfig, 'microsoft', {});
+				assert.equal(config.provider, 'microsoft');
+				assert.ok(config.jwksUri);
+				assert.equal(config.issuer, null);
+			});
+
+			it('does not throw for Azure default (/common) multi-tenant config — deliberately issuer-less by design', () => {
+				// Azure's preset ships jwksUri + issuer: null for the multi-tenant
+				// /common default; this is documented, boots today, and is excluded
+				// from this check (see validateIssuerForJwks in config.ts).
+				const providerConfig = {
+					provider: 'azure',
+					clientId: 'c',
+					clientSecret: 's',
+					redirectUri: 'https://app.test.com/oauth',
+				};
+
+				const config = buildProviderConfig(providerConfig, 'azure', {});
+				assert.ok(config.jwksUri);
+				assert.equal(config.issuer, null);
+			});
+
+			it('does not throw when no jwksUri is configured at all (non-OIDC provider)', () => {
+				const providerConfig = {
+					provider: 'generic',
+					clientId: 'c',
+					clientSecret: 's',
+					authorizationUrl: 'https://idp.example.com/authorize',
+					tokenUrl: 'https://idp.example.com/token',
+					userInfoUrl: 'https://idp.example.com/userinfo',
+					redirectUri: 'https://app.test.com/oauth',
+				};
+
+				const config = buildProviderConfig(providerConfig, 'plain-oauth2', {});
+				assert.equal(config.jwksUri, undefined);
+			});
+
+			it('GitHub preset (no jwksUri) is unaffected', () => {
+				const providerConfig = {
+					provider: 'github',
+					clientId: 'c',
+					clientSecret: 's',
+					redirectUri: 'https://app.test.com/oauth',
+				};
+
+				const config = buildProviderConfig(providerConfig, 'github', {});
+				assert.ok(!config.jwksUri, 'GitHub preset has no jwksUri (null)');
+			});
+
+			it('initializeProviders propagates the throw (fails fast at startup, not a silent per-login deny)', () => {
+				const options = {
+					providers: {
+						'custom-idp': {
+							provider: 'generic',
+							clientId: 'c',
+							clientSecret: 's',
+							authorizationUrl: 'https://idp.example.com/authorize',
+							tokenUrl: 'https://idp.example.com/token',
+							userInfoUrl: 'https://idp.example.com/userinfo',
+							jwksUri: 'https://idp.example.com/jwks',
+							redirectUri: 'https://app.test.com/oauth',
+						},
+					},
+				};
+
+				assert.throws(() => initializeProviders(options, undefined), /issuer/);
+			});
+		});
+
 		it('should infer provider type from name if not specified', () => {
 			const providerConfig = {
 				// No 'provider' field

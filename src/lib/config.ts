@@ -660,7 +660,62 @@ export function buildProviderConfig(
 		}
 	}
 
+	validateIssuerForJwks(config, providerName, providerPreset);
+
 	return config;
+}
+
+/**
+ * True when `issuer` is a value `jwt.verify`/`verifyIdTokenClaims` will actually
+ * check against — a non-empty string, or a non-empty array (an empty array
+ * normalizes to "no issuer configured", same as OAuthProvider.verifyIdToken).
+ */
+function hasUsableIssuer(issuer: OAuthProviderConfig['issuer']): boolean {
+	if (Array.isArray(issuer)) return issuer.length > 0;
+	return typeof issuer === 'string' && issuer !== '';
+}
+
+/**
+ * Fail fast at config-build time when a provider is JWKS-enabled (so its id
+ * tokens are signature-verified and can in principle be trusted for account
+ * adoption — see HarperFast/oauth#231 §4) but has no usable `issuer`. Without
+ * this, `issuerValidated` is silently `false` forever and a hookless login
+ * that should adopt an existing account is denied at login time, with no
+ * indication of why.
+ *
+ * Okta and Auth0 ship an empty-string `issuer` placeholder that their preset's
+ * `configure(domain)` fills in alongside `jwksUri` — using `domain` (or
+ * explicitly setting `issuer`) always satisfies this check. A 'generic' OIDC
+ * config (no preset) has the same expectation: setting `jwksUri` means the
+ * operator wants signature verification, so `issuer` must be set too.
+ *
+ * Azure is deliberately excluded: its preset ships `issuer: null` for the
+ * multi-tenant `/common` default, which has no single issuer by design
+ * (OAuthProvider.verifyIdToken already documents `/common` as "not trusted
+ * for adoption", not a misconfiguration) and boots today. Only Azure's
+ * `tenantId`-driven `configure()` path sets a real issuer; explicit-endpoint
+ * Azure configs are unchanged by this check. Checked against the preset's own
+ * `provider` field (`providerPreset`), not `config.provider` — the `microsoft`
+ * alias resolves to the Azure preset but can itself be carried through as
+ * `config.provider` by an explicit `provider: 'microsoft'` option.
+ */
+function validateIssuerForJwks(
+	config: OAuthProviderConfig,
+	providerName: string,
+	providerPreset: OAuthProviderConfig | null
+): void {
+	if (!config.jwksUri) return;
+	if (config.provider === 'azure' || providerPreset?.provider === 'azure') return;
+	if (hasUsableIssuer(config.issuer)) return;
+
+	throw new Error(
+		`OAuth provider '${providerName}' (${config.provider}) has a 'jwksUri' but no usable 'issuer'. ` +
+			`Without a validated issuer, ID token signature verification still runs but 'issuerValidated' is ` +
+			`always false, so this provider's logins can never satisfy the account-adoption gate (a hookless ` +
+			`login that should adopt an existing Harper account is silently denied instead). Set 'issuer' ` +
+			`explicitly on provider '${providerName}' (e.g. your OIDC server's issuer URI), or use the preset's ` +
+			`'domain'/'tenantId' shortcut if you're not already, which derives it for you.`
+	);
 }
 
 /**

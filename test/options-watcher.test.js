@@ -497,6 +497,39 @@ describe('OAuth Plugin Options Watcher', () => {
 		);
 	});
 
+	it('a reload that disables allowUnverifiedClaimInheritance applies immediately even when the same snapshot errors (#231 §5c)', async () => {
+		scope.options._config.allowUnverifiedClaimInheritance = true;
+		await handleApplication(scope);
+		assert.equal(OAuthResource.allowUnverifiedClaimInheritance, true, 'escape hatch should start enabled');
+
+		let errorLogged = false;
+		scope.logger.error = (msg) => {
+			if (typeof msg === 'string' && msg.includes('Failed to update OAuth configuration')) errorLogged = true;
+		};
+
+		// This snapshot both disables the escape hatch AND has an unrelated
+		// provider error ('mcp' is a reserved provider name) that makes
+		// initializeProviders throw before providers/OAuthResource would
+		// otherwise be updated. The escape-hatch flag must still land.
+		scope.options._config = {
+			...scope.options._config,
+			allowUnverifiedClaimInheritance: false,
+			providers: {
+				...scope.options._config.providers,
+				mcp: { provider: 'generic', clientId: 'x', clientSecret: 'y' },
+			},
+		};
+		configChangeListeners[0]();
+		await waitFor(() => errorLogged);
+
+		assert.ok(errorLogged, 'the rejected reload should be logged');
+		assert.equal(
+			OAuthResource.allowUnverifiedClaimInheritance,
+			false,
+			'the escape hatch must be disabled immediately, not left at the stale enabled value'
+		);
+	});
+
 	describe('reload ordering vs. a per-key OptionsWatcher merge', () => {
 		// Harper's real OptionsWatcher#merge writes a multi-key edit into the
 		// live config ONE KEY AT A TIME and emits 'change' synchronously after

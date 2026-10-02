@@ -870,8 +870,9 @@ export interface IOAuthProvider {
 	getAuthorizationUrl(state: string, redirectUri: string): string;
 	/** Exchange authorization code for access/refresh tokens */
 	exchangeCodeForToken(code: string, redirectUri: string): Promise<TokenResponse>;
-	/** Fetch user information from provider */
-	getUserInfo(accessToken: string, idTokenClaims?: any): Promise<any>;
+	/** Fetch user information from provider. `idTokenSignatureVerified` gates whether
+	 *  the resulting `_emailProvenance` may be `'signed-oidc'`. */
+	getUserInfo(accessToken: string, idTokenClaims?: any, idTokenSignatureVerified?: boolean): Promise<any>;
 	/** Map provider user info to Harper user format */
 	mapUserToHarper(userInfo: any): OAuthUser;
 	/** Verify and decode ID token (OIDC only). Returns claims, whether the signature

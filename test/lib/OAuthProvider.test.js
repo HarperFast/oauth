@@ -922,7 +922,32 @@ describe('OAuthProvider', () => {
 			assert.equal(userInfo.name, 'ID Token User');
 		});
 
-		it('should set _emailProvenance signed-oidc when email is in the id token', async () => {
+		it('should set _emailProvenance signed-oidc when email is in the id token and the signature was verified', async () => {
+			const idTokenClaims = {
+				sub: 'u1',
+				email: 'user@example.com',
+				email_verified: true,
+			};
+
+			const userInfo = await provider.getUserInfo('access-token', idTokenClaims, true);
+			assert.equal(userInfo._emailProvenance, 'signed-oidc');
+		});
+
+		it('must NOT set _emailProvenance signed-oidc on the no-JWKS fallback (signatureVerified false) (#231 §5d)', async () => {
+			// verifyIdToken's no-JWKS fallback returns signatureVerified: false — the
+			// claims are decoded, not cryptographically verified. getUserInfo must not
+			// label them 'signed-oidc' just because idTokenClaims is present.
+			const idTokenClaims = {
+				sub: 'u1',
+				email: 'user@example.com',
+				email_verified: true,
+			};
+
+			const userInfo = await provider.getUserInfo('access-token', idTokenClaims, false);
+			assert.equal(userInfo._emailProvenance, 'unauthenticated');
+		});
+
+		it('defaults to NOT signed-oidc when idTokenSignatureVerified is omitted (safe default)', async () => {
 			const idTokenClaims = {
 				sub: 'u1',
 				email: 'user@example.com',
@@ -930,7 +955,7 @@ describe('OAuthProvider', () => {
 			};
 
 			const userInfo = await provider.getUserInfo('access-token', idTokenClaims);
-			assert.equal(userInfo._emailProvenance, 'signed-oidc');
+			assert.equal(userInfo._emailProvenance, 'unauthenticated');
 		});
 
 		it('should set _emailProvenance unauthenticated when no id token', async () => {
@@ -988,6 +1013,69 @@ describe('OAuthProvider', () => {
 			}
 		});
 
+		it('discards UserInfo whose sub does not match the id-token sub on the fetchEmail path (OIDC Core 5.3.2/5.3.4, #231 §5a)', async () => {
+			// A UserInfo response describing a different subject than the id token
+			// must never contribute fields (email, name, role claims, ...) to this
+			// login. Only the id-token's own claims are used.
+			const originalFetch = global.fetch;
+			global.fetch = async () => ({
+				ok: true,
+				json: async () => ({
+					sub: 'attacker-sub',
+					email: 'attacker@example.com',
+					name: 'Attacker Name',
+				}),
+			});
+
+			const configWithFetchEmail = {
+				...mockConfig,
+				fetchEmail: true,
+			};
+			provider = new OAuthProvider(configWithFetchEmail, mockLogger);
+
+			try {
+				const idTokenClaimsNoEmail = {
+					sub: 'victim-sub',
+					iss: 'https://issuer.example.com',
+					name: 'Victim Name',
+				};
+
+				const userInfo = await provider.getUserInfo('access-token', idTokenClaimsNoEmail);
+				assert.equal(userInfo.sub, 'victim-sub', 'sub must stay the id token subject');
+				assert.equal(userInfo.email, undefined, "the mismatched subject's email must not be merged in");
+				assert.equal(userInfo.name, 'Victim Name', "the mismatched subject's name must not override the id token's");
+				assert.equal(userInfo._emailProvenance, 'unauthenticated');
+			} finally {
+				global.fetch = originalFetch;
+			}
+		});
+
+		it('allows UserInfo whose sub matches the id-token sub on the fetchEmail path', async () => {
+			const originalFetch = global.fetch;
+			global.fetch = async () => ({
+				ok: true,
+				json: async () => ({
+					sub: 'same-sub',
+					email: 'user@example.com',
+				}),
+			});
+
+			const configWithFetchEmail = {
+				...mockConfig,
+				fetchEmail: true,
+			};
+			provider = new OAuthProvider(configWithFetchEmail, mockLogger);
+
+			try {
+				const idTokenClaimsNoEmail = { sub: 'same-sub', iss: 'https://issuer.example.com' };
+				const userInfo = await provider.getUserInfo('access-token', idTokenClaimsNoEmail);
+				assert.equal(userInfo.email, 'user@example.com', 'a matching sub still merges the fetched email');
+				assert.equal(userInfo._emailProvenance, 'unauthenticated');
+			} finally {
+				global.fetch = originalFetch;
+			}
+		});
+
 		it('should return signed-oidc with id token claims intact (no UserInfo merge)', async () => {
 			// Confirms the idTokenClaims path is a simple passthrough with signed-oidc tag.
 			// No UserInfo fetch happens regardless of fetchEmail.
@@ -1005,7 +1093,7 @@ describe('OAuthProvider', () => {
 				name: 'Real User',
 			};
 
-			const userInfo = await provider.getUserInfo('access-token', idTokenClaims);
+			const userInfo = await provider.getUserInfo('access-token', idTokenClaims, true);
 			assert.equal(userInfo.iss, 'https://real.issuer.example.com');
 			assert.equal(userInfo.sub, 'u1');
 			assert.equal(userInfo.email, 'user@example.com');

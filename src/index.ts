@@ -339,6 +339,16 @@ export async function handleApplication(scope: Scope): Promise<void> {
 					'This is a security regression; disable this setting unless you have a specific operational need.'
 			);
 		}
+		// Apply the escape-hatch flag to the static immediately, independently of
+		// provider (re)initialization below, which can throw on a bad provider
+		// config (e.g. #231 §4's issuer validation). Without this, a snapshot
+		// that both disables the hatch AND has an unrelated provider error would
+		// abort before ever reaching OAuthResource.configure()'s assignment,
+		// leaving the PREVIOUS snapshot's value (possibly `true`) in effect even
+		// though this snapshot's operator intent was to turn it off. The success
+		// path below re-applies the same value via OAuthResource.configure();
+		// the all-providers-invalid path still forces it to `false`.
+		OAuthResource.allowUnverifiedClaimInheritance = allowUnverifiedClaimInheritance;
 
 		// Re-initialize providers from new configuration
 		// Clear existing providers and repopulate (don't reassign to preserve closure reference)

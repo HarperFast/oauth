@@ -389,7 +389,9 @@ There are exactly **two** trusted email sources. A login may adopt an existing a
 **Source 1 — JWKS-signed OIDC id token (`signed-oidc`)**:
 
 - The email is a claim in a JWKS-signature-verified id token.
-- The token's `iss` was validated against the provider's **expected issuer** (`config.issuer`). Providers without a known issuer — Azure `/common` (multi-tenant) and issuer-less generic providers — are not trusted for adoption.
+- The token's `iss` was validated against the provider's **expected issuer** (`config.issuer`). Providers without a known issuer — Azure `/common` (multi-tenant) — are not trusted for adoption.
+
+  Any other JWKS-enabled provider (Okta, Auth0, or a `generic` OIDC config) that sets `jwksUri` but has no usable `issuer` fails at startup instead, naming the provider and the `issuer` key — this is almost always a bypassed shortcut (Okta/Auth0's `domain` option, which derives `issuer` for you) rather than an intentionally issuer-less provider. Set `issuer` explicitly, or use `domain`/`tenantId`.
 - `email_verified === true` for the **standard `email` claim**. Providers that use a custom `emailClaim` cannot earn adoption trust because `email_verified` only attests the standard claim.
 - The verified email equals the resolved username (`usernameClaim === 'email'`).
 
@@ -417,7 +419,7 @@ When an `onLogin` hook supplies the identity (`hookData.user`), the gate is skip
 | `email_verified` absent or false                                    | Provider has not attested the email                  |
 | Custom `emailClaim` (non-`email` claim used as identity)            | `email_verified` does not attest the custom claim    |
 | Unsigned / unverified id token                                      | Signature not verified                               |
-| JWKS-signed token from issuer-less provider (Azure /common, etc.)   | Issuer cannot be validated; nOAuth class attack      |
+| JWKS-signed token from issuer-less Azure `/common` (multi-tenant)   | Issuer cannot be validated; nOAuth class attack      |
 | Azure id token without `email_verified`                             | No verified-email attestation available              |
 | Plain UserInfo response (no id token)                               | No authenticated binding to the identity             |
 | GitHub `/user/emails` fetch failed or returned non-OK               | Email not confirmed by an authenticated call         |
