@@ -464,6 +464,8 @@ When enabled, the plugin logs a warning on every login that uses the escape hatc
 
 Default: `false` (off). Junk values, unresolved `${VAR}` placeholders (environment variable not set), and anything that is not `true` or `false` are treated as `false`.
 
+**On a transient `hdb_user` read error** with the hatch enabled, the login fails with a retryable error (`error=server_error&reason=account_lookup_failed`) rather than falling back to the quarantine principal below — quarantining would silently roleless a session the hatch should have adopted with its real role. With the hatch disabled (the default), a lookup error quarantines exactly like a confirmed non-existent account.
+
 ### Quarantine principal
 
 For a roleless login with no matching account and an untrusted claim, the plugin sets the session identity to a **quarantine principal** of the form `unverified:<claim>#<random>`. The random suffix makes the value unpredictable, so it can never be created as an `hdb_user` and can never resolve to a role. Unlike a fixed reserved prefix, it requires no naming convention and no fail-closed collision check — its security comes from unpredictability, not from a reserved namespace. The claim is embedded before the `#` purely for log readability and is never parsed back out.
