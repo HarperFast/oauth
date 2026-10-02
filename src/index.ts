@@ -79,8 +79,8 @@ function isHttpsOrLoopbackIssuer(issuer: string): boolean {
  * Response for the session-validation middleware when an OAuth session invalidation couldn't
  * persist: retriable rather than served as either the stale identity or a cached denial.
  * This middleware is a raw `server.http` listener, not a Resource method, so nothing else
- * serializes its return value — `toHttpResponse` does that (JSON body, fresh headers object
- * per call) the same way it already does for `handleLogout`'s matching 503.
+ * serializes its return value — `toHttpResponse` does that explicitly here (JSON body,
+ * fresh headers object per call).
  */
 function sessionClearFailedResponse() {
 	return toHttpResponse({

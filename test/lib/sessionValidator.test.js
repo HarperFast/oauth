@@ -354,7 +354,7 @@ test('should return a controlled result, not reject, when the post-refresh-failu
 		},
 	});
 	// createMockSession's default `update` never rejects — override after creation so the
-	// session store write fails, simulating #265's "second clear also throws" scenario.
+	// session store write fails.
 	session.update = async () => {
 		throw new Error('session store unavailable');
 	};
@@ -374,7 +374,7 @@ test('should return a controlled result, not reject, when the post-refresh-failu
 });
 
 // A throwing logger must not turn the refresh-failure branch's own error log into an unhandled
-// rejection either — the same invariant clearOAuthSession's internal logging now holds.
+// rejection.
 test('should still resolve to a controlled result when the logger itself throws on the refresh-failure log', async () => {
 	const provider = createMockProvider({
 		refreshAccessToken: async () => {
