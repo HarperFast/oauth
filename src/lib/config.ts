@@ -8,7 +8,7 @@ import { OAuthProvider } from './OAuthProvider.ts';
 import { getProvider } from './providers/index.ts';
 import { redactSecrets } from './redact.ts';
 import { algFromPrivateKeyPem } from './mcp/keyStore.ts';
-import { isCimdClientId } from './mcp/cimd.ts';
+import { isCimdClientId, cimdEnabled } from './mcp/cimd.ts';
 import type { OAuthProviderConfig, OAuthPluginConfig, ProviderRegistry, Logger } from '../types.ts';
 
 /**
@@ -414,14 +414,10 @@ export function normalizeMcpSecurityConfig(mcpConfig: Record<string, any>, logge
 	}
 
 	// CIMD reads allowedRedirectUriHosts independently of dcr.enabled (cimd.ts);
-	// precompute its active state here, before cimd.enabled is normalized below.
-	const cimdConfigForGate = mcpConfig.clientIdMetadataDocuments;
-	const cimdActive =
-		coerceConfigBoolean(
-			cimdConfigForGate && typeof cimdConfigForGate === 'object' && !Array.isArray(cimdConfigForGate)
-				? cimdConfigForGate.enabled
-				: undefined
-		) !== false;
+	// precompute its active state here (shared `cimdEnabled` predicate — also
+	// used at request time by `resolveClient`), before cimd.enabled is
+	// normalized below.
+	const cimdActive = cimdEnabled(mcpConfig.clientIdMetadataDocuments);
 
 	const dcr = mcpConfig.dynamicClientRegistration;
 	if (dcr !== undefined && dcr !== null && (typeof dcr !== 'object' || Array.isArray(dcr))) {
