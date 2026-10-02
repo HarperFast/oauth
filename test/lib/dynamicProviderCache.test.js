@@ -306,4 +306,138 @@ describe('DynamicProviderCache', () => {
 			}
 		});
 	});
+
+	describe('Azure issuer-pin failure cooldown (#264/#271)', () => {
+		it('returns undefined when no failure has been recorded', () => {
+			const cache = new DynamicProviderCache();
+			assert.equal(cache.getAzurePinFailure('azure-tenant-a'), undefined);
+		});
+
+		it('returns the recorded message within the cooldown window', () => {
+			const cache = new DynamicProviderCache();
+			cache.recordAzurePinFailure('azure-tenant-a', 'issuer names a different tenant');
+			assert.equal(cache.getAzurePinFailure('azure-tenant-a'), 'issuer names a different tenant');
+		});
+
+		it('expires after the fixed 30s cooldown, independent of the success TTL', () => {
+			// A long success TTL must not also extend the failure cooldown — a
+			// fixed config should recover fast, not wait for a long/forever TTL.
+			const cache = new DynamicProviderCache(true);
+			cache.recordAzurePinFailure('azure-tenant-a', 'issuer names a different tenant');
+
+			const restoreWithin = advanceTime(29_000);
+			try {
+				assert.equal(cache.getAzurePinFailure('azure-tenant-a'), 'issuer names a different tenant');
+			} finally {
+				restoreWithin();
+			}
+
+			const restoreAfter = advanceTime(31_000);
+			try {
+				assert.equal(cache.getAzurePinFailure('azure-tenant-a'), undefined);
+			} finally {
+				restoreAfter();
+			}
+		});
+
+		it('is cleared by clearAzurePinFailure (a subsequent successful resolution)', () => {
+			const cache = new DynamicProviderCache();
+			cache.recordAzurePinFailure('azure-tenant-a', 'issuer names a different tenant');
+			cache.clearAzurePinFailure('azure-tenant-a');
+			assert.equal(cache.getAzurePinFailure('azure-tenant-a'), undefined);
+		});
+
+		it('is scoped per provider name', () => {
+			const cache = new DynamicProviderCache();
+			cache.recordAzurePinFailure('azure-tenant-a', 'tenant A pin invalid');
+			assert.equal(cache.getAzurePinFailure('azure-tenant-b'), undefined);
+		});
+
+		it('clear() also clears recorded Azure-pin failures', () => {
+			const cache = new DynamicProviderCache();
+			cache.recordAzurePinFailure('azure-tenant-a', 'tenant A pin invalid');
+			cache.clear();
+			assert.equal(cache.getAzurePinFailure('azure-tenant-a'), undefined);
+		});
+	});
+
+	describe('wrapLoggerForDynamicResolution', () => {
+		it('returns undefined unchanged when no logger is given', () => {
+			const cache = new DynamicProviderCache();
+			assert.equal(cache.wrapLoggerForDynamicResolution('azure-provider', undefined), undefined);
+		});
+
+		it('logs the first warn() call for a provider', () => {
+			const cache = new DynamicProviderCache();
+			const warnings = [];
+			const logger = { warn: (msg) => warnings.push(msg) };
+			const wrapped = cache.wrapLoggerForDynamicResolution('azure-provider', logger);
+			wrapped.warn('tenant mismatch');
+			assert.deepEqual(warnings, ['tenant mismatch']);
+		});
+
+		it('drops a repeat of the exact same message for the same provider — the dynamic-resolution path can otherwise re-log it on every request', () => {
+			const cache = new DynamicProviderCache();
+			const warnings = [];
+			const logger = { warn: (msg) => warnings.push(msg) };
+			const wrapped = cache.wrapLoggerForDynamicResolution('azure-provider', logger);
+			wrapped.warn('tenant mismatch');
+			wrapped.warn('tenant mismatch');
+			wrapped.warn('tenant mismatch');
+			assert.deepEqual(warnings, ['tenant mismatch']);
+		});
+
+		it('logs a DIFFERENT message for the same provider — dedup is keyed by message, not just by provider', () => {
+			const cache = new DynamicProviderCache();
+			const warnings = [];
+			const logger = { warn: (msg) => warnings.push(msg) };
+			const wrapped = cache.wrapLoggerForDynamicResolution('azure-provider', logger);
+			wrapped.warn('tenant mismatch');
+			wrapped.warn('a different warning');
+			assert.deepEqual(warnings, ['tenant mismatch', 'a different warning']);
+		});
+
+		it('is scoped per provider — the same message still logs once for a different provider', () => {
+			const cache = new DynamicProviderCache();
+			const warnings = [];
+			const logger = { warn: (msg) => warnings.push(msg) };
+			cache.wrapLoggerForDynamicResolution('azure-provider-a', logger).warn('tenant mismatch');
+			cache.wrapLoggerForDynamicResolution('azure-provider-b', logger).warn('tenant mismatch');
+			assert.deepEqual(warnings, ['tenant mismatch', 'tenant mismatch']);
+		});
+
+		it('passes info/error/debug through unchanged, with no dedup', () => {
+			const cache = new DynamicProviderCache();
+			const infos = [];
+			const logger = { info: (msg) => infos.push(msg) };
+			const wrapped = cache.wrapLoggerForDynamicResolution('azure-provider', logger);
+			wrapped.info('resolved');
+			wrapped.info('resolved');
+			assert.deepEqual(infos, ['resolved', 'resolved']);
+		});
+
+		it('delegates to a class-based logger whose methods live on its prototype, not as its own properties — a `{ ...logger }` spread would silently drop them', () => {
+			const infos = [];
+			class ClassLogger {
+				info(msg) {
+					infos.push(msg);
+				}
+			}
+			const cache = new DynamicProviderCache();
+			const wrapped = cache.wrapLoggerForDynamicResolution('azure-provider', new ClassLogger());
+			wrapped.info('resolved');
+			assert.deepEqual(infos, ['resolved']);
+		});
+
+		it('clear() resets the dedup state, so a warning can log again afterward', () => {
+			const cache = new DynamicProviderCache();
+			const warnings = [];
+			const logger = { warn: (msg) => warnings.push(msg) };
+			const wrapped = cache.wrapLoggerForDynamicResolution('azure-provider', logger);
+			wrapped.warn('tenant mismatch');
+			cache.clear();
+			wrapped.warn('tenant mismatch');
+			assert.deepEqual(warnings, ['tenant mismatch', 'tenant mismatch']);
+		});
+	});
 });

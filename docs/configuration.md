@@ -389,9 +389,9 @@ There are exactly **two** trusted email sources. A login may adopt an existing a
 **Source 1 — JWKS-signed OIDC id token (`signed-oidc`)**:
 
 - The email is a claim in a JWKS-signature-verified id token.
-- The token's `iss` was validated against the provider's **expected issuer** (`config.issuer`). Providers without a known issuer — Azure `/common` (multi-tenant) — are not trusted for adoption.
+- The token's `iss` was validated against the provider's **expected issuer** (`config.issuer`). An Azure `/common`/`/organizations`/`consumers` provider with no `issuer` pinned is not trusted for adoption — see [Multi-Tenant Apps and Account Adoption](./providers.md#multi-tenant-apps-and-account-adoption) for how to make one specific tenant adoption-eligible.
 
-  Any other JWKS-enabled provider (Okta, Auth0, or a `generic` OIDC config) that sets `jwksUri` but has no usable `issuer` fails at startup instead, naming the provider and the `issuer` key — this is almost always a bypassed shortcut (Okta/Auth0's `domain` option, which derives `issuer` for you) rather than an intentionally issuer-less provider. Set `issuer` explicitly, or use `domain`/`tenantId`.
+  **You almost never need to set `issuer` yourself.** Presets derive it from `domain`/`tenantId`/`authServer` whenever it's knowable, and any other JWKS-enabled provider (Okta, Auth0, or a `generic` OIDC config) that sets `jwksUri` with explicit endpoints but no usable `issuer` derives it automatically in the background via [OIDC discovery](./providers.md#issuer-is-usually-unnecessary) — this never blocks startup, and the first login that needs it waits only briefly for an in-flight attempt; every other login proceeds without waiting. Only a config that's wrong _independent_ of the network — no `authorizationUrl`, or a non-`https` one — still fails fast at startup, naming the provider and the `issuer` key.
 
 - `email_verified === true` for the **standard `email` claim**. Providers that use a custom `emailClaim` cannot earn adoption trust because `email_verified` only attests the standard claim.
 - The verified email equals the resolved username (`usernameClaim === 'email'`).
@@ -434,21 +434,23 @@ Only VERIFIED addresses from GitHub's authenticated fetch are ever candidates fo
 
 **Denied by default:**
 
-| Scenario                                                            | Reason                                               |
-| ------------------------------------------------------------------- | ---------------------------------------------------- |
-| GitHub `login` claim → existing account                             | `login` ≠ email; username and email differ           |
-| Okta `preferred_username` ≠ email → existing account                | username claim differs from email                    |
-| `email_verified` absent or false                                    | Provider has not attested the email                  |
-| Custom `emailClaim` (non-`email` claim used as identity)            | `email_verified` does not attest the custom claim    |
-| Unsigned / unverified id token                                      | Signature not verified                               |
-| JWKS-signed token from issuer-less Azure `/common` (multi-tenant)   | Issuer cannot be validated; nOAuth class attack      |
-| Azure id token without `email_verified`                             | No verified-email attestation available              |
-| Plain UserInfo response (no id token)                               | No authenticated binding to the identity             |
-| GitHub `/user/emails` fetch failed or returned non-OK               | Email not confirmed by an authenticated call         |
-| GitHub `/user/emails` returned `verified: false`                    | Email not verified by GitHub                         |
-| Non-GitHub provider with custom `getUserInfo` adapter               | `github-authenticated` requires `provider=github`    |
-| Custom adapter returning `_emailProvenance: 'github-authenticated'` | Provenance is plugin-assigned; adapter value ignored |
-| `fetchEmail: true` resolved email from UserInfo (no signed token)   | Email is present but provenance is unauthenticated   |
+| Scenario                                                                 | Reason                                                                                                     |
+| ------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------- |
+| GitHub `login` claim → existing account                                  | `login` ≠ email; username and email differ                                                                 |
+| Okta `preferred_username` ≠ email → existing account                     | username claim differs from email                                                                          |
+| `email_verified` absent or false                                         | Provider has not attested the email                                                                        |
+| Custom `emailClaim` (non-`email` claim used as identity)                 | `email_verified` does not attest the custom claim                                                          |
+| Unsigned / unverified id token                                           | Signature not verified                                                                                     |
+| JWKS-signed token from an unpinned Azure `/common` (multi-tenant)        | Issuer cannot be validated; nOAuth class attack                                                            |
+| Azure id token from a tenant other than a pinned multi-tenant provider's | ID token verification fails outright (not just denied adoption) — pinning makes the provider single-tenant |
+| Login arriving before background OIDC discovery resolves                 | No validated issuer yet for this attempt                                                                   |
+| Azure id token without `email_verified`                                  | No verified-email attestation available                                                                    |
+| Plain UserInfo response (no id token)                                    | No authenticated binding to the identity                                                                   |
+| GitHub `/user/emails` fetch failed or returned non-OK                    | Email not confirmed by an authenticated call                                                               |
+| GitHub `/user/emails` returned `verified: false`                         | Email not verified by GitHub                                                                               |
+| Non-GitHub provider with custom `getUserInfo` adapter                    | `github-authenticated` requires `provider=github`                                                          |
+| Custom adapter returning `_emailProvenance: 'github-authenticated'`      | Provenance is plugin-assigned; adapter value ignored                                                       |
+| `fetchEmail: true` resolved email from UserInfo (no signed token)        | Email is present but provenance is unauthenticated                                                         |
 
 Two further denials happen earlier, during [email resolution itself](#github-default-email-when-there-are-several-verified-addresses) (`usernameClaim: 'email'` only) — not from the trust-source table above, but from which address gets picked in the first place:
 
@@ -459,14 +461,16 @@ Two further denials happen earlier, during [email resolution itself](#github-def
 
 **Allowed:**
 
-| Scenario                                                       | Reason                                                      |
-| -------------------------------------------------------------- | ----------------------------------------------------------- |
-| Google (JWKS-signed token, `email_verified=true`)              | `signed-oidc`: issuer validated, email verified             |
-| Auth0 (JWKS-signed token, `email_verified=true`)               | `signed-oidc`: issuer derived from domain                   |
-| Okta (JWKS-signed token, `preferred_username` equals email)    | `signed-oidc`: issuer derived from domain                   |
-| Azure single-tenant (JWKS-signed, `email_verified=true`)       | `signed-oidc`: issuer derived from tenant ID                |
-| GitHub (`provider=github`) with verified email, username=email | `github-authenticated`: successful `/user/emails`, verified |
-| `onLogin` hook returns `{ user }`                              | Hook path, gate skipped                                     |
+| Scenario                                                              | Reason                                                      |
+| --------------------------------------------------------------------- | ----------------------------------------------------------- |
+| Google (JWKS-signed token, `email_verified=true`)                     | `signed-oidc`: issuer validated, email verified             |
+| Auth0 (JWKS-signed token, `email_verified=true`)                      | `signed-oidc`: issuer derived from domain                   |
+| Okta (JWKS-signed token, `preferred_username` equals email)           | `signed-oidc`: issuer derived from domain                   |
+| Azure single-tenant (JWKS-signed, `email_verified=true`)              | `signed-oidc`: issuer derived from tenant ID                |
+| Azure multi-tenant with `issuer` pinned to the matching tenant        | `signed-oidc`: verified against that tenant's own keys      |
+| Okta custom authorization server, explicit endpoints, no `issuer` set | `signed-oidc`: issuer derived via OIDC discovery            |
+| GitHub (`provider=github`) with verified email, username=email        | `github-authenticated`: successful `/user/emails`, verified |
+| `onLogin` hook returns `{ user }`                                     | Hook path, gate skipped                                     |
 
 ### Escape hatch: `allowUnverifiedClaimInheritance`
 
@@ -497,6 +501,10 @@ Default: `false` (off). Junk values, unresolved `${VAR}` placeholders (environme
 ### Quarantine principal
 
 For a roleless login with no matching account and an untrusted claim, the plugin sets the session identity to a **quarantine principal** of the form `unverified:<claim>#<random>`. The random suffix makes the value unpredictable, so it can never be created as an `hdb_user` and can never resolve to a role. Unlike a fixed reserved prefix, it requires no naming convention and no fail-closed collision check — its security comes from unpredictability, not from a reserved namespace. The claim is embedded before the `#` purely for log readability and is never parsed back out.
+
+### OIDC discovery and startup behavior (upgrade note)
+
+Before this release, a statically configured JWKS-enabled provider with explicit endpoints and no usable `issuer` failed to start (see the `[Unreleased]`/2.9.0 CHANGELOG entry for #231 §4). As of this release, that config now boots normally whenever `authorizationUrl` is `https://` — the issuer is instead derived in the background via OIDC discovery (non-`https` is unchanged: it still fails fast, since no amount of waiting fixes that). While discovery is pending, or if it never resolves (e.g. the IdP doesn't publish a discovery document, or it doesn't validate against your configured endpoints), logins through that provider proceed exactly as any other "signed but not issuer-validated" login already does: a login that would adopt an **existing** account is **denied**, and a login with **no** existing account match proceeds as a quarantined, roleless session — the same behavior Azure `/common` has always had. A session already created while discovery was pending does not retroactively gain trust once discovery later succeeds; only a subsequent login benefits. A failed discovery attempt is retried only on a live config reload (or a restart) at least 5 minutes after the failure — never automatically, and never from a login path. A reload inside that 5-minute window is a no-op, so a transient DNS/network blip does **not** recover "on its own": it requires an operator-initiated reload after the cooldown, or a restart. Each Harper worker thread also holds its own discovery cache (module state, not shared), so the same blip can affect only some of a multi-worker deployment's threads — whether a given login is denied adoption depends on which worker served it.
 
 ### Pre-existing sessions (upgrade note)
 

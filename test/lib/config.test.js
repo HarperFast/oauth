@@ -15,6 +15,8 @@ import {
 	normalizeMcpSecurityConfig,
 	isUnresolvedEnvPlaceholder,
 	skipUndefined,
+	needsIssuerDiscovery,
+	collectDiscoveryTargets,
 } from '../../dist/lib/config.js';
 import { interactivePrivateKeyJwtEnabled } from '../../dist/lib/mcp/clientAuthMethod.js';
 
@@ -1394,6 +1396,67 @@ describe('OAuth Configuration', () => {
 				assert.ok(config.userInfoUrl.includes('myapp.auth0.com'));
 			});
 
+			it('an explicit, usable issuer pin wins over the domain-derived one (#264)', () => {
+				const providerConfig = {
+					provider: 'auth0',
+					clientId: 'auth0-client',
+					clientSecret: 'auth0-secret',
+					domain: 'myapp.auth0.com',
+					issuer: 'https://custom-issuer.example.com/',
+					redirectUri: 'https://app.test.com/oauth',
+				};
+
+				const config = buildProviderConfig(providerConfig, 'auth0', {});
+
+				assert.equal(config.issuer, 'https://custom-issuer.example.com/');
+			});
+
+			it('an unresolved ${VAR} issuer placeholder does not win over the domain-derived issuer (#264)', () => {
+				delete process.env.OAUTH_TEST_UNSET_ISSUER_VAR;
+				const providerConfig = {
+					provider: 'auth0',
+					clientId: 'auth0-client',
+					clientSecret: 'auth0-secret',
+					domain: 'myapp.auth0.com',
+					issuer: '${OAUTH_TEST_UNSET_ISSUER_VAR}',
+					redirectUri: 'https://app.test.com/oauth',
+				};
+
+				const config = buildProviderConfig(providerConfig, 'auth0', {});
+
+				assert.equal(config.issuer, 'https://myapp.auth0.com/');
+			});
+
+			it('a null issuer does not win over the domain-derived issuer (#264)', () => {
+				const providerConfig = {
+					provider: 'auth0',
+					clientId: 'auth0-client',
+					clientSecret: 'auth0-secret',
+					domain: 'myapp.auth0.com',
+					issuer: null,
+					redirectUri: 'https://app.test.com/oauth',
+				};
+
+				const config = buildProviderConfig(providerConfig, 'auth0', {});
+
+				assert.equal(config.issuer, 'https://myapp.auth0.com/');
+			});
+
+			it('an empty-string issuer does not win over the domain-derived issuer (#264)', () => {
+				const providerConfig = {
+					provider: 'auth0',
+					clientId: 'auth0-client',
+					clientSecret: 'auth0-secret',
+					domain: 'myapp.auth0.com',
+					issuer: '',
+					redirectUri: 'https://app.test.com/oauth',
+				};
+
+				const config = buildProviderConfig(providerConfig, 'auth0', {});
+
+				assert.equal(config.issuer, 'https://myapp.auth0.com/');
+			});
+
 			it('should clean Auth0 domain input', () => {
 				const providerConfig = {
 					provider: 'auth0',
@@ -1410,8 +1473,13 @@ describe('OAuth Configuration', () => {
 			});
 		});
 
-		describe('issuer required for JWKS-enabled providers, static startup only (#231 §4)', () => {
-			it('throws naming the provider and key when a generic provider sets jwksUri but no issuer', () => {
+		describe('issuer required for JWKS-enabled providers, static startup only (#231 §4, relaxed by #264)', () => {
+			it('does NOT throw for a generic provider with an https authorizationUrl, jwksUri and no issuer — defers to OIDC discovery instead (#264)', () => {
+				// #264 relaxes #231 §4's hard-fail: an `https` explicit-endpoint
+				// config is no longer necessarily wrong — it may just need one
+				// background discovery round-trip the operator never has to think
+				// about. Only a config that's wrong independent of the network
+				// (next test) still hard-fails.
 				const providerConfig = {
 					provider: 'generic',
 					clientId: 'c',
@@ -1419,6 +1487,23 @@ describe('OAuth Configuration', () => {
 					authorizationUrl: 'https://idp.example.com/authorize',
 					tokenUrl: 'https://idp.example.com/token',
 					userInfoUrl: 'https://idp.example.com/userinfo',
+					jwksUri: 'https://idp.example.com/jwks',
+					redirectUri: 'https://app.test.com/oauth',
+				};
+
+				const config = buildProviderConfig(providerConfig, 'custom-idp', {}, true);
+				assert.equal(config.issuer, undefined);
+				assert.equal(needsIssuerDiscovery(config), true, 'eligible for background OIDC discovery');
+			});
+
+			it('still throws naming the provider and key when authorizationUrl is not https — discovery cannot help a config that is wrong independent of the network (#264)', () => {
+				const providerConfig = {
+					provider: 'generic',
+					clientId: 'c',
+					clientSecret: 's',
+					authorizationUrl: 'http://idp.example.com/authorize',
+					tokenUrl: 'http://idp.example.com/token',
+					userInfoUrl: 'http://idp.example.com/userinfo',
 					jwksUri: 'https://idp.example.com/jwks',
 					redirectUri: 'https://app.test.com/oauth',
 				};
@@ -1433,10 +1518,11 @@ describe('OAuth Configuration', () => {
 				);
 			});
 
-			it('throws when Okta is configured with explicit endpoints (bypassing domain) and no issuer', () => {
+			it('does NOT throw when Okta is configured with explicit endpoints (bypassing domain) and no issuer — defers to discovery (#264)', () => {
 				// A custom Okta authorization-server config with explicit endpoints —
-				// the regression this closes: previously issuer stayed '' and adoption
-				// was silently denied at login instead of failing fast at startup.
+				// #231 §4 used to fail fast at startup for this; #264 relaxes that to
+				// a background discovery attempt instead, since the https endpoint
+				// may well be resolvable.
 				const providerConfig = {
 					provider: 'okta',
 					clientId: 'c',
@@ -1448,7 +1534,9 @@ describe('OAuth Configuration', () => {
 					redirectUri: 'https://app.test.com/oauth',
 				};
 
-				assert.throws(() => buildProviderConfig(providerConfig, 'okta-custom-as', {}, true), /issuer/);
+				const config = buildProviderConfig(providerConfig, 'okta-custom-as', {}, true);
+				assert.ok(!config.issuer, 'no usable issuer (Okta preset default is an empty string)');
+				assert.equal(needsIssuerDiscovery(config), true);
 			});
 
 			it('does NOT throw the same config without enforceIssuerForJwks — the dynamic/request-time path (#231 follow-up)', () => {
@@ -1536,6 +1624,101 @@ describe('OAuth Configuration', () => {
 				assert.equal(config.issuer, null);
 			});
 
+			it('does not throw for a generic provider manually pointed at an unpinned Azure alias jwksUri — excluded by jwksUri shape, not declared provider type (#264)', () => {
+				// Before the fix, this hard-failed with a misleading "authorizationUrl
+				// is missing or not https" error (authorizationUrl IS https here) —
+				// the real reason was the Azure-host carve-out only firing for
+				// `provider: 'azure'`/`microsoft`, not any config whose jwksUri
+				// happens to be Azure's shared, tenant-independent host.
+				const providerConfig = {
+					provider: 'generic',
+					clientId: 'c',
+					clientSecret: 's',
+					authorizationUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize',
+					tokenUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/token',
+					userInfoUrl: 'https://graph.microsoft.com/v1.0/me',
+					jwksUri: 'https://login.microsoftonline.com/common/discovery/v2.0/keys',
+					redirectUri: 'https://app.test.com/oauth',
+				};
+
+				const config = buildProviderConfig(providerConfig, 'custom-azure', {}, true);
+				assert.equal(config.provider, 'generic');
+				assert.equal(config.issuer, undefined);
+				assert.equal(
+					needsIssuerDiscovery(config),
+					false,
+					'an unpinned alias must never be probed by generic discovery'
+				);
+			});
+
+			it('does not throw for an unpinned Azure alias on the older v1 keys shape (no v2.0) either — byte-identical to main, same as the v2 alias shape (#271 follow-up)', () => {
+				// Before this fix, this shape was NOT recognized at all, so it fell
+				// through into generic OIDC discovery (which fails for it) and was
+				// told to pin `issuer` — landing on a config that binds a pin to
+				// Azure's shared, unvalidated v1 key pool.
+				const providerConfig = {
+					provider: 'generic',
+					clientId: 'c',
+					clientSecret: 's',
+					authorizationUrl: 'https://login.microsoftonline.com/common/oauth2/authorize',
+					tokenUrl: 'https://login.microsoftonline.com/common/oauth2/token',
+					userInfoUrl: 'https://graph.microsoft.com/v1.0/me',
+					jwksUri: 'https://login.microsoftonline.com/common/discovery/keys',
+					redirectUri: 'https://app.test.com/oauth',
+				};
+
+				const config = buildProviderConfig(providerConfig, 'custom-azure-v1', {}, true);
+				assert.equal(config.issuer, undefined);
+				assert.equal(
+					needsIssuerDiscovery(config),
+					false,
+					'an unpinned v1 alias must never be probed by generic discovery'
+				);
+			});
+
+			it('throws for a PINNED Azure alias on the older v1 keys shape (no v2.0) — a pin can never be safely bound to this shared key pool (#271 follow-up)', () => {
+				const providerConfig = {
+					provider: 'generic',
+					clientId: 'c',
+					clientSecret: 's',
+					authorizationUrl: 'https://login.microsoftonline.com/common/oauth2/authorize',
+					tokenUrl: 'https://login.microsoftonline.com/common/oauth2/token',
+					userInfoUrl: 'https://graph.microsoft.com/v1.0/me',
+					jwksUri: 'https://login.microsoftonline.com/common/discovery/keys',
+					issuer: 'https://sts.windows.net/12345678-1234-1234-1234-123456789012/',
+					redirectUri: 'https://app.test.com/oauth',
+				};
+
+				assert.throws(() => buildProviderConfig(providerConfig, 'custom-azure-v1', {}, true), /shared v1/);
+			});
+
+			it('still requires an issuer (or defers to discovery) for a tenant-DOMAIN Azure jwksUri — resolveAzureIssuerBinding never recognizes it, so it must not get the unpinned-alias exemption (#264/#271)', () => {
+				// A verified .onmicrosoft.com domain is a real, Azure-accepted
+				// segment here — not a GUID, and not one of the shared aliases —
+				// so resolveAzureIssuerBinding leaves it untouched, and this must
+				// fall through to the normal check instead of booting silently
+				// with issuerValidated permanently false.
+				const httpsConfig = {
+					provider: 'generic',
+					clientId: 'c',
+					clientSecret: 's',
+					authorizationUrl: 'https://login.microsoftonline.com/contoso.onmicrosoft.com/oauth2/v2.0/authorize',
+					tokenUrl: 'https://login.microsoftonline.com/contoso.onmicrosoft.com/oauth2/v2.0/token',
+					userInfoUrl: 'https://graph.microsoft.com/v1.0/me',
+					jwksUri: 'https://login.microsoftonline.com/contoso.onmicrosoft.com/discovery/v2.0/keys',
+					redirectUri: 'https://app.test.com/oauth',
+				};
+				const config = buildProviderConfig(httpsConfig, 'contoso-azure', {}, true);
+				assert.equal(config.issuer, undefined);
+				assert.equal(needsIssuerDiscovery(config), true, 'eligible for background OIDC discovery, unlike an alias');
+
+				const nonHttpsConfig = {
+					...httpsConfig,
+					authorizationUrl: 'http://login.microsoftonline.com/contoso.onmicrosoft.com/oauth2/v2.0/authorize',
+				};
+				assert.throws(() => buildProviderConfig(nonHttpsConfig, 'contoso-azure', {}, true), /issuer/);
+			});
+
 			it('does not throw when no jwksUri is configured at all (non-OIDC provider)', () => {
 				const providerConfig = {
 					provider: 'generic',
@@ -1563,7 +1746,7 @@ describe('OAuth Configuration', () => {
 				assert.ok(!config.jwksUri, 'GitHub preset has no jwksUri (null)');
 			});
 
-			it('a non-empty issuer array with only blank entries is NOT usable (hasUsableIssuer)', () => {
+			it('a non-empty issuer array with only blank entries is NOT usable (hasUsableIssuer) — still eligible for discovery with an https authorizationUrl', () => {
 				const providerConfig = {
 					provider: 'generic',
 					clientId: 'c',
@@ -1576,10 +1759,27 @@ describe('OAuth Configuration', () => {
 					redirectUri: 'https://app.test.com/oauth',
 				};
 
+				const config = buildProviderConfig(providerConfig, 'custom-idp', {}, true);
+				assert.equal(needsIssuerDiscovery(config), true);
+			});
+
+			it('a non-empty issuer array with only blank entries still hard-fails with a non-https authorizationUrl', () => {
+				const providerConfig = {
+					provider: 'generic',
+					clientId: 'c',
+					clientSecret: 's',
+					authorizationUrl: 'http://idp.example.com/authorize',
+					tokenUrl: 'http://idp.example.com/token',
+					userInfoUrl: 'http://idp.example.com/userinfo',
+					jwksUri: 'https://idp.example.com/jwks',
+					issuer: [''],
+					redirectUri: 'https://app.test.com/oauth',
+				};
+
 				assert.throws(() => buildProviderConfig(providerConfig, 'custom-idp', {}, true), /issuer/);
 			});
 
-			it('initializeProviders propagates the throw (fails fast at startup, not a silent per-login deny)', () => {
+			it('initializeProviders does NOT throw for an https explicit-endpoint provider missing issuer — it defers to background discovery (#264)', () => {
 				const options = {
 					providers: {
 						'custom-idp': {
@@ -1590,6 +1790,91 @@ describe('OAuth Configuration', () => {
 							tokenUrl: 'https://idp.example.com/token',
 							userInfoUrl: 'https://idp.example.com/userinfo',
 							jwksUri: 'https://idp.example.com/jwks',
+							redirectUri: 'https://app.test.com/oauth',
+						},
+					},
+				};
+
+				const providers = initializeProviders(options, undefined);
+				assert.ok(providers['custom-idp'], 'provider still initializes');
+				assert.equal(providers['custom-idp'].config.issuer, undefined);
+				assert.equal(collectDiscoveryTargets(providers).length, 1, 'eligible for background OIDC discovery');
+			});
+
+			it('initializeProviders still propagates the throw for a non-https authorizationUrl (fails fast at startup, not a silent per-login deny)', () => {
+				const options = {
+					providers: {
+						'custom-idp': {
+							provider: 'generic',
+							clientId: 'c',
+							clientSecret: 's',
+							authorizationUrl: 'http://idp.example.com/authorize',
+							tokenUrl: 'http://idp.example.com/token',
+							userInfoUrl: 'http://idp.example.com/userinfo',
+							jwksUri: 'https://idp.example.com/jwks',
+							redirectUri: 'https://app.test.com/oauth',
+						},
+					},
+				};
+
+				assert.throws(() => initializeProviders(options, undefined), /issuer/);
+			});
+
+			it('a provider with an invalid Azure issuer pin is skipped with a logged error — every other provider still initializes (#271 follow-up)', () => {
+				const warnings = [];
+				const logger = {
+					error: (...args) => warnings.push(args.join(' ')),
+					warn: () => {},
+					info: () => {},
+					debug: () => {},
+				};
+				const options = {
+					providers: {
+						// A stale pin left over after switching tenantId, or copied from
+						// docs — does not name the configured tenant.
+						'bad-azure': {
+							provider: 'azure',
+							clientId: 'c',
+							clientSecret: 's',
+							tenantId: '12345678-1234-1234-1234-123456789012',
+							issuer: 'https://login.microsoftonline.com/87654321-4321-4321-4321-210987654321/v2.0',
+							redirectUri: 'https://app.test.com/oauth',
+						},
+						'github': {
+							provider: 'github',
+							clientId: 'github-client',
+							clientSecret: 'github-secret',
+							redirectUri: 'https://app.test.com/oauth',
+						},
+					},
+				};
+
+				const providers = initializeProviders(options, logger);
+				assert.ok(!providers['bad-azure'], 'the misconfigured provider is skipped, not published');
+				assert.ok(providers['github'], 'every other provider still initializes');
+				assert.ok(
+					warnings.some((w) => w.includes('bad-azure') && w.includes('invalid Azure issuer pin')),
+					'the skip is logged as an error naming the provider'
+				);
+			});
+
+			it('a non-Azure buildProviderConfig failure still aborts every provider — only the Azure-pin case is downgraded to skip-with-error', () => {
+				const options = {
+					providers: {
+						'custom-idp': {
+							provider: 'generic',
+							clientId: 'c',
+							clientSecret: 's',
+							authorizationUrl: 'http://idp.example.com/authorize', // non-https: #231 §4 hard-fail, unrelated to Azure
+							tokenUrl: 'http://idp.example.com/token',
+							userInfoUrl: 'http://idp.example.com/userinfo',
+							jwksUri: 'https://idp.example.com/jwks',
+							redirectUri: 'https://app.test.com/oauth',
+						},
+						'github': {
+							provider: 'github',
+							clientId: 'github-client',
+							clientSecret: 'github-secret',
 							redirectUri: 'https://app.test.com/oauth',
 						},
 					},
@@ -1631,10 +1916,11 @@ describe('OAuth Configuration', () => {
 				);
 			});
 
-			it('a configured provider alongside an unconfigured one in the same config still gets the §4 fail-fast', () => {
+			it('a configured provider alongside an unconfigured one in the same config still gets the §4 fail-fast for a non-https authorizationUrl', () => {
 				// Mirrors the test above but with a second, fully configured provider
 				// present: the unconfigured one is skipped silently while the
-				// configured one still throws for its missing issuer.
+				// configured one still throws for its missing issuer (non-https —
+				// discovery can't help, so #231 §4's hard-fail still applies).
 				delete process.env.OAUTH_TEST_231_UNSET_CLIENT_ID_2;
 				const options = {
 					providers: {
@@ -1650,9 +1936,9 @@ describe('OAuth Configuration', () => {
 							provider: 'generic',
 							clientId: 'c',
 							clientSecret: 's',
-							authorizationUrl: 'https://idp.example.com/authorize',
-							tokenUrl: 'https://idp.example.com/token',
-							userInfoUrl: 'https://idp.example.com/userinfo',
+							authorizationUrl: 'http://idp.example.com/authorize',
+							tokenUrl: 'http://idp.example.com/token',
+							userInfoUrl: 'http://idp.example.com/userinfo',
 							jwksUri: 'https://idp.example.com/jwks',
 							redirectUri: 'https://app.test.com/oauth',
 						},
@@ -2234,6 +2520,167 @@ describe('OAuth Configuration', () => {
 				assert.equal(providers.github, undefined, 'the half-configured provider is skipped');
 				assert.ok(errors.some((msg) => msg.includes('github') && msg.includes('half configured')));
 				assert.ok(errors.some((msg) => msg.includes('clientSecret')));
+			});
+		});
+	});
+
+	describe('Graph profile-scope warning (#264)', () => {
+		function graphProvider(overrides = {}) {
+			return {
+				provider: 'azure',
+				clientId: 'c',
+				clientSecret: 's',
+				fetchEmail: true,
+				redirectUri: 'https://app.test.com/oauth',
+				...overrides,
+			};
+		}
+
+		it('warns when fetchEmail is enabled on an Azure provider with scope missing profile', () => {
+			const warnings = [];
+			const logger = { ...mockLogger, warn: (msg) => warnings.push(msg) };
+
+			const options = {
+				redirectUri: 'https://app.test.com/oauth',
+				providers: { azure: graphProvider({ scope: 'openid email' }) },
+			};
+			initializeProviders(options, logger);
+
+			assert.ok(
+				warnings.some((msg) => msg.includes('azure') && msg.includes('profile')),
+				'expected a warning naming the provider and the fix'
+			);
+		});
+
+		it('does not throw when scope is a non-string (e.g. a YAML list surviving as an array) — this check is documented as never throwing, and must not take down every other provider', () => {
+			const options = {
+				redirectUri: 'https://app.test.com/oauth',
+				providers: {
+					azure: graphProvider({ scope: ['openid', 'profile', 'email', 'User.Read'] }),
+					github: {
+						provider: 'github',
+						clientId: 'github-client',
+						clientSecret: 'github-secret',
+						redirectUri: 'https://app.test.com/oauth',
+					},
+				},
+			};
+
+			const providers = initializeProviders(options, mockLogger);
+			assert.ok(providers['azure'], 'the azure provider still initializes despite the non-string scope');
+			assert.ok(providers['github'], 'every other provider still initializes');
+		});
+
+		it('warns for a generic provider pointed at graph.microsoft.com too (host-based, not provider-name-based)', () => {
+			const warnings = [];
+			const logger = { ...mockLogger, warn: (msg) => warnings.push(msg) };
+
+			const options = {
+				redirectUri: 'https://app.test.com/oauth',
+				providers: {
+					'custom-graph': {
+						provider: 'generic',
+						clientId: 'c',
+						clientSecret: 's',
+						authorizationUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize',
+						tokenUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/token',
+						userInfoUrl: 'https://graph.microsoft.com/v1.0/me',
+						fetchEmail: true,
+						scope: 'openid email',
+						redirectUri: 'https://app.test.com/oauth',
+					},
+				},
+			};
+			initializeProviders(options, logger);
+
+			assert.ok(warnings.some((msg) => msg.includes('custom-graph') && msg.includes('profile')));
+		});
+
+		it('warns for an azure provider with a non-Graph userInfoUrl override too (provider===azure is sufficient on its own)', () => {
+			const warnings = [];
+			const logger = { ...mockLogger, warn: (msg) => warnings.push(msg) };
+
+			const options = {
+				redirectUri: 'https://app.test.com/oauth',
+				providers: {
+					azure: graphProvider({
+						userInfoUrl: 'https://idp.example.com/userinfo',
+						scope: 'openid email',
+					}),
+				},
+			};
+			initializeProviders(options, logger);
+
+			assert.ok(warnings.some((msg) => msg.includes('azure') && msg.includes('profile')));
+		});
+
+		it('does NOT warn when scope already includes profile', () => {
+			const warnings = [];
+			const logger = { ...mockLogger, warn: (msg) => warnings.push(msg) };
+
+			const options = {
+				redirectUri: 'https://app.test.com/oauth',
+				providers: { azure: graphProvider({ scope: 'openid profile email' }) },
+			};
+			initializeProviders(options, logger);
+
+			assert.ok(!warnings.some((msg) => msg.includes('profile')));
+		});
+
+		it('does NOT warn when fetchEmail is not enabled', () => {
+			const warnings = [];
+			const logger = { ...mockLogger, warn: (msg) => warnings.push(msg) };
+
+			const options = {
+				redirectUri: 'https://app.test.com/oauth',
+				providers: { azure: graphProvider({ fetchEmail: false, scope: 'openid email' }) },
+			};
+			initializeProviders(options, logger);
+
+			assert.ok(!warnings.some((msg) => msg.includes('profile')));
+		});
+
+		it('does NOT warn for a non-Azure, non-Graph provider', () => {
+			const warnings = [];
+			const logger = { ...mockLogger, warn: (msg) => warnings.push(msg) };
+
+			const options = {
+				redirectUri: 'https://app.test.com/oauth',
+				providers: {
+					'custom-idp': {
+						provider: 'generic',
+						clientId: 'c',
+						clientSecret: 's',
+						authorizationUrl: 'https://idp.example.com/authorize',
+						tokenUrl: 'https://idp.example.com/token',
+						userInfoUrl: 'https://idp.example.com/userinfo',
+						fetchEmail: true,
+						scope: 'openid email',
+						redirectUri: 'https://app.test.com/oauth',
+					},
+				},
+			};
+			initializeProviders(options, logger);
+
+			assert.ok(!warnings.some((msg) => msg.includes('profile')));
+		});
+
+		it('a throwing logger does not abort provider initialization', () => {
+			const throwingLogger = {
+				...mockLogger,
+				warn: () => {
+					throw new Error('boom');
+				},
+			};
+
+			const options = {
+				redirectUri: 'https://app.test.com/oauth',
+				providers: { azure: graphProvider({ scope: 'openid email' }) },
+			};
+
+			assert.doesNotThrow(() => {
+				const providers = initializeProviders(options, throwingLogger);
+				assert.ok(providers.azure, 'provider still initializes despite the throwing logger');
 			});
 		});
 	});

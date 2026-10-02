@@ -2,12 +2,17 @@
  * Tests for OAuthProvider
  */
 
-import { describe, it, before, after, beforeEach } from 'node:test';
+import { describe, it, before, after, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { generateKeyPairSync } from 'node:crypto';
+import jwt from 'jsonwebtoken';
+import jwksRsa from 'jwks-rsa';
 import { OAuthProvider } from '../../dist/lib/OAuthProvider.js';
 import { GitHubProvider } from '../../dist/lib/providers/github.js';
 import { AzureADProvider } from '../../dist/lib/providers/azure.js';
 import { resetCSRFTableCache } from '../../dist/lib/CSRFTokenManager.js';
+import { startIssuerDiscovery, _clearDiscoveryCache } from '../../dist/lib/discovery.js';
+import { _setFetch, _setDnsLookup } from '../../dist/lib/mcp/cimd.js';
 
 describe('OAuthProvider', () => {
 	let provider;
@@ -1626,6 +1631,414 @@ describe('OAuthProvider', () => {
 				// Expected to potentially fail, but should have warned
 				assert.ok(warnCalled, 'Should warn when JWKS not configured');
 			}
+		});
+	});
+
+	describe('ID Token Verification with a real JWKS signature + OIDC discovery (#264)', () => {
+		// jwks-rsa supports an injected `fetcher`, so these tests exercise real
+		// RS256 signature verification (jwt.verify against a real key pair)
+		// without any network I/O — the same approach `OAuthProvider`'s own
+		// `initializeJwksClient` would use in production, just with the
+		// fetcher substituted for a real jwks_uri the way the account-adoption
+		// gate's own test fixtures substitute a real local server. The
+		// private `jwksClient` field is overwritten after construction, the
+		// same way this file already reaches into other private fields.
+		let keyPair;
+		const KID = 'test-key-1';
+
+		before(() => {
+			keyPair = generateKeyPairSync('rsa', { modulusLength: 2048 });
+		});
+
+		beforeEach(() => {
+			_clearDiscoveryCache();
+			_setDnsLookup(async () => [{ address: '93.184.216.34', family: 4 }]);
+		});
+		afterEach(() => {
+			_setFetch(null);
+			_setDnsLookup(null);
+		});
+
+		function publicJwk() {
+			const jwk = keyPair.publicKey.export({ format: 'jwk' });
+			return { ...jwk, kid: KID, alg: 'RS256', use: 'sig' };
+		}
+
+		function attachRealJwksClient(provider, keys = [publicJwk()]) {
+			provider['jwksClient'] = jwksRsa({
+				jwksUri: 'https://idp.example.com/jwks', // never actually fetched — see `fetcher`
+				fetcher: async () => ({ keys }),
+				cache: true,
+			});
+		}
+
+		function sign(claims, { kid = KID, key = keyPair.privateKey } = {}) {
+			return jwt.sign(claims, key, { algorithm: 'RS256', keyid: kid });
+		}
+
+		function jsonResponse(body, status = 200) {
+			const bytes = Buffer.from(JSON.stringify(body));
+			return {
+				ok: status >= 200 && status < 300,
+				status,
+				headers: new Map([['content-type', 'application/json']]),
+				body: {
+					getReader: () => {
+						let sent = false;
+						return {
+							read: async () => {
+								if (!sent) {
+									sent = true;
+									return { done: false, value: bytes };
+								}
+								return { done: true, value: undefined };
+							},
+							cancel: () => {},
+						};
+					},
+				},
+			};
+		}
+
+		describe('generic OIDC discovery (non-Azure)', () => {
+			const discoveryConfig = {
+				provider: 'generic',
+				clientId: 'test-client-id',
+				clientSecret: 'test-client-secret',
+				authorizationUrl: 'https://idp.example.com/authorize',
+				tokenUrl: 'https://idp.example.com/token',
+				userInfoUrl: 'https://idp.example.com/userinfo',
+				jwksUri: 'https://idp.example.com/jwks',
+				redirectUri: 'https://app.test.com/oauth',
+				issuer: undefined,
+			};
+			function discoveryDoc() {
+				return {
+					issuer: 'https://idp.example.com',
+					authorization_endpoint: discoveryConfig.authorizationUrl,
+					token_endpoint: discoveryConfig.tokenUrl,
+					jwks_uri: discoveryConfig.jwksUri,
+				};
+			}
+
+			it('a signature-verified token is upgraded to issuerValidated once discovery resolves', async () => {
+				_setFetch(async () => jsonResponse(discoveryDoc()));
+				startIssuerDiscovery(
+					discoveryConfig.authorizationUrl,
+					discoveryConfig.jwksUri,
+					discoveryConfig.tokenUrl,
+					'custom-idp'
+				);
+
+				const p = new OAuthProvider({ ...discoveryConfig }, mockLogger);
+				attachRealJwksClient(p);
+
+				const now = Math.floor(Date.now() / 1000);
+				const token = sign({
+					iss: 'https://idp.example.com',
+					sub: 'user-1',
+					aud: discoveryConfig.clientId,
+					iat: now,
+					exp: now + 3600,
+				});
+
+				const result = await p.verifyIdToken(token);
+				assert.equal(result.signatureVerified, true);
+				assert.equal(result.issuerValidated, true);
+				assert.equal(p.config.issuer, 'https://idp.example.com', 'the discovered issuer is cached onto config');
+			});
+
+			it('a verified token whose own iss disagrees with the discovered issuer is NOT cached onto config — caching it would break every future login’s issuer check', async () => {
+				_setFetch(async () => jsonResponse(discoveryDoc()));
+				startIssuerDiscovery(
+					discoveryConfig.authorizationUrl,
+					discoveryConfig.jwksUri,
+					discoveryConfig.tokenUrl,
+					'custom-idp'
+				);
+
+				const p = new OAuthProvider({ ...discoveryConfig }, mockLogger);
+				attachRealJwksClient(p);
+
+				const now = Math.floor(Date.now() / 1000);
+				// A non-compliant IdP: its real token's iss disagrees with its own
+				// discovery document's issuer (which discoveryDoc() sets to
+				// 'https://idp.example.com', no trailing slash).
+				const token = sign({
+					iss: 'https://idp.example.com/',
+					sub: 'user-1',
+					aud: discoveryConfig.clientId,
+					iat: now,
+					exp: now + 3600,
+				});
+
+				const result = await p.verifyIdToken(token);
+				assert.equal(result.signatureVerified, true, 'signature verification itself still succeeds');
+				assert.equal(result.issuerValidated, false, 'not adoption-eligible on a mismatch');
+				assert.equal(p.config.issuer, undefined, 'the mismatched discovered issuer must not be cached onto config');
+
+				// A second, otherwise-identical login must still succeed exactly as
+				// the first did — nothing was cached that could break it.
+				const secondToken = sign({
+					iss: 'https://idp.example.com/',
+					sub: 'user-2',
+					aud: discoveryConfig.clientId,
+					iat: now,
+					exp: now + 3600,
+				});
+				const secondResult = await p.verifyIdToken(secondToken);
+				assert.equal(secondResult.signatureVerified, true);
+				assert.equal(secondResult.issuerValidated, false);
+			});
+
+			it('a forged/invalid-signature token never consumes the bounded first-login discovery wait', async () => {
+				// A fetch a short real delay (the previous version of this test)
+				// does NOT pin the ordering: by the time the valid call ran,
+				// discovery had already SETTLED either way, and
+				// `awaitDiscoveredIssuer` returns a settled entry's cached result
+				// immediately regardless of which call "consumed" the one bounded
+				// wait — the `awaited` flag only matters while the entry is still
+				// PENDING. So this holds the fetch open on a promise released by
+				// hand, keeping discovery pending across every step below, and
+				// checks the actual ordering effect (does the valid call get
+				// upgraded, or does it see `awaited` already set and get `null`)
+				// instead of a timing proxy for it.
+				let releaseFetch;
+				_setFetch(
+					() =>
+						new Promise((resolve) => {
+							releaseFetch = () => resolve(jsonResponse(discoveryDoc()));
+						})
+				);
+				startIssuerDiscovery(
+					discoveryConfig.authorizationUrl,
+					discoveryConfig.jwksUri,
+					discoveryConfig.tokenUrl,
+					'custom-idp'
+				);
+
+				const p = new OAuthProvider({ ...discoveryConfig }, mockLogger);
+				attachRealJwksClient(p);
+
+				const now = Math.floor(Date.now() / 1000);
+				const otherKeyPair = generateKeyPairSync('rsa', { modulusLength: 2048 });
+				const forgedToken = sign(
+					{ iss: 'https://idp.example.com', sub: 'attacker', aud: discoveryConfig.clientId, iat: now, exp: now + 3600 },
+					{ key: otherKeyPair.privateKey } // signed with a key NOT in the JWKS response
+				);
+
+				// 1. The forged call must reject while discovery is still pending —
+				// the fetch has not been released, so if `verifyIdToken` awaited
+				// discovery before checking the signature, this would not settle
+				// until the bounded wait times out (seconds, not the test's normal
+				// runtime) rather than rejecting promptly on the bad signature.
+				await assert.rejects(() => p.verifyIdToken(forgedToken));
+
+				// 2. Start the valid call (don't await it yet) — with the correct
+				// ordering, the forged call above never touched discovery, so this
+				// is the first real awaiter and should genuinely wait on it.
+				const validToken = sign({
+					iss: 'https://idp.example.com',
+					sub: 'user-1',
+					aud: discoveryConfig.clientId,
+					iat: now,
+					exp: now + 3600,
+				});
+				const validPromise = p.verifyIdToken(validToken);
+
+				// 3. Before releasing the fetch, confirm the valid call is still
+				// genuinely pending — not settled early. With the correct ordering,
+				// its own discovery-await is a fresh wait on the still-unresolved
+				// entry, so it cannot have settled yet. With the ordering reversed,
+				// the forged call already consumed the one bounded-await slot
+				// (`entry.awaited`); this call's own discovery-await would then see
+				// `awaited` already set and return `null` IMMEDIATELY (no I/O wait
+				// at all, since the entry is checked, not awaited, once `awaited` is
+				// already true), so the whole call would settle fast — with
+				// `issuerValidated: false` — well before the fetch is ever released.
+				const STILL_PENDING = Symbol('still-pending');
+				const racedResult = await Promise.race([
+					validPromise,
+					new Promise((resolve) => setTimeout(() => resolve(STILL_PENDING), 100)),
+				]);
+				assert.equal(
+					racedResult,
+					STILL_PENDING,
+					'the valid call must still be genuinely waiting on discovery, not already settled before the fetch is released'
+				);
+
+				// 4. Release the fetch; the valid call's genuine wait resolves, and
+				// it gets upgraded.
+				releaseFetch();
+				const result = await validPromise;
+				assert.equal(result.signatureVerified, true);
+				assert.equal(result.issuerValidated, true, 'the valid call was still the first caller and got upgraded');
+			});
+
+			it('audience is still enforced on the discovery-eligible branch (shared verification options, not a parallel check)', async () => {
+				_setFetch(async () => jsonResponse(discoveryDoc()));
+				startIssuerDiscovery(
+					discoveryConfig.authorizationUrl,
+					discoveryConfig.jwksUri,
+					discoveryConfig.tokenUrl,
+					'custom-idp'
+				);
+
+				const p = new OAuthProvider({ ...discoveryConfig }, mockLogger);
+				attachRealJwksClient(p);
+
+				const now = Math.floor(Date.now() / 1000);
+				const wrongAudienceToken = sign({
+					iss: 'https://idp.example.com',
+					sub: 'user-1',
+					aud: 'some-other-client-id',
+					iat: now,
+					exp: now + 3600,
+				});
+
+				await assert.rejects(() => p.verifyIdToken(wrongAudienceToken), /audience/i);
+			});
+
+			it('a genuinely concurrent second login does not wait, even if discovery resolves moments later', async () => {
+				let resolveFetch;
+				_setFetch(
+					() =>
+						new Promise((resolve) => {
+							resolveFetch = () => resolve(jsonResponse(discoveryDoc()));
+						})
+				);
+				startIssuerDiscovery(
+					discoveryConfig.authorizationUrl,
+					discoveryConfig.jwksUri,
+					discoveryConfig.tokenUrl,
+					'custom-idp'
+				);
+
+				const p = new OAuthProvider({ ...discoveryConfig }, mockLogger);
+				attachRealJwksClient(p);
+
+				const now = Math.floor(Date.now() / 1000);
+				const tokenA = sign({
+					iss: 'https://idp.example.com',
+					sub: 'user-a',
+					aud: discoveryConfig.clientId,
+					iat: now,
+					exp: now + 3600,
+				});
+				const tokenB = sign({
+					iss: 'https://idp.example.com',
+					sub: 'user-b',
+					aud: discoveryConfig.clientId,
+					iat: now,
+					exp: now + 3600,
+				});
+
+				const firstCall = p.verifyIdToken(tokenA);
+				await new Promise((resolve) => setTimeout(resolve, 5)); // let the first call claim the await slot
+				const secondResult = await p.verifyIdToken(tokenB);
+				assert.equal(secondResult.issuerValidated, false, 'a concurrent second login does not wait');
+
+				resolveFetch();
+				const firstResult = await firstCall;
+				assert.equal(firstResult.issuerValidated, true, 'the first login is upgraded once discovery resolves');
+			});
+		});
+
+		describe('Azure alias authority pinned to a single tenant (collapses into the ordinary configured-issuer path)', () => {
+			const GUID = '12345678-1234-1234-1234-123456789012';
+
+			it('constructing OAuthProvider directly (bypassing buildProviderConfig, like TenantManager) still resolves the safe tenant-specific binding', () => {
+				const handBuiltConfig = {
+					provider: 'azure',
+					clientId: 'c',
+					clientSecret: 's',
+					authorizationUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize',
+					tokenUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/token',
+					userInfoUrl: 'https://graph.microsoft.com/v1.0/me',
+					jwksUri: 'https://login.microsoftonline.com/common/discovery/v2.0/keys',
+					issuer: `https://login.microsoftonline.com/${GUID}/v2.0`,
+					redirectUri: 'https://app.test.com/oauth',
+				};
+
+				const p = new OAuthProvider(handBuiltConfig, mockLogger);
+				assert.equal(p.config.jwksUri, `https://login.microsoftonline.com/${GUID}/discovery/v2.0/keys`);
+				assert.equal(p.config.issuer, `https://login.microsoftonline.com/${GUID}/v2.0`);
+			});
+
+			it('constructing OAuthProvider directly with an array pin on an alias still throws', () => {
+				const handBuiltConfig = {
+					provider: 'azure',
+					clientId: 'c',
+					clientSecret: 's',
+					authorizationUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize',
+					tokenUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/token',
+					userInfoUrl: 'https://graph.microsoft.com/v1.0/me',
+					jwksUri: 'https://login.microsoftonline.com/common/discovery/v2.0/keys',
+					issuer: [`https://login.microsoftonline.com/${GUID}/v2.0`, 'https://login.microsoftonline.com/other/v2.0'],
+					redirectUri: 'https://app.test.com/oauth',
+				};
+
+				assert.throws(() => new OAuthProvider(handBuiltConfig, mockLogger), /array/);
+			});
+
+			it('a token matching the pinned tenant verifies through the ordinary issuer-configured path', async () => {
+				const handBuiltConfig = {
+					provider: 'azure',
+					clientId: 'c',
+					clientSecret: 's',
+					authorizationUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize',
+					tokenUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/token',
+					userInfoUrl: 'https://graph.microsoft.com/v1.0/me',
+					jwksUri: 'https://login.microsoftonline.com/common/discovery/v2.0/keys',
+					issuer: `https://login.microsoftonline.com/${GUID}/v2.0`,
+					redirectUri: 'https://app.test.com/oauth',
+				};
+				const p = new OAuthProvider(handBuiltConfig, mockLogger);
+				attachRealJwksClient(p);
+
+				const now = Math.floor(Date.now() / 1000);
+				const token = sign({
+					iss: `https://login.microsoftonline.com/${GUID}/v2.0`,
+					sub: 'user-1',
+					tid: GUID,
+					aud: 'c',
+					iat: now,
+					exp: now + 3600,
+				});
+
+				const result = await p.verifyIdToken(token);
+				assert.equal(result.signatureVerified, true);
+				assert.equal(result.issuerValidated, true);
+			});
+
+			it('a token claiming a different tenant than the pin is refused (not adoption-eligible)', async () => {
+				const otherGuid = '87654321-4321-4321-4321-210987654321';
+				const handBuiltConfig = {
+					provider: 'azure',
+					clientId: 'c',
+					clientSecret: 's',
+					authorizationUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize',
+					tokenUrl: 'https://login.microsoftonline.com/common/oauth2/v2.0/token',
+					userInfoUrl: 'https://graph.microsoft.com/v1.0/me',
+					jwksUri: 'https://login.microsoftonline.com/common/discovery/v2.0/keys',
+					issuer: `https://login.microsoftonline.com/${GUID}/v2.0`,
+					redirectUri: 'https://app.test.com/oauth',
+				};
+				const p = new OAuthProvider(handBuiltConfig, mockLogger);
+				attachRealJwksClient(p);
+
+				const now = Math.floor(Date.now() / 1000);
+				const token = sign({
+					iss: `https://login.microsoftonline.com/${otherGuid}/v2.0`,
+					sub: 'attacker',
+					tid: otherGuid,
+					aud: 'c',
+					iat: now,
+					exp: now + 3600,
+				});
+
+				await assert.rejects(() => p.verifyIdToken(token), /issuer/i);
+			});
 		});
 	});
 });

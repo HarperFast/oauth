@@ -71,7 +71,7 @@ No central `errors.ts` — error classes are defined locally near where they're 
 
 ## Where design decisions live
 
-Non-trivial issues carry their design and status in the issue body itself, kept current as work lands — read the issue before re-deciding something it already settled (current examples: #231, #244, #212, #213, #264). `docs/mcp-oauth-conformance.md` maps every MCP requirement to its implementing code and test and must be updated in the same PR as any behavior change. See **[docs/maintaining.md](docs/maintaining.md)** for the release process, CI/review automation, and the Harper peer-dependency relationship.
+Non-trivial issues carry their design and status in the issue body itself, kept current as work lands — read the issue before re-deciding something it already settled (current examples: #231, #244, #212, #213, #264). `docs/mcp-oauth-conformance.md` maps every MCP requirement to its implementing code and test and must be updated in the same PR as any behavior change. See **[docs/maintaining.md](docs/maintaining.md)** for the release process, CI/review automation, and the Harper peer-dependency relationship. See `src/lib/DESIGN.md` for invariants around issuer derivation (OIDC discovery, Azure multi-tenant adoption, #264) that aren't obvious from the code alone.
 
 ## Dependencies
 

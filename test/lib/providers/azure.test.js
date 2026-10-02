@@ -67,4 +67,30 @@ describe('Azure Provider', () => {
 			message: 'Azure AD provider requires tenantId configuration',
 		});
 	});
+
+	describe('alias tenantIds no longer set a literal (wrong) issuer (#264)', () => {
+		// configure('common'/'organizations'/'consumers') previously set a
+		// literal issuer like 'https://login.microsoftonline.com/common/v2.0',
+		// which no real token's `iss` could ever equal. Deriving — or
+		// intentionally leaving unset — the issuer for these aliases is now
+		// `resolveAzureIssuerBinding`'s job (src/lib/azureIssuer.ts); the
+		// preset itself only derives endpoints for them.
+		for (const alias of ['common', 'organizations', 'consumers']) {
+			it(`configure('${alias}') derives endpoints but no literal issuer`, () => {
+				const azure = getProvider('azure');
+				const configured = azure.configure(alias);
+				assert.ok(configured.authorizationUrl.includes(`/${alias}/`));
+				assert.ok(configured.tokenUrl.includes(`/${alias}/`));
+				assert.ok(configured.jwksUri.includes(`/${alias}/`));
+				assert.equal(configured.issuer, undefined);
+			});
+		}
+
+		it('a real tenant GUID still gets a direct issuer (unaffected)', () => {
+			const azure = getProvider('azure');
+			const tenantId = '12345678-1234-1234-1234-123456789012';
+			const configured = azure.configure(tenantId);
+			assert.equal(configured.issuer, `https://login.microsoftonline.com/${tenantId}/v2.0`);
+		});
+	});
 });

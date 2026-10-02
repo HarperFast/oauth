@@ -19,6 +19,41 @@ import type {
 } from '../types.ts';
 import { csrfTokenManager } from './CSRFTokenManager.ts';
 import { ADAPTER_EMAIL_PROVENANCE } from './emailProvenance.ts';
+import { resolveAzureIssuerBinding, isAzureJwksUri } from './azureIssuer.ts';
+import { awaitDiscoveredIssuer } from './discovery.ts';
+
+/**
+ * True when `issuer` is a value `jwt.verify`/`verifyIdTokenClaims` will
+ * actually check against — a non-empty string, or a non-empty array (an
+ * empty array normalizes to "no issuer configured"). Duplicated from
+ * `config.ts` (not imported) to avoid a module cycle — `config.ts`
+ * constructs `OAuthProvider`.
+ */
+function hasUsableIssuer(issuer: OAuthProviderConfig['issuer']): boolean {
+	if (Array.isArray(issuer)) return issuer.some((value) => typeof value === 'string' && value !== '');
+	return typeof issuer === 'string' && issuer !== '';
+}
+
+/**
+ * True when an issuer-less, JWKS-enabled config is eligible to consult the
+ * OIDC discovery cache (HarperFast/oauth#264): `authorizationUrl` parses as
+ * `https:` (discovery must not depend on the network for a config that's
+ * wrong independent of it), and the endpoint isn't Azure's own host (an
+ * *unpinned* alias authority is intentionally issuer-less — see
+ * `azureIssuer.ts` — and generic discovery must never probe it). Mirrors
+ * `config.ts`'s `needsIssuerDiscovery` (not imported, to avoid a module
+ * cycle); the `jwksUri`/`!hasUsableIssuer` half of that check is already
+ * established by the caller.
+ */
+function canAwaitDiscoveredIssuer(config: OAuthProviderConfig): boolean {
+	if (!config.jwksUri) return false;
+	if (isAzureJwksUri(config.jwksUri)) return false;
+	try {
+		return new URL(config.authorizationUrl).protocol === 'https:';
+	} catch {
+		return false;
+	}
+}
 import { ResolveEmailError } from './resolveEmailError.ts';
 
 export class OAuthProvider implements IOAuthProvider {
@@ -33,6 +68,14 @@ export class OAuthProvider implements IOAuthProvider {
 		if (!csrfTokenManager['logger']) {
 			csrfTokenManager['logger'] = logger;
 		}
+		// Enforced here too (not only in `config.ts`'s `buildProviderConfig`),
+		// because a config built outside that path — e.g. `TenantManager`,
+		// which assembles `OAuthProviderConfig` directly and never calls
+		// `buildProviderConfig` — must not reach a shared Azure alias endpoint
+		// with a pinned issuer and no tenant-specific binding (HarperFast/oauth#264).
+		// A no-op for a non-Azure-shaped `jwksUri`, and idempotent once the
+		// rewrite has already happened.
+		resolveAzureIssuerBinding(this.config, this.config.provider, logger);
 		this.validateConfig();
 		this.initializeJwksClient();
 	}
@@ -308,10 +351,14 @@ export class OAuthProvider implements IOAuthProvider {
 	 * Returns `{ claims, signatureVerified, issuerValidated }`:
 	 *   - `signatureVerified` — true only when the token was checked against a
 	 *     JWKS-fetched public key. The no-JWKS fallback always yields false.
-	 *   - `issuerValidated` — true only when `config.issuer` is set AND the token's
-	 *     `iss` was verified to equal that value by jwt.verify. Providers without a
-	 *     known issuer (Azure /common, issuer-less generic) yield false; their tokens
-	 *     are not trusted for account adoption.
+	 *   - `issuerValidated` — true only when the token's `iss` was verified
+	 *     against a known-good issuer: `config.issuer` if already set (by a
+	 *     preset, an explicit pin, or a prior call's discovered/Azure-derived
+	 *     value — see `config.ts`), or, failing that, one derived via OIDC
+	 *     discovery (HarperFast/oauth#264) and checked explicitly against the
+	 *     already-signature-verified claims. An unpinned Azure alias
+	 *     authority (`/common`) or any other provider discovery can't help
+	 *     yields false; their tokens are not trusted for account adoption.
 	 */
 	async verifyIdToken(idToken: string): Promise<{ claims: any; signatureVerified: boolean; issuerValidated: boolean }> {
 		// First decode to get the header and payload
@@ -334,13 +381,20 @@ export class OAuthProvider implements IOAuthProvider {
 				const key = await this.jwksClient.getSigningKey(kid);
 				const publicKey = key.getPublicKey();
 
+				const configuredIssuer = hasUsableIssuer(this.config.issuer);
 				// jsonwebtoken's `issuer` accepts a string or a non-empty tuple; normalize
-				// (an array issuer lets a provider accept several valid iss forms).
-				const expectedIssuer: string | [string, ...string[]] | undefined = Array.isArray(this.config.issuer)
-					? this.config.issuer.length
+				// (an array issuer lets a provider accept several valid iss forms). When no
+				// issuer is configured yet, pass none at all to jwt.verify — a discovered
+				// issuer (below) is checked afterward as an explicit equality check, never
+				// baked into this call. That ordering matters (HarperFast/oauth#264): a
+				// bogus/forged token fails signature verification here, before the
+				// discovery-await branch is ever reached, so it can never consume the one
+				// bounded wait a concurrent, genuinely signature-valid login needs.
+				const expectedIssuer: string | [string, ...string[]] | undefined = configuredIssuer
+					? Array.isArray(this.config.issuer)
 						? (this.config.issuer as [string, ...string[]])
-						: undefined
-					: this.config.issuer || undefined;
+						: (this.config.issuer as string)
+					: undefined;
 
 				// Verify signature and claims
 				const verified = jwt.verify(idToken, publicKey, {
@@ -361,9 +415,32 @@ export class OAuthProvider implements IOAuthProvider {
 				if (!verified.exp) throw new Error('ID token missing required exp claim');
 
 				this.logger?.debug?.('ID token signature verified successfully');
-				// issuerValidated only when a non-empty issuer was actually passed to
-				// jwt.verify (an empty array normalizes to undefined and skips the check).
-				return { claims: verified, signatureVerified: true, issuerValidated: expectedIssuer != null };
+
+				let issuerValidated = configuredIssuer;
+				if (!configuredIssuer && canAwaitDiscoveredIssuer(this.config)) {
+					const discovered = await awaitDiscoveredIssuer(
+						this.config.authorizationUrl,
+						this.config.jwksUri!,
+						this.config.tokenUrl,
+						this.logger
+					);
+					if (discovered) {
+						issuerValidated = verified.iss === discovered;
+						// Cache (idempotent: later calls take the `configuredIssuer`
+						// branch above) only on a match. A mismatch is this one
+						// login's own problem (e.g. a non-compliant IdP whose tokens
+						// disagree with its own discovery document) — caching
+						// `discovered` anyway would make every FUTURE login's `iss`
+						// (including ones that previously had no issuer check at all)
+						// fail `jwt.verify` against a value their real tokens don't
+						// carry, breaking logins that worked before this one.
+						if (issuerValidated) {
+							this.config.issuer = discovered;
+						}
+					}
+				}
+
+				return { claims: verified, signatureVerified: true, issuerValidated };
 			} catch (error) {
 				// Signature verification failed - this is a security issue
 				this.logger?.error?.(

@@ -6,7 +6,7 @@
  */
 import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { handleApplication } from '../dist/index.js';
+import { handleApplication, registerHooks } from '../dist/index.js';
 import { createMockLogger } from './helpers/mockFn.js';
 
 describe('OAuth session-validation middleware — persist-failure handling (#265, #266)', () => {
@@ -155,5 +155,88 @@ describe('OAuth session-validation middleware — persist-failure handling (#265
 
 		assert.equal(result.status, 200);
 		assert.equal(result.body.ran, true);
+	});
+
+	describe('dynamic resolution — invalid Azure issuer pin, cooldown (#264/#271)', () => {
+		// A stale pin that doesn't name the configured tenant — buildProviderConfig throws AzureIssuerBindingError.
+		const badAzureHookConfig = {
+			provider: 'azure',
+			clientId: 'c',
+			clientSecret: 's',
+			tenantId: '12345678-1234-1234-1234-123456789012',
+			issuer: 'https://login.microsoftonline.com/87654321-4321-4321-4321-210987654321/v2.0',
+			redirectUri: 'https://app.test.com/oauth',
+		};
+
+		it('clears the session (the stale identity is never served) and does not re-run the resolve hook within the 30s cooldown', async () => {
+			let resolveCount = 0;
+			registerHooks({
+				onResolveProvider: async () => {
+					resolveCount++;
+					return badAzureHookConfig;
+				},
+			});
+
+			let updateCalled = 0;
+			// Each call gets its OWN session object — one per request, same as
+			// production (Harper loads a fresh session per request). Reusing one
+			// mutable object across calls would hide a real bug: clearOAuthSession
+			// wipes `.oauth` in memory, so a second call against the SAME object
+			// would hit the "no OAuth session data" early-return before ever
+			// reaching the cooldown logic, trivially (and wrongly) appearing to
+			// pass.
+			const makeRequest = () => ({
+				session: {
+					id: 'sess-1',
+					update: async () => {
+						updateCalled++;
+					},
+					oauth: { providerConfigId: 'bad-azure-tenant', accessToken: 'tok' },
+				},
+			});
+			const next = () => ({ status: 200, body: { ran: true } });
+
+			const first = await middleware(makeRequest(), next);
+			assert.equal(first.status, 200, 'the session is cleared, then next() proceeds');
+			assert.equal(updateCalled, 1, 'the session clear was persisted — the stale identity is not served');
+			assert.equal(resolveCount, 1);
+
+			// A second, independent request for the same provider, still within
+			// the cooldown, must not re-run the resolve hook (and re-throw).
+			const second = await middleware(makeRequest(), next);
+			assert.equal(second.status, 200, 'that session is cleared too, independent of the cooldown');
+			assert.equal(resolveCount, 1, 'the hook must not be re-run while the failure is cooling down');
+		});
+
+		it('re-runs the resolve hook once the 30s cooldown elapses', async () => {
+			let resolveCount = 0;
+			registerHooks({
+				onResolveProvider: async () => {
+					resolveCount++;
+					return badAzureHookConfig;
+				},
+			});
+
+			const makeRequest = () => ({
+				session: {
+					id: 'sess-1',
+					update: async () => {},
+					oauth: { providerConfigId: 'bad-azure-tenant-2', accessToken: 'tok' },
+				},
+			});
+			const next = () => ({ status: 200, body: { ran: true } });
+
+			await middleware(makeRequest(), next);
+			assert.equal(resolveCount, 1);
+
+			const realNow = Date.now;
+			Date.now = () => realNow() + 31_000;
+			try {
+				await middleware(makeRequest(), next);
+				assert.equal(resolveCount, 2, 'the hook runs again once the 30s cooldown elapses');
+			} finally {
+				Date.now = realNow;
+			}
+		});
 	});
 });

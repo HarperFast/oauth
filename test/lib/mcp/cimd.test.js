@@ -20,6 +20,7 @@ import {
 	resolveClient,
 	cimdEnabled,
 	CimdClientError,
+	fetchPinnedBoundedJson,
 	_setDnsLookup,
 	_setFetch,
 	_clearCimdCache,
@@ -326,6 +327,60 @@ describe('resolveCimdClient — SSRF DNS gate', () => {
 	it('DNS lookups are bounded by the fetch deadline', async () => {
 		_setDnsLookup(() => new Promise(() => {})); // hangs forever
 		await assert.rejects(() => resolveCimdClient(VALID_URL, { fetchTimeoutMs: 50 }), /CIMD DNS lookup timed out/);
+	});
+});
+
+describe('fetchPinnedBoundedJson — allowPrivateAddresses (HarperFast/oauth#264)', () => {
+	afterEach(() => {
+		_setDnsLookup(null);
+		_setFetch(null);
+	});
+
+	const OPTS = {
+		label: 'test document',
+		tag: 'test',
+		accept: 'application/json',
+		contentTypes: ['application/json'],
+		timeoutMs: 1000,
+		maxBytes: 65536,
+	};
+
+	it('rejects a private address by default, same as every other caller', async () => {
+		_setDnsLookup(makeDnsOk([{ address: '10.0.0.5', family: 4 }]));
+		_setFetch(makeOkFetch({ ok: true }));
+		await assert.rejects(
+			() => fetchPinnedBoundedJson('https://internal.example.com/doc.json', OPTS),
+			/could not be resolved to a permitted address/
+		);
+	});
+
+	it('allows a private address when allowPrivateAddresses is set', async () => {
+		_setDnsLookup(makeDnsOk([{ address: '10.0.0.5', family: 4 }]));
+		_setFetch(makeOkFetch({ ok: true }));
+		const { body } = await fetchPinnedBoundedJson('https://internal.example.com/doc.json', {
+			...OPTS,
+			allowPrivateAddresses: true,
+		});
+		assert.deepEqual(JSON.parse(body), { ok: true });
+	});
+
+	it('allows a loopback address when allowPrivateAddresses is set', async () => {
+		_setDnsLookup(makeDnsOk([{ address: '127.0.0.1', family: 4 }]));
+		_setFetch(makeOkFetch({ ok: true }));
+		const { body } = await fetchPinnedBoundedJson('https://internal.example.com/doc.json', {
+			...OPTS,
+			allowPrivateAddresses: true,
+		});
+		assert.deepEqual(JSON.parse(body), { ok: true });
+	});
+
+	it('still rejects an unclassified address family even with allowPrivateAddresses set', async () => {
+		_setDnsLookup(makeDnsOk([{ address: '10.0.0.5', family: 5 }]));
+		_setFetch(makeOkFetch({ ok: true }));
+		await assert.rejects(
+			() => fetchPinnedBoundedJson('https://internal.example.com/doc.json', { ...OPTS, allowPrivateAddresses: true }),
+			/could not be resolved to a permitted address/
+		);
 	});
 });
 
