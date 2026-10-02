@@ -309,6 +309,63 @@ async function handleLogin(oauthUser, tokenResponse, session, request, provider)
 
 ---
 
+### onResolveEmail
+
+Choose which of several provider-reported emails becomes the login identity ([#228](https://github.com/HarperFast/oauth/issues/228)). Called only when the provider's authenticated email fetch succeeded — currently GitHub's `/user/emails`, which can return more than one address with independent `verified`/`primary` flags. OIDC providers have a single `email` claim, so this hook never fires for them.
+
+**Purpose:** Let an application pick a specific verified address (e.g. "prefer the address on my company domain") instead of the plugin's default — the public profile email if set, else the `primary` address.
+
+**Signature:**
+
+```typescript
+async function onResolveEmail(
+	candidates: Array<{ email: string; verified: boolean; primary: boolean }>,
+	provider: string
+): Promise<string | null | undefined>;
+```
+
+**Parameters:**
+
+- `candidates` - Every email the provider's authenticated fetch returned, verified or not (so you can see the whole picture — e.g. to prompt a user to verify a preferred but currently-unverified address, while still returning a verified one for this login). An immutable snapshot: mutating it has no effect on anything the plugin validates against.
+- `provider` - Provider name (e.g., `'github'`)
+
+**Returns:** The chosen address, or `null`/`undefined` for "no preference" — the plugin falls back to its default selection, unchanged from today's behavior.
+
+**This is the config option for the feature**: registering `onResolveEmail` is the opt-in; leaving it unregistered is the default, with no behavior change and no added cost (the candidate list is never built or retained unless something calls for it).
+
+**SECURITY — enforced by the plugin, not by convention:**
+
+- The returned address **must** be one of `candidates` with `verified === true`. This is checked against the exact snapshot handed to the hook, not a value the hook could have mutated.
+- An invalid result (not a string, not a verified candidate), a thrown error, or a hook that doesn't settle within 5 seconds, **fails the login** — it does **not** fall back to the default selection. Falling back silently on a failed pick could establish a session for a *different* account than the one the hook was trying to reach (e.g. selecting a work address to adopt an existing work account, but the lookup inside the hook fails) — so an unresolved pick is loud, not quiet.
+- The resolved address is exactly what later becomes `authEvidence.email` / `oauthUser.email` — there is no separate path that could key identity on a different, unvalidated address.
+
+**GitHub's default `usernameClaim` is `login` (the handle), not `email`.** Unless you also set `usernameClaim: 'email'` on the GitHub provider config, `onResolveEmail` changes `oauthUser.email` and `authEvidence.email` but **not** `session.user` (still the GitHub handle) — set `usernameClaim: 'email'`, or map the chosen email to a username yourself in `onLogin` (`oauthUser.email` already reflects the resolved address there).
+
+**Example — prefer a company domain, else no preference:**
+
+```javascript
+async function resolveEmail(candidates, provider) {
+	const corporate = candidates.find((c) => c.verified && c.email.endsWith('@acme.example'));
+	return corporate?.email; // undefined → plugin's default selection
+}
+```
+
+**Example — reject a login with no corporate-domain option instead of silently using a personal address**, by validating inside the hook and intentionally returning something that isn't a candidate (the plugin turns that into a login failure):
+
+```javascript
+async function resolveEmail(candidates) {
+	const corporate = candidates.find((c) => c.verified && c.email.endsWith('@acme.example'));
+	if (!corporate) {
+		throw new Error('no verified @acme.example address on this GitHub account');
+	}
+	return corporate.email;
+}
+```
+
+**Rollout note:** this hook is opt-in and additive — an instance that never registers it keeps today's selection exactly. Once registered, though, it can change which Harper account a given GitHub login resolves to (relative to the previous default pick): roll it out deliberately, not as an incidental part of an unrelated deploy, and expect any already-established sessions under the old selection to be unaffected (they are not re-evaluated until their next login).
+
+---
+
 ### onLogout
 
 Called before the session is cleared during logout.

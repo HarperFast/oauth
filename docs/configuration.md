@@ -403,6 +403,8 @@ There are exactly **two** trusted email sources. A login may adopt an existing a
 - `email_verified === true` for the fetched email (a `verified: false` record does not qualify).
 - The verified email equals the resolved username.
 
+  GitHub can report several emails; which one is "the verified email" here is whichever address the plugin resolved as `email` — by default the public profile email or else the `primary` address, or an application's own choice via the [`onResolveEmail` hook](./lifecycle-hooks.md#onresolveemail), which can only ever resolve to one of GitHub's own `verified: true` addresses. Either way, GitHub's default `usernameClaim` (`login`, the handle) is not the email, so this source's "equals the resolved username" condition still requires `usernameClaim: 'email'` regardless of which verified address was chosen.
+
 Any other source (unsigned token, plain UserInfo, failed GitHub fetch, custom `emailClaim`, non-GitHub provider) yields provenance `unauthenticated` → adoption denied.
 
 When an `onLogin` hook supplies the identity (`hookData.user`), the gate is skipped entirely — the hook is authoritative.

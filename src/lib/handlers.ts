@@ -21,6 +21,7 @@ import type {
 	AuthTrust,
 	EmailProvenance,
 	OAuthAuthEvidence,
+	EmailCandidate,
 } from '../types.ts';
 import {
 	browserSecretMatches,
@@ -441,8 +442,18 @@ export async function handleCallback(
 		// Get user info (will use ID token claims if available and verified).
 		// getUserInfo also sets _emailProvenance on the returned object; pass
 		// idTokenSignatureVerified so it can't stamp 'signed-oidc' on a
-		// decoded-only (no-JWKS) token.
-		const userInfo = await provider.getUserInfo(tokenResponse.access_token, idTokenClaims, idTokenSignatureVerified);
+		// decoded-only (no-JWKS) token. onResolveEmail is only built when the
+		// application registered the hook (#228) — its absence leaves a custom
+		// adapter's default email selection unchanged.
+		const resolveEmail = hookManager.hasHook('onResolveEmail')
+			? (candidates: EmailCandidate[]) => hookManager.callResolveEmail(candidates, providerName)
+			: undefined;
+		const userInfo = await provider.getUserInfo(
+			tokenResponse.access_token,
+			idTokenClaims,
+			idTokenSignatureVerified,
+			resolveEmail
+		);
 		// Extract provenance before mapUserToHarper discards the meta-field.
 		const emailProvenance: string =
 			typeof userInfo?._emailProvenance === 'string' ? userInfo._emailProvenance : 'unauthenticated';
@@ -801,6 +812,7 @@ export async function handleCallback(
 		const message = error instanceof Error ? error.message : String(error);
 		let reason = 'unknown';
 		if (message.startsWith('Token exchange failed')) reason = 'token_exchange';
+		else if (message.includes('onResolveEmail')) reason = 'email_selection';
 		else if (message.includes('claim')) reason = 'user_mapping';
 		else if (message.includes('user info') || message.includes('userinfo')) reason = 'user_info';
 		else if (message.includes('hook') || message.includes('onLogin')) reason = 'login_hook';

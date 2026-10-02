@@ -563,4 +563,116 @@ describe('GitHub Provider', () => {
 			global.fetch = originalFetch;
 		}
 	});
+
+	describe('helpers.resolveEmail selection (#228)', () => {
+		const originalFetch = global.fetch;
+		const EMAILS = [
+			{ email: 'secondary@example.com', primary: false, verified: true },
+			{ email: 'primary@example.com', primary: true, verified: true },
+			{ email: 'unverified@example.com', primary: false, verified: false },
+		];
+
+		function mockEmailsFetch() {
+			global.fetch = async () => ({ ok: true, json: async () => EMAILS });
+		}
+
+		it('uses the hook-resolved email, with email_verified true and github-authenticated provenance', async () => {
+			const github = getProvider('github');
+			mockEmailsFetch();
+			try {
+				const info = await github.getUserInfo.call({ config: github }, 'token', {
+					getUserInfo: async () => ({ login: 'user', email: null }),
+					logger: { warn: () => {} },
+					resolveEmail: async () => 'secondary@example.com',
+				});
+				assert.equal(info.email, 'secondary@example.com');
+				assert.equal(info.email_verified, true);
+				assert.equal(info[ADAPTER_EMAIL_PROVENANCE], 'github-authenticated');
+			} finally {
+				global.fetch = originalFetch;
+			}
+		});
+
+		it('falls back to the default (primary) selection when resolveEmail returns undefined', async () => {
+			const github = getProvider('github');
+			mockEmailsFetch();
+			try {
+				const info = await github.getUserInfo.call({ config: github }, 'token', {
+					getUserInfo: async () => ({ login: 'user', email: null }),
+					logger: { warn: () => {} },
+					resolveEmail: async () => undefined,
+				});
+				assert.equal(info.email, 'primary@example.com');
+				assert.equal(info[ADAPTER_EMAIL_PROVENANCE], 'github-authenticated');
+			} finally {
+				global.fetch = originalFetch;
+			}
+		});
+
+		it('passes helpers.resolveEmail every fetched address, verified or not', async () => {
+			const github = getProvider('github');
+			mockEmailsFetch();
+			let received;
+			try {
+				await github.getUserInfo.call({ config: github }, 'token', {
+					getUserInfo: async () => ({ login: 'user', email: null }),
+					logger: { warn: () => {} },
+					resolveEmail: async (candidates) => {
+						received = candidates;
+						return undefined;
+					},
+				});
+				assert.deepEqual(
+					received,
+					EMAILS.map((e) => ({ email: e.email, verified: e.verified, primary: e.primary }))
+				);
+			} finally {
+				global.fetch = originalFetch;
+			}
+		});
+
+		it('is not called when the /user/emails fetch did not succeed', async () => {
+			const github = getProvider('github');
+			global.fetch = async () => ({
+				ok: false,
+				status: 403,
+				statusText: 'Forbidden',
+				body: { cancel: async () => {} },
+			});
+			let called = false;
+			try {
+				await github.getUserInfo.call({ config: github }, 'token', {
+					getUserInfo: async () => ({ login: 'user', email: null }),
+					logger: { warn: () => {} },
+					resolveEmail: async () => {
+						called = true;
+						return undefined;
+					},
+				});
+				assert.equal(called, false, 'resolveEmail must not be called without a successful candidate fetch');
+			} finally {
+				global.fetch = originalFetch;
+			}
+		});
+
+		it('propagates a rejection from resolveEmail instead of falling back to the default (#228 wrong-account guard)', async () => {
+			const github = getProvider('github');
+			mockEmailsFetch();
+			try {
+				await assert.rejects(
+					() =>
+						github.getUserInfo.call({ config: github }, 'token', {
+							getUserInfo: async () => ({ login: 'user', email: null }),
+							logger: { warn: () => {} },
+							resolveEmail: async () => {
+								throw new Error('onResolveEmail hook returned an address that is not one of the verified candidates');
+							},
+						}),
+					/onResolveEmail hook returned an address/
+				);
+			} finally {
+				global.fetch = originalFetch;
+			}
+		});
+	});
 });

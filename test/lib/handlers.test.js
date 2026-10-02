@@ -24,6 +24,7 @@ describe('OAuth Handlers', () => {
 			callOnLogin: createMockFn(async () => {}),
 			callOnLogout: createMockFn(async () => {}),
 			callOnTokenRefresh: createMockFn(async () => {}),
+			callResolveEmail: createMockFn(async () => undefined),
 			hasHook: createMockFn(() => true),
 		};
 
@@ -2293,6 +2294,67 @@ describe('OAuth Handlers', () => {
 				`expected access_denied for unverified GitHub email; got ${result.headers.Location}`
 			);
 			assert.equal(mockRequest.session.update.mock.calls.length, 0);
+		});
+	});
+
+	describe('handleCallback — onResolveEmail wiring (#228)', () => {
+		it('builds the resolveEmail closure only when onResolveEmail is registered, and threads it as the 4th getUserInfo argument', async () => {
+			mockHookManager.hasHook = createMockFn((name) => name === 'onResolveEmail');
+			mockProvider.getUserInfo = createMockFn(async (_token, _idTokenClaims, _sigVerified, resolveEmail) => {
+				assert.equal(typeof resolveEmail, 'function');
+				const chosen = await resolveEmail([{ email: 'work@example.com', verified: true, primary: false }]);
+				return { email: chosen, email_verified: true, _emailProvenance: 'github-authenticated' };
+			});
+
+			await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockHookManager, 'test-provider', {
+				logger: mockLogger,
+			});
+
+			assert.equal(mockHookManager.callResolveEmail.mock.calls.length, 1);
+			assert.deepEqual(mockHookManager.callResolveEmail.mock.calls[0].arguments[0], [
+				{ email: 'work@example.com', verified: true, primary: false },
+			]);
+			assert.equal(mockHookManager.callResolveEmail.mock.calls[0].arguments[1], 'test-provider');
+		});
+
+		it('passes undefined as the 4th getUserInfo argument when no onResolveEmail hook is registered', async () => {
+			mockHookManager.hasHook = createMockFn(() => false);
+			mockProvider.getUserInfo = createMockFn(async (_token, _idTokenClaims, _sigVerified, resolveEmail) => {
+				assert.equal(resolveEmail, undefined);
+				return { email: 'user@example.com', email_verified: true };
+			});
+
+			await handleCallback(mockRequest, mockTarget, mockProvider, mockConfig, mockHookManager, 'test-provider', {
+				logger: mockLogger,
+			});
+
+			assert.equal(mockHookManager.callResolveEmail.mock.calls.length, 0);
+		});
+
+		it('a rejection from the adapter (invalid pick, hook throw, or timeout) fails the login with a safe redirect, not a crash', async () => {
+			mockHookManager.hasHook = createMockFn((name) => name === 'onResolveEmail');
+			mockProvider.getUserInfo = createMockFn(async (_token, _idTokenClaims, _sigVerified, resolveEmail) => {
+				// Mirrors what the real OAuthProvider throws on an invalid hook pick.
+				await resolveEmail([{ email: 'work@example.com', verified: true, primary: false }]);
+				throw new Error('onResolveEmail hook returned an address that is not one of the verified candidates');
+			});
+			mockHookManager.callResolveEmail = createMockFn(async () => 'attacker@evil.example');
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				{
+					logger: mockLogger,
+				}
+			);
+
+			assert.equal(result.status, 302);
+			assert.ok(result.headers.Location.includes('reason=email_selection'), result.headers.Location);
+			assert.equal(mockRequest.session.update.mock.calls.length, 0, 'no session is established on a failed selection');
 		});
 	});
 

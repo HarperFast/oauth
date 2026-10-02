@@ -536,6 +536,18 @@ export interface OnLoginResultNeedsConfirmation {
 export type OnLoginResult = OnLoginResultOk | OnLoginResultDenied | OnLoginResultNeedsConfirmation;
 
 /**
+ * One email address as reported by a provider's authenticated, multi-email fetch
+ * (currently GitHub's `/user/emails`). `verified` is the provider's own flag — see
+ * {@link OAuthHooks.onResolveEmail}, which may only resolve to a candidate where this
+ * is `true`.
+ */
+export interface EmailCandidate {
+	readonly email: string;
+	readonly verified: boolean;
+	readonly primary: boolean;
+}
+
+/**
  * OAuth Lifecycle Hooks
  * Callbacks invoked at key points in the OAuth flow
  */
@@ -616,6 +628,29 @@ export interface OAuthHooks {
 		request: any,
 		provider: string
 	) => Promise<OnLoginResult | void>;
+
+	/**
+	 * Choose which of several provider-reported emails becomes the login identity (#228).
+	 * Called only when the provider's authenticated email fetch succeeded (currently
+	 * GitHub's `/user/emails`); `candidates` is every address it returned, verified or not,
+	 * so the hook can see the full picture (e.g. to prompt for or prefer a specific domain).
+	 *
+	 * Return the chosen address, or `null`/`undefined` for "no preference" — the plugin's
+	 * default selection (today's profile-email-or-primary policy) is used unchanged.
+	 *
+	 * SECURITY: the returned address MUST be one of `candidates` with `verified === true`.
+	 * The plugin enforces this independently of the hook — an address that isn't a verified
+	 * candidate, or any other invalid result, is treated as a hook failure, which **fails the
+	 * login** (does not fall back to the default): falling back silently could establish a
+	 * session for a different account than the one the hook was trying to reach. A thrown
+	 * error, or a hook that does not settle within 5 seconds, fails the login the same way.
+	 * `candidates` is an immutable snapshot; mutating it has no effect on validation.
+	 *
+	 * @param candidates - Every email the provider's authenticated fetch returned
+	 * @param provider - The provider name (e.g., 'github')
+	 * @returns The chosen (verified) address, or `null`/`undefined` to use the default
+	 */
+	onResolveEmail?: (candidates: EmailCandidate[], provider: string) => Promise<string | null | undefined>;
 
 	/**
 	 * Called before logout, before session is cleared
@@ -719,6 +754,15 @@ export interface GetUserInfoHelpers {
 	/** Default getUserInfo implementation to call */
 	getUserInfo: (accessToken: string) => Promise<any>;
 	logger?: Logger;
+	/**
+	 * Present when an `onResolveEmail` hook is registered (#228). Call with every email
+	 * candidate the adapter fetched to get the application's chosen address — already
+	 * validated to be one of the given candidates with `verified === true` — or `undefined`
+	 * when the hook declined (no preference). Rejects (does not resolve to a fallback) on an
+	 * invalid pick, a thrown hook, or a hook that doesn't settle within 5 seconds; an adapter
+	 * must let that rejection propagate rather than catching it and using its own default.
+	 */
+	resolveEmail?: (candidates: EmailCandidate[]) => Promise<string | undefined>;
 }
 
 /**
@@ -871,8 +915,14 @@ export interface IOAuthProvider {
 	/** Exchange authorization code for access/refresh tokens */
 	exchangeCodeForToken(code: string, redirectUri: string): Promise<TokenResponse>;
 	/** Fetch user information from provider. `idTokenSignatureVerified` gates whether
-	 *  the resulting `_emailProvenance` may be `'signed-oidc'`. */
-	getUserInfo(accessToken: string, idTokenClaims?: any, idTokenSignatureVerified?: boolean): Promise<any>;
+	 *  the resulting `_emailProvenance` may be `'signed-oidc'`. `onResolveEmail`, when given,
+	 *  is threaded to a custom adapter's `GetUserInfoHelpers.resolveEmail` (#228). */
+	getUserInfo(
+		accessToken: string,
+		idTokenClaims?: any,
+		idTokenSignatureVerified?: boolean,
+		onResolveEmail?: (candidates: EmailCandidate[]) => Promise<string | null | undefined>
+	): Promise<any>;
 	/** Map provider user info to Harper user format */
 	mapUserToHarper(userInfo: any): OAuthUser;
 	/** Verify and decode ID token (OIDC only). Returns claims, whether the signature

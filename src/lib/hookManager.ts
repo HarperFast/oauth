@@ -4,7 +4,19 @@
  * Manages loading and calling lifecycle hooks for the OAuth plugin
  */
 
-import type { OAuthHooks, OAuthUser, OnLoginResult, TokenResponse, Logger, OAuthProviderConfig } from '../types.ts';
+import type {
+	OAuthHooks,
+	OAuthUser,
+	OnLoginResult,
+	TokenResponse,
+	Logger,
+	OAuthProviderConfig,
+	EmailCandidate,
+} from '../types.ts';
+
+/** Bounds `onResolveEmail` so a stalled selector (e.g. a slow DB lookup) can't hold the
+ *  OAuth callback open indefinitely — same bound as the GitHub `/user/emails` fetch itself. */
+const ON_RESOLVE_EMAIL_TIMEOUT_MS = 5000;
 
 /**
  * Hook Manager
@@ -57,6 +69,41 @@ export class HookManager {
 			this.logger?.error?.('onLogin hook failed:', error instanceof Error ? error.message : String(error));
 			// Don't throw - hooks should not break the OAuth flow
 			return;
+		}
+	}
+
+	/**
+	 * Call onResolveEmail hook (#228).
+	 *
+	 * Unlike `callOnLogin`/`callOnLogout`/`callOnTokenRefresh`, a failure here is NOT
+	 * swallowed — it is logged and RE-THROWN, the same contract as `callResolveProvider`.
+	 * A hook that cannot resolve the address it was asked to resolve must fail the login,
+	 * never silently fall back to the default (which may be a different account than the
+	 * one the hook was trying to reach). A hook that doesn't settle within
+	 * `ON_RESOLVE_EMAIL_TIMEOUT_MS` fails the same way.
+	 */
+	async callResolveEmail(
+		candidates: EmailCandidate[],
+		provider: string,
+		timeoutMs: number = ON_RESOLVE_EMAIL_TIMEOUT_MS
+	): Promise<string | null | undefined> {
+		const hook = this.hooks.onResolveEmail;
+		if (!hook) return undefined;
+
+		this.logger?.debug?.(`Calling onResolveEmail hook for provider: ${provider}`);
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		try {
+			return await Promise.race([
+				Promise.resolve(hook(candidates, provider)),
+				new Promise<never>((_, reject) => {
+					timer = setTimeout(() => reject(new Error(`onResolveEmail hook timed out after ${timeoutMs}ms`)), timeoutMs);
+				}),
+			]);
+		} catch (error) {
+			this.logger?.error?.('onResolveEmail hook failed:', error instanceof Error ? error.message : String(error));
+			throw error;
+		} finally {
+			clearTimeout(timer);
 		}
 	}
 

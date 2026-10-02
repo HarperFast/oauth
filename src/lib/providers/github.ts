@@ -55,6 +55,7 @@ export const GitHubProvider: OAuthProviderConfig = {
 		// Only a genuinely successful /user/emails fetch earns the trusted tag.
 		// On any failure or non-OK response the provenance stays 'unauthenticated'.
 		let emailFetchSucceeded = false;
+		let fetchedEmails: Array<{ email: string; primary: boolean; verified: boolean }> | undefined;
 
 		try {
 			const emailResponse = await fetch('https://api.github.com/user/emails', {
@@ -67,27 +68,7 @@ export const GitHubProvider: OAuthProviderConfig = {
 			});
 
 			if (emailResponse.ok) {
-				const emails = (await emailResponse.json()) as Array<{
-					email: string;
-					primary: boolean;
-					verified: boolean;
-				}>;
-				if (userInfo.email) {
-					// Public profile email: surface its verified status. No match →
-					// leave email_verified unset (unknown), never guess.
-					const match = emails.find((e) => e.email === userInfo.email);
-					if (match) {
-						userInfo.email_verified = match.verified;
-						emailFetchSucceeded = true;
-					}
-				} else {
-					const primaryEmail = emails.find((e) => e.primary);
-					if (primaryEmail) {
-						userInfo.email = primaryEmail.email;
-						userInfo.email_verified = primaryEmail.verified;
-						emailFetchSucceeded = true;
-					}
-				}
+				fetchedEmails = await emailResponse.json();
 			} else {
 				// The case operators actually hit when the user:email scope is missing
 				helpers.logger?.warn?.(
@@ -103,6 +84,39 @@ export const GitHubProvider: OAuthProviderConfig = {
 				'Failed to fetch GitHub user emails:',
 				error instanceof Error ? error.message : String(error)
 			);
+		}
+
+		// Selection runs OUTSIDE the fetch's try/catch above: an `onResolveEmail` hook that
+		// rejects (invalid pick, throw, or timeout — see helpers.resolveEmail) must fail this
+		// login, not be swallowed by the fetch error handler and silently fall through to the
+		// default selection below (#228).
+		if (fetchedEmails) {
+			const resolved = helpers.resolveEmail
+				? await helpers.resolveEmail(
+						fetchedEmails.map((e) => ({ email: e.email, verified: e.verified === true, primary: e.primary === true }))
+					)
+				: undefined;
+			if (resolved) {
+				// helpers.resolveEmail already validated this is one of the verified candidates.
+				userInfo.email = resolved;
+				userInfo.email_verified = true;
+				emailFetchSucceeded = true;
+			} else if (userInfo.email) {
+				// Public profile email: surface its verified status. No match →
+				// leave email_verified unset (unknown), never guess.
+				const match = fetchedEmails.find((e) => e.email === userInfo.email);
+				if (match) {
+					userInfo.email_verified = match.verified;
+					emailFetchSucceeded = true;
+				}
+			} else {
+				const primaryEmail = fetchedEmails.find((e) => e.primary);
+				if (primaryEmail) {
+					userInfo.email = primaryEmail.email;
+					userInfo.email_verified = primaryEmail.verified;
+					emailFetchSucceeded = true;
+				}
+			}
 		}
 
 		// 'github-authenticated' ONLY when the authenticated /user/emails fetch

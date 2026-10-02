@@ -15,6 +15,7 @@ import type {
 	OAuthUser,
 	GetUserInfoHelpers,
 	IOAuthProvider,
+	EmailCandidate,
 } from '../types.ts';
 import { csrfTokenManager } from './CSRFTokenManager.ts';
 import { ADAPTER_EMAIL_PROVENANCE } from './emailProvenance.ts';
@@ -158,13 +159,23 @@ export class OAuthProvider implements IOAuthProvider {
 	 *   verified via JWKS (from `verifyIdToken`'s `signatureVerified`). `'signed-oidc'`
 	 *   requires this to be `true` — otherwise `idTokenClaims` is a decoded-only,
 	 *   unverified payload (no JWKS configured) and must not be labeled as signed.
+	 * @param onResolveEmail - Resolves which of several provider-reported emails becomes
+	 *   the login identity (#228). Threaded to a custom adapter as
+	 *   `helpers.resolveEmail`, which validates the result against the SAME candidate
+	 *   snapshot the adapter passed in before returning it — see {@link makeResolveEmailHelper}.
 	 */
-	async getUserInfo(accessToken: string, idTokenClaims: any = null, idTokenSignatureVerified = false): Promise<any> {
+	async getUserInfo(
+		accessToken: string,
+		idTokenClaims: any = null,
+		idTokenSignatureVerified = false,
+		onResolveEmail?: (candidates: EmailCandidate[]) => Promise<string | null | undefined>
+	): Promise<any> {
 		// Check if provider has custom getUserInfo implementation
 		if (typeof this.config.getUserInfo === 'function') {
 			const helpers: GetUserInfoHelpers = {
 				getUserInfo: this.fetchUserInfo.bind(this),
 				logger: this.logger,
+				resolveEmail: onResolveEmail ? this.makeResolveEmailHelper(onResolveEmail) : undefined,
 			};
 			const raw = await this.config.getUserInfo.call(this, accessToken, helpers);
 			// Provenance is trusted ONLY through the ADAPTER_EMAIL_PROVENANCE Symbol,
@@ -238,6 +249,33 @@ export class OAuthProvider implements IOAuthProvider {
 		// Fetch from userinfo endpoint — no id-token correlation, so unauthenticated.
 		const userInfo = await this.fetchUserInfo(accessToken);
 		return { ...userInfo, _emailProvenance: 'unauthenticated' };
+	}
+
+	/**
+	 * Build `GetUserInfoHelpers.resolveEmail` for a custom adapter (#228). The enforcement
+	 * point for the feature's guardrail: the result is validated against the SAME frozen
+	 * snapshot handed to `onResolveEmail`, never against a reference the hook could have
+	 * mutated, and must be one of its entries with `verified === true`. `onResolveEmail`
+	 * rejecting (hook throw, timeout, or this validation failing) propagates as a rejection
+	 * — it never resolves to a fallback value — so the adapter must not catch it; the login
+	 * fails rather than silently adopting a different (default) account.
+	 */
+	private makeResolveEmailHelper(
+		onResolveEmail: (candidates: EmailCandidate[]) => Promise<string | null | undefined>
+	): (candidates: EmailCandidate[]) => Promise<string | undefined> {
+		return async (candidates: EmailCandidate[]): Promise<string | undefined> => {
+			const snapshot: readonly EmailCandidate[] = Object.freeze(
+				candidates.map((c) => Object.freeze({ email: c.email, verified: c.verified, primary: c.primary }))
+			);
+			const chosen = await onResolveEmail(snapshot as EmailCandidate[]);
+			if (chosen == null) return undefined;
+			if (typeof chosen !== 'string' || !snapshot.some((c) => c.email === chosen && c.verified === true)) {
+				throw new Error(
+					'onResolveEmail hook returned an address that is not one of the verified candidates — refusing to use it'
+				);
+			}
+			return chosen;
+		};
 	}
 
 	/**

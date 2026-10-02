@@ -32,6 +32,7 @@ export type {
 	OAuthUser,
 	OAuthAuthEvidence,
 	EmailProvenance,
+	EmailCandidate,
 	TokenResponse,
 	OnLoginResult,
 	OnLoginResultOk,
