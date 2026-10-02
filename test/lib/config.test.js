@@ -479,11 +479,23 @@ describe('OAuth Configuration', () => {
 				);
 			});
 
-			it('DCR: dynamicClientRegistration.enabled: false leaves a declared-but-empty list INERT (DCR itself is off)', () => {
+			it('DCR: disabling DCR alone does NOT make a declared-but-empty list inert — CIMD (default-enabled) still reads it', () => {
+				assert.throws(
+					() =>
+						normalizeMcpSecurityConfig({
+							enabled: true,
+							dynamicClientRegistration: { enabled: false, allowedRedirectUriHosts: [''] },
+						}),
+					/mcp\.dynamicClientRegistration\.allowedRedirectUriHosts.*resolved to an empty list/s
+				);
+			});
+
+			it('DCR: a declared-but-empty list IS inert when both DCR and CIMD are explicitly disabled', () => {
 				assert.doesNotThrow(() =>
 					normalizeMcpSecurityConfig({
 						enabled: true,
 						dynamicClientRegistration: { enabled: false, allowedRedirectUriHosts: [''] },
+						clientIdMetadataDocuments: { enabled: false },
 					})
 				);
 			});

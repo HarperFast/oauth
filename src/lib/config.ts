@@ -218,32 +218,19 @@ function normalizeTokenEndpointAudience(value: unknown, logger?: Logger): { clie
 
 /**
  * Normalize a declared hostname allowlist (`dcr.allowedRedirectUriHosts`,
- * `cimd.allowedHosts`): wrap a scalar into a single-element array, trim +
- * lowercase each entry, and drop blanks — exactly as before. Two failure
- * modes now throw instead of silently producing a list the gate can't use
- * as intended:
- * - An unresolved `${VAR}` placeholder entry is a non-empty string, so
- *   without this check it would survive normalization as a literal,
- *   unmatchable hostname (e.g. the literal text `${trusted_host}`) — the
- *   allowlist looks populated but silently never matches real traffic.
- *   That's a misconfiguration the operator can't see; fail loudly instead.
- * - A declared list whose entries all resolve blank (every placeholder
- *   unset, or all-whitespace) normalizes to `[]`, which `validateRedirectUri`
- *   (clientValidator.ts) and CIMD's `allowedHosts.length > 0` check both read
- *   as "no allowlist" — the exact opposite of what the operator declared
- *   (#249, the same fail-open shape #240/#207 closed for initialAccessToken
- *   and the MCP feature booleans). An explicit empty list (`allowedHosts: []`)
- *   is treated the same way: this allowlist's only documented way to express
- *   "no restriction" is omitting the key entirely (clientValidator.ts has no
- *   "explicit empty list denies every host" mode), so a present-but-empty
- *   array can't be a deliberate "allow nothing" choice — it reads as the same
- *   declared-but-unusable state as the blank-entries case.
- *
- * Both checks are gated by `guard` (`mcpActive && <block>.enabled !== false`,
- * matching {@link validateDcrInitialAccessToken}'s own gate): while the
- * surface this list protects is inert, stale placeholders in unused config
- * must not block boot (the byte-identical-boot contract every other MCP
- * security field honors).
+ * `cimd.allowedHosts`): wrap a scalar into a single-element array, trim,
+ * lowercase, and drop blanks. When `guard` is true (the surface this list
+ * gates is active — the caller decides which block(s) that is), a result
+ * that normalizes to zero usable hosts throws naming `path` instead of
+ * silently becoming "no restriction" to `validateRedirectUri` / CIMD's own
+ * length check (#249, the same fail-open shape #240/#207 closed for
+ * initialAccessToken and the MCP feature booleans) — including an explicit
+ * `[]`, since neither validator has a mode where an empty list means "deny
+ * every host," so omitting the key is the only way to get that default. A
+ * single unresolved `${VAR}` entry also throws rather than surviving as a
+ * literal, unmatchable hostname. `guard` false (surface inert) skips both
+ * checks, matching every other MCP security field's byte-identical-boot
+ * contract.
  */
 function normalizeHostAllowlist(value: unknown, path: string, guard: boolean): string[] {
 	const raw: unknown[] = Array.isArray(value) ? value : [value];
@@ -388,14 +375,15 @@ function validateDcrInitialAccessToken(dcr: Record<string, any>): void {
  *   is the exception.
  * - `mcp.clientIdMetadataDocuments.allowedHosts` and
  *   `mcp.dynamicClientRegistration.allowedRedirectUriHosts` are normalized to
- *   an array of exact, lowercased hostnames via {@link normalizeHostAllowlist}.
- *   A scalar string (which `Array.includes` / `String.includes` would turn
- *   into substring matching) is wrapped into a single-element array; anything
- *   that isn't a string or array of strings is rejected. A declared list that
- *   resolves empty (blank entries, an unset env placeholder, or an explicit
- *   `[]`) throws naming the key instead of silently becoming "no restriction"
- *   (#249) — while the block it gates is active; omitting the key entirely
- *   keeps the documented no-allowlist default.
+ *   an array of exact, lowercased hostnames via {@link normalizeHostAllowlist}
+ *   (a scalar string is wrapped into a single-element array; anything that
+ *   isn't a string or array of strings is rejected). A declared list that
+ *   resolves to zero usable hosts throws naming the key instead of silently
+ *   becoming "no restriction" (#249); omitting the key keeps that default.
+ *   `allowedRedirectUriHosts` is read by both DCR and CIMD redirect-uri
+ *   checks (cimd.ts), so its guard is active whenever EITHER block is —
+ *   `dcr.enabled !== false` alone would miss a CIMD-forward deployment with
+ *   DCR disabled.
  * - `mcp.clientIdMetadataDocuments.privateKeyJwt`: `enabled` is a documented
  *   boolean; `jwksUriAllowedOrigins` is normalized to exact https origins;
  *   `tokenEndpointAudience` needs exact CIMD client IDs and a parseable
@@ -439,6 +427,21 @@ export function normalizeMcpSecurityConfig(mcpConfig: Record<string, any>, logge
 		);
 	}
 
+	// CIMD's redirect-uri check (cimd.ts) reads this same allowedRedirectUriHosts
+	// list independently of dcr.enabled — CIMD defaults to enabled and consults
+	// the list whenever it resolves a client, whether or not DCR itself is on.
+	// So the list's empty/placeholder guard below must fire whenever EITHER
+	// consumer is active, not just DCR; computed here (matching cimd.enabled's
+	// own default-enabled, false-only-disables coercion) so it's available
+	// before the cimd block below normalizes that field.
+	const cimdConfigForGate = mcpConfig.clientIdMetadataDocuments;
+	const cimdActive =
+		coerceConfigBoolean(
+			cimdConfigForGate && typeof cimdConfigForGate === 'object' && !Array.isArray(cimdConfigForGate)
+				? cimdConfigForGate.enabled
+				: undefined
+		) !== false;
+
 	const dcr = mcpConfig.dynamicClientRegistration;
 	if (dcr !== undefined && dcr !== null && (typeof dcr !== 'object' || Array.isArray(dcr))) {
 		// A non-mapping value (`false`, `0`, an unresolved placeholder string, an
@@ -463,12 +466,13 @@ export function normalizeMcpSecurityConfig(mcpConfig: Record<string, any>, logge
 		// String.prototype.includes (substring matching) instead of an exact-host
 		// allowlist. Normalize to an array up front, exactly like CIMD's
 		// allowedHosts below (this list is shared by both the DCR and CIMD
-		// redirect-uri checks).
+		// redirect-uri checks, so its guard below is DCR-or-CIMD, not DCR alone —
+		// see cimdActive above).
 		if (dcr.allowedRedirectUriHosts !== undefined) {
 			dcr.allowedRedirectUriHosts = normalizeHostAllowlist(
 				dcr.allowedRedirectUriHosts,
 				'mcp.dynamicClientRegistration.allowedRedirectUriHosts',
-				mcpActive && dcr.enabled !== false
+				mcpActive && (dcr.enabled !== false || cimdActive)
 			);
 		}
 	}

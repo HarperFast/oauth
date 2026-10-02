@@ -429,14 +429,48 @@ describe('OAuth Plugin Options Watcher', () => {
 			if (typeof msg === 'string' && msg.includes('Failed to update OAuth configuration')) errorLogged = true;
 		};
 
-		// Reload with an env placeholder that resolves blank — the declared allowlist
-		// collapses to [], which must be rejected rather than silently applied as
-		// "no restriction".
+		// Reload with an unresolved env placeholder entry — must be rejected rather
+		// than kept as a literal, unmatchable host.
 		scope.options._config = {
 			...scope.options._config,
 			mcp: {
 				...scope.options._config.mcp,
 				dynamicClientRegistration: { allowedRedirectUriHosts: ['${REDIRECT_HOST_NOT_SET}'] },
+			},
+		};
+		configChangeListeners[0]();
+		await waitFor(() => errorLogged);
+
+		assert.ok(errorLogged, 'the rejected reload should be logged');
+		assert.equal(
+			OAuthResource.mcpConfig,
+			previousMcpConfig,
+			'the previous mcp config must keep serving after a rejected reload'
+		);
+	});
+
+	it('a live reload with DCR disabled still rejects an empty allowedRedirectUriHosts, because CIMD reads the same list (#249)', async () => {
+		scope.options._config.mcp = {
+			enabled: true,
+			issuer: 'https://app.example.com',
+			dynamicClientRegistration: { allowedRedirectUriHosts: ['trusted.example.com'] },
+		};
+		await handleApplication(scope);
+		const previousMcpConfig = OAuthResource.mcpConfig;
+
+		let errorLogged = false;
+		scope.logger.error = (msg) => {
+			if (typeof msg === 'string' && msg.includes('Failed to update OAuth configuration')) errorLogged = true;
+		};
+
+		// DCR explicitly disabled, but CIMD (default-enabled, not declared here)
+		// still consults allowedRedirectUriHosts for its own clients' redirect_uris
+		// (cimd.ts) — a declared-but-empty list must still be rejected.
+		scope.options._config = {
+			...scope.options._config,
+			mcp: {
+				...scope.options._config.mcp,
+				dynamicClientRegistration: { enabled: false, allowedRedirectUriHosts: [''] },
 			},
 		};
 		configChangeListeners[0]();
