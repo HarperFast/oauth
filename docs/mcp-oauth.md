@@ -647,7 +647,11 @@ automatic resolution.
 - Config safety: `mcp.enabled`, `clientIdMetadataDocuments.enabled`, and
   `allowedHosts` are normalized at load — an env-expanded `"false"` disables the
   feature (not left truthy), and `allowedHosts` is coerced to an array of exact,
-  lowercased hostnames (never substring-matched).
+  lowercased hostnames (never substring-matched). A **declared** `allowedHosts`
+  that resolves to zero usable hosts (an explicit `[]`, all-blank entries, or an
+  unresolved `${VAR}`) fails startup and is rejected on a live config reload,
+  rather than silently being read as "no restriction"; only omitting the key
+  gets that default.
 
 ### Configuration
 
@@ -669,8 +673,9 @@ list is treated as an unknown client (`invalid_client`) without revealing whethe
 the host would otherwise be valid — the list is not disclosed to the client.
 Entries are matched exactly (case-insensitive) against the URL host; a single
 hostname string is accepted and normalized to a one-element list. Omitting
-`allowedHosts` (or an empty list) allows any globally-routable host — the SSRF
-gate still applies.
+`allowedHosts` is the only way to allow any globally-routable host (the SSRF
+gate still applies) — a declared list that resolves to zero hosts (an explicit
+`[]`, blank entries, or an unset `${VAR}`) fails startup instead.
 
 ### Token endpoint authentication for CIMD clients
 
