@@ -13,7 +13,10 @@ import {
 	expandEnvVarsDeep,
 	coerceConfigBoolean,
 	normalizeMcpSecurityConfig,
+	isUnresolvedEnvPlaceholder,
+	skipUndefined,
 } from '../../dist/lib/config.js';
+import { interactivePrivateKeyJwtEnabled } from '../../dist/lib/mcp/clientAuthMethod.js';
 
 describe('OAuth Configuration', () => {
 	let originalEnv;
@@ -76,6 +79,30 @@ describe('OAuth Configuration', () => {
 		});
 	});
 
+	describe('skipUndefined', () => {
+		it('drops keys whose value is undefined', () => {
+			const result = skipUndefined({ a: 1, b: undefined, c: 'x' });
+			assert.deepEqual(result, { a: 1, c: 'x' });
+			assert.equal('b' in result, false);
+		});
+
+		it('keeps null and empty-string values as explicit entries', () => {
+			const result = skipUndefined({ a: null, b: '' });
+			assert.deepEqual(result, { a: null, b: '' });
+		});
+
+		it('returns an empty object for null/undefined input', () => {
+			assert.deepEqual(skipUndefined(null), {});
+			assert.deepEqual(skipUndefined(undefined), {});
+		});
+
+		it('does not mutate the source object', () => {
+			const source = { a: 1, b: undefined };
+			skipUndefined(source);
+			assert.deepEqual(source, { a: 1, b: undefined });
+		});
+	});
+
 	describe('coerceConfigBoolean', () => {
 		it('passes real booleans through', () => {
 			assert.equal(coerceConfigBoolean(true), true);
@@ -94,6 +121,45 @@ describe('OAuth Configuration', () => {
 		});
 	});
 
+	describe('isUnresolvedEnvPlaceholder', () => {
+		it('matches a bare ${VAR} placeholder', () => {
+			assert.equal(isUnresolvedEnvPlaceholder('${MY_VAR}'), true);
+		});
+		it('matches with surrounding whitespace', () => {
+			assert.equal(isUnresolvedEnvPlaceholder('  ${MY_VAR}  '), true);
+		});
+		it('matches an empty placeholder body', () => {
+			assert.equal(isUnresolvedEnvPlaceholder('${}'), true);
+		});
+		it('does not match a resolved/literal string', () => {
+			assert.equal(isUnresolvedEnvPlaceholder('literal'), false);
+			assert.equal(isUnresolvedEnvPlaceholder(''), false);
+		});
+		it('does not match a partial or embedded placeholder', () => {
+			assert.equal(isUnresolvedEnvPlaceholder('${MISSING_CLOSE'), false);
+			assert.equal(isUnresolvedEnvPlaceholder('MISSING_OPEN}'), false);
+			assert.equal(isUnresolvedEnvPlaceholder('text ${VAR} text'), false);
+		});
+		it('does not match non-string values', () => {
+			assert.equal(isUnresolvedEnvPlaceholder(undefined), false);
+			assert.equal(isUnresolvedEnvPlaceholder(null), false);
+			assert.equal(isUnresolvedEnvPlaceholder(123), false);
+			assert.equal(isUnresolvedEnvPlaceholder(true), false);
+		});
+		it('is a shape check only — also matches a RESOLVED value that happens to be the literal placeholder text', () => {
+			// e.g. an env var deliberately set to the string "${X}". expandEnvVar
+			// successfully resolved it; this function can't tell that apart from
+			// an unresolved placeholder, since it never sees whether expansion ran.
+			process.env._TEST_LITERAL_PLACEHOLDER = '${X}';
+			try {
+				assert.equal(expandEnvVar('${_TEST_LITERAL_PLACEHOLDER}'), '${X}');
+				assert.equal(isUnresolvedEnvPlaceholder(expandEnvVar('${_TEST_LITERAL_PLACEHOLDER}')), true);
+			} finally {
+				delete process.env._TEST_LITERAL_PLACEHOLDER;
+			}
+		});
+	});
+
 	describe('normalizeMcpSecurityConfig', () => {
 		it('coerces an env-expanded "false" so the feature is truly disabled', () => {
 			const cfg = { enabled: 'false', clientIdMetadataDocuments: { enabled: 'false' } };
@@ -109,9 +175,10 @@ describe('OAuth Configuration', () => {
 			normalizeMcpSecurityConfig(cfgTrue);
 			assert.equal(cfgTrue.refreshTokenRequiresOfflineAccess, true);
 		});
-		it('drops an unresolved "${FLAG}" placeholder so a documented-off gate stays off, and warns', () => {
-			// expandEnvVarsDeep leaves "${FLAG}" intact when FLAG is unset; that
-			// string is truthy and must not activate the gate (PR #192 review).
+		it('drops an unresolved "${FLAG}" placeholder on a feature-scoped field while mcp is inactive, and warns (byte-identical-boot contract)', () => {
+			// mcp.enabled is absent here — the surface this gate scopes to isn't
+			// active, so a placeholder left in its unused config must not refuse
+			// boot; it drops to the documented default with a warning instead.
 			const warnings = [];
 			const logger = { warn: (...args) => warnings.push(args.join(' ')) };
 			const cfg = { refreshTokenRequiresOfflineAccess: '${FLAG}' };
@@ -119,6 +186,163 @@ describe('OAuth Configuration', () => {
 			assert.equal(cfg.refreshTokenRequiresOfflineAccess, undefined, 'placeholder dropped — default applies');
 			assert.equal(warnings.length, 1);
 			assert.match(warnings[0], /unresolved env placeholder/);
+		});
+		describe('unresolved "${VAR}" placeholder on a boolean gate throws instead of silently dropping (#207)', () => {
+			it('mcp.enabled itself keeps the pre-#207 warn-and-drop behavior — dropping already lands on the safe direction (MCP off)', () => {
+				const warnings = [];
+				const logger = { warn: (...args) => warnings.push(args.join(' ')) };
+				const cfg = { enabled: '${MCP_ENABLED}' };
+				assert.doesNotThrow(() => normalizeMcpSecurityConfig(cfg, logger));
+				assert.equal(cfg.enabled, undefined, 'placeholder dropped — default (off) applies');
+				assert.equal(warnings.length, 1);
+				assert.match(warnings[0], /mcp\.enabled is the unresolved env placeholder.*MCP_ENABLED/s);
+			});
+			it('mcp.enabled as a placeholder also leaves a feature-scoped placeholder inert — the whole thing boots with MCP off', () => {
+				const warnings = [];
+				const logger = { warn: (...args) => warnings.push(args.join(' ')) };
+				const cfg = { enabled: '${MCP_ENABLED}', refreshTokenRequiresOfflineAccess: '${FLAG}' };
+				assert.doesNotThrow(() => normalizeMcpSecurityConfig(cfg, logger));
+				assert.equal(cfg.enabled, undefined);
+				assert.equal(cfg.refreshTokenRequiresOfflineAccess, undefined);
+				assert.equal(warnings.length, 2);
+			});
+			it('refreshTokenRequiresOfflineAccess throws while mcp is active', () => {
+				assert.throws(
+					() => normalizeMcpSecurityConfig({ enabled: true, refreshTokenRequiresOfflineAccess: '${FLAG}' }),
+					/mcp\.refreshTokenRequiresOfflineAccess is the unresolved env placeholder.*FLAG/s
+				);
+			});
+			it('clientCredentials.enabled throws while mcp is active', () => {
+				assert.throws(
+					() =>
+						normalizeMcpSecurityConfig({
+							enabled: true,
+							clientCredentials: { enabled: '${CC_ENABLED}' },
+						}),
+					/mcp\.clientCredentials\.enabled is the unresolved env placeholder.*CC_ENABLED/s
+				);
+			});
+			it('dynamicClientRegistration.enabled throws while mcp is active', () => {
+				assert.throws(
+					() =>
+						normalizeMcpSecurityConfig({
+							enabled: true,
+							dynamicClientRegistration: { enabled: '${DCR_ENABLED}' },
+						}),
+					/mcp\.dynamicClientRegistration\.enabled is the unresolved env placeholder.*DCR_ENABLED/s
+				);
+			});
+			it('clientIdMetadataDocuments.enabled throws while mcp is active', () => {
+				assert.throws(
+					() =>
+						normalizeMcpSecurityConfig({
+							enabled: true,
+							clientIdMetadataDocuments: { enabled: '${CIMD_ENABLED}' },
+						}),
+					/mcp\.clientIdMetadataDocuments\.enabled is the unresolved env placeholder.*CIMD_ENABLED/s
+				);
+			});
+			it('a feature-scoped placeholder stays inert (warns, drops) when mcp.enabled is false', () => {
+				assert.doesNotThrow(() =>
+					normalizeMcpSecurityConfig({
+						enabled: false,
+						refreshTokenRequiresOfflineAccess: '${FLAG}',
+						clientCredentials: { enabled: '${CC_ENABLED}' },
+						dynamicClientRegistration: { enabled: '${DCR_ENABLED}' },
+						clientIdMetadataDocuments: { enabled: '${CIMD_ENABLED}' },
+					})
+				);
+			});
+			it('a feature-scoped placeholder stays inert when mcp.enabled is absent (not just explicitly false)', () => {
+				assert.doesNotThrow(() => normalizeMcpSecurityConfig({ refreshTokenRequiresOfflineAccess: '${FLAG}' }));
+			});
+			it('an empty string after expansion (e.g. docker-compose\'s "${VAR}" resolving to "" for an unset VAR) throws the same as an unresolved placeholder', () => {
+				assert.throws(
+					() => normalizeMcpSecurityConfig({ enabled: true, refreshTokenRequiresOfflineAccess: '' }),
+					/mcp\.refreshTokenRequiresOfflineAccess resolved to an empty value/
+				);
+			});
+			it('an all-whitespace string after expansion also throws', () => {
+				assert.throws(
+					() => normalizeMcpSecurityConfig({ enabled: true, dynamicClientRegistration: { enabled: '   ' } }),
+					/mcp\.dynamicClientRegistration\.enabled resolved to an empty value/
+				);
+			});
+			it('an empty string on a feature-scoped field stays inert (warns, drops) when mcp is inactive — same as a placeholder', () => {
+				const warnings = [];
+				const logger = { warn: (...args) => warnings.push(args.join(' ')) };
+				const cfg = { refreshTokenRequiresOfflineAccess: '' };
+				assert.doesNotThrow(() => normalizeMcpSecurityConfig(cfg, logger));
+				assert.equal(cfg.refreshTokenRequiresOfflineAccess, undefined);
+			});
+		});
+
+		describe('non-object dynamicClientRegistration / clientIdMetadataDocuments blocks must not fail open', () => {
+			it('a non-object, non-null dynamicClientRegistration block throws while mcp is active', () => {
+				assert.throws(
+					() => normalizeMcpSecurityConfig({ enabled: true, dynamicClientRegistration: false }),
+					/mcp\.dynamicClientRegistration must be a mapping; use enabled: false to disable/
+				);
+				assert.throws(
+					() => normalizeMcpSecurityConfig({ enabled: true, dynamicClientRegistration: 0 }),
+					/mcp\.dynamicClientRegistration must be a mapping/
+				);
+				assert.throws(
+					() => normalizeMcpSecurityConfig({ enabled: true, dynamicClientRegistration: '${DCR_BLOCK}' }),
+					/mcp\.dynamicClientRegistration must be a mapping/
+				);
+			});
+			it('a non-object, non-null clientIdMetadataDocuments block throws while mcp is active', () => {
+				assert.throws(
+					() => normalizeMcpSecurityConfig({ enabled: true, clientIdMetadataDocuments: false }),
+					/mcp\.clientIdMetadataDocuments must be a mapping; use enabled: false to disable/
+				);
+			});
+			it('an array passes `typeof === "object"` but must not be treated as a mapping', () => {
+				// `dynamicClientRegistration:\n  - enabled: false` is a YAML authoring
+				// mistake that parses as an array. `[].enabled` is undefined, which
+				// would otherwise default-enable DCR/CIMD with no token/allowlist.
+				assert.throws(
+					() => normalizeMcpSecurityConfig({ enabled: true, dynamicClientRegistration: [{ enabled: false }] }),
+					/mcp\.dynamicClientRegistration must be a mapping; use enabled: false to disable/
+				);
+				assert.throws(
+					() => normalizeMcpSecurityConfig({ enabled: true, clientIdMetadataDocuments: [] }),
+					/mcp\.clientIdMetadataDocuments must be a mapping; use enabled: false to disable/
+				);
+			});
+			it('a non-object block on either stays inert when mcp is inactive (byte-identical-boot contract)', () => {
+				assert.doesNotThrow(() => normalizeMcpSecurityConfig({ dynamicClientRegistration: false }));
+				assert.doesNotThrow(() => normalizeMcpSecurityConfig({ enabled: false, clientIdMetadataDocuments: 0 }));
+			});
+			it('a bare null block (YAML key with no children) is unaffected — still means absent/disabled', () => {
+				assert.doesNotThrow(() => normalizeMcpSecurityConfig({ enabled: true, dynamicClientRegistration: null }));
+				assert.doesNotThrow(() => normalizeMcpSecurityConfig({ enabled: true, clientIdMetadataDocuments: null }));
+			});
+		});
+
+		describe('dynamicClientRegistration.allowedRedirectUriHosts — scalar must not become substring matching', () => {
+			it('wraps a scalar host into a lowercased exact-match array', () => {
+				const cfg = { dynamicClientRegistration: { allowedRedirectUriHosts: 'Trusted.Example.COM' } };
+				normalizeMcpSecurityConfig(cfg);
+				assert.deepEqual(cfg.dynamicClientRegistration.allowedRedirectUriHosts, ['trusted.example.com']);
+			});
+			it('normalizes an array of hostnames (trim + lowercase, drops empties)', () => {
+				const cfg = { dynamicClientRegistration: { allowedRedirectUriHosts: [' A.com ', 'B.COM', ''] } };
+				normalizeMcpSecurityConfig(cfg);
+				assert.deepEqual(cfg.dynamicClientRegistration.allowedRedirectUriHosts, ['a.com', 'b.com']);
+			});
+			it('rejects a non-string entry rather than failing open', () => {
+				assert.throws(
+					() => normalizeMcpSecurityConfig({ dynamicClientRegistration: { allowedRedirectUriHosts: [123] } }),
+					/allowedRedirectUriHosts must be/
+				);
+			});
+			it('leaves an absent allowedRedirectUriHosts untouched', () => {
+				const cfg = { dynamicClientRegistration: {} };
+				normalizeMcpSecurityConfig(cfg);
+				assert.equal('allowedRedirectUriHosts' in cfg.dynamicClientRegistration, false);
+			});
 		});
 		it('drops any other non-boolean value with a warning (total normalization)', () => {
 			const warnings = [];
@@ -176,17 +400,91 @@ describe('OAuth Configuration', () => {
 		});
 
 		describe('interactive private_key_jwt settings', () => {
-			it('coerces privateKeyJwt.enabled and acceptTokenEndpointAudience like the other documented booleans', () => {
-				const cfg = {
-					clientIdMetadataDocuments: { privateKeyJwt: { enabled: 'true' } },
-					clientCredentials: { acceptTokenEndpointAudience: 'false' },
-				};
+			it('refuses declared non-boolean privateKeyJwt.enabled, including undefined, while MCP is active', () => {
+				const dropped = { clientIdMetadataDocuments: { privateKeyJwt: {} } };
+				assert.equal(
+					interactivePrivateKeyJwtEnabled(dropped),
+					true,
+					'a warn-and-drop normalization would activate the default-on predicate'
+				);
+				for (const value of [undefined, 'yes', 'true', 'false', 1, 1n, null, {}, []]) {
+					const cfg = { enabled: true, clientIdMetadataDocuments: { privateKeyJwt: { enabled: value } } };
+					assert.throws(
+						() => normalizeMcpSecurityConfig(cfg),
+						/mcp\.clientIdMetadataDocuments\.privateKeyJwt\.enabled must be true or false when MCP is enabled/,
+						`declared value of type ${typeof value} must be refused`
+					);
+				}
+			});
+
+			it('keeps placeholder and empty-value errors for privateKeyJwt.enabled', () => {
+				for (const value of ['${FLAG}', '', '  ']) {
+					assert.throws(
+						() =>
+							normalizeMcpSecurityConfig({
+								enabled: true,
+								clientIdMetadataDocuments: { privateKeyJwt: { enabled: value } },
+							}),
+						(error) =>
+							/mcp\.clientIdMetadataDocuments\.privateKeyJwt\.enabled/.test(error.message) &&
+							(value === '${FLAG}'
+								? /unresolved env placeholder.*FLAG/.test(error.message)
+								: /resolved to an empty value/.test(error.message))
+					);
+				}
+			});
+
+			it('keeps true, false and absent privateKeyJwt.enabled values while MCP is active', () => {
+				for (const value of [true, false]) {
+					const cfg = { enabled: true, clientIdMetadataDocuments: { privateKeyJwt: { enabled: value } } };
+					normalizeMcpSecurityConfig(cfg);
+					assert.equal(cfg.clientIdMetadataDocuments.privateKeyJwt.enabled, value);
+					assert.equal(interactivePrivateKeyJwtEnabled(cfg), value);
+				}
+				const absent = { enabled: true, clientIdMetadataDocuments: { privateKeyJwt: {} } };
+				normalizeMcpSecurityConfig(absent);
+				assert.equal('enabled' in absent.clientIdMetadataDocuments.privateKeyJwt, false);
+				assert.equal(interactivePrivateKeyJwtEnabled(absent), true);
+			});
+
+			it('keeps MCP-off coercion, warn-and-drop and placeholder behavior', () => {
+				const warnings = [];
+				const logger = { warn: (message) => warnings.push(message) };
+				for (const [input, expected] of [
+					['true', true],
+					['false', false],
+					['yes', undefined],
+					[null, null],
+					[undefined, undefined],
+				]) {
+					const cfg = { enabled: false, clientIdMetadataDocuments: { privateKeyJwt: { enabled: input } } };
+					normalizeMcpSecurityConfig(cfg, logger);
+					assert.equal(cfg.clientIdMetadataDocuments.privateKeyJwt.enabled, expected);
+					if (input === undefined) {
+						assert.equal(
+							Object.prototype.hasOwnProperty.call(cfg.clientIdMetadataDocuments.privateKeyJwt, 'enabled'),
+							true
+						);
+					}
+				}
+				assert.equal(warnings.length, 1);
+				assert.match(warnings[0], /privateKeyJwt\.enabled must be a boolean/);
+				for (const value of ['${FLAG}', '']) {
+					assert.throws(
+						() =>
+							normalizeMcpSecurityConfig({
+								enabled: false,
+								clientIdMetadataDocuments: { privateKeyJwt: { enabled: value } },
+							}),
+						/mcp\.clientIdMetadataDocuments\.privateKeyJwt\.enabled/
+					);
+				}
+			});
+
+			it('still coerces the separate clientCredentials audience boolean', () => {
+				const cfg = { clientCredentials: { acceptTokenEndpointAudience: 'false' } };
 				normalizeMcpSecurityConfig(cfg);
-				assert.equal(cfg.clientIdMetadataDocuments.privateKeyJwt.enabled, true);
 				assert.equal(cfg.clientCredentials.acceptTokenEndpointAudience, false);
-				const disabled = { clientIdMetadataDocuments: { privateKeyJwt: { enabled: 'false' } } };
-				normalizeMcpSecurityConfig(disabled);
-				assert.equal(disabled.clientIdMetadataDocuments.privateKeyJwt.enabled, false);
 			});
 
 			it('normalizes jwksUriAllowedOrigins to exact https origins and refuses anything else', () => {
@@ -326,6 +624,98 @@ describe('OAuth Configuration', () => {
 				const cfg = { enabled: true, signingKeyPem: pem };
 				normalizeMcpSecurityConfig(cfg);
 				assert.equal(cfg.signingKeyPem, pem);
+			});
+		});
+
+		describe('dynamicClientRegistration.initialAccessToken (#240 — fails open on an unresolved/empty gate)', () => {
+			it('declared as an unresolved ${VAR} placeholder throws, naming the variable', () => {
+				assert.throws(
+					() =>
+						normalizeMcpSecurityConfig({
+							enabled: true,
+							dynamicClientRegistration: { initialAccessToken: '${DCR_TOKEN}' },
+						}),
+					/mcp\.dynamicClientRegistration\.initialAccessToken.*unresolved env placeholder.*DCR_TOKEN/s
+				);
+			});
+
+			it('declared but resolved empty (e.g. unset/empty env var) throws, naming the field', () => {
+				assert.throws(
+					() =>
+						normalizeMcpSecurityConfig({
+							enabled: true,
+							dynamicClientRegistration: { initialAccessToken: '' },
+						}),
+					/mcp\.dynamicClientRegistration\.initialAccessToken.*empty/s
+				);
+			});
+
+			it('declared but all-whitespace throws', () => {
+				assert.throws(
+					() =>
+						normalizeMcpSecurityConfig({
+							enabled: true,
+							dynamicClientRegistration: { initialAccessToken: '   ' },
+						}),
+					/mcp\.dynamicClientRegistration\.initialAccessToken.*empty/s
+				);
+			});
+
+			it('declared as a non-string value throws "must be a string", not the empty/whitespace message', () => {
+				assert.throws(
+					() =>
+						normalizeMcpSecurityConfig({
+							enabled: true,
+							dynamicClientRegistration: { initialAccessToken: 12345 },
+						}),
+					/mcp\.dynamicClientRegistration\.initialAccessToken must be a string; got number/
+				);
+			});
+
+			it('declared with a non-empty token passes through unchanged', () => {
+				const cfg = {
+					enabled: true,
+					dynamicClientRegistration: { initialAccessToken: 'super-secret-token' },
+				};
+				normalizeMcpSecurityConfig(cfg);
+				assert.equal(cfg.dynamicClientRegistration.initialAccessToken, 'super-secret-token');
+			});
+
+			it('not declared at all leaves the config untouched — open registration remains available by omission', () => {
+				const cfg = { enabled: true, dynamicClientRegistration: {} };
+				normalizeMcpSecurityConfig(cfg);
+				assert.equal('initialAccessToken' in cfg.dynamicClientRegistration, false);
+			});
+
+			it('declared as undefined (live-reload removed the key) counts as undeclared — no throw', () => {
+				assert.doesNotThrow(() =>
+					normalizeMcpSecurityConfig({
+						enabled: true,
+						dynamicClientRegistration: { initialAccessToken: undefined },
+					})
+				);
+			});
+
+			it('mcp.enabled false leaves a declared-but-bad token INERT — the disabled block must not refuse boot', () => {
+				assert.doesNotThrow(() =>
+					normalizeMcpSecurityConfig({
+						enabled: false,
+						dynamicClientRegistration: { initialAccessToken: '${DCR_TOKEN}' },
+					})
+				);
+			});
+
+			it('dynamicClientRegistration.enabled: false leaves a declared-but-bad token INERT (DCR itself is off)', () => {
+				assert.doesNotThrow(() =>
+					normalizeMcpSecurityConfig({
+						enabled: true,
+						dynamicClientRegistration: { enabled: false, initialAccessToken: '${DCR_TOKEN}' },
+					})
+				);
+			});
+
+			it('no dynamicClientRegistration block at all is unaffected', () => {
+				assert.doesNotThrow(() => normalizeMcpSecurityConfig({ enabled: true }));
 			});
 		});
 	});

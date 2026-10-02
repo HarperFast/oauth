@@ -497,6 +497,11 @@ export async function handleApplication(scope: Scope): Promise<void> {
 
 		updating = true;
 		try {
+			// OptionsWatcher's merge emits 'change' per key, synchronously, before a
+			// multi-key edit finishes landing — without this macrotask yield,
+			// getAll() could read a half-applied snapshot. Boot's call bypasses
+			// runUpdate entirely, so this doesn't delay startup.
+			await new Promise((resolve) => setImmediate(resolve));
 			// Loop while holding the guard so the last snapshot wins. Catch per-iteration
 			// (not around the loop): a throwing intermediate snapshot must not abort before
 			// a queued final snapshot applies — otherwise a reload disabling the escape

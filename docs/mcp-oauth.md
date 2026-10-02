@@ -722,7 +722,7 @@ each refresh presented the refresh token returned by the previous one.
 | --------------------------------------------------------------------------- | ---------------------------- | -------------------------------------------------- | -------------------- | ----------------------------------------------------------------- |
 | CIMD on, `privateKeyJwt.enabled` absent or `true`, headless off             | yes                          | `RS256`, `ES256`, `EdDSA`                          | `private_key_jwt`    | refused (`invalid_client`) unless an unexpired exception lists it |
 | CIMD on, `privateKeyJwt.enabled: false`, headless off                       | no                           | omitted                                            | `none`               | the `none` form is accepted                                       |
-| CIMD on, headless on, `privateKeyJwt.enabled` any value                     | yes                          | `RS256`, `ES256`, `EdDSA`                          | `private_key_jwt`    | refused (`invalid_client`) unless an unexpired exception lists it |
+| CIMD on, headless on, `privateKeyJwt.enabled` absent, `true` or `false`     | yes                          | `RS256`, `ES256`, `EdDSA`                          | `private_key_jwt`    | refused (`invalid_client`) unless an unexpired exception lists it |
 | CIMD off, headless off, `privateKeyJwt.enabled: false`                      | no                           | omitted                                            | not resolved         | —                                                                 |
 | CIMD off with headless on, or with `privateKeyJwt.enabled` absent or `true` | startup error                | —                                                  | —                    | —                                                                 |
 
@@ -807,8 +807,14 @@ mcp:
         expiresAt: '2027-01-31T00:00:00Z'
 ```
 
-`privateKeyJwt.enabled` requires CIMD resolution and an `https:` issuer (loopback
-`http:` is allowed for development).
+Enabled interactive verification requires CIMD resolution and an `https:` issuer
+(loopback `http:` is allowed for development).
+When MCP is enabled, a declared `privateKeyJwt.enabled` must be the boolean
+`true` or `false`. Non-boolean values, including strings such as `"false"` and
+`null`, fail config normalization with the full path and accepted values in the
+error. Omission still selects the enabled default. Unresolved placeholders and
+empty values keep their specific startup errors; MCP-off coercion and
+warn-and-drop behavior is unchanged.
 
 On upgrade, omitting `privateKeyJwt.enabled` activates interactive verification
 for an MCP-enabled server with CIMD enabled and headless agents off; when the

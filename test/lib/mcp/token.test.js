@@ -347,26 +347,17 @@ describe('handleToken', () => {
 		assert.equal(families.size, 1, 'refresh family persisted');
 	});
 
-	it('an unresolved "${FLAG}" placeholder does not activate the gate once config is normalized (PR #192 review)', async () => {
+	it('an unresolved "${FLAG}" placeholder on an active gate throws at config-normalization time (#207)', () => {
 		// The startup path always runs normalizeMcpSecurityConfig before any
-		// handler sees the config; this pins the composed behavior — the truthy
-		// placeholder string is dropped, so the default (issue refresh) applies.
+		// handler sees the config; this pins the composed behavior — with mcp
+		// enabled, a truthy-but-unresolved placeholder on a security gate fails
+		// closed (throws) rather than silently guessing the documented default,
+		// so handleToken never sees an ambiguous value either way.
 		const cfg = { ...mcpConfig, refreshTokenRequiresOfflineAccess: '${FLAG}' };
-		normalizeMcpSecurityConfig(cfg);
-		seedCode('code-1'); // scope: 'mcp:read' — no offline_access
-		const res = await handleToken(
-			{ headers: {} },
-			{
-				grant_type: 'authorization_code',
-				code: 'code-1',
-				code_verifier: CODE_VERIFIER,
-				redirect_uri: REDIRECT,
-				client_id: 'public-1',
-			},
-			cfg
+		assert.throws(
+			() => normalizeMcpSecurityConfig(cfg),
+			/mcp\.refreshTokenRequiresOfflineAccess.*unresolved env placeholder.*FLAG/s
 		);
-		assert.equal(res.status, 200);
-		assert.ok(res.body.refresh_token, 'refresh token issued — documented default-off gate stayed off');
 	});
 
 	it('still gates on grant_types even when offline_access is requested', async () => {
