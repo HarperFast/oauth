@@ -932,9 +932,6 @@ Migration and rollback:
   this one neither write nor read a code's binding, so they do not check it when
   redeeming a code, and a family rotated by a version before 2.7 loses its
   binding, after which this version refuses it.
-- Move existing headless consumers' assertion `aud` to the issuer before
-  disabling their token-endpoint audience compatibility setting; see
-  `mcp.clientCredentials.acceptTokenEndpointAudience`.
 
 **Refresh bursts.** In the recorded session ChatGPT refreshed four times within
 6.6 seconds of the code exchange, each time with a new assertion. A grant bound
