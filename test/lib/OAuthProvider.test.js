@@ -1605,6 +1605,49 @@ describe('OAuthProvider', () => {
 				assert.equal(p.config.issuer, 'https://idp.example.com', 'the discovered issuer is cached onto config');
 			});
 
+			it('a verified token whose own iss disagrees with the discovered issuer is NOT cached onto config — caching it would break every future login’s issuer check', async () => {
+				_setFetch(async () => jsonResponse(discoveryDoc()));
+				startIssuerDiscovery(
+					discoveryConfig.authorizationUrl,
+					discoveryConfig.jwksUri,
+					discoveryConfig.tokenUrl,
+					'custom-idp'
+				);
+
+				const p = new OAuthProvider({ ...discoveryConfig }, mockLogger);
+				attachRealJwksClient(p);
+
+				const now = Math.floor(Date.now() / 1000);
+				// A non-compliant IdP: its real token's iss disagrees with its own
+				// discovery document's issuer (which discoveryDoc() sets to
+				// 'https://idp.example.com', no trailing slash).
+				const token = sign({
+					iss: 'https://idp.example.com/',
+					sub: 'user-1',
+					aud: discoveryConfig.clientId,
+					iat: now,
+					exp: now + 3600,
+				});
+
+				const result = await p.verifyIdToken(token);
+				assert.equal(result.signatureVerified, true, 'signature verification itself still succeeds');
+				assert.equal(result.issuerValidated, false, 'not adoption-eligible on a mismatch');
+				assert.equal(p.config.issuer, undefined, 'the mismatched discovered issuer must not be cached onto config');
+
+				// A second, otherwise-identical login must still succeed exactly as
+				// the first did — nothing was cached that could break it.
+				const secondToken = sign({
+					iss: 'https://idp.example.com/',
+					sub: 'user-2',
+					aud: discoveryConfig.clientId,
+					iat: now,
+					exp: now + 3600,
+				});
+				const secondResult = await p.verifyIdToken(secondToken);
+				assert.equal(secondResult.signatureVerified, true);
+				assert.equal(secondResult.issuerValidated, false);
+			});
+
 			it('a forged/invalid-signature token never consumes the bounded first-login discovery wait', async () => {
 				// A fetch a short real delay (the previous version of this test)
 				// does NOT pin the ordering: by the time the valid call ran,

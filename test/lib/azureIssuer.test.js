@@ -24,9 +24,21 @@ function baseConfig(overrides = {}) {
 }
 
 describe('isAzureJwksUri', () => {
-	it('is true only for the exact v2.0 keys-endpoint shape (GUID or alias segment)', () => {
+	it('is true only for an UNPINNED shared alias authority’s exact v2.0 keys-endpoint shape', () => {
 		assert.equal(isAzureJwksUri('https://login.microsoftonline.com/common/discovery/v2.0/keys'), true);
-		assert.equal(isAzureJwksUri(`https://login.microsoftonline.com/${GUID_A}/discovery/v2.0/keys`), true);
+		assert.equal(isAzureJwksUri('https://login.microsoftonline.com/organizations/discovery/v2.0/keys'), true);
+		assert.equal(isAzureJwksUri('https://login.microsoftonline.com/consumers/discovery/v2.0/keys'), true);
+	});
+
+	it('is false for a real-tenant-GUID segment — resolveAzureIssuerBinding always sets a usable issuer for it (or throws), so hasUsableIssuer already short-circuits every caller before this is reached', () => {
+		assert.equal(isAzureJwksUri(`https://login.microsoftonline.com/${GUID_A}/discovery/v2.0/keys`), false);
+	});
+
+	it('is false for a tenant-DOMAIN segment (e.g. a verified .onmicrosoft.com domain, which Azure also accepts here) — resolveAzureIssuerBinding never recognizes or binds it, so it must not be silently exempted from #231 §4/discovery', () => {
+		assert.equal(
+			isAzureJwksUri('https://login.microsoftonline.com/contoso.onmicrosoft.com/discovery/v2.0/keys'),
+			false
+		);
 	});
 
 	it('is false for an Azure-host jwksUri in an unrecognized shape — resolveAzureIssuerBinding never touches it, so it must not be silently exempted from #231 §4/discovery', () => {

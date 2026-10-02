@@ -413,23 +413,23 @@ When an `onLogin` hook supplies the identity (`hookData.user`), the gate is skip
 
 **Denied by default:**
 
-| Scenario                                                            | Reason                                               |
-| ------------------------------------------------------------------- | ---------------------------------------------------- |
-| GitHub `login` claim → existing account                             | `login` ≠ email; username and email differ           |
-| Okta `preferred_username` ≠ email → existing account                | username claim differs from email                    |
-| `email_verified` absent or false                                    | Provider has not attested the email                  |
-| Custom `emailClaim` (non-`email` claim used as identity)            | `email_verified` does not attest the custom claim    |
-| Unsigned / unverified id token                                      | Signature not verified                               |
-| JWKS-signed token from an unpinned Azure `/common` (multi-tenant)   | Issuer cannot be validated; nOAuth class attack      |
-| JWKS-signed token whose tenant doesn't match a pinned Azure issuer  | A pin narrows adoption to that one tenant only       |
-| Login arriving before background OIDC discovery resolves            | No validated issuer yet for this attempt             |
-| Azure id token without `email_verified`                             | No verified-email attestation available              |
-| Plain UserInfo response (no id token)                               | No authenticated binding to the identity             |
-| GitHub `/user/emails` fetch failed or returned non-OK               | Email not confirmed by an authenticated call         |
-| GitHub `/user/emails` returned `verified: false`                    | Email not verified by GitHub                         |
-| Non-GitHub provider with custom `getUserInfo` adapter               | `github-authenticated` requires `provider=github`    |
-| Custom adapter returning `_emailProvenance: 'github-authenticated'` | Provenance is plugin-assigned; adapter value ignored |
-| `fetchEmail: true` resolved email from UserInfo (no signed token)   | Email is present but provenance is unauthenticated   |
+| Scenario                                                                 | Reason                                                                                                     |
+| ------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------- |
+| GitHub `login` claim → existing account                                  | `login` ≠ email; username and email differ                                                                 |
+| Okta `preferred_username` ≠ email → existing account                     | username claim differs from email                                                                          |
+| `email_verified` absent or false                                         | Provider has not attested the email                                                                        |
+| Custom `emailClaim` (non-`email` claim used as identity)                 | `email_verified` does not attest the custom claim                                                          |
+| Unsigned / unverified id token                                           | Signature not verified                                                                                     |
+| JWKS-signed token from an unpinned Azure `/common` (multi-tenant)        | Issuer cannot be validated; nOAuth class attack                                                            |
+| Azure id token from a tenant other than a pinned multi-tenant provider's | ID token verification fails outright (not just denied adoption) — pinning makes the provider single-tenant |
+| Login arriving before background OIDC discovery resolves                 | No validated issuer yet for this attempt                                                                   |
+| Azure id token without `email_verified`                                  | No verified-email attestation available                                                                    |
+| Plain UserInfo response (no id token)                                    | No authenticated binding to the identity                                                                   |
+| GitHub `/user/emails` fetch failed or returned non-OK                    | Email not confirmed by an authenticated call                                                               |
+| GitHub `/user/emails` returned `verified: false`                         | Email not verified by GitHub                                                                               |
+| Non-GitHub provider with custom `getUserInfo` adapter                    | `github-authenticated` requires `provider=github`                                                          |
+| Custom adapter returning `_emailProvenance: 'github-authenticated'`      | Provenance is plugin-assigned; adapter value ignored                                                       |
+| `fetchEmail: true` resolved email from UserInfo (no signed token)        | Email is present but provenance is unauthenticated                                                         |
 
 **Allowed:**
 

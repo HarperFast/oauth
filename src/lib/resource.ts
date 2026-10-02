@@ -365,18 +365,26 @@ export class OAuthResource extends Resource {
 		// (HarperFast/oauth#264/#271): re-running the hook and rebuilding the
 		// config would just re-throw the same AzureIssuerBindingError, so skip
 		// straight to the same response every other request gets during the
-		// cooldown, rather than hammering the hook (and re-logging the same
-		// cause) on every single request for a config that hasn't changed.
-		const cachedAzurePinFailure = OAuthResource.dynamicProviderCache?.getAzurePinFailure(providerName);
-		if (!providerData && cachedAzurePinFailure) {
-			logger?.error?.(
-				`OAuth provider '${providerName}' (dynamic resolution) still has an invalid Azure issuer pin ` +
-					`(cooling down, not re-resolving): ${cachedAzurePinFailure}`
-			);
-			return {
-				status: 500,
-				body: { error: 'Failed to resolve OAuth provider' },
-			};
+		// cooldown, rather than hammering the hook on every single request for
+		// a config that hasn't changed. The cache lookup itself is gated on
+		// `!providerData` first — it's dynamic-resolution-only state, and must
+		// not cost every request a Map lookup on the already-resolved path.
+		if (!providerData) {
+			const cachedAzurePinFailure = OAuthResource.dynamicProviderCache?.getAzurePinFailure(providerName);
+			if (cachedAzurePinFailure) {
+				// Advisory only, and deliberately NOT error level: the cause was
+				// already logged at error level once, when recorded below — logging
+				// it again on every cached hit during the cooldown is exactly the
+				// log flood this cache exists to avoid.
+				logger?.debug?.(
+					`OAuth provider '${providerName}' (dynamic resolution) still has an invalid Azure issuer pin ` +
+						`(cooling down, not re-resolving): ${cachedAzurePinFailure}`
+				);
+				return {
+					status: 500,
+					body: { error: 'Failed to resolve OAuth provider' },
+				};
+			}
 		}
 
 		if (!providerData && OAuthResource.hookManager?.hasHook('onResolveProvider')) {

@@ -387,9 +387,18 @@ export class OAuthProvider implements IOAuthProvider {
 						this.logger
 					);
 					if (discovered) {
-						// Idempotent: later calls take the `configuredIssuer` branch above.
-						this.config.issuer = discovered;
 						issuerValidated = verified.iss === discovered;
+						// Cache (idempotent: later calls take the `configuredIssuer`
+						// branch above) only on a match. A mismatch is this one
+						// login's own problem (e.g. a non-compliant IdP whose tokens
+						// disagree with its own discovery document) — caching
+						// `discovered` anyway would make every FUTURE login's `iss`
+						// (including ones that previously had no issuer check at all)
+						// fail `jwt.verify` against a value their real tokens don't
+						// carry, breaking logins that worked before this one.
+						if (issuerValidated) {
+							this.config.issuer = discovered;
+						}
 					}
 				}
 

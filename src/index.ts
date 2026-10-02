@@ -474,9 +474,17 @@ export async function handleApplication(scope: Scope): Promise<void> {
 		// the same as "provider not found" below (logging it out) rather than
 		// re-running the hook and rebuilding the config only to re-throw the
 		// same AzureIssuerBindingError on every request carrying this session.
-		const cachedAzurePinFailure = dynamicProviderCache.getAzurePinFailure(providerConfigId);
-		if (!providerData && cachedAzurePinFailure) {
-			logger?.error?.(
+		// The cache lookup itself is gated on `!providerData` first — it's
+		// dynamic-resolution-only state, and must not cost every OAuth-session
+		// request a Map lookup on the already-resolved (static or cached) path.
+		const cachedAzurePinFailure = !providerData ? dynamicProviderCache.getAzurePinFailure(providerConfigId) : undefined;
+		if (cachedAzurePinFailure) {
+			// Advisory only, and deliberately NOT error level: the cause was
+			// already logged at error level once, when recorded below — logging
+			// it again on every cached hit for every request of this session
+			// during the cooldown is exactly the log flood this cache exists to
+			// avoid.
+			logger?.debug?.(
 				`OAuth provider '${providerConfigId}' (dynamic resolution, session validation) still has an invalid ` +
 					`Azure issuer pin (cooling down, not re-resolving): ${cachedAzurePinFailure}`
 			);

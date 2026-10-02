@@ -185,25 +185,31 @@ function normalizeAzureIssuerPin(issuer: OAuthProviderConfig['issuer'], guid: st
 }
 
 /**
- * True only for the exact Azure v2.0 keys-endpoint shape
- * (`https://login.microsoftonline.com/{segment}/discovery/v2.0/keys`) —
- * the one shape `resolveAzureIssuerBinding` above actually recognizes and
- * resolves (or safely leaves alone/throws for). Generic OIDC discovery
- * (`discovery.ts`) must never run against THAT shape: a config this
- * function excludes either already has a usable issuer (handled above) or
- * is an intentionally unpinned alias authority (byte-identical to today).
+ * True only for an UNPINNED shared alias authority's exact v2.0 keys-endpoint
+ * shape (`https://login.microsoftonline.com/common|organizations|consumers/
+ * discovery/v2.0/keys`) — the one case `resolveAzureIssuerBinding` above
+ * deliberately leaves issuer-less by design (byte-identical to today; see
+ * its own comments). Generic OIDC discovery (`discovery.ts`) and the #231 §4
+ * issuer-required check must both skip only THAT case — every caller already
+ * runs `hasUsableIssuer(config.issuer)` first, so this is only ever reached
+ * once that's already `false`.
  *
- * Deliberately NOT a bare Azure-hostname check: a `login.microsoftonline.com`
- * `jwksUri` in a DIFFERENT shape (e.g. the older, non-`v2.0` `/discovery/keys`
- * path) is a shape `resolveAzureIssuerBinding` never touches at all — for
- * that case, falling through to the normal #231 §4 issuer-required check (or
- * to generic OIDC discovery, which Azure also supports at the standard
- * `.well-known/openid-configuration` path) is the useful, actionable outcome;
- * exempting it here would instead boot it silently, with `issuerValidated`
- * permanently `false` and no error, defeating the point of that check.
+ * Deliberately NOT "any shape `resolveAzureIssuerBinding` recognizes": a
+ * real-tenant-GUID segment never reaches here at all (that function always
+ * either sets a usable issuer or throws for it, so `hasUsableIssuer` above
+ * already short-circuited), and neither a tenant-DOMAIN segment (e.g.
+ * `contoso.onmicrosoft.com` — Azure accepts a verified domain name here, not
+ * only a GUID) nor the older, non-`v2.0` `/discovery/keys` shape is a case
+ * `resolveAzureIssuerBinding` touches at all. Exempting either of those too
+ * (an earlier, broader version of this check did) would boot them silently,
+ * `issuerValidated` permanently `false` and no error — defeating the point
+ * of the check this guards. Falling through instead lets the normal startup
+ * error fire, or lets generic discovery run (Azure supports the standard
+ * `.well-known/openid-configuration` path for these shapes too).
  */
 export function isAzureJwksUri(jwksUri: string | null | undefined): boolean {
-	return azureJwksSegment(jwksUri) !== null;
+	const segment = azureJwksSegment(jwksUri);
+	return segment !== null && ALIAS_SEGMENTS.has(segment.toLowerCase());
 }
 
 /**

@@ -1651,6 +1651,33 @@ describe('OAuth Configuration', () => {
 				);
 			});
 
+			it('still requires an issuer (or defers to discovery) for a tenant-DOMAIN Azure jwksUri — resolveAzureIssuerBinding never recognizes it, so it must not get the unpinned-alias exemption (#264/#271)', () => {
+				// A verified .onmicrosoft.com domain is a real, Azure-accepted
+				// segment here — not a GUID, and not one of the shared aliases —
+				// so resolveAzureIssuerBinding leaves it untouched, and this must
+				// fall through to the normal check instead of booting silently
+				// with issuerValidated permanently false.
+				const httpsConfig = {
+					provider: 'generic',
+					clientId: 'c',
+					clientSecret: 's',
+					authorizationUrl: 'https://login.microsoftonline.com/contoso.onmicrosoft.com/oauth2/v2.0/authorize',
+					tokenUrl: 'https://login.microsoftonline.com/contoso.onmicrosoft.com/oauth2/v2.0/token',
+					userInfoUrl: 'https://graph.microsoft.com/v1.0/me',
+					jwksUri: 'https://login.microsoftonline.com/contoso.onmicrosoft.com/discovery/v2.0/keys',
+					redirectUri: 'https://app.test.com/oauth',
+				};
+				const config = buildProviderConfig(httpsConfig, 'contoso-azure', {}, true);
+				assert.equal(config.issuer, undefined);
+				assert.equal(needsIssuerDiscovery(config), true, 'eligible for background OIDC discovery, unlike an alias');
+
+				const nonHttpsConfig = {
+					...httpsConfig,
+					authorizationUrl: 'http://login.microsoftonline.com/contoso.onmicrosoft.com/oauth2/v2.0/authorize',
+				};
+				assert.throws(() => buildProviderConfig(nonHttpsConfig, 'contoso-azure', {}, true), /issuer/);
+			});
+
 			it('does not throw when no jwksUri is configured at all (non-OIDC provider)', () => {
 				const providerConfig = {
 					provider: 'generic',
