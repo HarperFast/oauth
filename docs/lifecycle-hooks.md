@@ -337,7 +337,7 @@ async function onResolveEmail(
 
 **SECURITY — enforced by the plugin, not by convention:**
 
-- The returned address **must** be one of `candidates` with `verified === true`. This is checked against the exact snapshot handed to the hook, not a value the hook could have mutated.
+- The returned address **must** be one of `candidates` with `verified === true`, matched exactly (case-sensitive) — return `candidate.email` itself, not a re-typed or re-cased copy. This is checked against the exact snapshot handed to the hook, not a value the hook could have mutated.
 - An invalid result (not a string, not a verified candidate), a thrown error, or a hook that doesn't settle within 5 seconds, **fails the login** — it does **not** fall back to the default selection. Falling back silently on a failed pick could establish a session for a _different_ account than the one the hook was trying to reach (e.g. selecting a work address to adopt an existing work account, but the lookup inside the hook fails) — so an unresolved pick is loud, not quiet.
 - The resolved address is exactly what later becomes `authEvidence.email` / `oauthUser.email` — there is no separate path that could key identity on a different, unvalidated address.
 
@@ -352,7 +352,7 @@ async function resolveEmail(candidates, provider) {
 }
 ```
 
-**Example — reject a login with no corporate-domain option instead of silently using a personal address**, by validating inside the hook and intentionally returning something that isn't a candidate (the plugin turns that into a login failure):
+**Example — reject a login with no corporate-domain option instead of silently using a personal address**, by throwing from the hook (returning an address that isn't one of the verified candidates fails the login the same way, but throwing documents the intent):
 
 ```javascript
 async function resolveEmail(candidates) {
