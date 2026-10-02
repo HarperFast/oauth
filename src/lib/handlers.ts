@@ -245,11 +245,9 @@ async function resolveEmailByExistingAccount(
 	if (verified.length === 0) return undefined;
 	const defaultPick = candidates.find((c) => c.profile) ?? candidates.find((c) => c.primary);
 	const defaultPickVerified = defaultPick?.verified === true;
-	// The lone verified candidate IS the default pick (profile-or-primary) — nothing to
-	// disambiguate, so no read: this is the common case and must stay exactly as cheap as
-	// before #228. A lone verified candidate that ISN'T the default pick (the default pick
-	// is unverified, or unset) still needs the read below — that's the GitHub-account shape
-	// #228 is actually about: an unverified primary with a single different verified address.
+	// No read only when the lone verified candidate IS the default pick — nothing to
+	// disambiguate. A lone verified candidate that ISN'T (an unverified default pick plus
+	// one different verified address) still needs the read below.
 	if (verified.length === 1 && defaultPickVerified) return undefined;
 
 	const results = await Promise.all(

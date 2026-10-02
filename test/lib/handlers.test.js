@@ -2715,9 +2715,6 @@ describe('OAuth Handlers', () => {
 		});
 
 		it('an unverified primary plus a single different verified address matching an account adopts that address', async () => {
-			// The default pick (primary) is UNVERIFIED, so it is never a candidate to read —
-			// the lone verified address 'work@example.com' is read on its own merits, and
-			// matching an existing account wins even though it isn't the default pick.
 			stubAccounts(['work@example.com']);
 			mockHookManager.hasHook = createMockFn(() => false);
 			useCandidateResolvingProvider(

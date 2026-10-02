@@ -335,7 +335,7 @@ async function onResolveEmail(
 
 **Returns:** The chosen address, or `null`/`undefined` for "no preference" — the plugin falls back to its [built-in default](./configuration.md#github-default-email-when-there-are-several-verified-addresses) (existing-account match, then ambiguity refusal, then the original profile-or-primary default). The existing-account match step only runs when `usernameClaim: 'email'` is configured — `hdb_user` isn't keyed by email otherwise, so there is nothing to match against; a declining hook always falls straight to the original profile-or-primary default in that case.
 
-**Registering this hook is opt-in**, but the built-in default it sits above is not (when `usernameClaim: 'email'`) — a GitHub login with several verified addresses is resolved by the plugin itself whether or not any hook is registered. Leaving `onResolveEmail` unregistered costs nothing beyond that built-in default's own cost (reads only when there are two or more verified addresses); the candidate list itself is never built or retained for any purpose beyond resolving this one login.
+**Registering this hook is opt-in**, but the built-in default it sits above is not (when `usernameClaim: 'email'`) — a GitHub login with several verified addresses is resolved by the plugin itself whether or not any hook is registered. Leaving `onResolveEmail` unregistered costs nothing beyond that built-in default's own cost (no reads for zero verified addresses, or when the lone verified address already is the verified profile-or-primary default pick — otherwise one read per verified address); the candidate list itself is never built or retained for any purpose beyond resolving this one login.
 
 **SECURITY — enforced by the plugin, not by convention:**
 
