@@ -445,7 +445,7 @@ describe('withOAuthValidation', () => {
 				requireAuth: true,
 				onValidationError: (request, error) => {
 					// Explicit property access — Harper's GenericTrackedObject
-					// does NOT support `{ ...obj }` spread (per CLAUDE.md
+					// does NOT support `{ ...obj }` spread (per AGENTS.md
 					// Non-Obvious Gotchas). Tests that snapshot via spread
 					// would silently yield empty objects in production and
 					// mislead integrators who copy the callback pattern.

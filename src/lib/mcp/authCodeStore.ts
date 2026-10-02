@@ -9,7 +9,7 @@
  *
  * Explicit field access on encode/decode (no `{ ...raw }`) — Harper
  * tracked-object Proxies return empty own-keys, so spread would drop
- * scalar fields. See CLAUDE.md "GenericTrackedObject + spread" gotcha.
+ * scalar fields. See AGENTS.md "GenericTrackedObject + spread" gotcha.
  */
 
 import type { Logger, MCPAuthCodeRecord, Table } from '../../types.ts';
