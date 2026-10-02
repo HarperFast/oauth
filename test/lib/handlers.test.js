@@ -2319,13 +2319,12 @@ describe('OAuth Handlers', () => {
 		});
 
 		it('the 4th getUserInfo argument is always a function — never skips callResolveEmail when no hook is registered', async () => {
-			// resolveEmail is always built now (#228 built-in existing-account default), but
-			// when no onResolveEmail hook is registered it never calls callResolveEmail at all.
 			mockHookManager.hasHook = createMockFn(() => false);
 			mockProvider.getUserInfo = createMockFn(async (_token, _idTokenClaims, _sigVerified, resolveEmail) => {
 				assert.equal(typeof resolveEmail, 'function');
+				// mockConfig.usernameClaim !== 'email', so the built-in default is skipped entirely.
 				const resolved = await resolveEmail([{ email: 'user@example.com', verified: true, primary: true }]);
-				assert.equal(resolved, undefined, 'a single verified candidate never matches without a real DB lookup hit');
+				assert.equal(resolved, undefined);
 				return { email: 'user@example.com', email_verified: true };
 			});
 
@@ -2403,7 +2402,7 @@ describe('OAuth Handlers', () => {
 			delete globalThis.databases;
 		});
 
-		const githubConfig = () => ({ ...mockConfig, provider: 'github' });
+		const githubConfig = () => ({ ...mockConfig, provider: 'github', usernameClaim: 'email' });
 
 		it('a verified non-primary address matching an existing account logs into that account', async () => {
 			stubAccounts(['work@example.com']);
@@ -2561,6 +2560,100 @@ describe('OAuth Handlers', () => {
 			// Only one verified candidate, so the built-in default does no reads at all — the
 			// unverified address is filtered out before matching, never even considered.
 			assert.deepEqual(getCalls, ['personal@example.com']);
+		});
+
+		it('is skipped entirely when usernameClaim is not "email" — hdb_user is not keyed by email', async () => {
+			// Two verified candidates that would otherwise be ambiguous (both match an
+			// existing account) must NOT be checked at all under the default usernameClaim.
+			stubAccounts(['personal@example.com', 'work@example.com']);
+			mockHookManager.hasHook = createMockFn(() => false);
+			useCandidateResolvingProvider([
+				{ email: 'personal@example.com', verified: true, primary: true },
+				{ email: 'work@example.com', verified: true, primary: false },
+			]);
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				{ ...mockConfig, provider: 'github' }, // usernameClaim left at its default ('login' for GitHub)
+				mockHookManager,
+				'test-provider',
+				{ logger: mockLogger }
+			);
+
+			assert.equal(result.status, 302);
+			assert.ok(!result.headers.Location.includes('email_ambiguous'), result.headers.Location);
+			assert.equal(mockRequest.session.update.mock.calls[0].arguments[0].user, 'personal@example.com');
+			// Only the adoption gate's own single check of the resolved username — if the
+			// built-in default had run, it would have scanned BOTH candidates first.
+			assert.deepEqual(
+				getCalls,
+				['personal@example.com'],
+				'the built-in default must not read hdb_user outside usernameClaim: email'
+			);
+		});
+
+		it('a failed hdb_user read fails the login with reason=email_lookup_failed, never guesses', async () => {
+			mockHookManager.hasHook = createMockFn(() => false);
+			globalThis.databases = {
+				system: {
+					hdb_user: {
+						get: async (name) => {
+							getCalls.push(name);
+							if (name === 'work@example.com') throw new Error('transient read error');
+							return null;
+						},
+					},
+				},
+			};
+			useCandidateResolvingProvider([
+				{ email: 'personal@example.com', verified: true, primary: true },
+				{ email: 'work@example.com', verified: true, primary: false },
+			]);
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				githubConfig(),
+				mockHookManager,
+				'test-provider',
+				{
+					logger: mockLogger,
+				}
+			);
+
+			assert.equal(result.status, 302);
+			assert.ok(result.headers.Location.includes('reason=email_lookup_failed'), result.headers.Location);
+			assert.equal(mockRequest.session.update.mock.calls.length, 0, 'never guesses when a read is unknown');
+		});
+
+		it('deduplicates a repeated verified address before counting matches as ambiguous', async () => {
+			stubAccounts(['personal@example.com']);
+			mockHookManager.hasHook = createMockFn(() => false);
+			// The same address reported twice (defensive: GitHub returns each once in practice)
+			// must not be read as two accounts matching.
+			useCandidateResolvingProvider([
+				{ email: 'personal@example.com', verified: true, primary: true },
+				{ email: 'personal@example.com', verified: true, primary: false },
+			]);
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				githubConfig(),
+				mockHookManager,
+				'test-provider',
+				{
+					logger: mockLogger,
+				}
+			);
+
+			assert.equal(result.status, 302);
+			assert.ok(!result.headers.Location?.includes('email_ambiguous'), result.headers.Location);
+			assert.equal(mockRequest.session.update.mock.calls[0].arguments[0].user, 'personal@example.com');
 		});
 	});
 

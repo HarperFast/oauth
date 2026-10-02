@@ -321,7 +321,7 @@ Most applications don't need this hook: GitHub logins with several verified addr
 
 ```typescript
 async function onResolveEmail(
-	candidates: ReadonlyArray<{ email: string; verified: boolean; primary: boolean }>,
+	candidates: ReadonlyArray<{ email: string; verified: boolean; primary: boolean; profile: boolean }>,
 	provider: string,
 	signal: AbortSignal
 ): Promise<string | null | undefined>;
@@ -329,13 +329,13 @@ async function onResolveEmail(
 
 **Parameters:**
 
-- `candidates` - Every email the provider's authenticated fetch returned, verified or not (so you can see the whole picture — e.g. to prompt a user to verify a preferred but currently-unverified address, while still returning a verified one for this login). An immutable snapshot: mutating it has no effect on anything the plugin validates against.
+- `candidates` - Every email the provider's authenticated fetch returned, verified or not (so you can see the whole picture — e.g. to prompt a user to verify a preferred but currently-unverified address, while still returning a verified one for this login). `profile` marks the provider's public profile address (GitHub's `/user` `email` field) — the address the plugin's original default preferred over `primary` when both exist. An immutable snapshot: mutating it has no effect on anything the plugin validates against.
 - `provider` - Provider name (e.g., `'github'`)
 - `signal` - Aborted when the 5-second deadline is reached. Cancellation is **cooperative**: pass `signal` to your own `fetch`/database call so a timed-out lookup actually stops (e.g. releases a connection) instead of continuing to run after the login has already failed.
 
-**Returns:** The chosen address, or `null`/`undefined` for "no preference" — the plugin falls back to its [built-in default](./configuration.md#github-default-email-when-there-are-several-verified-addresses) (existing-account match, then ambiguity refusal, then the original profile-or-primary default).
+**Returns:** The chosen address, or `null`/`undefined` for "no preference" — the plugin falls back to its [built-in default](./configuration.md#github-default-email-when-there-are-several-verified-addresses) (existing-account match, then ambiguity refusal, then the original profile-or-primary default). The existing-account match step only runs when `usernameClaim: 'email'` is configured — `hdb_user` isn't keyed by email otherwise, so there is nothing to match against; a declining hook always falls straight to the original profile-or-primary default in that case.
 
-**Registering this hook is opt-in**, but the built-in default it sits above is not — a GitHub login with several verified addresses is resolved by the plugin itself whether or not any hook is registered. Leaving `onResolveEmail` unregistered costs nothing beyond that built-in default's own cost (reads only when there are two or more verified addresses); the candidate list itself is never built or retained for any purpose beyond resolving this one login.
+**Registering this hook is opt-in**, but the built-in default it sits above is not (when `usernameClaim: 'email'`) — a GitHub login with several verified addresses is resolved by the plugin itself whether or not any hook is registered. Leaving `onResolveEmail` unregistered costs nothing beyond that built-in default's own cost (reads only when there are two or more verified addresses); the candidate list itself is never built or retained for any purpose beyond resolving this one login.
 
 **SECURITY — enforced by the plugin, not by convention:**
 
@@ -363,6 +363,18 @@ async function resolveEmail(candidates) {
 		throw new Error('no verified @acme.example address on this GitHub account');
 	}
 	return corporate.email;
+}
+```
+
+**Example — opt out of the built-in existing-account default and reconstruct the plugin's original profile-or-primary pick exactly**, using an `AbortController` wired to `signal` so an interrupted lookup actually stops:
+
+```javascript
+async function resolveEmail(candidates, provider, signal) {
+	const controller = new AbortController();
+	signal.addEventListener('abort', () => controller.abort());
+	await auditLookup(candidates, { signal: controller.signal }); // your own I/O, cancellable on timeout
+
+	return candidates.find((c) => c.profile)?.email ?? candidates.find((c) => c.primary)?.email;
 }
 ```
 

@@ -263,7 +263,9 @@ export class OAuthProvider implements IOAuthProvider {
 	): (candidates: readonly EmailCandidate[]) => Promise<string | undefined> {
 		return async (candidates: readonly EmailCandidate[]): Promise<string | undefined> => {
 			const snapshot: readonly EmailCandidate[] = Object.freeze(
-				candidates.map((c) => Object.freeze({ email: c.email, verified: c.verified, primary: c.primary }))
+				candidates.map((c) =>
+					Object.freeze({ email: c.email, verified: c.verified, primary: c.primary, profile: c.profile })
+				)
 			);
 			const chosen = await onResolveEmail(snapshot);
 			if (chosen == null) return undefined;

@@ -51,6 +51,9 @@ export const GitHubProvider: OAuthProviderConfig = {
 	async getUserInfo(accessToken: string, helpers: GetUserInfoHelpers): Promise<any> {
 		// Get basic user info using the base getUserInfo method
 		const userInfo = await helpers.getUserInfo(accessToken);
+		// Snapshot before any mutation below — needed to mark which candidate is the public
+		// profile address even after the profile-or-primary fallback overwrites userInfo.email.
+		const profileEmail = userInfo.email;
 
 		// Only a genuinely successful /user/emails fetch earns the trusted tag.
 		// On any failure or non-OK response the provenance stays 'unauthenticated'.
@@ -96,7 +99,12 @@ export const GitHubProvider: OAuthProviderConfig = {
 		if (fetchedEmails) {
 			const resolved = helpers.resolveEmail
 				? await helpers.resolveEmail(
-						fetchedEmails.map((e) => ({ email: e.email, verified: e.verified === true, primary: e.primary === true }))
+						fetchedEmails.map((e) => ({
+							email: e.email,
+							verified: e.verified === true,
+							primary: e.primary === true,
+							profile: e.email === profileEmail,
+						}))
 					)
 				: undefined;
 			if (resolved) {

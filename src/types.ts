@@ -545,6 +545,9 @@ export interface EmailCandidate {
 	readonly email: string;
 	readonly verified: boolean;
 	readonly primary: boolean;
+	/** Whether this is the provider's public profile address (GitHub's `/user` `email` field) —
+	 *  lets a hook reconstruct the plugin's own default (profile if set, else `primary`). */
+	readonly profile: boolean;
 }
 
 /**

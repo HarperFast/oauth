@@ -576,6 +576,29 @@ describe('GitHub Provider', () => {
 			global.fetch = async () => ({ ok: true, json: async () => EMAILS });
 		}
 
+		it('marks the public profile address as profile:true, even after the fallback mutates userInfo.email', async () => {
+			const github = getProvider('github');
+			mockEmailsFetch();
+			let received;
+			try {
+				await github.getUserInfo.call({ config: github }, 'token', {
+					// Public profile email is 'secondary@example.com' — distinct from 'primary'.
+					getUserInfo: async () => ({ login: 'user', email: 'secondary@example.com' }),
+					logger: { warn: () => {} },
+					resolveEmail: async (candidates) => {
+						received = candidates;
+						return undefined; // falls through to the profile-match branch, mutating nothing here
+					},
+				});
+				assert.deepEqual(
+					received.map((c) => c.profile),
+					[true, false, false]
+				);
+			} finally {
+				global.fetch = originalFetch;
+			}
+		});
+
 		it('uses the hook-resolved email, with email_verified true and github-authenticated provenance', async () => {
 			const github = getProvider('github');
 			mockEmailsFetch();
@@ -624,7 +647,7 @@ describe('GitHub Provider', () => {
 				});
 				assert.deepEqual(
 					received,
-					EMAILS.map((e) => ({ email: e.email, verified: e.verified, primary: e.primary }))
+					EMAILS.map((e) => ({ email: e.email, verified: e.verified, primary: e.primary, profile: false }))
 				);
 			} finally {
 				global.fetch = originalFetch;

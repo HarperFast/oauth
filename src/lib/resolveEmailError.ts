@@ -24,3 +24,15 @@ export class AmbiguousEmailError extends Error {
 		this.name = 'AmbiguousEmailError';
 	}
 }
+
+/**
+ * Thrown when the built-in existing-account default (#228) cannot complete an `hdb_user` read
+ * for a verified candidate email. Never conflated with "no match" or "ambiguous match" — the
+ * login fails with a retryable reason instead of guessing from incomplete information.
+ */
+export class EmailLookupError extends Error {
+	constructor(message: string, options?: { cause?: unknown }) {
+		super(message, options);
+		this.name = 'EmailLookupError';
+	}
+}
