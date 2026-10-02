@@ -647,7 +647,11 @@ automatic resolution.
 - Config safety: `mcp.enabled`, `clientIdMetadataDocuments.enabled`, and
   `allowedHosts` are normalized at load — an env-expanded `"false"` disables the
   feature (not left truthy), and `allowedHosts` is coerced to an array of exact,
-  lowercased hostnames (never substring-matched).
+  lowercased hostnames (never substring-matched). A **declared** `allowedHosts`
+  that resolves to zero usable hosts (an explicit `[]`, all-blank entries, or an
+  unresolved `${VAR}`) fails startup and is rejected on a live config reload,
+  rather than silently being read as "no restriction"; only omitting the key
+  gets that default.
 
 ### Configuration
 
@@ -669,8 +673,9 @@ list is treated as an unknown client (`invalid_client`) without revealing whethe
 the host would otherwise be valid — the list is not disclosed to the client.
 Entries are matched exactly (case-insensitive) against the URL host; a single
 hostname string is accepted and normalized to a one-element list. Omitting
-`allowedHosts` (or an empty list) allows any globally-routable host — the SSRF
-gate still applies.
+`allowedHosts` is the only way to allow any globally-routable host (the SSRF
+gate still applies) — a declared list that resolves to zero hosts (an explicit
+`[]`, blank entries, or an unset `${VAR}`) fails startup instead.
 
 ### Token endpoint authentication for CIMD clients
 
@@ -791,10 +796,11 @@ also accepts the exact advertised token endpoint URL as the sole `aud`:
 - only on `authorization_code` and `refresh_token`, never for headless or
   stored clients.
 
-The accepted audience form (`issuer` or `token_endpoint`) is logged; the
-assertion never is. RFC 7523bis §4 forbids the token endpoint as an audience
-by default because a malicious authorization server can advertise our token
-endpoint as its own and collect an assertion that can be replayed across servers.
+When an info logger is available, the accepted audience form (`issuer` or
+`token_endpoint`) is logged; the assertion never is. RFC 7523bis §4 forbids
+the token endpoint as an audience by default because a malicious
+authorization server can advertise our token endpoint as its own and collect
+an assertion that can be replayed across servers.
 
 ```yaml
 mcp:
@@ -902,6 +908,14 @@ name; later values are not checked there. With the array shape expected after
 HarperFast/harper#2953, the token endpoint refuses an array for a listed
 single-valued parameter, and accepts a `resource` array only when every value is
 acceptable.
+
+For `authorization_code` and `refresh_token`, a verified client assertion is
+recorded before grant and resource checks, including when `resource` is present.
+On a redeemable code or current refresh token with a stored resource, every
+parsed `resource` must match both it and the current MCP resource; otherwise
+`400 invalid_target` precedes code consumption or refresh rotation. Superseded
+refresh replay precedes resource validation. Omitting `resource` is unchanged.
+A valid grant without a stored resource still returns `server_error` at signing.
 
 ### Grant binding
 

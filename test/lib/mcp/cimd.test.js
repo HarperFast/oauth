@@ -18,6 +18,7 @@ import {
 	isCimdClientId,
 	resolveCimdClient,
 	resolveClient,
+	cimdEnabled,
 	CimdClientError,
 	_setDnsLookup,
 	_setFetch,
@@ -73,6 +74,32 @@ const VALID_DOC = {
 };
 
 const VALID_URL = 'https://example.com/client.json';
+
+describe('cimdEnabled', () => {
+	it('is true when cimdConfig is absent or null (CIMD defaults to enabled)', () => {
+		assert.equal(cimdEnabled(undefined), true);
+		assert.equal(cimdEnabled(null), true);
+	});
+
+	it('is true for a mapping with no enabled field, or enabled: true', () => {
+		assert.equal(cimdEnabled({}), true);
+		assert.equal(cimdEnabled({ enabled: true }), true);
+	});
+
+	it('is false only for a mapping with enabled === false (strict)', () => {
+		assert.equal(cimdEnabled({ enabled: false }), false);
+		// A non-boolean "falsy-looking" value does NOT disable it — only a real `false` does.
+		assert.equal(cimdEnabled({ enabled: 'false' }), true);
+		assert.equal(cimdEnabled({ enabled: 0 }), true);
+	});
+
+	it('is false for a non-mapping value (scalar or array) — must not fail open', () => {
+		assert.equal(cimdEnabled(false), false);
+		assert.equal(cimdEnabled(0), false);
+		assert.equal(cimdEnabled('nope'), false);
+		assert.equal(cimdEnabled([{ enabled: false }]), false);
+	});
+});
 
 describe('isCimdClientId', () => {
 	it('accepts https URLs with a non-root path', () => {

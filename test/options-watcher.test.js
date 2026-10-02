@@ -430,6 +430,73 @@ describe('OAuth Plugin Options Watcher', () => {
 		);
 	});
 
+	it('a live reload whose declared allowedRedirectUriHosts resolves empty is rejected and the previous config keeps serving (#249)', async () => {
+		scope.options._config.mcp = {
+			enabled: true,
+			issuer: 'https://app.example.com',
+			dynamicClientRegistration: { allowedRedirectUriHosts: ['trusted.example.com'] },
+		};
+		await handleApplication(scope);
+		const previousMcpConfig = OAuthResource.mcpConfig;
+		assert.deepEqual(previousMcpConfig?.dynamicClientRegistration?.allowedRedirectUriHosts, ['trusted.example.com']);
+
+		let errorLogged = false;
+		scope.logger.error = (msg) => {
+			if (typeof msg === 'string' && msg.includes('Failed to update OAuth configuration')) errorLogged = true;
+		};
+
+		// Reload with an unresolved env placeholder entry — must be rejected rather
+		// than kept as a literal, unmatchable host.
+		scope.options._config = {
+			...scope.options._config,
+			mcp: {
+				...scope.options._config.mcp,
+				dynamicClientRegistration: { allowedRedirectUriHosts: ['${REDIRECT_HOST_NOT_SET}'] },
+			},
+		};
+		configChangeListeners[0]();
+		await waitFor(() => errorLogged);
+
+		assert.ok(errorLogged, 'the rejected reload should be logged');
+		assert.equal(
+			OAuthResource.mcpConfig,
+			previousMcpConfig,
+			'the previous mcp config must keep serving after a rejected reload'
+		);
+	});
+
+	it('a live reload with DCR disabled still rejects an empty allowedRedirectUriHosts, because CIMD reads the same list (#249)', async () => {
+		scope.options._config.mcp = {
+			enabled: true,
+			issuer: 'https://app.example.com',
+			dynamicClientRegistration: { allowedRedirectUriHosts: ['trusted.example.com'] },
+		};
+		await handleApplication(scope);
+		const previousMcpConfig = OAuthResource.mcpConfig;
+
+		let errorLogged = false;
+		scope.logger.error = (msg) => {
+			if (typeof msg === 'string' && msg.includes('Failed to update OAuth configuration')) errorLogged = true;
+		};
+
+		scope.options._config = {
+			...scope.options._config,
+			mcp: {
+				...scope.options._config.mcp,
+				dynamicClientRegistration: { enabled: false, allowedRedirectUriHosts: [''] },
+			},
+		};
+		configChangeListeners[0]();
+		await waitFor(() => errorLogged);
+
+		assert.ok(errorLogged, 'the rejected reload should be logged');
+		assert.equal(
+			OAuthResource.mcpConfig,
+			previousMcpConfig,
+			'the previous mcp config must keep serving after a rejected reload'
+		);
+	});
+
 	describe('reload ordering vs. a per-key OptionsWatcher merge', () => {
 		// Harper's real OptionsWatcher#merge writes a multi-key edit into the
 		// live config ONE KEY AT A TIME and emits 'change' synchronously after

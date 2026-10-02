@@ -285,6 +285,19 @@ function requestedResources(body: any): unknown[] {
 	return Array.isArray(value) ? value : [value];
 }
 
+/** Check parsed values only on grants with a recorded resource. */
+function hasUnauthorizedResource(
+	body: any,
+	authorizedResource: string | undefined,
+	request: Request | undefined,
+	mcpConfig: MCPConfig
+): boolean {
+	const resources = requestedResources(body);
+	if (resources.length === 0 || typeof authorizedResource !== 'string') return false;
+	const configuredResource = resolveResource(request as any, mcpConfig);
+	return resources.some((resource) => resource !== authorizedResource || resource !== configuredResource);
+}
+
 /** The client's identity from an assertion's unverified `sub`, when no client_id was sent (RFC 7521 §4.2). */
 function unverifiedAssertionSubject(assertion: string): string | undefined {
 	const payloadSegment = assertion.split('.')[1];
@@ -456,7 +469,8 @@ async function authenticateClient(
 
 /**
  * Verify a private_key_jwt assertion presented on the authorization_code or
- * refresh_token grant, then record its jti. Headless records use their
+ * refresh_token grant, then record its jti before grant and resource checks.
+ * Headless records use their
  * client_credentials policy (EdDSA, inline keys); interactive CIMD records
  * use theirs (RS256/ES256/EdDSA narrowed by the document's pin, inline `jwks`
  * or `jwks_uri`, issuer audience plus the opt-in exception). A stored (DCR)
@@ -524,8 +538,7 @@ async function verifyPresentedAssertion(
 		return invalidClient(`client_assertion verification failed: ${result.reason}`);
 	}
 
-	// Replay guard: a storage failure THROWS to the top-level 500 handler —
-	// "could not check" must never degrade to "not seen" (fail closed).
+	// A storage failure throws to the top-level 500 handler (fail closed).
 	const fresh = await new MCPAssertionJtiStore(logger).checkAndRecord(
 		client.client_id,
 		result.claims.jti,
@@ -699,6 +712,9 @@ async function handleAuthorizationCodeGrant(
 	if (!pkceMatches(codeVerifier, record.code_challenge)) {
 		return errorResponse(400, 'invalid_grant', 'PKCE verification failed');
 	}
+	if (hasUnauthorizedResource(body, record.resource, request, mcpConfig)) {
+		return errorResponse(400, 'invalid_target', 'resource does not match the authorized MCP resource');
+	}
 
 	// Strict single-use consume: if the delete fails, the code might still be
 	// replayable, so refuse to issue rather than risk a double-spend.
@@ -847,6 +863,9 @@ async function handleRefreshTokenGrant(
 			'invalid_grant',
 			'Refresh token is bound to a different client authentication method; reauthorize'
 		);
+	}
+	if (hasUnauthorizedResource(body, family.resource, request, mcpConfig)) {
+		return errorResponse(400, 'invalid_target', 'resource does not match the authorized MCP resource');
 	}
 
 	// Sign the access token BEFORE committing the rotation. If key fetch or

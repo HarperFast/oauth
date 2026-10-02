@@ -8,7 +8,7 @@ import { OAuthProvider } from './OAuthProvider.ts';
 import { getProvider } from './providers/index.ts';
 import { redactSecrets } from './redact.ts';
 import { algFromPrivateKeyPem } from './mcp/keyStore.ts';
-import { isCimdClientId } from './mcp/cimd.ts';
+import { isCimdClientId, cimdEnabled } from './mcp/cimd.ts';
 import type { OAuthProviderConfig, OAuthPluginConfig, ProviderRegistry, Logger } from '../types.ts';
 
 /**
@@ -227,6 +227,40 @@ function normalizeTokenEndpointAudience(value: unknown, logger?: Logger): { clie
 }
 
 /**
+ * Normalize a declared hostname allowlist (`dcr.allowedRedirectUriHosts`,
+ * `cimd.allowedHosts`): wrap a scalar into a single-element array, trim,
+ * lowercase, and drop blanks. While `guard` is true (caller-determined: the
+ * surface this list gates is active), a result with zero usable hosts, or
+ * any unresolved `${VAR}` entry, throws naming `path` instead of silently
+ * reading as "no restriction" downstream (#249) — `guard` false leaves both
+ * checks inert so a disabled block can carry stale config.
+ */
+function normalizeHostAllowlist(value: unknown, path: string, guard: boolean): string[] {
+	const raw: unknown[] = Array.isArray(value) ? value : [value];
+	if (raw.some((h) => typeof h !== 'string')) {
+		throw new Error(`${path} must be a hostname string or an array of hostname strings`);
+	}
+	const entries = raw as string[];
+	if (guard) {
+		const placeholder = entries.find((h) => isUnresolvedEnvPlaceholder(h));
+		if (placeholder !== undefined) {
+			throw new Error(
+				`${path} contains the unresolved env placeholder ${JSON.stringify(placeholder)} (variable unset). ` +
+					`Set the variable, remove that entry, or omit ${path} entirely to allow any host.`
+			);
+		}
+	}
+	const normalized = entries.map((h) => h.trim().toLowerCase()).filter((h) => h.length > 0);
+	if (guard && normalized.length === 0) {
+		throw new Error(
+			`${path} is configured but resolved to an empty list (e.g. blank entries or an unset environment ` +
+				`variable substitution). Provide at least one hostname, or omit ${path} entirely to allow any host.`
+		);
+	}
+	return normalized;
+}
+
+/**
  * Validate `mcp.signingKeyPem` when the operator DECLARED it — i.e. the field
  * is present on the config object at all, regardless of what it resolved to.
  * Unlike the documented booleans above, an unresolved/empty pin does NOT get
@@ -342,11 +376,10 @@ function validateDcrInitialAccessToken(dcr: Record<string, any>): void {
  * - `mcp.enabled` itself keeps the pre-#207 warn-and-drop behavior (does not
  *   throw) — see {@link normalizeBooleanField}'s doc for why this one field
  *   is the exception.
- * - `mcp.clientIdMetadataDocuments.allowedHosts` is normalized to an array of
- *   exact, lowercased hostnames. A scalar string (which `Array.includes` /
- *   `String.includes` would turn into substring matching) is wrapped into a
- *   single-element array; anything that isn't a string or array of strings is
- *   rejected rather than treated as "no restriction".
+ * - `mcp.clientIdMetadataDocuments.allowedHosts` and
+ *   `mcp.dynamicClientRegistration.allowedRedirectUriHosts` are normalized via
+ *   {@link normalizeHostAllowlist}; the latter is read by both DCR and CIMD
+ *   (cimd.ts), so its guard covers either block being active, not DCR alone.
  * - `mcp.clientIdMetadataDocuments.privateKeyJwt`: `enabled` is opt-in.
  *   With MCP active, a declared non-boolean throws; with MCP off it keeps
  *   its previous coercion and warn-and-drop behavior. `jwksUriAllowedOrigins` is
@@ -392,6 +425,29 @@ export function normalizeMcpSecurityConfig(mcpConfig: Record<string, any>, logge
 		);
 	}
 
+	// CIMD's enabled state is normalized here, ahead of the DCR block below,
+	// so cimdActive (used by DCR's allowedRedirectUriHosts guard) reflects the
+	// coerced value — e.g. an env-substituted `enabled: "false"` must count as
+	// disabled, not as the still-truthy raw string.
+	const cimd = mcpConfig.clientIdMetadataDocuments;
+	if (cimd !== undefined && cimd !== null && (typeof cimd !== 'object' || Array.isArray(cimd))) {
+		// Same non-mapping guard as dynamicClientRegistration below (arrays
+		// included): CIMD's own `cimdConfig?.enabled !== false` predicate
+		// (cimd.ts) also falls through to its default — for CIMD that default
+		// is already "enabled", so a block meant to disable it would otherwise
+		// be silently ignored rather than taking effect.
+		if (mcpActive) {
+			throw new Error('mcp.clientIdMetadataDocuments must be a mapping; use enabled: false to disable');
+		}
+	} else if (cimd && typeof cimd === 'object' && !Array.isArray(cimd)) {
+		normalizeBooleanField(cimd, 'enabled', 'mcp.clientIdMetadataDocuments.enabled', logger, mcpActive);
+	}
+
+	// CIMD reads allowedRedirectUriHosts independently of dcr.enabled (cimd.ts);
+	// precompute its active state here (shared `cimdEnabled` predicate — also
+	// used at request time by `resolveClient`) for the DCR guard below.
+	const cimdActive = cimdEnabled(cimd);
+
 	const dcr = mcpConfig.dynamicClientRegistration;
 	if (dcr !== undefined && dcr !== null && (typeof dcr !== 'object' || Array.isArray(dcr))) {
 		// A non-mapping value (`false`, `0`, an unresolved placeholder string, an
@@ -411,46 +467,25 @@ export function normalizeMcpSecurityConfig(mcpConfig: Record<string, any>, logge
 		if (mcpActive && dcr.enabled !== false) {
 			validateDcrInitialAccessToken(dcr);
 		}
-		// allowedRedirectUriHosts is matched with Array.includes in
-		// clientValidator.ts — a scalar string there silently becomes
-		// String.prototype.includes (substring matching) instead of an exact-host
-		// allowlist. Normalize to an array up front, exactly like CIMD's
-		// allowedHosts below (this list is shared by both the DCR and CIMD
-		// redirect-uri checks).
 		if (dcr.allowedRedirectUriHosts !== undefined) {
-			const raw = Array.isArray(dcr.allowedRedirectUriHosts)
-				? dcr.allowedRedirectUriHosts
-				: [dcr.allowedRedirectUriHosts];
-			if (raw.some((h: unknown) => typeof h !== 'string')) {
-				throw new Error(
-					'mcp.dynamicClientRegistration.allowedRedirectUriHosts must be a hostname string or an array of hostname strings'
-				);
-			}
-			dcr.allowedRedirectUriHosts = raw.map((h: string) => h.trim().toLowerCase()).filter((h: string) => h.length > 0);
+			dcr.allowedRedirectUriHosts = normalizeHostAllowlist(
+				dcr.allowedRedirectUriHosts,
+				'mcp.dynamicClientRegistration.allowedRedirectUriHosts',
+				mcpActive && (dcr.enabled !== false || cimdActive)
+			);
 		}
 	}
 
-	const cimd = mcpConfig.clientIdMetadataDocuments;
-	if (cimd !== undefined && cimd !== null && (typeof cimd !== 'object' || Array.isArray(cimd))) {
-		// Same non-mapping guard as dynamicClientRegistration above (arrays
-		// included): CIMD's own `cimdConfig?.enabled !== false` predicate
-		// (cimd.ts) also falls through to its default — for CIMD that default
-		// is already "enabled", so a block meant to disable it would otherwise
-		// be silently ignored rather than taking effect.
-		if (mcpActive) {
-			throw new Error('mcp.clientIdMetadataDocuments must be a mapping; use enabled: false to disable');
-		}
-	} else if (cimd && typeof cimd === 'object' && !Array.isArray(cimd)) {
-		normalizeBooleanField(cimd, 'enabled', 'mcp.clientIdMetadataDocuments.enabled', logger, mcpActive);
-
+	// cimd's non-mapping guard and `enabled` normalization already ran above,
+	// before the DCR block; this continues processing the same mapping (if
+	// it is one) for its other fields.
+	if (cimd && typeof cimd === 'object' && !Array.isArray(cimd)) {
 		if (cimd.allowedHosts !== undefined) {
-			const raw = Array.isArray(cimd.allowedHosts) ? cimd.allowedHosts : [cimd.allowedHosts];
-			if (raw.some((h: unknown) => typeof h !== 'string')) {
-				throw new Error(
-					'mcp.clientIdMetadataDocuments.allowedHosts must be a hostname string or an array of hostname strings'
-				);
-			}
-			cimd.allowedHosts = raw.map((h: string) => h.trim().toLowerCase()).filter((h: string) => h.length > 0);
+			cimd.allowedHosts = normalizeHostAllowlist(
+				cimd.allowedHosts,
+				'mcp.clientIdMetadataDocuments.allowedHosts',
+				mcpActive && cimd.enabled !== false
+			);
 		}
 
 		const privateKeyJwt = cimd.privateKeyJwt;
