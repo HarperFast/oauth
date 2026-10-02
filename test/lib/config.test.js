@@ -16,6 +16,7 @@ import {
 	isUnresolvedEnvPlaceholder,
 	skipUndefined,
 } from '../../dist/lib/config.js';
+import { interactivePrivateKeyJwtEnabled } from '../../dist/lib/mcp/clientAuthMethod.js';
 
 describe('OAuth Configuration', () => {
 	let originalEnv;
@@ -560,13 +561,84 @@ describe('OAuth Configuration', () => {
 		});
 
 		describe('interactive private_key_jwt settings', () => {
-			it('coerces privateKeyJwt.enabled and acceptTokenEndpointAudience like the other documented booleans', () => {
-				const cfg = {
-					clientIdMetadataDocuments: { privateKeyJwt: { enabled: 'true' } },
-					clientCredentials: { acceptTokenEndpointAudience: 'false' },
-				};
+			it('refuses declared non-boolean privateKeyJwt.enabled, including undefined, while MCP is active', () => {
+				for (const value of [undefined, 'yes', 'true', 'false', 1, 1n, null, {}, []]) {
+					const cfg = { enabled: true, clientIdMetadataDocuments: { privateKeyJwt: { enabled: value } } };
+					assert.throws(
+						() => normalizeMcpSecurityConfig(cfg),
+						/mcp\.clientIdMetadataDocuments\.privateKeyJwt\.enabled must be true or false when MCP is enabled/,
+						`declared value of type ${typeof value} must be refused`
+					);
+				}
+			});
+
+			it('keeps placeholder and empty-value errors for privateKeyJwt.enabled', () => {
+				for (const value of ['${FLAG}', '', '  ']) {
+					assert.throws(
+						() =>
+							normalizeMcpSecurityConfig({
+								enabled: true,
+								clientIdMetadataDocuments: { privateKeyJwt: { enabled: value } },
+							}),
+						(error) =>
+							/mcp\.clientIdMetadataDocuments\.privateKeyJwt\.enabled/.test(error.message) &&
+							(value === '${FLAG}'
+								? /unresolved env placeholder.*FLAG/.test(error.message)
+								: /resolved to an empty value/.test(error.message))
+					);
+				}
+			});
+
+			it('keeps true, false and absent privateKeyJwt.enabled values while MCP is active', () => {
+				for (const value of [true, false]) {
+					const cfg = { enabled: true, clientIdMetadataDocuments: { privateKeyJwt: { enabled: value } } };
+					normalizeMcpSecurityConfig(cfg);
+					assert.equal(cfg.clientIdMetadataDocuments.privateKeyJwt.enabled, value);
+					assert.equal(interactivePrivateKeyJwtEnabled(cfg), value);
+				}
+				const absent = { enabled: true, clientIdMetadataDocuments: { privateKeyJwt: {} } };
+				normalizeMcpSecurityConfig(absent);
+				assert.equal('enabled' in absent.clientIdMetadataDocuments.privateKeyJwt, false);
+				assert.equal(interactivePrivateKeyJwtEnabled(absent), false);
+			});
+
+			it('keeps MCP-off coercion, warn-and-drop and placeholder behavior', () => {
+				const warnings = [];
+				const logger = { warn: (message) => warnings.push(message) };
+				for (const [input, expected] of [
+					['true', true],
+					['false', false],
+					['yes', undefined],
+					[null, null],
+					[undefined, undefined],
+				]) {
+					const cfg = { enabled: false, clientIdMetadataDocuments: { privateKeyJwt: { enabled: input } } };
+					normalizeMcpSecurityConfig(cfg, logger);
+					assert.equal(cfg.clientIdMetadataDocuments.privateKeyJwt.enabled, expected);
+					if (input === undefined) {
+						assert.equal(
+							Object.prototype.hasOwnProperty.call(cfg.clientIdMetadataDocuments.privateKeyJwt, 'enabled'),
+							true
+						);
+					}
+				}
+				assert.equal(warnings.length, 1);
+				assert.match(warnings[0], /privateKeyJwt\.enabled must be a boolean/);
+				for (const value of ['${FLAG}', '']) {
+					assert.throws(
+						() =>
+							normalizeMcpSecurityConfig({
+								enabled: false,
+								clientIdMetadataDocuments: { privateKeyJwt: { enabled: value } },
+							}),
+						/mcp\.clientIdMetadataDocuments\.privateKeyJwt\.enabled/
+					);
+				}
+			});
+
+			it('still coerces the separate clientCredentials audience boolean', () => {
+				const cfg = { clientCredentials: { acceptTokenEndpointAudience: 'false' } };
 				normalizeMcpSecurityConfig(cfg);
-				assert.equal(cfg.clientIdMetadataDocuments.privateKeyJwt.enabled, true);
 				assert.equal(cfg.clientCredentials.acceptTokenEndpointAudience, false);
 			});
 

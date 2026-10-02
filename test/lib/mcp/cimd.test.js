@@ -637,7 +637,11 @@ describe('resolveCimdClient — document validation', () => {
 		const record = await resolveCimdClient(VALID_URL, undefined);
 		assert.deepEqual(record._cimdAuth.declared, ['private_key_jwt']);
 		assert.equal(record.token_endpoint_auth_method, undefined, 'no fixed method on interactive records');
-		assert.match(permittedAuthMethod(record, { enabled: true }).error, /no token endpoint authentication method/);
+		assert.match(
+			permittedAuthMethod(record, { enabled: true, clientIdMetadataDocuments: { privateKeyJwt: { enabled: false } } })
+				.error,
+			/no token endpoint authentication method/
+		);
 		assert.match(
 			permittedAuthMethod(record, { enabled: true, clientIdMetadataDocuments: { privateKeyJwt: { enabled: true } } })
 				.error,

@@ -111,28 +111,38 @@ export function coerceConfigBoolean(value: unknown): boolean | undefined {
  * (byte-identical-boot contract) and fail closed once it's on. `mcp.enabled`
  * itself passes `false` explicitly — see {@link normalizeMcpSecurityConfig}
  * for why that one field keeps the pre-#207 warn-and-drop behavior.
+ * `requireBoolean` is used by the interactive private_key_jwt gate: while
+ * MCP is active, a declared value other than a boolean is refused rather than
+ * silently dropped. Placeholders and empty strings retain their specific errors.
  */
 function normalizeBooleanField(
 	obj: Record<string, any>,
 	field: string,
 	path: string,
 	logger?: Logger,
-	failOnPlaceholder = true
+	failOnPlaceholder = true,
+	requireBoolean = false
 ): void {
 	const value = obj[field];
-	if (value === undefined || value === null) return; // Absent (or bare YAML key) — default applies already.
+	if (value === undefined && (!requireBoolean || !Object.prototype.hasOwnProperty.call(obj, field))) {
+		return; // Omitted field uses its default; a declared undefined fails the strict boolean gate.
+	}
+	if (value === null && !requireBoolean) return; // Bare YAML key keeps the existing absent-value behavior.
+	const isUnresolvedPlaceholder = isUnresolvedEnvPlaceholder(value);
+	const isEmptyString = typeof value === 'string' && value.trim() === '';
+	if (requireBoolean && typeof value !== 'boolean' && !isUnresolvedPlaceholder && !isEmptyString) {
+		throw new Error(`${path} must be true or false when MCP is enabled.`);
+	}
 	const coerced = coerceConfigBoolean(value);
 	if (coerced !== undefined) {
 		obj[field] = coerced;
 		return;
 	}
-	const isUnresolvedPlaceholder = isUnresolvedEnvPlaceholder(value);
 	// Not every substitution mechanism leaves the placeholder text behind when
 	// its variable is unset — docker-compose's `X=${X}` resolves to "" (not the
 	// literal "${X}") for an unset X. That's the same operator-unreadable gate
 	// value as an unresolved placeholder; treat it identically rather than
 	// letting it fall through to "must be a boolean" and get silently dropped.
-	const isEmptyString = typeof value === 'string' && value.trim() === '';
 	if ((isUnresolvedPlaceholder || isEmptyString) && failOnPlaceholder) {
 		throw new Error(
 			isUnresolvedPlaceholder
@@ -370,8 +380,10 @@ function validateDcrInitialAccessToken(dcr: Record<string, any>): void {
  *   `mcp.dynamicClientRegistration.allowedRedirectUriHosts` are normalized via
  *   {@link normalizeHostAllowlist}; the latter is read by both DCR and CIMD
  *   (cimd.ts), so its guard covers either block being active, not DCR alone.
- * - `mcp.clientIdMetadataDocuments.privateKeyJwt`: `enabled` is a documented
- *   boolean; `jwksUriAllowedOrigins` is normalized to exact https origins;
+ * - `mcp.clientIdMetadataDocuments.privateKeyJwt`: `enabled` is opt-in.
+ *   With MCP active, a declared non-boolean throws; with MCP off it keeps
+ *   its previous coercion and warn-and-drop behavior. `jwksUriAllowedOrigins` is
+ *   normalized to exact https origins;
  *   `tokenEndpointAudience` needs exact CIMD client IDs and a parseable
  *   `expiresAt` (normalized to epoch ms). Invalid values throw.
  * - `mcp.signingKeyPem`, if declared, must resolve to a parseable key — see
@@ -481,7 +493,14 @@ export function normalizeMcpSecurityConfig(mcpConfig: Record<string, any>, logge
 			if (!privateKeyJwt || typeof privateKeyJwt !== 'object' || Array.isArray(privateKeyJwt)) {
 				throw new Error('mcp.clientIdMetadataDocuments.privateKeyJwt must be an object');
 			}
-			normalizeBooleanField(privateKeyJwt, 'enabled', 'mcp.clientIdMetadataDocuments.privateKeyJwt.enabled', logger);
+			normalizeBooleanField(
+				privateKeyJwt,
+				'enabled',
+				'mcp.clientIdMetadataDocuments.privateKeyJwt.enabled',
+				logger,
+				true,
+				mcpActive
+			);
 			if (privateKeyJwt.jwksUriAllowedOrigins !== undefined) {
 				privateKeyJwt.jwksUriAllowedOrigins = normalizeHttpsOrigins(
 					privateKeyJwt.jwksUriAllowedOrigins,

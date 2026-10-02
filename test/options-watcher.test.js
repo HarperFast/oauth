@@ -128,7 +128,7 @@ describe('OAuth Plugin Options Watcher', () => {
 		assert.ok(resources.oauth, 'OAuth resource should be registered');
 	});
 
-	it('should fail to start interactive private_key_jwt on a cleartext non-loopback issuer', async () => {
+	it('should fail to start opt-in interactive private_key_jwt on a cleartext non-loopback issuer', async () => {
 		scope.options._config.mcp = {
 			enabled: true,
 			issuer: 'http://app.example.com',
@@ -137,7 +137,7 @@ describe('OAuth Plugin Options Watcher', () => {
 		await assert.rejects(handleApplication(scope), /privateKeyJwt\.enabled requires an https: mcp\.issuer/);
 	});
 
-	it('should fail to start interactive private_key_jwt with CIMD disabled', async () => {
+	it('should fail to start opt-in interactive private_key_jwt with CIMD disabled', async () => {
 		scope.options._config.mcp = {
 			enabled: true,
 			issuer: 'https://app.example.com',
@@ -146,7 +146,23 @@ describe('OAuth Plugin Options Watcher', () => {
 		await assert.rejects(handleApplication(scope), /privateKeyJwt\.enabled requires CIMD resolution/);
 	});
 
-	it('should start interactive private_key_jwt on an https or loopback issuer', async () => {
+	it('should keep the previous startup behaviour when interactive private_key_jwt is absent or false', async () => {
+		for (const [issuer, cimdEnabled] of [
+			['http://app.example.com', true],
+			['https://app.example.com', false],
+		]) {
+			for (const privateKeyJwt of [undefined, { enabled: false }]) {
+				scope.options._config.mcp = {
+					enabled: true,
+					issuer,
+					clientIdMetadataDocuments: { enabled: cimdEnabled, ...(privateKeyJwt && { privateKeyJwt }) },
+				};
+				await handleApplication(scope);
+			}
+		}
+	});
+
+	it('should start opt-in interactive private_key_jwt on an https or loopback issuer', async () => {
 		for (const issuer of ['https://app.example.com', 'http://localhost:9926']) {
 			scope.options._config.mcp = {
 				enabled: true,

@@ -165,7 +165,7 @@ describe('MCP well-known: AS metadata document (RFC 8414)', () => {
 	describe('signing algorithms = the union of what the enabled verification paths accept', () => {
 		const metadata = (config) => buildAuthorizationServerMetadata(makeRequest(), { enabled: true, ...config });
 
-		it('nothing enabled: no private_key_jwt and no signing algorithms', async () => {
+		it('interactive verification is off until enabled', async () => {
 			const doc = await metadata({});
 			assert.ok(!doc.token_endpoint_auth_methods_supported.includes('private_key_jwt'));
 			assert.equal(doc.token_endpoint_auth_signing_alg_values_supported, undefined);
@@ -191,10 +191,10 @@ describe('MCP well-known: AS metadata document (RFC 8414)', () => {
 			}
 		});
 
-		it('interactive setting without headless: RS256, ES256, EdDSA', async () => {
-			const doc = await metadata({ clientIdMetadataDocuments: { privateKeyJwt: { enabled: true } } });
-			assert.ok(doc.token_endpoint_auth_methods_supported.includes('private_key_jwt'));
-			assert.deepEqual(doc.token_endpoint_auth_signing_alg_values_supported, ['RS256', 'ES256', 'EdDSA']);
+		it('explicit false without headless: no private_key_jwt or signing algorithms', async () => {
+			const doc = await metadata({ clientIdMetadataDocuments: { privateKeyJwt: { enabled: false } } });
+			assert.ok(!doc.token_endpoint_auth_methods_supported.includes('private_key_jwt'));
+			assert.equal(doc.token_endpoint_auth_signing_alg_values_supported, undefined);
 			assert.ok(!doc.grant_types_supported.includes('client_credentials'));
 		});
 
@@ -214,7 +214,7 @@ describe('MCP well-known: AS metadata document (RFC 8414)', () => {
 		}
 	});
 
-	it('advertises interactive private_key_jwt and its algorithms only when the setting is on', async () => {
+	it('advertises interactive private_key_jwt on opt-in and omits it otherwise', async () => {
 		const off = await buildAuthorizationServerMetadata(makeRequest(), {
 			enabled: true,
 			clientIdMetadataDocuments: { privateKeyJwt: { enabled: false } },
