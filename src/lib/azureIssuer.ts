@@ -49,10 +49,32 @@ function azureTenantUri(kind: 'issuer' | 'keys', guid: string): string {
 }
 
 /**
+ * True when `url`'s query string is either empty, or consists of exactly
+ * one `appid` parameter with a non-empty value — Azure's documented form
+ * for identifying the calling application on these shared keys endpoints
+ * (https://learn.microsoft.com/en-us/entra/identity-platform/access-tokens).
+ * Any other query (extra/duplicate/renamed params, or an empty `appid`)
+ * is NOT accepted — callers treat that the same as before this existed.
+ */
+function hasEmptyOrAppIdOnlyQuery(url: URL): boolean {
+	if (url.search === '') return true;
+	const keys = [...url.searchParams.keys()];
+	return keys.length === 1 && keys[0] === 'appid' && url.searchParams.get('appid') !== '';
+}
+
+/** The `appid` query parameter's value on `jwksUri`, or `null` if it has no query. Call only once the shape is already confirmed valid. */
+function azureJwksAppId(jwksUri: string): string | null {
+	const url = new URL(jwksUri);
+	return url.search === '' ? null : url.searchParams.get('appid');
+}
+
+/**
  * The `{segment}` of an exact `https://login.microsoftonline.com/{segment}/discovery/v2.0/keys`
- * URL — full-URL match: exact host, no port/userinfo/query/fragment, exactly
- * one path segment before the fixed suffix. `null` for anything else,
- * including a lookalike with extra path segments or a different host.
+ * URL — full-URL match: exact host, no port/userinfo/fragment, exactly one
+ * path segment before the fixed suffix, and a query that's either empty or
+ * exactly Azure's documented `?appid=<client-id>` form. `null` for anything
+ * else, including a lookalike with extra path segments, a different host,
+ * or any other query.
  */
 function azureJwksSegment(jwksUri: string | null | undefined): string | null {
 	if (!jwksUri) return null;
@@ -64,9 +86,8 @@ function azureJwksSegment(jwksUri: string | null | undefined): string | null {
 	}
 	if (url.protocol !== 'https:') return null;
 	if (url.hostname !== AZURE_HOST) return null;
-	if (url.port !== '' || url.username !== '' || url.password !== '' || url.search !== '' || url.hash !== '') {
-		return null;
-	}
+	if (url.port !== '' || url.username !== '' || url.password !== '' || url.hash !== '') return null;
+	if (!hasEmptyOrAppIdOnlyQuery(url)) return null;
 	const match = /^\/([^/]+)\/discovery\/v2\.0\/keys$/.exec(url.pathname);
 	return match ? match[1] : null;
 }
@@ -91,9 +112,8 @@ function azureV1AliasJwksSegment(jwksUri: string | null | undefined): string | n
 	}
 	if (url.protocol !== 'https:') return null;
 	if (url.hostname !== AZURE_HOST) return null;
-	if (url.port !== '' || url.username !== '' || url.password !== '' || url.search !== '' || url.hash !== '') {
-		return null;
-	}
+	if (url.port !== '' || url.username !== '' || url.password !== '' || url.hash !== '') return null;
+	if (!hasEmptyOrAppIdOnlyQuery(url)) return null;
 	const match = /^\/([^/]+)\/discovery\/keys$/.exec(url.pathname);
 	if (!match) return null;
 	const segment = match[1].toLowerCase();
@@ -470,7 +490,14 @@ export function resolveAzureIssuerBinding(config: OAuthProviderConfig, providerN
 	} catch {
 		/* advisory log only */
 	}
-	config.jwksUri = azureTenantUri('keys', pinnedGuid);
+	// Preserve the shared alias URL's own `?appid=` (if any, see
+	// `hasEmptyOrAppIdOnlyQuery` above) on the rewritten tenant-exclusive
+	// URL — it identifies the calling application to Azure, not the tenant,
+	// so it still applies once `jwksUri` is redirected.
+	const appId = azureJwksAppId(config.jwksUri as string);
+	config.jwksUri = appId
+		? `${azureTenantUri('keys', pinnedGuid)}?appid=${encodeURIComponent(appId)}`
+		: azureTenantUri('keys', pinnedGuid);
 	// Canonicalized WITHIN the pin's own form (case, trailing slash) — never
 	// rewritten to the other form, same rationale as the real-tenant-GUID
 	// case above.
