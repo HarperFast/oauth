@@ -398,6 +398,167 @@ describe('OAuth Configuration', () => {
 			);
 		});
 
+		describe('allowedHosts / allowedRedirectUriHosts resolving empty (#249 — fails open on a declared-but-empty allowlist)', () => {
+			it('CIMD: all entries blank after trim throws, naming the field', () => {
+				assert.throws(
+					() =>
+						normalizeMcpSecurityConfig({
+							enabled: true,
+							clientIdMetadataDocuments: { allowedHosts: ['   ', ''] },
+						}),
+					/mcp\.clientIdMetadataDocuments\.allowedHosts.*resolved to an empty list/s
+				);
+			});
+
+			it('CIMD: an unresolved ${VAR} placeholder entry throws instead of surviving as a literal host', () => {
+				assert.throws(
+					() =>
+						normalizeMcpSecurityConfig({
+							enabled: true,
+							clientIdMetadataDocuments: { allowedHosts: ['trusted.example.com', '${CIMD_HOST}'] },
+						}),
+					/mcp\.clientIdMetadataDocuments\.allowedHosts.*unresolved env placeholder.*CIMD_HOST/s
+				);
+			});
+
+			it('CIMD: an explicit empty list throws — this allowlist has no "deny all hosts" mode', () => {
+				assert.throws(
+					() =>
+						normalizeMcpSecurityConfig({
+							enabled: true,
+							clientIdMetadataDocuments: { allowedHosts: [] },
+						}),
+					/mcp\.clientIdMetadataDocuments\.allowedHosts.*resolved to an empty list/s
+				);
+			});
+
+			it('CIMD: not declared at all leaves the config untouched — no-allowlist default remains available by omission', () => {
+				const cfg = { enabled: true, clientIdMetadataDocuments: {} };
+				normalizeMcpSecurityConfig(cfg);
+				assert.equal('allowedHosts' in cfg.clientIdMetadataDocuments, false);
+			});
+
+			it('CIMD: mcp.enabled false leaves a declared-but-empty list INERT', () => {
+				assert.doesNotThrow(() =>
+					normalizeMcpSecurityConfig({
+						enabled: false,
+						clientIdMetadataDocuments: { allowedHosts: [''] },
+					})
+				);
+			});
+
+			it('CIMD: clientIdMetadataDocuments.enabled: false leaves a declared-but-empty list INERT (CIMD itself is off)', () => {
+				assert.doesNotThrow(() =>
+					normalizeMcpSecurityConfig({
+						enabled: true,
+						clientIdMetadataDocuments: { enabled: false, allowedHosts: [''] },
+					})
+				);
+			});
+
+			it('DCR: all entries blank after trim throws, naming the field', () => {
+				assert.throws(
+					() =>
+						normalizeMcpSecurityConfig({
+							enabled: true,
+							dynamicClientRegistration: { allowedRedirectUriHosts: ['   ', ''] },
+						}),
+					/mcp\.dynamicClientRegistration\.allowedRedirectUriHosts.*resolved to an empty list/s
+				);
+			});
+
+			it('DCR: an unresolved ${VAR} placeholder entry throws instead of surviving as a literal host', () => {
+				assert.throws(
+					() =>
+						normalizeMcpSecurityConfig({
+							enabled: true,
+							dynamicClientRegistration: { allowedRedirectUriHosts: ['${DCR_HOST}'] },
+						}),
+					/mcp\.dynamicClientRegistration\.allowedRedirectUriHosts.*unresolved env placeholder.*DCR_HOST/s
+				);
+			});
+
+			it('DCR: an explicit empty list throws — this allowlist has no "deny all hosts" mode', () => {
+				assert.throws(
+					() =>
+						normalizeMcpSecurityConfig({
+							enabled: true,
+							dynamicClientRegistration: { allowedRedirectUriHosts: [] },
+						}),
+					/mcp\.dynamicClientRegistration\.allowedRedirectUriHosts.*resolved to an empty list/s
+				);
+			});
+
+			it('DCR: not declared at all leaves the config untouched — no-allowlist default remains available by omission', () => {
+				const cfg = { enabled: true, dynamicClientRegistration: {} };
+				normalizeMcpSecurityConfig(cfg);
+				assert.equal('allowedRedirectUriHosts' in cfg.dynamicClientRegistration, false);
+			});
+
+			it('DCR: mcp.enabled false leaves a declared-but-empty list INERT', () => {
+				assert.doesNotThrow(() =>
+					normalizeMcpSecurityConfig({
+						enabled: false,
+						dynamicClientRegistration: { allowedRedirectUriHosts: [''] },
+					})
+				);
+			});
+
+			it('DCR: disabling DCR alone does NOT make a declared-but-empty list inert — CIMD (default-enabled) still reads it', () => {
+				assert.throws(
+					() =>
+						normalizeMcpSecurityConfig({
+							enabled: true,
+							dynamicClientRegistration: { enabled: false, allowedRedirectUriHosts: [''] },
+						}),
+					/mcp\.dynamicClientRegistration\.allowedRedirectUriHosts.*resolved to an empty list/s
+				);
+			});
+
+			it('DCR: a declared-but-empty list IS inert when both DCR and CIMD are explicitly disabled', () => {
+				assert.doesNotThrow(() =>
+					normalizeMcpSecurityConfig({
+						enabled: true,
+						dynamicClientRegistration: { enabled: false, allowedRedirectUriHosts: [''] },
+						clientIdMetadataDocuments: { enabled: false },
+					})
+				);
+			});
+
+			it('DCR: an env-substituted clientIdMetadataDocuments.enabled: "false" string counts as disabled, not truthy raw text', () => {
+				// cimdActive must be computed from cimd.enabled AFTER normalizeBooleanField
+				// coerces this string — not from the pre-normalization raw value, which a
+				// naive `!== false` would read as still-active (string !== boolean).
+				assert.doesNotThrow(() =>
+					normalizeMcpSecurityConfig({
+						enabled: true,
+						dynamicClientRegistration: { enabled: false, allowedRedirectUriHosts: [] },
+						clientIdMetadataDocuments: { enabled: 'false' },
+					})
+				);
+			});
+
+			it('DCR: clientIdMetadataDocuments.enabled: "true" (or absent) still forces the guard active', () => {
+				assert.throws(
+					() =>
+						normalizeMcpSecurityConfig({
+							enabled: true,
+							dynamicClientRegistration: { enabled: false, allowedRedirectUriHosts: [] },
+							clientIdMetadataDocuments: { enabled: 'true' },
+						}),
+					/mcp\.dynamicClientRegistration\.allowedRedirectUriHosts.*resolved to an empty list/s
+				);
+				assert.throws(
+					() =>
+						normalizeMcpSecurityConfig({
+							enabled: true,
+							dynamicClientRegistration: { enabled: false, allowedRedirectUriHosts: [] },
+						}),
+					/mcp\.dynamicClientRegistration\.allowedRedirectUriHosts.*resolved to an empty list/s
+				);
+			});
+		});
+
 		describe('interactive private_key_jwt settings', () => {
 			it('coerces privateKeyJwt.enabled and acceptTokenEndpointAudience like the other documented booleans', () => {
 				const cfg = {
