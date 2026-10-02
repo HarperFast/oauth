@@ -1651,6 +1651,47 @@ describe('OAuth Configuration', () => {
 				);
 			});
 
+			it('does not throw for an unpinned Azure alias on the older v1 keys shape (no v2.0) either — byte-identical to main, same as the v2 alias shape (#271 follow-up)', () => {
+				// Before this fix, this shape was NOT recognized at all, so it fell
+				// through into generic OIDC discovery (which fails for it) and was
+				// told to pin `issuer` — landing on a config that binds a pin to
+				// Azure's shared, unvalidated v1 key pool.
+				const providerConfig = {
+					provider: 'generic',
+					clientId: 'c',
+					clientSecret: 's',
+					authorizationUrl: 'https://login.microsoftonline.com/common/oauth2/authorize',
+					tokenUrl: 'https://login.microsoftonline.com/common/oauth2/token',
+					userInfoUrl: 'https://graph.microsoft.com/v1.0/me',
+					jwksUri: 'https://login.microsoftonline.com/common/discovery/keys',
+					redirectUri: 'https://app.test.com/oauth',
+				};
+
+				const config = buildProviderConfig(providerConfig, 'custom-azure-v1', {}, true);
+				assert.equal(config.issuer, undefined);
+				assert.equal(
+					needsIssuerDiscovery(config),
+					false,
+					'an unpinned v1 alias must never be probed by generic discovery'
+				);
+			});
+
+			it('throws for a PINNED Azure alias on the older v1 keys shape (no v2.0) — a pin can never be safely bound to this shared key pool (#271 follow-up)', () => {
+				const providerConfig = {
+					provider: 'generic',
+					clientId: 'c',
+					clientSecret: 's',
+					authorizationUrl: 'https://login.microsoftonline.com/common/oauth2/authorize',
+					tokenUrl: 'https://login.microsoftonline.com/common/oauth2/token',
+					userInfoUrl: 'https://graph.microsoft.com/v1.0/me',
+					jwksUri: 'https://login.microsoftonline.com/common/discovery/keys',
+					issuer: 'https://sts.windows.net/12345678-1234-1234-1234-123456789012/',
+					redirectUri: 'https://app.test.com/oauth',
+				};
+
+				assert.throws(() => buildProviderConfig(providerConfig, 'custom-azure-v1', {}, true), /shared v1/);
+			});
+
 			it('still requires an issuer (or defers to discovery) for a tenant-DOMAIN Azure jwksUri — resolveAzureIssuerBinding never recognizes it, so it must not get the unpinned-alias exemption (#264/#271)', () => {
 				// A verified .onmicrosoft.com domain is a real, Azure-accepted
 				// segment here — not a GUID, and not one of the shared aliases —

@@ -41,8 +41,15 @@ describe('isAzureJwksUri', () => {
 		);
 	});
 
-	it('is false for an Azure-host jwksUri in an unrecognized shape — resolveAzureIssuerBinding never touches it, so it must not be silently exempted from #231 §4/discovery', () => {
-		assert.equal(isAzureJwksUri('https://login.microsoftonline.com/common/discovery/keys'), false); // the older, non-v2.0 shape
+	it('is also true for the older v1 shared-alias keys shape (no v2.0) — resolveAzureIssuerBinding handles it the same way as the v2 alias shape', () => {
+		assert.equal(isAzureJwksUri('https://login.microsoftonline.com/common/discovery/keys'), true);
+		assert.equal(isAzureJwksUri('https://login.microsoftonline.com/organizations/discovery/keys'), true);
+		assert.equal(isAzureJwksUri('https://login.microsoftonline.com/consumers/discovery/keys'), true);
+	});
+
+	it('is false for the same v1 keys shape on a real tenant GUID, or any other unrecognized shape — resolveAzureIssuerBinding never touches those, so they must not be silently exempted from #231 §4/discovery', () => {
+		assert.equal(isAzureJwksUri(`https://login.microsoftonline.com/${GUID_A}/discovery/keys`), false);
+		assert.equal(isAzureJwksUri('https://login.microsoftonline.com/contoso.onmicrosoft.com/discovery/keys'), false);
 		assert.equal(isAzureJwksUri('https://login.microsoftonline.com/anything/at/all'), false);
 	});
 
@@ -316,6 +323,26 @@ describe('resolveAzureIssuerBinding', () => {
 				resolveAzureIssuerBinding(config, 'azure');
 				assert.equal(config.jwksUri, `https://login.microsoftonline.com/${GUID_A}/discovery/v2.0/keys`);
 				assert.equal(config.issuer, `https://login.microsoftonline.com/${GUID_A}/v2.0`);
+			});
+
+			it(`'${alias}' on the older v1 keys shape (no v2.0) with no pin is ALSO untouched (byte-identical to today) — this is the same shared key pool under an older URL`, () => {
+				const config = baseConfig({
+					jwksUri: `https://login.microsoftonline.com/${alias}/discovery/keys`,
+					issuer: null,
+				});
+				resolveAzureIssuerBinding(config, 'azure');
+				assert.equal(config.jwksUri, `https://login.microsoftonline.com/${alias}/discovery/keys`);
+				assert.equal(config.issuer, null);
+			});
+
+			it(`'${alias}' on the older v1 keys shape (no v2.0) with ANY pin throws — a pinned issuer can never be safely bound to this shared, unvalidated key pool`, () => {
+				const config = baseConfig({
+					jwksUri: `https://login.microsoftonline.com/${alias}/discovery/keys`,
+					issuer: `https://login.microsoftonline.com/${GUID_A}/v2.0`,
+				});
+				assert.throws(() => resolveAzureIssuerBinding(config, 'azure'), /shared v1 (key pool|authority)/);
+				// jwksUri must be left exactly as configured — no partial rewrite before the throw.
+				assert.equal(config.jwksUri, `https://login.microsoftonline.com/${alias}/discovery/keys`);
 			});
 		}
 

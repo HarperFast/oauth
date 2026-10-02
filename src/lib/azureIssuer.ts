@@ -71,6 +71,35 @@ function azureJwksSegment(jwksUri: string | null | undefined): string | null {
 	return match ? match[1] : null;
 }
 
+/**
+ * The `{segment}` of an exact Azure v1 JWKS keys-endpoint URL
+ * (`https://login.microsoftonline.com/{segment}/discovery/keys` — no
+ * `v2.0`; Azure's actual v1 metadata `jwks_uri` for a shared alias
+ * authority), when `{segment}` is one of the shared aliases. `null` for
+ * anything else, including the same path shape for a real tenant GUID —
+ * out of scope here; this module's GUID branch only recognizes the v2 JWKS
+ * shape (`azureJwksSegment`), and a v1-shaped GUID `jwksUri` is unaffected
+ * by this function.
+ */
+function azureV1AliasJwksSegment(jwksUri: string | null | undefined): string | null {
+	if (!jwksUri) return null;
+	let url: URL;
+	try {
+		url = new URL(jwksUri);
+	} catch {
+		return null;
+	}
+	if (url.protocol !== 'https:') return null;
+	if (url.hostname !== AZURE_HOST) return null;
+	if (url.port !== '' || url.username !== '' || url.password !== '' || url.search !== '' || url.hash !== '') {
+		return null;
+	}
+	const match = /^\/([^/]+)\/discovery\/keys$/.exec(url.pathname);
+	if (!match) return null;
+	const segment = match[1].toLowerCase();
+	return ALIAS_SEGMENTS.has(segment) ? segment : null;
+}
+
 /** True when `issuer` is a value `jwt.verify` would actually check against. */
 function hasUsableIssuer(issuer: OAuthProviderConfig['issuer']): boolean {
 	if (Array.isArray(issuer)) return issuer.some((value) => typeof value === 'string' && value !== '');
@@ -265,32 +294,59 @@ function azureDerivedIssuer(
  * Deliberately NOT "any shape `resolveAzureIssuerBinding` recognizes": a
  * real-tenant-GUID segment never reaches here at all (that function always
  * either sets a usable issuer or throws for it, so `hasUsableIssuer` above
- * already short-circuited), and neither a tenant-DOMAIN segment (e.g.
+ * already short-circuited), and a tenant-DOMAIN segment (e.g.
  * `contoso.onmicrosoft.com` — Azure accepts a verified domain name here, not
- * only a GUID) nor the older, non-`v2.0` `/discovery/keys` shape is a case
- * `resolveAzureIssuerBinding` touches at all. Exempting either of those too
- * (an earlier, broader version of this check did) would boot them silently,
- * `issuerValidated` permanently `false` and no error — defeating the point
- * of the check this guards. Falling through instead lets the normal startup
- * error fire, or lets generic discovery run (Azure supports the standard
- * `.well-known/openid-configuration` path for these shapes too).
+ * only a GUID), or the older, non-`v2.0` `/discovery/keys` shape on a real
+ * tenant GUID, is not a case `resolveAzureIssuerBinding` touches at all.
+ * Exempting either of those too (an earlier, broader version of this check
+ * did) would boot them silently, `issuerValidated` permanently `false` and
+ * no error — defeating the point of the check this guards. Falling through
+ * instead lets the normal startup error fire, or lets generic discovery run
+ * (Azure supports the standard `.well-known/openid-configuration` path for
+ * these shapes too).
+ *
+ * The v1 alias shape (`.../common/discovery/keys`, no `v2.0`) IS included
+ * here, alongside the v2 one: it is the same shared, tenant-independent key
+ * pool under an older URL, and `resolveAzureIssuerBinding` handles it the
+ * same way (byte-identical when unpinned; throws when pinned, below) — not
+ * exempting it would route an unpinned one into generic discovery (which
+ * fails for it) and tell the operator to pin, landing on the pinned case
+ * that would otherwise bind an issuer to the unvalidated shared pool.
  */
 export function isAzureJwksUri(jwksUri: string | null | undefined): boolean {
 	const segment = azureJwksSegment(jwksUri);
-	return segment !== null && ALIAS_SEGMENTS.has(segment.toLowerCase());
+	if (segment !== null) return ALIAS_SEGMENTS.has(segment.toLowerCase());
+	return azureV1AliasJwksSegment(jwksUri) !== null;
 }
 
 /**
  * Resolve (and validate) an Azure issuer binding on `config`, in place.
- * A no-op for any `jwksUri` that isn't the exact Azure v2.0 keys-endpoint
- * shape. Throws naming the provider for an unsafe or malformed combination
- * (an array/non-Azure pin on an alias authority, or a pin naming a different
- * tenant than a real-tenant-GUID `jwksUri`) — never silently builds a config
- * that could widen trust or that could never validate anything.
+ * A no-op for any `jwksUri` that isn't a recognized Azure JWKS shape (the
+ * v2 keys endpoint for any segment, or the v1 keys endpoint for a shared
+ * alias specifically). Throws naming the provider for an unsafe or
+ * malformed combination (an array/non-Azure pin on an alias authority, a
+ * pin naming a different tenant than a real-tenant-GUID `jwksUri`, or ANY
+ * pin on a v1-shaped shared alias) — never silently builds a config that
+ * could widen trust or that could never validate anything.
  */
 export function resolveAzureIssuerBinding(config: OAuthProviderConfig, providerName: string, logger?: Logger): void {
 	const segment = azureJwksSegment(config.jwksUri);
-	if (!segment) return;
+	if (!segment) {
+		// Not the v2 shape at all — the only other case this module
+		// recognizes is the v1 shared-alias shape. A v1-shaped real-tenant-GUID
+		// `jwksUri` is NOT recognized (falls through, untouched, same as
+		// before): this module's GUID handling only ever operates on the v2
+		// JWKS shape.
+		const v1AliasSegment = azureV1AliasJwksSegment(config.jwksUri);
+		if (!v1AliasSegment) return;
+		if (!hasUsableIssuer(config.issuer)) return; // Byte-identical to today — same as an unpinned v2 alias.
+		throw new AzureIssuerBindingError(
+			`OAuth provider '${providerName}' (azure) pins 'issuer' on a shared v1 authority ('${v1AliasSegment}', ` +
+				`jwksUri '.../${v1AliasSegment}/discovery/keys') — a pinned issuer can't be bound to Azure's shared v1 ` +
+				`key pool. Use the tenant's own keys ('https://login.microsoftonline.com/<tenant-guid>/discovery/keys') ` +
+				`or the v2 endpoint ('https://login.microsoftonline.com/<tenant-guid>/discovery/v2.0/keys') instead.`
+		);
+	}
 	const lowerSegment = segment.toLowerCase();
 
 	if (GUID_RE.test(lowerSegment)) {
