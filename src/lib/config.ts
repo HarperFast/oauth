@@ -682,7 +682,8 @@ export function extractPluginDefaults(options: OAuthPluginConfig): Partial<OAuth
 }
 
 function isUnsetCredential(expandedValue: unknown): boolean {
-	if (expandedValue === undefined || expandedValue === null || expandedValue === '') return true;
+	if (expandedValue === undefined || expandedValue === null) return true;
+	if (typeof expandedValue === 'string' && expandedValue.trim() === '') return true;
 	return isUnresolvedEnvPlaceholder(expandedValue);
 }
 

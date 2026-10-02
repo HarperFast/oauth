@@ -1921,6 +1921,62 @@ describe('OAuth Configuration', () => {
 				assert.equal(providers.github, undefined);
 				assert.ok(warnings.some((msg) => msg.includes('github') && msg.includes('not configured')));
 			});
+
+			it('6. both credentials whitespace-only: skipped with a warning, other providers still initialize', () => {
+				const warnings = [];
+				const logger = { ...mockLogger, warn: (msg) => warnings.push(msg) };
+
+				const options = {
+					providers: {
+						github: {
+							clientId: '   ',
+							clientSecret: '   ',
+						},
+						google: {
+							clientId: 'google-client',
+							clientSecret: 'google-secret',
+							authorizationUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
+							tokenUrl: 'https://oauth2.googleapis.com/token',
+							userInfoUrl: 'https://openidconnect.googleapis.com/v1/userinfo',
+							redirectUri: 'https://app.test.com/oauth',
+						},
+					},
+				};
+
+				const providers = initializeProviders(options, logger);
+
+				assert.equal(providers.github, undefined, 'the unconfigured provider is skipped');
+				assert.ok(providers.google, 'other providers still initialize');
+				assert.ok(
+					warnings.some((msg) => msg.includes('github') && msg.includes('not configured')),
+					'skipping is warned, not silent'
+				);
+			});
+
+			it('7. clientId set, clientSecret whitespace-only: refuses, naming clientSecret', () => {
+				const options = {
+					redirectUri: 'https://app.test.com/oauth',
+					providers: {
+						github: {
+							clientId: 'github-client',
+							clientSecret: '   ',
+							authorizationUrl: 'https://github.com/login/oauth/authorize',
+							tokenUrl: 'https://github.com/login/oauth/access_token',
+							userInfoUrl: 'https://api.github.com/user',
+						},
+					},
+				};
+
+				assert.throws(
+					() => initializeProviders(options, mockLogger),
+					(error) => {
+						assert.match(error.message, /github/);
+						assert.match(error.message, /half configured/);
+						assert.match(error.message, /clientSecret/);
+						return true;
+					}
+				);
+			});
 		});
 	});
 });
