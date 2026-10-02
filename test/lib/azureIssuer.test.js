@@ -95,6 +95,64 @@ describe('resolveAzureIssuerBinding', () => {
 			assert.equal(config.issuer, `https://login.microsoftonline.com/${GUID_A}/v2.0`);
 		});
 
+		it('warns at startup when authorizationUrl names a different tenant (an alias here) than the unpinned jwksUri’s real tenant — the derived issuer now excludes every other tenant, where main had no issuer check at all', () => {
+			const warnings = [];
+			const logger = { warn: (msg) => warnings.push(msg) };
+			const config = baseConfig({
+				// authorizationUrl stays at baseConfig's default: the 'common' alias.
+				jwksUri: `https://login.microsoftonline.com/${GUID_A}/discovery/v2.0/keys`,
+				issuer: null,
+			});
+			resolveAzureIssuerBinding(config, 'azure-provider', logger);
+			assert.equal(config.issuer, `https://login.microsoftonline.com/${GUID_A}/v2.0`);
+			assert.ok(
+				warnings.some(
+					(msg) =>
+						msg.includes('azure-provider') && msg.includes(GUID_A) && msg.includes('common') && msg.includes('issuer')
+				),
+				'expected a warning naming the provider, the effective tenant, and the alias authorizationUrl names'
+			);
+		});
+
+		it('warns when authorizationUrl names a DIFFERENT real tenant GUID than jwksUri’s', () => {
+			const warnings = [];
+			const logger = { warn: (msg) => warnings.push(msg) };
+			const config = baseConfig({
+				authorizationUrl: `https://login.microsoftonline.com/${GUID_B}/oauth2/v2.0/authorize`,
+				jwksUri: `https://login.microsoftonline.com/${GUID_A}/discovery/v2.0/keys`,
+				issuer: null,
+			});
+			resolveAzureIssuerBinding(config, 'azure-provider', logger);
+			assert.equal(config.issuer, `https://login.microsoftonline.com/${GUID_A}/v2.0`);
+			assert.ok(warnings.some((msg) => msg.includes(GUID_A) && msg.includes(GUID_B)));
+		});
+
+		it('does not warn when authorizationUrl and jwksUri name the same tenant (the normal, unaffected shape)', () => {
+			const warnings = [];
+			const logger = { warn: (msg) => warnings.push(msg) };
+			const config = baseConfig({
+				authorizationUrl: `https://login.microsoftonline.com/${GUID_A}/oauth2/v2.0/authorize`,
+				jwksUri: `https://login.microsoftonline.com/${GUID_A}/discovery/v2.0/keys`,
+				issuer: null,
+			});
+			resolveAzureIssuerBinding(config, 'azure-provider', logger);
+			assert.equal(warnings.length, 0);
+		});
+
+		it('a throwing warn logger does not abort the derivation', () => {
+			const config = baseConfig({
+				jwksUri: `https://login.microsoftonline.com/${GUID_A}/discovery/v2.0/keys`,
+				issuer: null,
+			});
+			const throwingLogger = {
+				warn: () => {
+					throw new Error('logger blew up');
+				},
+			};
+			resolveAzureIssuerBinding(config, 'azure', throwingLogger);
+			assert.equal(config.issuer, `https://login.microsoftonline.com/${GUID_A}/v2.0`);
+		});
+
 		it('derives the v1 (sts.windows.net) issuer form when no pin is given and authorizationUrl is a v1 authorize endpoint', () => {
 			// Mirrors the pinned branch's form check: an unpinned real-tenant-GUID
 			// config must derive the SAME form a pin would have been required to

@@ -185,6 +185,27 @@ function normalizeAzureIssuerPin(issuer: OAuthProviderConfig['issuer'], guid: st
 }
 
 /**
+ * The `{segment}` of an Azure authorize URL's path — either the v1
+ * (`/{segment}/oauth2/authorize`) or v2 (`/{segment}/oauth2/v2.0/authorize`)
+ * shape, lowercased. `null` for a non-Azure host or an unrecognized shape
+ * (e.g. a B2C custom-policy URL) — callers must not warn on `null`; there is
+ * no information to compare.
+ */
+function azureAuthorizeTenantSegment(authorizationUrl: string | null | undefined): string | null {
+	if (!authorizationUrl) return null;
+	let url: URL;
+	try {
+		url = new URL(authorizationUrl);
+	} catch {
+		return null;
+	}
+	if (url.hostname !== AZURE_HOST) return null;
+	const match =
+		/^\/([^/]+)\/oauth2\/v2\.0\/authorize$/.exec(url.pathname) ?? /^\/([^/]+)\/oauth2\/authorize$/.exec(url.pathname);
+	return match ? match[1].toLowerCase() : null;
+}
+
+/**
  * The issuer to DERIVE (no pin given) for tenant `guid`, in the form
  * `authorizationUrl` actually issues — v1 (`sts.windows.net`) when it's a
  * recognized v1 authorize endpoint, v2 otherwise (including an unrecognized
@@ -192,8 +213,40 @@ function normalizeAzureIssuerPin(issuer: OAuthProviderConfig['issuer'], guid: st
  * Mirrors the pinned branch's `azureIssuerMatchesAuthorizeForm` check — a
  * real-tenant-GUID config with NO pin must derive the same form that one
  * would have been required to match.
+ *
+ * Also warns (never throws — advisory only) when `authorizationUrl` names a
+ * DIFFERENT tenant (an alias, or another real GUID) than `jwksUri`'s `guid`:
+ * deriving an issuer here is still the right, secure direction (it collapses
+ * this config into the already-safe tenant-exclusive case, same as the
+ * pinned branch), but it is also a silent behavior change — on `main`, this
+ * exact shape (e.g. `authorizationUrl` pointed at the shared `/common`
+ * endpoint, `jwksUri` pointed at one real tenant) had no issuer check at
+ * all, so any tenant whose token verified against those keys could sign in;
+ * now only `guid`'s tokens can. The warning exists so an operator who relied
+ * on that (deliberately or not) finds out at startup, not from a wave of
+ * `jwt issuer invalid` login failures.
  */
-function azureDerivedIssuer(guid: string, authorizationUrl: string | null | undefined): string {
+function azureDerivedIssuer(
+	guid: string,
+	authorizationUrl: string | null | undefined,
+	providerName: string,
+	logger?: Logger
+): string {
+	const authorizeSegment = azureAuthorizeTenantSegment(authorizationUrl);
+	if (authorizeSegment && authorizeSegment !== guid) {
+		try {
+			logger?.warn?.(
+				`OAuth provider '${providerName}' (azure) has a jwksUri for tenant '${guid}' but an 'authorizationUrl' ` +
+					`naming a different tenant ('${authorizeSegment}'). This provider now accepts sign-ins from '${guid}' ` +
+					`only — a real token from any other tenant now fails ID-token verification outright, where it ` +
+					`previously had no issuer check at all. If that's not intentional, point 'authorizationUrl' and ` +
+					`'jwksUri' at the same tenant. If it is, pin 'issuer' explicitly to '${guid}'s issuer to make this ` +
+					`startup-time derivation explicit in your config.`
+			);
+		} catch {
+			/* advisory log only */
+		}
+	}
 	return azureAuthorizeIssuerHost(authorizationUrl) === AZURE_STS_HOST
 		? `https://${AZURE_STS_HOST}/${guid}/`
 		: azureTenantUri('issuer', guid);
@@ -282,7 +335,7 @@ export function resolveAzureIssuerBinding(config: OAuthProviderConfig, providerN
 			config.issuer = normalizeAzureIssuerPin(config.issuer, lowerSegment);
 			return;
 		}
-		config.issuer = azureDerivedIssuer(lowerSegment, config.authorizationUrl);
+		config.issuer = azureDerivedIssuer(lowerSegment, config.authorizationUrl, providerName, logger);
 		return;
 	}
 
