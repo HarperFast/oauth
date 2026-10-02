@@ -185,6 +185,21 @@ function normalizeAzureIssuerPin(issuer: OAuthProviderConfig['issuer'], guid: st
 }
 
 /**
+ * The issuer to DERIVE (no pin given) for tenant `guid`, in the form
+ * `authorizationUrl` actually issues — v1 (`sts.windows.net`) when it's a
+ * recognized v1 authorize endpoint, v2 otherwise (including an unrecognized
+ * shape, matching this function's behavior before v1 derivation existed).
+ * Mirrors the pinned branch's `azureIssuerMatchesAuthorizeForm` check — a
+ * real-tenant-GUID config with NO pin must derive the same form that one
+ * would have been required to match.
+ */
+function azureDerivedIssuer(guid: string, authorizationUrl: string | null | undefined): string {
+	return azureAuthorizeIssuerHost(authorizationUrl) === AZURE_STS_HOST
+		? `https://${AZURE_STS_HOST}/${guid}/`
+		: azureTenantUri('issuer', guid);
+}
+
+/**
  * True only for an UNPINNED shared alias authority's exact v2.0 keys-endpoint
  * shape (`https://login.microsoftonline.com/common|organizations|consumers/
  * discovery/v2.0/keys`) — the one case `resolveAzureIssuerBinding` above
@@ -267,7 +282,7 @@ export function resolveAzureIssuerBinding(config: OAuthProviderConfig, providerN
 			config.issuer = normalizeAzureIssuerPin(config.issuer, lowerSegment);
 			return;
 		}
-		config.issuer = azureTenantUri('issuer', lowerSegment);
+		config.issuer = azureDerivedIssuer(lowerSegment, config.authorizationUrl);
 		return;
 	}
 

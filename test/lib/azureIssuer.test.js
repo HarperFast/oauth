@@ -95,6 +95,30 @@ describe('resolveAzureIssuerBinding', () => {
 			assert.equal(config.issuer, `https://login.microsoftonline.com/${GUID_A}/v2.0`);
 		});
 
+		it('derives the v1 (sts.windows.net) issuer form when no pin is given and authorizationUrl is a v1 authorize endpoint', () => {
+			// Mirrors the pinned branch's form check: an unpinned real-tenant-GUID
+			// config must derive the SAME form a pin would have been required to
+			// match, not always v2 regardless of what authorizationUrl actually
+			// issues.
+			const config = baseConfig({
+				authorizationUrl: `https://login.microsoftonline.com/${GUID_A}/oauth2/authorize`,
+				jwksUri: `https://login.microsoftonline.com/${GUID_A}/discovery/v2.0/keys`,
+				issuer: null,
+			});
+			resolveAzureIssuerBinding(config, 'azure');
+			assert.equal(config.issuer, `https://sts.windows.net/${GUID_A}/`);
+		});
+
+		it('still derives the v2 issuer form when authorizationUrl is unrecognized (not v1 or v2 shaped)', () => {
+			const config = baseConfig({
+				authorizationUrl: `https://login.microsoftonline.com/${GUID_A}/custom/authorize-path`,
+				jwksUri: `https://login.microsoftonline.com/${GUID_A}/discovery/v2.0/keys`,
+				issuer: null,
+			});
+			resolveAzureIssuerBinding(config, 'azure');
+			assert.equal(config.issuer, `https://login.microsoftonline.com/${GUID_A}/v2.0`);
+		});
+
 		it('leaves an already-canonical matching explicit pin untouched', () => {
 			const config = baseConfig({
 				jwksUri: `https://login.microsoftonline.com/${GUID_A}/discovery/v2.0/keys`,
