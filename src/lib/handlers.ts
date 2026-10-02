@@ -854,9 +854,20 @@ export async function clearOAuthSession(session: any, logger?: Logger): Promise<
 	}
 
 	// Clear in memory too so the current request sees no identity, regardless of persistence.
-	session.user = null;
-	delete session.oauth;
-	delete session.oauthUser;
+	// Guarded: a frozen or otherwise non-configurable session object would throw here, and that
+	// must not undo the "never rejects" contract above either.
+	try {
+		session.user = null;
+		delete session.oauth;
+		delete session.oauthUser;
+	} catch (error) {
+		logQuietly(() =>
+			logger?.error?.(
+				'Failed to clear in-memory OAuth session fields:',
+				error instanceof Error ? error.message : String(error)
+			)
+		);
+	}
 
 	if (persisted) logQuietly(() => logger?.info?.('OAuth session cleared'));
 	return persisted;
@@ -876,9 +887,11 @@ export function logQuietly(log: () => void): void {
 
 /**
  * Headers for a response that reports a failed OAuth session invalidation: retriable, and
- * never cached, so an intermediary can't serve a stale "it's done" to a second client.
+ * never cached, so an intermediary can't serve a stale "it's done" to a second client. Frozen
+ * so a caller spreading this into a response (rather than mutating it directly) is required —
+ * see `handleLogout` and `src/index.ts`'s `sessionClearFailedResponse`.
  */
-export const SESSION_CLEAR_FAILED_HEADERS = { 'Cache-Control': 'no-store', 'Pragma': 'no-cache' };
+export const SESSION_CLEAR_FAILED_HEADERS = Object.freeze({ 'Cache-Control': 'no-store', 'Pragma': 'no-cache' });
 
 /**
  * Handle user logout
@@ -896,7 +909,7 @@ export async function handleLogout(request: Request, hookManager: HookManager, l
 		// for a retry instead of claiming a logout that didn't happen.
 		return {
 			status: 503,
-			headers: SESSION_CLEAR_FAILED_HEADERS,
+			headers: { ...SESSION_CLEAR_FAILED_HEADERS },
 			body: { error: 'logout_failed', message: 'Unable to complete logout, please try again' },
 		};
 	}

@@ -11,6 +11,7 @@ import {
 	handleUserInfo,
 	handleTestPage,
 	clearOAuthSession,
+	SESSION_CLEAR_FAILED_HEADERS,
 } from '../../dist/lib/handlers.js';
 import { buildProviderConfig } from '../../dist/lib/config.js';
 import { createMockFn, createMockLogger } from '../helpers/mockFn.js';
@@ -2922,6 +2923,29 @@ describe('OAuth Handlers', () => {
 			assert.deepEqual(session.update.mock.calls[0].arguments[0], { user: null });
 			assert.equal(mockLogger.error.mock.calls.length, 0);
 		});
+
+		it('resolves (does not reject) when the in-memory clear itself throws', async () => {
+			const session = {
+				id: 'session-123',
+				oauth: { accessToken: 'tok' },
+				update: createMockFn(async () => {}),
+			};
+			// Non-configurable `oauth` makes `delete session.oauth` throw in strict mode.
+			Object.defineProperty(session, 'oauth', { value: session.oauth, configurable: false });
+
+			const result = await clearOAuthSession(session, mockLogger);
+
+			// The store write itself still succeeded; only the best-effort in-memory clear failed.
+			assert.equal(result, true);
+			assert.equal(mockLogger.error.mock.calls.length, 1);
+		});
+
+		it('exports a frozen shared headers constant', () => {
+			assert.ok(Object.isFrozen(SESSION_CLEAR_FAILED_HEADERS));
+			assert.throws(() => {
+				SESSION_CLEAR_FAILED_HEADERS.Mutated = 'nope';
+			});
+		});
 	});
 
 	describe('handleLogout', () => {
@@ -2988,6 +3012,7 @@ describe('OAuth Handlers', () => {
 
 			assert.equal(result.status, 503);
 			assert.equal(result.headers['Cache-Control'], 'no-store');
+			assert.notEqual(result.headers, SESSION_CLEAR_FAILED_HEADERS, 'must not return the shared constant by reference');
 			assert.notEqual(result.body.message, 'Logged out successfully');
 			// Best-effort in-memory clear still happens so this request doesn't see the old identity.
 			assert.equal(mockRequest.session.user, null);
