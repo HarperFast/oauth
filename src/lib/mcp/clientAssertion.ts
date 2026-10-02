@@ -112,7 +112,7 @@ export type ClientAssertionResult =
 			/** The verified header algorithm. */
 			alg: AssertionAlgorithm;
 	  }
-	| { valid: false; reason: string; unknownKid?: boolean };
+	| { valid: false; reason: string; unknownKid?: boolean; rejectedTokenEndpointAudience?: boolean };
 
 export interface VerifyClientAssertionParams {
 	/** The `client_assertion` value — a compact-serialized JWT. */
@@ -124,7 +124,7 @@ export interface VerifyClientAssertionParams {
 	 * value (the original headless contract).
 	 */
 	audiences?: AcceptedAudience[];
-	/** Resolved token-endpoint URL; the sole accepted `aud` when `audiences` is omitted. */
+	/** Resolved token-endpoint URL; accepted by default when `audiences` is omitted, otherwise used only to identify its rejection. */
 	tokenEndpoint?: string;
 	/** The client's registered public JWK Set keys. */
 	jwks: Record<string, unknown>[];
@@ -140,8 +140,16 @@ export interface VerifyClientAssertionParams {
 	clockToleranceSeconds?: number;
 }
 
-function fail(reason: string, extra?: { unknownKid?: boolean }): ClientAssertionResult {
-	return extra?.unknownKid ? { valid: false, reason, unknownKid: true } : { valid: false, reason };
+function fail(
+	reason: string,
+	extra?: { unknownKid?: boolean; rejectedTokenEndpointAudience?: boolean }
+): ClientAssertionResult {
+	return {
+		valid: false,
+		reason,
+		...(extra?.unknownKid ? { unknownKid: true } : {}),
+		...(extra?.rejectedTokenEndpointAudience ? { rejectedTokenEndpointAudience: true } : {}),
+	};
 }
 
 /**
@@ -413,7 +421,9 @@ export function verifyClientAssertion(params: VerifyClientAssertionParams): Clie
 	const aud = Array.isArray(payload.aud) && payload.aud.length === 1 ? payload.aud[0] : payload.aud;
 	const matchedAudience = typeof aud === 'string' ? audiences.find((a) => a.value === aud) : undefined;
 	if (!matchedAudience) {
-		return fail('client_assertion aud does not match an accepted audience');
+		return fail('client_assertion aud does not match an accepted audience', {
+			rejectedTokenEndpointAudience: typeof params.tokenEndpoint === 'string' && aud === params.tokenEndpoint,
+		});
 	}
 
 	const now = Math.floor(Date.now() / 1000);
