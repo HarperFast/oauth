@@ -200,6 +200,17 @@ describe('handleToken', () => {
 		});
 	}
 
+	function codeGrantBody(code, overrides = {}) {
+		return {
+			grant_type: 'authorization_code',
+			code,
+			code_verifier: CODE_VERIFIER,
+			redirect_uri: REDIRECT,
+			client_id: 'public-1',
+			...overrides,
+		};
+	}
+
 	// ---- grant_type dispatch ----
 
 	it('rejects an unsupported grant_type', async () => {
@@ -385,6 +396,56 @@ describe('handleToken', () => {
 	});
 
 	// ---- authorization_code rejection branches ----
+
+	it('accepts a recorded resource on code exchange, including an array of matching values', async () => {
+		for (const [code, resource] of [
+			['code-single', RESOURCE],
+			['code-array', [RESOURCE, RESOURCE]],
+		]) {
+			seedCode(code);
+			const res = await handleToken({ headers: {} }, codeGrantBody(code, { resource }), mcpConfig);
+			assert.equal(res.status, 200);
+			assert.ok(res.body.access_token);
+		}
+	});
+
+	it('rejects unauthorized code resources without consuming the code', async () => {
+		for (const [code, resource] of [
+			['code-single', `${RESOURCE}/other`],
+			['code-array', [RESOURCE, `${RESOURCE}/other`]],
+		]) {
+			seedCode(code);
+			const bad = await handleToken({ headers: {} }, codeGrantBody(code, { resource }), mcpConfig);
+			assert.equal(bad.status, 400);
+			assert.equal(bad.body.error, 'invalid_target');
+			assert.ok(codes.has(code), 'code remains redeemable');
+			const retry = await handleToken({ headers: {} }, codeGrantBody(code, { resource: RESOURCE }), mcpConfig);
+			assert.equal(retry.status, 200);
+		}
+	});
+
+	it('rejects a code resource that matches its record but not the current configuration', async () => {
+		seedCode('code-drift');
+		const res = await handleToken({ headers: {} }, codeGrantBody('code-drift', { resource: RESOURCE }), {
+			...mcpConfig,
+			resource: `${RESOURCE}/new`,
+		});
+		assert.equal(res.body.error, 'invalid_target');
+		assert.ok(codes.has('code-drift'));
+	});
+
+	it('keeps the prior signing error for a code record with no resource', async () => {
+		for (const [code, extra] of [
+			['code-old-absent', {}],
+			['code-old-present', { resource: `${RESOURCE}/other` }],
+		]) {
+			seedCode(code);
+			delete codes.get(code).resource;
+			const res = await handleToken({ headers: {} }, codeGrantBody(code, extra), mcpConfig);
+			assert.equal(res.status, 500);
+			assert.equal(res.body.error, 'server_error');
+		}
+	});
 
 	it('rejects when code, code_verifier, or redirect_uri is missing', async () => {
 		seedCode('code-1');
@@ -701,6 +762,10 @@ describe('handleToken', () => {
 		return token;
 	}
 
+	function refreshGrantBody(token, overrides = {}) {
+		return { grant_type: 'refresh_token', refresh_token: token, client_id: 'public-1', ...overrides };
+	}
+
 	it('rotates a refresh token and issues a fresh access token', async () => {
 		const token = seedFamily('fam-1');
 		const res = await handleToken(
@@ -713,6 +778,56 @@ describe('handleToken', () => {
 		assert.notEqual(res.body.refresh_token, token, 'a new refresh token is issued');
 		const claims = verifyAccessToken(res.body.access_token, keypair.publicKey, { audience: RESOURCE, issuer: ISSUER });
 		assert.equal(claims.sub, 'alice@example.com');
+	});
+
+	it('accepts a recorded resource on refresh, including an array of matching values', async () => {
+		for (const [label, resource] of [
+			['single', RESOURCE],
+			['array', [RESOURCE, RESOURCE]],
+		]) {
+			const token = seedFamily(label);
+			const res = await handleToken({ headers: {} }, refreshGrantBody(token, { resource }), mcpConfig);
+			assert.equal(res.status, 200);
+			assert.ok(res.body.access_token);
+		}
+	});
+
+	it('rejects unauthorized refresh resources without rotating the family', async () => {
+		for (const [label, resource] of [
+			['single', `${RESOURCE}/other`],
+			['array', [RESOURCE, `${RESOURCE}/other`]],
+		]) {
+			const token = seedFamily(label);
+			const before = families.get(`${FAMILY_ID_PREFIX}${label}`).current_token_hash;
+			const bad = await handleToken({ headers: {} }, refreshGrantBody(token, { resource }), mcpConfig);
+			assert.equal(bad.status, 400);
+			assert.equal(bad.body.error, 'invalid_target');
+			assert.equal(families.get(`${FAMILY_ID_PREFIX}${label}`).current_token_hash, before);
+			const retry = await handleToken({ headers: {} }, refreshGrantBody(token, { resource: RESOURCE }), mcpConfig);
+			assert.equal(retry.status, 200);
+		}
+	});
+
+	it('rejects a refresh resource that matches its family but not the current configuration', async () => {
+		const token = seedFamily('drift');
+		const res = await handleToken({ headers: {} }, refreshGrantBody(token, { resource: RESOURCE }), {
+			...mcpConfig,
+			resource: `${RESOURCE}/new`,
+		});
+		assert.equal(res.body.error, 'invalid_target');
+	});
+
+	it('keeps the prior signing error for a refresh family with no resource', async () => {
+		for (const [label, extra] of [
+			['old-absent', {}],
+			['old-present', { resource: `${RESOURCE}/other` }],
+		]) {
+			const token = seedFamily(label);
+			delete families.get(`${FAMILY_ID_PREFIX}${label}`).resource;
+			const res = await handleToken({ headers: {} }, refreshGrantBody(token, extra), mcpConfig);
+			assert.equal(res.status, 500);
+			assert.equal(res.body.error, 'server_error');
+		}
 	});
 
 	it('detects replay of a superseded refresh token and revokes the family', async () => {
