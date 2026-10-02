@@ -378,10 +378,7 @@ export async function handleApplication(scope: Scope): Promise<void> {
 				startIssuerDiscovery(target.authorizationUrl, target.jwksUri, target.tokenUrl, target.providerName, logger);
 			}
 		} catch (error) {
-			logger?.error?.(
-				'OAuth: failed to schedule OIDC issuer discovery:',
-				error instanceof Error ? error.message : String(error)
-			);
+			logger?.error?.('OAuth: failed to schedule OIDC issuer discovery:', error);
 		}
 
 		// Extract plugin defaults for dynamic provider resolution

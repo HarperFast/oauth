@@ -232,9 +232,7 @@ async function discoverIssuer(
 		return await discoverIssuerUnsafe(authorizationUrl, jwksUri, tokenUrl, providerName, logger);
 	} catch (error) {
 		try {
-			logger?.error?.(
-				`OIDC discovery crashed for provider '${providerName}': ${error instanceof Error ? error.message : String(error)}`
-			);
+			logger?.error?.(`OIDC discovery crashed for provider '${providerName}':`, error);
 		} catch {
 			/* never let a throwing logger escape discovery */
 		}
@@ -308,9 +306,7 @@ export function startIssuerDiscovery(
 		discoveryCache.set(key, entry);
 	} catch (error) {
 		try {
-			logger?.error?.(
-				`OIDC discovery: failed to start for provider '${providerName}': ${error instanceof Error ? error.message : String(error)}`
-			);
+			logger?.error?.(`OIDC discovery: failed to start for provider '${providerName}':`, error);
 		} catch {
 			/* swallow */
 		}
