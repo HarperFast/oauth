@@ -317,6 +317,82 @@ describe('TenantManager', () => {
 			const tenant = manager.getTenant('acme-corp');
 			assert.equal(tenant?.providerConfig.provider, 'okta');
 		});
+
+		it('an undefined value in additionalConfig does not override the preset scope (#248)', () => {
+			const manager = new TenantManager();
+
+			manager.registerTenant({
+				tenantId: 'acme-corp',
+				name: 'Acme Corporation',
+				provider: 'okta',
+				domain: 'acme.okta.com',
+				clientId: 'okta-client-id',
+				clientSecret: 'okta-secret',
+				additionalConfig: {
+					scope: undefined,
+				},
+			});
+
+			const tenant = manager.getTenant('acme-corp');
+			assert.equal(tenant?.providerConfig.scope, 'openid profile email groups');
+		});
+
+		it('a null value in additionalConfig is kept as an explicit override, not skipped (#248)', () => {
+			const manager = new TenantManager();
+
+			manager.registerTenant({
+				tenantId: 'acme-corp',
+				name: 'Acme Corporation',
+				provider: 'okta',
+				domain: 'acme.okta.com',
+				clientId: 'okta-client-id',
+				clientSecret: 'okta-secret',
+				additionalConfig: {
+					scope: null,
+				},
+			});
+
+			const tenant = manager.getTenant('acme-corp');
+			assert.equal(tenant?.providerConfig.scope, null);
+		});
+
+		it('an empty-string value in additionalConfig is kept as an explicit override, not skipped (#248)', () => {
+			const manager = new TenantManager();
+
+			manager.registerTenant({
+				tenantId: 'acme-corp',
+				name: 'Acme Corporation',
+				provider: 'okta',
+				domain: 'acme.okta.com',
+				clientId: 'okta-client-id',
+				clientSecret: 'okta-secret',
+				additionalConfig: {
+					scope: '',
+				},
+			});
+
+			const tenant = manager.getTenant('acme-corp');
+			assert.equal(tenant?.providerConfig.scope, '');
+		});
+
+		it('an undefined value in additionalConfig does not defeat the normalized-provider pin (#248)', () => {
+			const manager = new TenantManager();
+
+			manager.registerTenant({
+				tenantId: 'acme-corp',
+				name: 'Acme Corporation',
+				provider: 'Okta',
+				domain: 'acme.okta.com',
+				clientId: 'okta-client-id',
+				clientSecret: 'okta-secret',
+				additionalConfig: {
+					provider: undefined,
+				},
+			});
+
+			const tenant = manager.getTenant('acme-corp');
+			assert.equal(tenant?.providerConfig.provider, 'okta');
+		});
 	});
 
 	describe('Validation', () => {
