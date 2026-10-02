@@ -681,6 +681,19 @@ export function extractPluginDefaults(options: OAuthPluginConfig): Partial<OAuth
 	return pluginDefaults;
 }
 
+function isUnsetCredential(expandedValue: unknown): boolean {
+	if (expandedValue === undefined || expandedValue === null) return true;
+	if (typeof expandedValue === 'string' && expandedValue.trim() === '') return true;
+	return isUnresolvedEnvPlaceholder(expandedValue);
+}
+
+function describeUnsetCredential(field: string, expandedValue: unknown): string {
+	if (isUnresolvedEnvPlaceholder(expandedValue)) {
+		return `'${field}' references environment variable ${String(expandedValue).trim()}, which is not set`;
+	}
+	return `'${field}' is not set`;
+}
+
 /**
  * Initialize OAuth providers from configuration
  */
@@ -706,6 +719,27 @@ export function initializeProviders(options: OAuthPluginConfig, logger?: Logger)
 			throw new Error(
 				"OAuth provider name 'mcp' is reserved for the MCP OAuth endpoints (/oauth/mcp/*). Rename this provider."
 			);
+		}
+
+		// Must run before buildProviderConfig (#238's redirectUri checks) so an unconfigured
+		// provider's redirectUri is never evaluated (#259).
+		const expandedClientId = expandEnvVar(providerConfig?.clientId);
+		const expandedClientSecret = expandEnvVar(providerConfig?.clientSecret);
+		const clientIdUnset = isUnsetCredential(expandedClientId);
+		const clientSecretUnset = isUnsetCredential(expandedClientSecret);
+
+		if (clientIdUnset && clientSecretUnset) {
+			logger?.warn?.(`OAuth provider '${providerName}' not configured. Missing: clientId, clientSecret`);
+			continue;
+		}
+		if (clientIdUnset || clientSecretUnset) {
+			const unsetField = clientIdUnset ? 'clientId' : 'clientSecret';
+			const unsetValue = clientIdUnset ? expandedClientId : expandedClientSecret;
+			logger?.error?.(
+				`OAuth provider '${providerName}' is half configured — ${describeUnsetCredential(unsetField, unsetValue)} ` +
+					`while the other credential is set. Skipping until both 'clientId' and 'clientSecret' are set.`
+			);
+			continue;
 		}
 
 		const config = buildProviderConfig(providerConfig, providerName, pluginDefaults);

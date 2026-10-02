@@ -12,6 +12,16 @@ All notable changes to `@harperfast/oauth` are documented here. The format is ba
 
 - **Token error responses are now tested for `Cache-Control: no-store` / `Pragma: no-cache`.** The error path (`token.ts:errorResponse`) already applied the same `NO_STORE_HEADERS` as the success path; only the success-path assertion existed. No behavior change — closes the other half of the no-store conformance gap (#202).
 
+## [2.8.1] - 2026-10-02
+
+### Fixed
+
+- **An unconfigured or half-configured provider no longer stops every other provider from starting (#259).** Since #238 (2.7.0), `initializeProviders` called `buildProviderConfig` — which throws on a missing or unresolved-placeholder `redirectUri` — before its own "not configured" check, so one provider left unconfigured (e.g. credentials sourced from environment variables an operator hasn't set yet) prevented the plugin from starting at all, and blocked an otherwise-valid live-reload update to every other provider too. Configured-ness is now decided from each provider's raw, env-expanded `clientId`/`clientSecret` before `redirectUri` is ever evaluated: both absent, empty, whitespace-only, or an unresolved `${VAR}` placeholder skips the provider with a warning; exactly one set skips the provider with an error log naming the unset field or the unresolved environment variable, so a typo'd variable still surfaces loudly without taking the rest of the plugin down with it; both set proceeds to build and validate the provider as before. Dynamically resolved providers (`onResolveProvider`) are unaffected — `buildProviderConfig` itself, which they call directly, keeps its existing behavior.
+
+  **Upgrading from 2.8.0 or earlier:**
+  - A provider whose `clientId` and `clientSecret` are _both_ unset, empty, whitespace-only, or an unresolved `${VAR}` is now skipped with a warning. On 2.8.0, such a provider with a valid `redirectUri` was instead registered with the literal, unresolved placeholder string as its credential, which only ever failed logins at the IdP.
+  - A provider with _only one_ of `clientId`/`clientSecret` set is now skipped with an error log naming the unset field or variable. On 2.8.0 it was either skipped with a warning (indistinguishable from a fully-unset provider) or registered with a placeholder credential, depending on which field was unset and how. Neither this nor the fully-unset case stops the plugin from starting.
+
 ## [2.8.0] - 2026-10-01
 
 ### Added
