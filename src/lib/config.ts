@@ -682,6 +682,27 @@ export function extractPluginDefaults(options: OAuthPluginConfig): Partial<OAuth
 }
 
 /**
+ * True when a provider's raw (pre-`buildProviderConfig`) `clientId`/`clientSecret` value,
+ * after env-var expansion, counts as "not set": absent, empty, or an unresolved
+ * `${VAR}` placeholder.
+ */
+function isUnsetCredential(expandedValue: unknown): boolean {
+	if (expandedValue === undefined || expandedValue === null || expandedValue === '') return true;
+	return isUnresolvedEnvPlaceholder(expandedValue);
+}
+
+/**
+ * Describe why a credential counts as unset, naming the environment variable when the
+ * raw value is an unresolved placeholder rather than just saying the field is missing.
+ */
+function describeUnsetCredential(field: string, rawValue: unknown): string {
+	if (isUnresolvedEnvPlaceholder(rawValue)) {
+		return `'${field}' references environment variable ${String(rawValue).trim()}, which is not set`;
+	}
+	return `'${field}' is not set`;
+}
+
+/**
  * Initialize OAuth providers from configuration
  */
 export function initializeProviders(options: OAuthPluginConfig, logger?: Logger): ProviderRegistry {
@@ -705,6 +726,33 @@ export function initializeProviders(options: OAuthPluginConfig, logger?: Logger)
 		if (providerName === 'mcp') {
 			throw new Error(
 				"OAuth provider name 'mcp' is reserved for the MCP OAuth endpoints (/oauth/mcp/*). Rename this provider."
+			);
+		}
+
+		// Decide whether this provider is configured from its raw clientId/clientSecret
+		// BEFORE calling buildProviderConfig, which throws on a missing/unresolved
+		// redirectUri (#238). A provider that was never set up (both credentials unset)
+		// must be skipped with a warning like any other "not configured" provider,
+		// without ever evaluating its redirectUri — otherwise one unconfigured provider
+		// (e.g. credentials sourced from unset env vars) stops every other provider from
+		// initializing (#259). expandEnvVar leaves an unset `${VAR}` unchanged, so the
+		// requiredFields check below would not otherwise catch it either.
+		const rawClientId = providerConfig?.clientId;
+		const rawClientSecret = providerConfig?.clientSecret;
+		const clientIdUnset = isUnsetCredential(expandEnvVar(rawClientId));
+		const clientSecretUnset = isUnsetCredential(expandEnvVar(rawClientSecret));
+
+		if (clientIdUnset && clientSecretUnset) {
+			logger?.warn?.(`OAuth provider '${providerName}' not configured. Missing: clientId, clientSecret`);
+			continue;
+		}
+		if (clientIdUnset || clientSecretUnset) {
+			const unsetField = clientIdUnset ? 'clientId' : 'clientSecret';
+			const unsetRawValue = clientIdUnset ? rawClientId : rawClientSecret;
+			throw new Error(
+				`OAuth provider '${providerName}' is half configured — ${describeUnsetCredential(unsetField, unsetRawValue)} ` +
+					`while the other credential is set. Set both 'clientId' and 'clientSecret' for '${providerName}' ` +
+					`(or remove both to leave it disabled).`
 			);
 		}
 
