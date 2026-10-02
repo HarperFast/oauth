@@ -1169,6 +1169,141 @@ describe('OAuth Handlers', () => {
 			assert.equal(mockRequest.session.update.mock.calls.length, 0);
 		});
 
+		it('gate: hdb_user lookup error + untrusted claim, hatch DISABLED → roleless quarantine, not denied (#231 §5b)', async () => {
+			// A transient read error must not be treated as "account confirmed to
+			// exist": that widens trust to the deny path, which is exactly as
+			// restrictive (no adoption either way) but less available than
+			// quarantining. Default mockProvider/mapUserToHarper yield an
+			// untrusted claim for 'user@example.com'. allowUnverifiedClaimInheritance
+			// defaults to false (not passed in opts).
+			globalThis.databases = {
+				system: {
+					hdb_user: {
+						get: async () => {
+							throw new Error('transient RocksDB read error');
+						},
+					},
+				},
+			};
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				{ logger: mockLogger }
+			);
+
+			assert.equal(result.status, 302);
+			assert.ok(
+				!result.headers.Location.includes('access_denied'),
+				`expected a non-denied redirect; got ${result.headers.Location}`
+			);
+			const updateCall = mockRequest.session.update.mock.calls[0];
+			assert.match(updateCall.arguments[0].user, /^unverified:user@example\.com#[0-9a-f]{16}$/);
+			assert.equal(updateCall.arguments[0].oauth.authTrust, 'untrusted');
+		});
+
+		it('gate: hdb_user lookup error + untrusted claim, hatch ENABLED → retryable server_error, no session established', async () => {
+			// With the hatch enabled, a lookup error must NOT quarantine: if
+			// 'user@example.com' is in fact an existing account, the hatch would
+			// normally adopt it and inherit its role, so quarantining would
+			// silently roleless the session until the next login. Fail with a
+			// retryable error instead so a retry gets the real adopt-vs-quarantine
+			// decision once the lookup succeeds.
+			globalThis.databases = {
+				system: {
+					hdb_user: {
+						get: async () => {
+							throw new Error('transient RocksDB read error');
+						},
+					},
+				},
+			};
+
+			const errorMessages = [];
+			const errorLogger = { ...mockLogger, error: createMockFn((...args) => errorMessages.push(args.join(' '))) };
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				{ logger: errorLogger, allowUnverifiedClaimInheritance: true }
+			);
+
+			assert.equal(result.status, 302);
+			assert.ok(
+				result.headers.Location.includes('error=server_error'),
+				`expected a server_error redirect; got ${result.headers.Location}`
+			);
+			assert.ok(
+				result.headers.Location.includes('account_lookup_failed'),
+				`expected reason=account_lookup_failed; got ${result.headers.Location}`
+			);
+			assert.equal(mockRequest.session.update.mock.calls.length, 0, 'no session must be established');
+			assert.ok(
+				errorMessages.some((m) => m.includes('user@example.com') && m.includes('allowUnverifiedClaimInheritance')),
+				'the lookup failure must be logged server-side'
+			);
+		});
+
+		it('gate: hdb_user lookup error + TRUSTED claim still adopts (lookup error does not block a trusted login)', async () => {
+			// A trusted claim (signed-oidc, issuer validated) is not affected by the
+			// lookup outcome either way — Harper's own role resolution handles a
+			// nonexistent account at request time regardless of what this plugin does.
+			globalThis.databases = {
+				system: {
+					hdb_user: {
+						get: async () => {
+							throw new Error('transient RocksDB read error');
+						},
+					},
+				},
+			};
+			mockProvider.getUserInfo = createMockFn(async () => ({
+				sub: 'u1',
+				email: 'user@example.com',
+				email_verified: true,
+				_emailProvenance: 'signed-oidc',
+			}));
+			mockProvider.mapUserToHarper = createMockFn(() => ({
+				username: 'user@example.com',
+				role: 'user',
+				email: 'user@example.com',
+				emailVerified: true,
+				provider: 'test',
+			}));
+			mockProvider.verifyIdToken = createMockFn(async () => ({
+				claims: { sub: 'u1', iss: 'https://accounts.test', iat: 1, exp: Math.floor(Date.now() / 1000) + 3600 },
+				signatureVerified: true,
+				issuerValidated: true,
+			}));
+			mockProvider.exchangeCodeForToken = createMockFn(async () => ({
+				access_token: 'token',
+				id_token: 'signed-jwt',
+			}));
+
+			const result = await handleCallback(
+				mockRequest,
+				mockTarget,
+				mockProvider,
+				mockConfig,
+				mockHookManager,
+				'test-provider',
+				{ logger: mockLogger }
+			);
+
+			assert.equal(result.status, 302);
+			const updateCall = mockRequest.session.update.mock.calls[0];
+			assert.equal(updateCall.arguments[0].user, 'user@example.com');
+			assert.equal(updateCall.arguments[0].oauth.authTrust, 'verified');
+		});
+
 		it('gate: GitHub verified email (authenticated fetch, username=email) → adopted', async () => {
 			// When a GitHub user is identified by email (e.g. a custom usernameClaim
 			// override or a hook) and GitHub's /user/emails confirmed it verified,

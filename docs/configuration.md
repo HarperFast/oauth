@@ -389,7 +389,10 @@ There are exactly **two** trusted email sources. A login may adopt an existing a
 **Source 1 — JWKS-signed OIDC id token (`signed-oidc`)**:
 
 - The email is a claim in a JWKS-signature-verified id token.
-- The token's `iss` was validated against the provider's **expected issuer** (`config.issuer`). Providers without a known issuer — Azure `/common` (multi-tenant) and issuer-less generic providers — are not trusted for adoption.
+- The token's `iss` was validated against the provider's **expected issuer** (`config.issuer`). Providers without a known issuer — Azure `/common` (multi-tenant) — are not trusted for adoption.
+
+  Any other JWKS-enabled provider (Okta, Auth0, or a `generic` OIDC config) that sets `jwksUri` but has no usable `issuer` fails at startup instead, naming the provider and the `issuer` key — this is almost always a bypassed shortcut (Okta/Auth0's `domain` option, which derives `issuer` for you) rather than an intentionally issuer-less provider. Set `issuer` explicitly, or use `domain`/`tenantId`.
+
 - `email_verified === true` for the **standard `email` claim**. Providers that use a custom `emailClaim` cannot earn adoption trust because `email_verified` only attests the standard claim.
 - The verified email equals the resolved username (`usernameClaim === 'email'`).
 
@@ -404,7 +407,7 @@ Any other source (unsigned token, plain UserInfo, failed GitHub fetch, custom `e
 
 When an `onLogin` hook supplies the identity (`hookData.user`), the gate is skipped entirely — the hook is authoritative.
 
-**`fetchEmail` and OIDC providers without email in the id token** — when `fetchEmail: true` is configured and the id token lacks an `email` claim, the plugin fetches the email from the UserInfo endpoint so the login can resolve a username. The email is populated but the provenance is `unauthenticated` (it is not a signed claim), so adoption of an existing account is still denied. The login proceeds as a roleless session carrying a quarantine principal (see below).
+**`fetchEmail` and OIDC providers without email in the id token** — when `fetchEmail: true` is configured and the id token lacks an `email` claim, the plugin fetches the UserInfo endpoint so the login can resolve a username. The UserInfo response's `sub` must be present and match the id token's `sub` (OIDC Core 5.3.2/5.3.4) — a mismatch or missing `sub` discards the entire response, and the login falls back to the id token's own claims, which lack email in this case. When `sub` matches, the email is populated but the provenance is `unauthenticated` (it is not a signed claim), so adoption of an existing account is still denied; the login proceeds as a roleless session carrying a quarantine principal (see below). Microsoft Graph's non-OIDC `/v1.0/me` response (the Azure preset's default `userInfoUrl`) has no `sub`; it's correlated instead by matching its `id` field against the id token's `oid` claim, so the Azure preset's `fetchEmail: true` behavior (including Graph-only fields like `mail`/`userPrincipalName`) is unaffected by the `sub` requirement above. This needs `oid` on the id token, which Azure only includes when the `profile` scope is requested (the preset's default `scope` includes it) — a config that sets a custom `scope` without `profile` loses `oid` and falls back to the discard.
 
 **Unverified sessions for new accounts** — when the login claim is not trusted and no existing account is found, the session identity is set to an unpredictable, non-resolvable **quarantine principal** of the form `unverified:<email>#<random>` rather than the raw claim. Because the random suffix cannot be guessed, no `hdb_user` can be created to match it, so a later-provisioned privileged account of the claim's name can never be adopted by a replayed unverified login. `oauthUser` (including any app-level role claim) is preserved for the application's own authorization. The `/user` endpoint for such sessions reports the IdP-derived identity with a `null` role — never leaking the opaque principal. See [Quarantine principal](#quarantine-principal) and [Pre-emption](#known-limitations) below.
 
@@ -417,7 +420,7 @@ When an `onLogin` hook supplies the identity (`hookData.user`), the gate is skip
 | `email_verified` absent or false                                    | Provider has not attested the email                  |
 | Custom `emailClaim` (non-`email` claim used as identity)            | `email_verified` does not attest the custom claim    |
 | Unsigned / unverified id token                                      | Signature not verified                               |
-| JWKS-signed token from issuer-less provider (Azure /common, etc.)   | Issuer cannot be validated; nOAuth class attack      |
+| JWKS-signed token from issuer-less Azure `/common` (multi-tenant)   | Issuer cannot be validated; nOAuth class attack      |
 | Azure id token without `email_verified`                             | No verified-email attestation available              |
 | Plain UserInfo response (no id token)                               | No authenticated binding to the identity             |
 | GitHub `/user/emails` fetch failed or returned non-OK               | Email not confirmed by an authenticated call         |
@@ -460,6 +463,8 @@ export OAUTH_ALLOW_UNVERIFIED=true  # disable once migration is complete
 When enabled, the plugin logs a warning on every login that uses the escape hatch. **Disable this setting as soon as operationally practical** — it restores the pre-gate behavior where an unverified claim can adopt any existing account.
 
 Default: `false` (off). Junk values, unresolved `${VAR}` placeholders (environment variable not set), and anything that is not `true` or `false` are treated as `false`.
+
+**On a transient `hdb_user` read error** with the hatch enabled, the login fails with a retryable error (`error=server_error&reason=account_lookup_failed`) rather than falling back to the quarantine principal below — quarantining would silently roleless a session the hatch should have adopted with its real role. With the hatch disabled (the default), a lookup error quarantines exactly like a confirmed non-existent account.
 
 ### Quarantine principal
 

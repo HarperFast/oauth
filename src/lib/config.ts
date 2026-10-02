@@ -550,11 +550,18 @@ export function skipUndefined(source: Record<string, any> | null | undefined): R
  * this matters for a dynamically resolved config (e.g. from `onResolveProvider`)
  * that passes through an unset field such as `scope: row.scope`. `null` and
  * `''` are explicit values and are kept as-is.
+ *
+ * `enforceIssuerForJwks` runs {@link validateIssuerForJwks} (#231 §4) — pass
+ * `true` only from a static, startup-time build (`initializeProviders`), never
+ * from a request-path dynamic resolution (`onResolveProvider`): throwing there
+ * would fail every request for a misconfigured tenant instead of just leaving
+ * it non-adoption-eligible.
  */
 export function buildProviderConfig(
 	providerConfig: Record<string, any>,
 	providerName: string,
-	pluginDefaults: Partial<OAuthProviderConfig> = {}
+	pluginDefaults: Partial<OAuthProviderConfig> = {},
+	enforceIssuerForJwks = false
 ): OAuthProviderConfig {
 	const options = providerConfig || {};
 
@@ -660,7 +667,54 @@ export function buildProviderConfig(
 		}
 	}
 
+	if (enforceIssuerForJwks) {
+		validateIssuerForJwks(config, providerName, providerPreset);
+	}
+
 	return config;
+}
+
+/**
+ * True when `issuer` is a value `jwt.verify`/`verifyIdTokenClaims` will actually
+ * check against — a non-empty string, or a non-empty array (an empty array
+ * normalizes to "no issuer configured", same as OAuthProvider.verifyIdToken).
+ */
+function hasUsableIssuer(issuer: OAuthProviderConfig['issuer']): boolean {
+	if (Array.isArray(issuer)) return issuer.some((value) => typeof value === 'string' && value !== '');
+	return typeof issuer === 'string' && issuer !== '';
+}
+
+/**
+ * A JWKS-enabled provider (so `issuerValidated` can in principle be `true` —
+ * HarperFast/oauth#231 §4) with no usable `issuer` would otherwise deny
+ * adoption silently at login, forever. `domain`/`tenantId` already derive
+ * `issuer` for Okta/Auth0/Azure; this only fires when that's bypassed.
+ *
+ * Azure is excluded by provider type, not just its `/common` default: single-
+ * tenant Azure configs with explicit endpoints and no `issuer` are unchanged
+ * by this PR (tracked as a known gap in HarperFast/oauth#264, not fixed
+ * here). Checked against the
+ * preset's own `provider` field (`providerPreset`), not `config.provider` —
+ * the `microsoft` alias resolves to the Azure preset but an explicit
+ * `provider: 'microsoft'` option carries that string into `config.provider`.
+ */
+function validateIssuerForJwks(
+	config: OAuthProviderConfig,
+	providerName: string,
+	providerPreset: OAuthProviderConfig | null
+): void {
+	if (!config.jwksUri) return;
+	if (config.provider === 'azure' || providerPreset?.provider === 'azure') return;
+	if (hasUsableIssuer(config.issuer)) return;
+
+	throw new Error(
+		`OAuth provider '${providerName}' (${config.provider}) has a 'jwksUri' but no usable 'issuer'. ` +
+			`Without a validated issuer, ID token signature verification still runs but 'issuerValidated' is ` +
+			`always false, so this provider's logins can never satisfy the account-adoption gate (a hookless ` +
+			`login that should adopt an existing Harper account is silently denied instead). Set 'issuer' ` +
+			`explicitly on provider '${providerName}' (e.g. your OIDC server's issuer URI), or use the preset's ` +
+			`'domain'/'tenantId' shortcut if you're not already, which derives it for you.`
+	);
 }
 
 /**
@@ -742,7 +796,10 @@ export function initializeProviders(options: OAuthPluginConfig, logger?: Logger)
 			continue;
 		}
 
-		const config = buildProviderConfig(providerConfig, providerName, pluginDefaults);
+		// enforceIssuerForJwks (#231 §4) only runs here, after the configured-ness
+		// precheck above (#259/#260) — an unconfigured or half-configured provider
+		// is already skipped and never reaches the issuer check.
+		const config = buildProviderConfig(providerConfig, providerName, pluginDefaults, /* enforceIssuerForJwks */ true);
 
 		// Check if this provider is properly configured
 		const requiredFields = ['clientId', 'clientSecret', 'authorizationUrl', 'tokenUrl', 'userInfoUrl'];
