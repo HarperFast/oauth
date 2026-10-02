@@ -16,6 +16,7 @@ import {
 	handleToken,
 } from '../../../dist/lib/mcp/token.js';
 import { MAX_ASSERTION_LENGTH } from '../../../dist/lib/mcp/clientAssertion.js';
+import { tokenEndpointAudienceExceptionApplies } from '../../../dist/lib/mcp/clientAuthMethod.js';
 import { buildAuthorizationServerMetadata } from '../../../dist/lib/mcp/wellKnown.js';
 import { resetMCPAssertionJtisTableCache } from '../../../dist/lib/mcp/assertionJtiStore.js';
 import { resetMCPAuthCodesTableCache } from '../../../dist/lib/mcp/authCodeStore.js';
@@ -725,8 +726,17 @@ describe('handleToken — shared client authenticator', () => {
 			});
 			assertAudienceWarning(
 				ASSISTANT,
-				`No token-endpoint audience exception is configured. Set mcp.clientIdMetadataDocuments.privateKeyJwt.tokenEndpointAudience to { clientIds: [${JSON.stringify(ASSISTANT)}], expiresAt: "<ISO 8601 date-time with timezone>" } with an expiry you choose.`
+				`No token-endpoint audience exception is configured; set mcp.clientIdMetadataDocuments.privateKeyJwt.tokenEndpointAudience to { clientIds: [${JSON.stringify(ASSISTANT)}], expiresAt: "<future ISO 8601 date-time with timezone>" }.`
 			);
+			const proposed = {
+				...MIXED,
+				clientIdMetadataDocuments: {
+					privateKeyJwt: {
+						tokenEndpointAudience: { clientIds: [ASSISTANT], expiresAt: new Date(Date.now() + 60_000).toISOString() },
+					},
+				},
+			};
+			assert.equal(tokenEndpointAudienceExceptionApplies({ ...ASSISTANT_DOC, _cimd: true }, proposed), true);
 			const [, payload, signature] = assertion.split('.');
 			assert.ok(
 				!logLines.some((line) => line.includes(assertion) || line.includes(payload) || line.includes(signature))
@@ -865,7 +875,7 @@ describe('handleToken — shared client authenticator', () => {
 				);
 				assertAudienceWarning(
 					ASSISTANT,
-					'The configured token-endpoint audience exception has expired. Renew mcp.clientIdMetadataDocuments.privateKeyJwt.tokenEndpointAudience.expiresAt to a future ISO 8601 date-time with timezone (an expiry you choose), keeping the configured clientIds.'
+					'The configured token-endpoint audience exception has expired; renew mcp.clientIdMetadataDocuments.privateKeyJwt.tokenEndpointAudience.expiresAt to a future ISO 8601 date-time with timezone.'
 				);
 				assertNoReplacementObject();
 			});
@@ -878,7 +888,7 @@ describe('handleToken — shared client authenticator', () => {
 				);
 				assertAudienceWarning(
 					ASSISTANT,
-					`The configured token-endpoint audience exception does not list this client ID. Add ${JSON.stringify(ASSISTANT)} to the existing mcp.clientIdMetadataDocuments.privateKeyJwt.tokenEndpointAudience.clientIds, keeping its configured expiresAt.`
+					`The configured token-endpoint audience exception does not list this client ID; add ${JSON.stringify(ASSISTANT)} to the existing mcp.clientIdMetadataDocuments.privateKeyJwt.tokenEndpointAudience.clientIds, preserving its other IDs.`
 				);
 				assertNoReplacementObject();
 			});
@@ -891,9 +901,94 @@ describe('handleToken — shared client authenticator', () => {
 				);
 				assertAudienceWarning(
 					ASSISTANT,
-					'The configured token-endpoint audience exception has an invalid expiry. Set mcp.clientIdMetadataDocuments.privateKeyJwt.tokenEndpointAudience.expiresAt to an ISO 8601 date-time with timezone (an expiry you choose), keeping the configured clientIds.'
+					'The configured token-endpoint audience exception has an invalid expiry; set mcp.clientIdMetadataDocuments.privateKeyJwt.tokenEndpointAudience.expiresAt to a future ISO 8601 date-time with timezone.'
 				);
 				assertNoReplacementObject();
+			});
+
+			it('names both repairs when an exception is expired and does not list the client', async () => {
+				const config = exceptionFor(['https://other.example.com/client.json'], Date.now() - 1);
+				assertInvalidClient(
+					await exchange(body(signAssertion({ claims: { aud: TOKEN_ENDPOINT } })), { config }),
+					/aud does not match/
+				);
+				assertAudienceWarning(
+					ASSISTANT,
+					`The configured token-endpoint audience exception has expired and does not list this client ID; renew mcp.clientIdMetadataDocuments.privateKeyJwt.tokenEndpointAudience.expiresAt to a future ISO 8601 date-time with timezone and add ${JSON.stringify(ASSISTANT)} to the existing mcp.clientIdMetadataDocuments.privateKeyJwt.tokenEndpointAudience.clientIds, preserving its other IDs.`
+				);
+				assertNoReplacementObject();
+			});
+
+			for (const [expired, unlisted] of [
+				[false, false],
+				[true, false],
+				[false, true],
+				[true, true],
+			]) {
+				it(`printed remedy admits the client (expired=${expired}, unlisted=${unlisted})`, async () => {
+					const otherId = 'https://other.example.com/client.json';
+					const config = exceptionFor(
+						unlisted ? [otherId] : [otherId, ASSISTANT],
+						Date.now() + (expired ? -60_000 : 60_000)
+					);
+					const client = { ...ASSISTANT_DOC, _cimd: true };
+					const exception = config.clientIdMetadataDocuments.privateKeyJwt.tokenEndpointAudience;
+					assert.equal(tokenEndpointAudienceExceptionApplies(client, config), !expired && !unlisted);
+					const result = await exchange(body(signAssertion({ claims: { aud: TOKEN_ENDPOINT } })), { config });
+					if (!expired && !unlisted) {
+						assert.equal(result.status, 200);
+						assert.equal(warningLines.length, 0);
+					} else {
+						assertInvalidClient(result, /aud does not match/);
+						assert.equal(warningLines.length, 1);
+						assertNoReplacementObject();
+						const remedy = warningLines[0];
+						const renew = remedy.includes(
+							'renew mcp.clientIdMetadataDocuments.privateKeyJwt.tokenEndpointAudience.expiresAt to a future ISO 8601 date-time with timezone'
+						);
+						const add = remedy.includes(
+							`add ${JSON.stringify(ASSISTANT)} to the existing mcp.clientIdMetadataDocuments.privateKeyJwt.tokenEndpointAudience.clientIds`
+						);
+						assert.equal(renew, expired, 'warning must name each needed expiry edit');
+						assert.equal(add, unlisted, 'warning must name each needed clientIds edit');
+						if (renew) exception.expiresAt = Date.now() + 60_000;
+						if (add) exception.clientIds.push(ASSISTANT);
+						assert.ok(exception.clientIds.includes(otherId), 'the existing client ID stays listed');
+					}
+					assert.equal(tokenEndpointAudienceExceptionApplies(client, config), true);
+				});
+			}
+
+			it('repairs invalid expiry and an unlisted client together', async () => {
+				const config = exceptionFor(['https://other.example.com/client.json'], 'not-a-date');
+				assertInvalidClient(
+					await exchange(body(signAssertion({ claims: { aud: TOKEN_ENDPOINT } })), { config }),
+					/aud does not match/
+				);
+				assertAudienceWarning(
+					ASSISTANT,
+					`The configured token-endpoint audience exception has an invalid expiry and does not list this client ID; set mcp.clientIdMetadataDocuments.privateKeyJwt.tokenEndpointAudience.expiresAt to a future ISO 8601 date-time with timezone and add ${JSON.stringify(ASSISTANT)} to the existing mcp.clientIdMetadataDocuments.privateKeyJwt.tokenEndpointAudience.clientIds, preserving its other IDs.`
+				);
+				assertNoReplacementObject();
+				const exception = config.clientIdMetadataDocuments.privateKeyJwt.tokenEndpointAudience;
+				exception.expiresAt = new Date(Date.now() + 60_000).toISOString();
+				exception.clientIds.push(ASSISTANT);
+				assert.equal(tokenEndpointAudienceExceptionApplies({ ...ASSISTANT_DOC, _cimd: true }, config), true);
+			});
+
+			it('repairs an invalid clientIds field inside the existing exception', async () => {
+				const config = exceptionFor('not-a-list', Date.now() + 60_000);
+				assertInvalidClient(
+					await exchange(body(signAssertion({ claims: { aud: TOKEN_ENDPOINT } })), { config }),
+					/aud does not match/
+				);
+				assertAudienceWarning(
+					ASSISTANT,
+					`The configured token-endpoint audience exception has invalid clientIds; set mcp.clientIdMetadataDocuments.privateKeyJwt.tokenEndpointAudience.clientIds to a list containing ${JSON.stringify(ASSISTANT)}.`
+				);
+				assertNoReplacementObject();
+				config.clientIdMetadataDocuments.privateKeyJwt.tokenEndpointAudience.clientIds = [ASSISTANT];
+				assert.equal(tokenEndpointAudienceExceptionApplies({ ...ASSISTANT_DOC, _cimd: true }, config), true);
 			});
 
 			it('diagnoses off-origin keys before the absence of an exception', async () => {
@@ -923,9 +1018,9 @@ describe('handleToken — shared client authenticator', () => {
 				assert.ok(!warningLines[0].includes('mcp.clientIdMetadataDocuments.privateKeyJwt.tokenEndpointAudience'));
 			});
 
-			it('does not apply when the keys come from an allowlisted foreign origin', async () => {
+			it('off-origin keys take precedence over an expired exception that omits the client', async () => {
 				seedCode('code-2', FOREIGN, 'https://foreign.example.com/cb', 'private_key_jwt');
-				const config = exceptionFor([FOREIGN], Date.now() + 60_000, {
+				const config = exceptionFor([ASSISTANT], Date.now() - 60_000, {
 					jwksUriAllowedOrigins: ['https://keys.example.net'],
 				});
 				const foreign = (aud) => signAssertion({ claims: { iss: FOREIGN, sub: FOREIGN, aud } });

@@ -107,17 +107,35 @@ function warnRejectedTokenEndpointAudience(
 		remediation =
 			'The token-endpoint audience exception cannot admit this client because its keys are not on its client-ID origin; use inline keys or a jwks_uri on that origin before configuring or using the exception.';
 	} else if (!exception) {
-		remediation = `No token-endpoint audience exception is configured. Set mcp.clientIdMetadataDocuments.privateKeyJwt.tokenEndpointAudience to { clientIds: [${logSafeId}], expiresAt: "<ISO 8601 date-time with timezone>" } with an expiry you choose.`;
+		remediation = `No token-endpoint audience exception is configured; set mcp.clientIdMetadataDocuments.privateKeyJwt.tokenEndpointAudience to { clientIds: [${logSafeId}], expiresAt: "<future ISO 8601 date-time with timezone>" }.`;
 	} else {
 		const expiresAt = typeof exception.expiresAt === 'number' ? exception.expiresAt : Date.parse(exception.expiresAt);
+		const problems: string[] = [];
+		const actions: string[] = [];
 		if (!Number.isFinite(expiresAt)) {
-			remediation =
-				'The configured token-endpoint audience exception has an invalid expiry. Set mcp.clientIdMetadataDocuments.privateKeyJwt.tokenEndpointAudience.expiresAt to an ISO 8601 date-time with timezone (an expiry you choose), keeping the configured clientIds.';
+			problems.push('has an invalid expiry');
+			actions.push(
+				'set mcp.clientIdMetadataDocuments.privateKeyJwt.tokenEndpointAudience.expiresAt to a future ISO 8601 date-time with timezone'
+			);
 		} else if (nowMs >= expiresAt) {
-			remediation =
-				'The configured token-endpoint audience exception has expired. Renew mcp.clientIdMetadataDocuments.privateKeyJwt.tokenEndpointAudience.expiresAt to a future ISO 8601 date-time with timezone (an expiry you choose), keeping the configured clientIds.';
-		} else if (!Array.isArray(exception.clientIds) || !exception.clientIds.includes(clientId)) {
-			remediation = `The configured token-endpoint audience exception does not list this client ID. Add ${logSafeId} to the existing mcp.clientIdMetadataDocuments.privateKeyJwt.tokenEndpointAudience.clientIds, keeping its configured expiresAt.`;
+			problems.push('has expired');
+			actions.push(
+				'renew mcp.clientIdMetadataDocuments.privateKeyJwt.tokenEndpointAudience.expiresAt to a future ISO 8601 date-time with timezone'
+			);
+		}
+		if (!Array.isArray(exception.clientIds)) {
+			problems.push('has invalid clientIds');
+			actions.push(
+				`set mcp.clientIdMetadataDocuments.privateKeyJwt.tokenEndpointAudience.clientIds to a list containing ${logSafeId}`
+			);
+		} else if (!exception.clientIds.includes(clientId)) {
+			problems.push('does not list this client ID');
+			actions.push(
+				`add ${logSafeId} to the existing mcp.clientIdMetadataDocuments.privateKeyJwt.tokenEndpointAudience.clientIds, preserving its other IDs`
+			);
+		}
+		if (problems.length > 0) {
+			remediation = `The configured token-endpoint audience exception ${problems.join(' and ')}; ${actions.join(' and ')}.`;
 		} else {
 			remediation = 'The configured token-endpoint audience exception did not apply.';
 		}

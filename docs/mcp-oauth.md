@@ -853,9 +853,10 @@ assertion names the token endpoint URL as `aud` and the audience check refuses
 it, an available warning logger can name the client ID and explain why the exception
 did not apply. With keys on the client-ID origin and no exception configured, it
 shows the full
-`mcp.clientIdMetadataDocuments.privateKeyJwt.tokenEndpointAudience` object and an expiry
+`mcp.clientIdMetadataDocuments.privateKeyJwt.tokenEndpointAudience` object and a future expiry
 to choose. With an existing exception and keys on the client-ID origin, it tells the
-operator which field to amend while keeping the other field. If `jwks_uri` is off
+operator every field that must change (expiry, client ID, or both), preserving
+other listed client IDs when the list is valid. If `jwks_uri` is off
 the client-ID origin, it says the exception cannot admit that client and does
 not suggest a setting. Each node warns at most once per client ID per five minutes. When its 1,024 slots are full, it suppresses warnings for new IDs until an expired slot is cleared by a later refusal. The client still receives the
 generic `invalid_client` audience error.
