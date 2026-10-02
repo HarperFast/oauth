@@ -317,9 +317,8 @@ type PresentedCredentials =
 	| { method: 'client_secret_post'; secret: string }
 	| { method: 'private_key_jwt'; assertion: string };
 
-type VerifiedPresentedAssertion = { jti: string; exp: number; alg: string; audienceForm: AudienceForm };
 type ClientAuthResult =
-	| { client: MCPClientRecord; method: ClientAuthMethod; assertion?: VerifiedPresentedAssertion }
+	| { client: MCPClientRecord; method: ClientAuthMethod; audienceForm?: AudienceForm }
 	| { error: TokenResponse };
 
 /** The verifier's wording for an over-length assertion, reused where the token endpoint rejects one early. */
@@ -460,12 +459,7 @@ async function authenticateClient(
 	if (presented.method === 'private_key_jwt') {
 		const verified = await verifyPresentedAssertion(client, presented.assertion, request, mcpConfig, logger);
 		if ('error' in verified) return verified;
-		if (requestedResources(body).length === 0) {
-			const replayError = await recordPresentedAssertion(client, verified, logger);
-			if (replayError) return { error: replayError };
-			return { client, method: 'private_key_jwt' };
-		}
-		return { client, method: 'private_key_jwt', assertion: verified };
+		return { client, method: 'private_key_jwt', audienceForm: verified.audienceForm };
 	}
 	if (!client.client_secret || !safeEqual(presented.secret, client.client_secret)) {
 		return invalidClient('Invalid client credentials');
@@ -475,11 +469,8 @@ async function authenticateClient(
 
 /**
  * Verify a private_key_jwt assertion presented on the authorization_code or
- * refresh_token grant. Without `resource`, client authentication attempts to
- * record its jti. With `resource`, recording depends on the grant path:
- * redeemable grants attempt it after resource validation; superseded refresh
- * replay attempts it before revocation without checking the resource. Earlier
- * grant failures skip recording. Headless records use their
+ * refresh_token grant, then record its jti before grant and resource checks.
+ * Headless records use their
  * client_credentials policy (EdDSA, inline keys); interactive CIMD records
  * use theirs (RS256/ES256/EdDSA narrowed by the document's pin, inline `jwks`
  * or `jwks_uri`, issuer audience plus the opt-in exception). A stored (DCR)
@@ -491,7 +482,7 @@ async function verifyPresentedAssertion(
 	request: Request | undefined,
 	mcpConfig: MCPConfig | undefined,
 	logger?: Logger
-): Promise<VerifiedPresentedAssertion | { error: TokenResponse }> {
+): Promise<{ audienceForm: AudienceForm } | { error: TokenResponse }> {
 	const issuer = resolveIssuer(request as any, mcpConfig ?? {});
 	const tokenEndpoint = tokenEndpointUrl(issuer);
 	let policy: AssertionPolicy;
@@ -547,29 +538,20 @@ async function verifyPresentedAssertion(
 		return invalidClient(`client_assertion verification failed: ${result.reason}`);
 	}
 
-	return {
-		jti: result.claims.jti,
-		exp: result.claims.exp,
-		alg: result.alg,
-		audienceForm: result.audienceForm,
-	};
-}
-
-/** Record a verified assertion's jti and optionally log its accepted audience form. */
-async function recordPresentedAssertion(
-	client: MCPClientRecord,
-	assertion: VerifiedPresentedAssertion | undefined,
-	logger?: Logger
-): Promise<TokenResponse | undefined> {
-	if (!assertion) return undefined;
 	// A storage failure throws to the top-level 500 handler (fail closed).
-	const fresh = await new MCPAssertionJtiStore(logger).checkAndRecord(client.client_id, assertion.jti, assertion.exp);
-	if (!fresh) return errorResponse(401, 'invalid_client', 'client_assertion jti has already been used');
+	const fresh = await new MCPAssertionJtiStore(logger).checkAndRecord(
+		client.client_id,
+		result.claims.jti,
+		result.claims.exp
+	);
+	if (!fresh) return invalidClient('client_assertion jti has already been used');
+
+	// Record which audience form was accepted; never the assertion itself.
 	logger?.info?.(
 		`MCP token: client ${JSON.stringify(client.client_id)} authenticated with private_key_jwt ` +
-			`(alg ${assertion.alg}, aud form ${assertion.audienceForm})`
+			`(alg ${result.alg}, aud form ${result.audienceForm})`
 	);
-	return undefined;
+	return { audienceForm: result.audienceForm };
 }
 
 /** PKCE S256: base64url(sha256(code_verifier)) must equal the stored challenge. */
@@ -678,7 +660,6 @@ async function handleAuthorizationCodeGrant(
 	body: any,
 	client: MCPClientRecord,
 	clientAuthMethod: ClientAuthMethod,
-	assertion: VerifiedPresentedAssertion | undefined,
 	mcpConfig: MCPConfig,
 	hookManager?: HookManager,
 	logger?: Logger
@@ -734,8 +715,6 @@ async function handleAuthorizationCodeGrant(
 	if (hasUnauthorizedResource(body, record.resource, request, mcpConfig)) {
 		return errorResponse(400, 'invalid_target', 'resource does not match the authorized MCP resource');
 	}
-	const replayError = await recordPresentedAssertion(client, assertion, logger);
-	if (replayError) return replayError;
 
 	// Strict single-use consume: if the delete fails, the code might still be
 	// replayable, so refuse to issue rather than risk a double-spend.
@@ -770,7 +749,6 @@ async function handleRefreshTokenGrant(
 	body: any,
 	client: MCPClientRecord,
 	clientAuthMethod: ClientAuthMethod,
-	assertion: VerifiedPresentedAssertion | undefined,
 	mcpConfig: MCPConfig,
 	hookManager?: HookManager,
 	logger?: Logger
@@ -795,8 +773,6 @@ async function handleRefreshTokenGrant(
 	}
 
 	if (!safeEqual(hashRefreshToken(presented), family.current_token_hash)) {
-		const replayError = await recordPresentedAssertion(client, assertion, logger);
-		if (replayError) return replayError;
 		// A superseded (already-rotated) token was replayed — revoke the family.
 		// Rejecting the replay must not depend on the revoke write succeeding: a
 		// hash mismatch NEVER reissues, and a failed write still answers
@@ -891,8 +867,6 @@ async function handleRefreshTokenGrant(
 	if (hasUnauthorizedResource(body, family.resource, request, mcpConfig)) {
 		return errorResponse(400, 'invalid_target', 'resource does not match the authorized MCP resource');
 	}
-	const replayError = await recordPresentedAssertion(client, assertion, logger);
-	if (replayError) return replayError;
 
 	// Sign the access token BEFORE committing the rotation. If key fetch or
 	// signing throws, the family is left untouched so the client's current
@@ -1178,22 +1152,12 @@ async function dispatchToken(
 				body,
 				auth.client,
 				auth.method,
-				auth.assertion,
 				mcpConfig,
 				hookManager,
 				logger
 			);
 		}
-		return await handleRefreshTokenGrant(
-			request,
-			body,
-			auth.client,
-			auth.method,
-			auth.assertion,
-			mcpConfig,
-			hookManager,
-			logger
-		);
+		return await handleRefreshTokenGrant(request, body, auth.client, auth.method, mcpConfig, hookManager, logger);
 	} catch (error) {
 		logger?.error?.(
 			'MCP token: unexpected error during token issuance:',

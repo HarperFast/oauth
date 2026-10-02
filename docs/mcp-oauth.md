@@ -880,15 +880,13 @@ HarperFast/harper#2953, the token endpoint refuses an array for a listed
 single-valued parameter, and accepts a `resource` array only when every value is
 acceptable.
 
-For `authorization_code` and `refresh_token`, after grant validation, each
-parsed `resource` value on a redeemable code or current refresh token with a
-stored resource must match both that resource and the current MCP resource. A
-mismatch then returns `400 invalid_target` before an assertion ID is recorded,
-the code consumed, or the refresh family rotated. Superseded refresh replay
-handling retains precedence over resource validation. Omitting `resource` leaves
-issuance unchanged. An otherwise valid grant record without a stored resource
-still reaches signing and returns `server_error`, whether or not the request
-supplies `resource`.
+For `authorization_code` and `refresh_token`, a verified client assertion is
+recorded before grant and resource checks, including when `resource` is present.
+On a redeemable code or current refresh token with a stored resource, every
+parsed `resource` must match both it and the current MCP resource; otherwise
+`400 invalid_target` precedes code consumption or refresh rotation. Superseded
+refresh replay precedes resource validation. Omitting `resource` is unchanged.
+A valid grant without a stored resource still returns `server_error` at signing.
 
 ### Grant binding
 
