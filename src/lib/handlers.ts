@@ -835,22 +835,81 @@ export async function handleCallback(
  * Harper 5's request.session is a shallow copy with only `.update` (a full-replace put) and
  * no `.delete`; in-memory mutation never persists — so invalidate by persisting `{ user: null }`,
  * mirroring Harper's own logout().
+ *
+ * Returns `true` when there was nothing to persist (no session, or an anonymous session with
+ * no `id` — the intentional quiet no-op) or the clear fully succeeded. Returns `false` when an
+ * *existing* session couldn't be reliably cleared — the store write failed, or it succeeded but
+ * the in-memory clear afterward threw — so callers must not treat `false` like a completed
+ * logout/invalidation. Reports this as a boolean rather than throwing, so a caller that forgets
+ * to catch a thrown error can't turn either failure into an unhandled rejection.
  */
-export async function clearOAuthSession(session: any, logger?: Logger): Promise<void> {
-	if (!session) return;
+export async function clearOAuthSession(session: any, logger?: Logger): Promise<boolean> {
+	if (!session) return true;
 
 	// Persist only for an existing session: `.update` on an anonymous request would mint a
 	// fresh, non-expiring hdb_session row.
-	if (session.id && typeof session.update === 'function') {
-		await session.update({ user: null });
+	let persisted = true;
+	if (session.id) {
+		if (typeof session.update === 'function') {
+			try {
+				await session.update({ user: null });
+			} catch (error) {
+				persisted = false;
+				logQuietly(() =>
+					logger?.error?.(
+						'Failed to persist OAuth session clear:',
+						error instanceof Error ? error.message : String(error)
+					)
+				);
+			}
+		} else {
+			persisted = false;
+			logQuietly(() => logger?.error?.('Failed to persist OAuth session clear: session.update is not callable'));
+		}
 	}
-	// Clear in memory too so the current request sees no identity.
-	session.user = null;
-	delete session.oauth;
-	delete session.oauthUser;
 
-	logger?.info?.('OAuth session cleared');
+	// Clear in memory too so the current request sees no identity. A frozen or otherwise
+	// non-configurable session object would throw here — guarded so that can't escape or be
+	// mistaken for a clean clear.
+	let clearedInMemory = true;
+	try {
+		session.user = null;
+		delete session.oauth;
+		delete session.oauthUser;
+	} catch (error) {
+		clearedInMemory = false;
+		logQuietly(() =>
+			logger?.error?.(
+				'Failed to clear in-memory OAuth session fields:',
+				error instanceof Error ? error.message : String(error)
+			)
+		);
+	}
+
+	const cleared = persisted && clearedInMemory;
+	if (cleared) logQuietly(() => logger?.info?.('OAuth session cleared'));
+	return cleared;
 }
+
+/**
+ * Runs a logging call without letting a throwing logger turn an already-decided result into
+ * an unhandled rejection.
+ */
+export function logQuietly(log: () => void): void {
+	try {
+		log();
+	} catch {
+		// Logging is best-effort; the caller already has the outcome it needs.
+	}
+}
+
+/**
+ * Headers for a response that reports a failed OAuth session invalidation: retriable, and
+ * never cached, so an intermediary can't serve a stale "it's done" to a second client. Frozen
+ * so a caller must spread it into a fresh object (as `handleLogout` and `src/index.ts`'s
+ * `sessionClearFailedResponse` both do) instead of mutating it directly.
+ */
+export const SESSION_CLEAR_FAILED_HEADERS = Object.freeze({ 'Cache-Control': 'no-store', 'Pragma': 'no-cache' });
 
 /**
  * Handle user logout
@@ -860,7 +919,18 @@ export async function handleLogout(request: Request, hookManager: HookManager, l
 	await hookManager.callOnLogout(request.session, request);
 
 	// Clear the OAuth session
-	await clearOAuthSession(request.session, logger);
+	const cleared = await clearOAuthSession(request.session, logger);
+
+	if (!cleared) {
+		// There was a session to clear and it didn't fully go through — reporting success would
+		// tell the client the old identity is gone when it might not be. 503 + no-store asks
+		// for a retry instead of claiming a logout that didn't happen.
+		return {
+			status: 503,
+			headers: { ...SESSION_CLEAR_FAILED_HEADERS },
+			body: { error: 'logout_failed', message: 'Unable to complete logout, please try again' },
+		};
+	}
 
 	return {
 		status: 200,

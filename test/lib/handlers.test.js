@@ -4,7 +4,15 @@
 
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { handleLogin, handleCallback, handleLogout, handleUserInfo, handleTestPage } from '../../dist/lib/handlers.js';
+import {
+	handleLogin,
+	handleCallback,
+	handleLogout,
+	handleUserInfo,
+	handleTestPage,
+	clearOAuthSession,
+	SESSION_CLEAR_FAILED_HEADERS,
+} from '../../dist/lib/handlers.js';
 import { buildProviderConfig } from '../../dist/lib/config.js';
 import { createMockFn, createMockLogger } from '../helpers/mockFn.js';
 
@@ -2870,6 +2878,96 @@ describe('OAuth Handlers', () => {
 		});
 	});
 
+	describe('clearOAuthSession — #266', () => {
+		it('returns true and stays quiet for a missing session', async () => {
+			const result = await clearOAuthSession(undefined, mockLogger);
+
+			assert.equal(result, true);
+			assert.equal(mockLogger.error.mock.calls.length, 0);
+		});
+
+		it('returns true and stays quiet for an anonymous session (no id)', async () => {
+			const session = { update: createMockFn() };
+
+			const result = await clearOAuthSession(session, mockLogger);
+
+			assert.equal(result, true);
+			assert.equal(session.update.mock.calls.length, 0, 'anonymous logout must not mint a session row');
+			assert.equal(mockLogger.error.mock.calls.length, 0);
+		});
+
+		it('returns false when an existing session has no callable .update', async () => {
+			const session = { id: 'session-123', user: 'alice', oauth: { accessToken: 'tok' } };
+
+			const result = await clearOAuthSession(session, mockLogger);
+
+			assert.equal(result, false);
+			assert.equal(mockLogger.error.mock.calls.length, 1);
+			// Best-effort in-memory clear still happens.
+			assert.equal(session.user, null);
+			assert.equal(session.oauth, undefined);
+		});
+
+		it('returns false when an existing session.update rejects', async () => {
+			const session = {
+				id: 'session-123',
+				user: 'alice',
+				oauth: { accessToken: 'tok' },
+				update: createMockFn(async () => {
+					throw new Error('store unavailable');
+				}),
+			};
+
+			const result = await clearOAuthSession(session, mockLogger);
+
+			assert.equal(result, false);
+			assert.equal(mockLogger.error.mock.calls.length, 1);
+			assert.equal(session.user, null);
+			assert.equal(session.oauth, undefined);
+		});
+
+		it('returns true and persists { user: null } for an existing session with a callable .update', async () => {
+			const session = {
+				id: 'session-123',
+				user: 'alice',
+				oauth: { accessToken: 'tok' },
+				update: createMockFn(async () => {}),
+			};
+
+			const result = await clearOAuthSession(session, mockLogger);
+
+			assert.equal(result, true);
+			assert.equal(session.update.mock.calls.length, 1);
+			assert.deepEqual(session.update.mock.calls[0].arguments[0], { user: null });
+			assert.equal(mockLogger.error.mock.calls.length, 0);
+		});
+
+		it('resolves false (does not reject, and does not report success) when the in-memory clear itself throws', async () => {
+			const session = {
+				id: 'session-123',
+				oauth: { accessToken: 'tok' },
+				update: createMockFn(async () => {}),
+			};
+			// Non-configurable `oauth` makes `delete session.oauth` throw in strict mode.
+			Object.defineProperty(session, 'oauth', { value: session.oauth, configurable: false });
+
+			const result = await clearOAuthSession(session, mockLogger);
+
+			// The store write succeeded, but this request would still be holding the old
+			// identity in memory — callers must not treat that as a completed clear either.
+			assert.equal(result, false);
+			assert.equal(session.update.mock.calls.length, 1, 'the store write was still attempted');
+			assert.equal(mockLogger.error.mock.calls.length, 1);
+		});
+
+		it('exports a frozen shared headers constant', () => {
+			assert.ok(Object.isFrozen(SESSION_CLEAR_FAILED_HEADERS));
+			assert.throws(() => {
+				SESSION_CLEAR_FAILED_HEADERS.Mutated = 'nope';
+			});
+		});
+	});
+
 	describe('handleLogout', () => {
 		it('persists an invalidated session record (user: null) — not just an in-memory clear', async () => {
 			// Regression (F4): Harper session exposes only .update, never .delete — logout must persist { user: null }.
@@ -2920,7 +3018,9 @@ describe('OAuth Handlers', () => {
 			assert.equal(mockRequest.session.update.mock.calls.length, 0, 'no persistence for an anonymous logout');
 		});
 
-		it('falls back to an in-memory clear when the session cannot persist (no update)', async () => {
+		it('reports a failed logout when an existing session cannot persist (no update) — #266', async () => {
+			// A session with an id but no callable `.update` had a session to clear and
+			// couldn't — must not look like a completed logout.
 			mockRequest.session = {
 				id: 'session-123',
 				user: 'test-user',
@@ -2930,10 +3030,43 @@ describe('OAuth Handlers', () => {
 
 			const result = await handleLogout(mockRequest, mockHookManager, mockLogger);
 
-			assert.equal(result.status, 200);
+			assert.equal(result.status, 503);
+			assert.equal(result.headers['Cache-Control'], 'no-store');
+			assert.notEqual(result.headers, SESSION_CLEAR_FAILED_HEADERS, 'must not return the shared constant by reference');
+			assert.notEqual(result.body.message, 'Logged out successfully');
+			// Best-effort in-memory clear still happens so this request doesn't see the old identity.
 			assert.equal(mockRequest.session.user, null);
 			assert.equal(mockRequest.session.oauth, undefined);
 			assert.equal(mockRequest.session.oauthUser, undefined);
+			assert.equal(mockLogger.error.mock.calls.length, 1);
+		});
+
+		it('reports a failed logout when session.update rejects — #266', async () => {
+			mockRequest.session = {
+				id: 'session-123',
+				user: 'test-user',
+				oauthUser: { username: 'test' },
+				oauth: { accessToken: 'token' },
+				update: createMockFn(async () => {
+					throw new Error('store unavailable');
+				}),
+			};
+
+			const result = await handleLogout(mockRequest, mockHookManager, mockLogger);
+
+			assert.equal(result.status, 503);
+			assert.equal(result.headers['Cache-Control'], 'no-store');
+			assert.equal(mockLogger.error.mock.calls.length, 1);
+		});
+
+		it('still succeeds quietly for an anonymous logout even though update is missing', async () => {
+			mockRequest.session = { oauth: { accessToken: 'token' } }; // no id → nothing to invalidate
+
+			const result = await handleLogout(mockRequest, mockHookManager, mockLogger);
+
+			assert.equal(result.status, 200);
+			assert.equal(result.body.message, 'Logged out successfully');
+			assert.equal(mockLogger.error.mock.calls.length, 0);
 		});
 
 		it('should handle missing session', async () => {

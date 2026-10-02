@@ -13,9 +13,9 @@ import {
 	normalizeMcpSecurityConfig,
 	coerceConfigBoolean,
 } from './lib/config.ts';
-import { OAuthResource } from './lib/resource.ts';
+import { OAuthResource, toHttpResponse } from './lib/resource.ts';
 import { validateAndRefreshSession } from './lib/sessionValidator.ts';
-import { clearOAuthSession } from './lib/handlers.ts';
+import { clearOAuthSession, SESSION_CLEAR_FAILED_HEADERS } from './lib/handlers.ts';
 import { HookManager } from './lib/hookManager.ts';
 import { DynamicProviderCache, DEFAULT_DYNAMIC_PROVIDER_CACHE_TTL_SECONDS } from './lib/dynamicProviderCache.ts';
 import { registerWellKnownHandlers } from './lib/mcp/wellKnown.ts';
@@ -73,6 +73,21 @@ function isHttpsOrLoopbackIssuer(issuer: string): boolean {
 		url.hostname === '127.0.0.1' ||
 		url.hostname === '[::1]'
 	);
+}
+
+/**
+ * Response for the session-validation middleware when an OAuth session invalidation couldn't
+ * persist: retriable rather than served as either the stale identity or a cached denial.
+ * This middleware is a raw `server.http` listener, not a Resource method, so nothing else
+ * serializes its return value — `toHttpResponse` does that explicitly here (JSON body,
+ * fresh headers object per call).
+ */
+function sessionClearFailedResponse() {
+	return toHttpResponse({
+		status: 503,
+		headers: SESSION_CLEAR_FAILED_HEADERS,
+		body: { error: 'session_invalidation_failed', message: 'Unable to validate session, please retry' },
+	});
 }
 
 // Store hooks registered at module load time and active hookManager
@@ -470,8 +485,9 @@ export async function handleApplication(scope: Scope): Promise<void> {
 
 		if (!providerData) {
 			logger?.warn?.(`OAuth provider config '${providerConfigId}' not found, logging out user`);
-			// Provider no longer exists - complete logout
-			await clearOAuthSession(request.session, logger);
+			// Provider no longer exists - complete logout.
+			const cleared = await clearOAuthSession(request.session, logger);
+			if (!cleared) return sessionClearFailedResponse();
 			return next(request);
 		}
 
@@ -481,6 +497,11 @@ export async function handleApplication(scope: Scope): Promise<void> {
 		if (!validation.valid) {
 			// Session is no longer valid (already cleaned up by validator)
 			logger?.debug?.(`OAuth session invalidated: ${validation.error}`);
+			if (validation.clearFailed) {
+				// The invalidation didn't fully go through, so Harper's already-resolved
+				// request.user may still be the old identity — deny rather than continue to next().
+				return sessionClearFailedResponse();
+			}
 		} else if (validation.refreshed) {
 			logger?.debug?.(`OAuth token auto-refreshed for ${providerConfigId}`);
 		}
