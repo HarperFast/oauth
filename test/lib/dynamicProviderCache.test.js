@@ -416,6 +416,19 @@ describe('DynamicProviderCache', () => {
 			assert.deepEqual(infos, ['resolved', 'resolved']);
 		});
 
+		it('delegates to a class-based logger whose methods live on its prototype, not as its own properties — a `{ ...logger }` spread would silently drop them', () => {
+			const infos = [];
+			class ClassLogger {
+				info(msg) {
+					infos.push(msg);
+				}
+			}
+			const cache = new DynamicProviderCache();
+			const wrapped = cache.wrapLoggerForDynamicResolution('azure-provider', new ClassLogger());
+			wrapped.info('resolved');
+			assert.deepEqual(infos, ['resolved']);
+		});
+
 		it('clear() resets the dedup state, so a warning can log again afterward', () => {
 			const cache = new DynamicProviderCache();
 			const warnings = [];

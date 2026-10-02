@@ -156,8 +156,14 @@ export class DynamicProviderCache {
 	 */
 	wrapLoggerForDynamicResolution(providerName: string, logger?: Logger): Logger | undefined {
 		if (!logger) return logger;
+		// Bind each method explicitly rather than `{ ...logger }` — a
+		// class-based logger's methods usually live on its prototype, not as
+		// its own properties, so a spread would silently drop `info`/`error`/
+		// `debug` (only `warn`, replaced below, would survive).
 		return {
-			...logger,
+			info: (message: string, ...args: any[]) => logger.info?.(message, ...args),
+			error: (message: string, ...args: any[]) => logger.error?.(message, ...args),
+			debug: (message: string, ...args: any[]) => logger.debug?.(message, ...args),
 			warn: (message: string, ...args: any[]) => {
 				if (this.shouldWarnOnce(providerName, message)) logger.warn?.(message, ...args);
 			},
