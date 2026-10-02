@@ -15,7 +15,7 @@ import {
 } from './lib/config.ts';
 import { OAuthResource } from './lib/resource.ts';
 import { validateAndRefreshSession } from './lib/sessionValidator.ts';
-import { clearOAuthSession } from './lib/handlers.ts';
+import { clearOAuthSession, SESSION_CLEAR_FAILED_HEADERS } from './lib/handlers.ts';
 import { HookManager } from './lib/hookManager.ts';
 import { DynamicProviderCache, DEFAULT_DYNAMIC_PROVIDER_CACHE_TTL_SECONDS } from './lib/dynamicProviderCache.ts';
 import { registerWellKnownHandlers } from './lib/mcp/wellKnown.ts';
@@ -73,6 +73,18 @@ function isHttpsOrLoopbackIssuer(issuer: string): boolean {
 		url.hostname === '127.0.0.1' ||
 		url.hostname === '[::1]'
 	);
+}
+
+/**
+ * Response for the session-validation middleware when an OAuth session invalidation couldn't
+ * persist: retriable rather than served as either the stale identity or a cached denial.
+ */
+function sessionClearFailedResponse() {
+	return {
+		status: 503,
+		headers: SESSION_CLEAR_FAILED_HEADERS,
+		body: { error: 'session_invalidation_failed', message: 'Unable to validate session, please retry' },
+	};
 }
 
 // Store hooks registered at module load time and active hookManager
@@ -470,11 +482,9 @@ export async function handleApplication(scope: Scope): Promise<void> {
 
 		if (!providerData) {
 			logger?.warn?.(`OAuth provider config '${providerConfigId}' not found, logging out user`);
-			// Provider no longer exists - complete logout. clearOAuthSession logs its own
-			// persistence failures (#266); this path already makes no success claim to deny
-			// (it just continues to next(request) either way) — reliably clearing
-			// request.user for *this* request is #213's scope, not fixed here.
-			await clearOAuthSession(request.session, logger);
+			// Provider no longer exists - complete logout.
+			const cleared = await clearOAuthSession(request.session, logger);
+			if (!cleared) return sessionClearFailedResponse();
 			return next(request);
 		}
 
@@ -484,6 +494,15 @@ export async function handleApplication(scope: Scope): Promise<void> {
 		if (!validation.valid) {
 			// Session is no longer valid (already cleaned up by validator)
 			logger?.debug?.(`OAuth session invalidated: ${validation.error}`);
+			if (validation.persistFailed) {
+				// The invalidation itself didn't persist (store write failed) — continuing to
+				// next(request) here would serve this request as the old, supposedly-revoked
+				// identity (Harper already resolved request.user from the session before this
+				// middleware ran; reliably clearing it needs core's
+				// request.invalidateSessionAuthentication(), #213, out of scope here). Deny the
+				// whole request instead.
+				return sessionClearFailedResponse();
+			}
 		} else if (validation.refreshed) {
 			logger?.debug?.(`OAuth token auto-refreshed for ${providerConfigId}`);
 		}

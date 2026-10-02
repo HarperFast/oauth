@@ -840,15 +840,17 @@ export async function clearOAuthSession(session: any, logger?: Logger): Promise<
 			try {
 				await session.update({ user: null });
 			} catch (error) {
-				logger?.error?.(
-					'Failed to persist OAuth session clear:',
-					error instanceof Error ? error.message : String(error)
-				);
 				persisted = false;
+				logQuietly(() =>
+					logger?.error?.(
+						'Failed to persist OAuth session clear:',
+						error instanceof Error ? error.message : String(error)
+					)
+				);
 			}
 		} else {
-			logger?.error?.('Failed to persist OAuth session clear: session.update is not callable');
 			persisted = false;
+			logQuietly(() => logger?.error?.('Failed to persist OAuth session clear: session.update is not callable'));
 		}
 	}
 
@@ -857,9 +859,27 @@ export async function clearOAuthSession(session: any, logger?: Logger): Promise<
 	delete session.oauth;
 	delete session.oauthUser;
 
-	if (persisted) logger?.info?.('OAuth session cleared');
+	if (persisted) logQuietly(() => logger?.info?.('OAuth session cleared'));
 	return persisted;
 }
+
+/**
+ * Runs a logging call without letting a throwing logger turn the already-decided outcome
+ * above (`persisted`) into a rejection — the point of returning a boolean in the first place.
+ */
+function logQuietly(log: () => void): void {
+	try {
+		log();
+	} catch {
+		// Logging is best-effort; the caller already has the outcome it needs.
+	}
+}
+
+/**
+ * Headers for a response that reports a failed OAuth session invalidation: retriable, and
+ * never cached, so an intermediary can't serve a stale "it's done" to a second client.
+ */
+export const SESSION_CLEAR_FAILED_HEADERS = { 'Cache-Control': 'no-store', 'Pragma': 'no-cache' };
 
 /**
  * Handle user logout
@@ -872,14 +892,12 @@ export async function handleLogout(request: Request, hookManager: HookManager, l
 	const cleared = await clearOAuthSession(request.session, logger);
 
 	if (!cleared) {
-		// There was a session to clear and the store write failed — the stored session may
-		// still carry the old identity. Reporting success here would tell the client (and any
-		// shared cache sitting in front of this response) that the old identity is gone when it
-		// might not be, which is worse than making the client retry: 503 + no-store is honest
-		// about "not done yet" and safe to retry.
+		// There was a session to clear and the store write failed — reporting success would
+		// tell the client the old identity is gone when it might not be. 503 + no-store asks
+		// for a retry instead of claiming a logout that didn't happen.
 		return {
 			status: 503,
-			headers: { 'Cache-Control': 'no-store', 'Pragma': 'no-cache' },
+			headers: SESSION_CLEAR_FAILED_HEADERS,
 			body: { error: 'logout_failed', message: 'Unable to complete logout, please try again' },
 		};
 	}

@@ -2975,10 +2975,8 @@ describe('OAuth Handlers', () => {
 		});
 
 		it('reports a failed logout when an existing session cannot persist (no update) — #266', async () => {
-			// Deliberately changed from the old "falls back to an in-memory clear and reports
-			// success" expectation (#213's design note): a session with an id but no callable
-			// `.update` had a session to clear and couldn't, which must not look like a
-			// completed logout.
+			// A session with an id but no callable `.update` had a session to clear and
+			// couldn't — must not look like a completed logout.
 			mockRequest.session = {
 				id: 'session-123',
 				user: 'test-user',

@@ -15,6 +15,14 @@ export interface SessionValidationResult {
 	refreshed?: boolean;
 	/** Error message if validation failed */
 	error?: string;
+	/**
+	 * Set when `valid` is `false` because the invalidation itself (clearOAuthSession)
+	 * couldn't persist — the store write failed, not just the token. Distinct from an
+	 * ordinary invalidation (expired/revoked token, successfully cleared): a caller that
+	 * passes through on `valid: false` must not do so here, since the stored session may
+	 * still carry the old identity.
+	 */
+	persistFailed?: boolean;
 }
 
 /**
@@ -58,8 +66,8 @@ export async function validateAndRefreshSession(
 	// Validate required fields
 	if (!oauthMetadata.accessToken) {
 		logger?.warn?.('OAuth session missing access token, logging out');
-		await clearOAuthSession(session, logger);
-		return { valid: false, error: 'OAuth session missing access token' };
+		const cleared = await clearOAuthSession(session, logger);
+		return { valid: false, error: 'OAuth session missing access token', persistFailed: !cleared };
 	}
 
 	const now = Date.now();
@@ -80,8 +88,12 @@ export async function validateAndRefreshSession(
 
 				if (!isValid) {
 					logger?.debug?.('OAuth token validation failed (token revoked or invalid), logging out');
-					await clearOAuthSession(session, logger);
-					return { valid: false, error: 'Token validation failed - token may have been revoked' };
+					const cleared = await clearOAuthSession(session, logger);
+					return {
+						valid: false,
+						error: 'Token validation failed - token may have been revoked',
+						persistFailed: !cleared,
+					};
 				}
 
 				// session.oauth is a Harper tracked object: its properties are read-only and
@@ -126,8 +138,8 @@ export async function validateAndRefreshSession(
 	if (!oauthMetadata.refreshToken) {
 		if (isExpired) {
 			logger?.warn?.('OAuth token expired and no refresh token available, logging out');
-			await clearOAuthSession(session, logger);
-			return { valid: false, error: 'Token expired and no refresh token available' };
+			const cleared = await clearOAuthSession(session, logger);
+			return { valid: false, error: 'Token expired and no refresh token available', persistFailed: !cleared };
 		}
 		// Token approaching expiration but no refresh token - still valid for now
 		return { valid: true, refreshed: false };
@@ -145,8 +157,8 @@ export async function validateAndRefreshSession(
 		if (!provider.refreshAccessToken) {
 			logger?.warn?.('OAuth provider does not support token refresh');
 			if (isExpired) {
-				await clearOAuthSession(session, logger);
-				return { valid: false, error: 'Token expired and provider does not support refresh' };
+				const cleared = await clearOAuthSession(session, logger);
+				return { valid: false, error: 'Token expired and provider does not support refresh', persistFailed: !cleared };
 			}
 			return { valid: true, refreshed: false };
 		}
@@ -195,21 +207,28 @@ export async function validateAndRefreshSession(
 	} catch (error) {
 		logger?.error?.('OAuth token refresh failed:', error instanceof Error ? error.message : String(error));
 
-		// If token was expired and refresh failed, log out. This second clear can itself fail
-		// (store write error) — it must never escape as an unhandled rejection on top of the
-		// refresh failure we're already handling, so it gets its own catch (#265) in addition to
-		// clearOAuthSession's own internal one; either way the outcome is the same controlled
-		// `{ valid: false }`.
+		// If token was expired and refresh failed, log out. clearOAuthSession itself never
+		// rejects (#266); the try/catch is defense-in-depth against the in-memory mutation
+		// throwing, so this resolution (#265) doesn't depend on that invariant holding forever.
 		if (isExpired) {
+			let cleared = false;
 			try {
-				await clearOAuthSession(session, logger);
+				cleared = await clearOAuthSession(session, logger);
 			} catch (clearError) {
-				logger?.error?.(
-					'OAuth session clear failed after refresh failure:',
-					clearError instanceof Error ? clearError.message : String(clearError)
-				);
+				try {
+					logger?.error?.(
+						'OAuth session clear failed after refresh failure:',
+						clearError instanceof Error ? clearError.message : String(clearError)
+					);
+				} catch {
+					// A throwing logger must not block resolving to the controlled result below.
+				}
 			}
-			return { valid: false, error: `Token refresh failed: ${error instanceof Error ? error.message : String(error)}` };
+			return {
+				valid: false,
+				error: `Token refresh failed: ${error instanceof Error ? error.message : String(error)}`,
+				persistFailed: !cleared,
+			};
 		}
 
 		// Token not yet expired, allow continued use
