@@ -193,11 +193,24 @@ export class OAuthProvider implements IOAuthProvider {
 					// id token's. A mismatch or omission cannot be correlated to the
 					// verified subject — discard the whole response (same as a fetch
 					// failure below) rather than merge an uncorrelated subject's fields.
-					if (idTokenClaims.sub != null && userInfo?.sub !== idTokenClaims.sub) {
-						this.logger?.warn?.(
-							'userinfo sub is missing or does not match id-token sub on the fetchEmail path; discarding userinfo and using id-token claims only'
-						);
-						return { ...idTokenClaims, _emailProvenance: 'unauthenticated' };
+					// Exception: Microsoft Graph's `/v1.0/me` (not an OIDC UserInfo
+					// endpoint — see `isAzureGraphUserInfo`) returns `id`, never `sub`, but
+					// it's the same value as the Azure id token's `oid` claim, so that pair
+					// correlates too. Gated to Azure/Graph UserInfo only, so this alternate
+					// pairing can't be used to bypass the `sub` check for any other provider.
+					if (idTokenClaims.sub != null) {
+						const subMatches = userInfo?.sub === idTokenClaims.sub;
+						const graphIdMatches =
+							this.isAzureGraphUserInfo() &&
+							idTokenClaims.oid != null &&
+							typeof userInfo?.id === 'string' &&
+							userInfo.id === idTokenClaims.oid;
+						if (!subMatches && !graphIdMatches) {
+							this.logger?.warn?.(
+								'userinfo sub (or, for Azure/Graph, id/oid) is missing or does not match the id token on the fetchEmail path; discarding userinfo and using id-token claims only'
+							);
+							return { ...idTokenClaims, _emailProvenance: 'unauthenticated' };
+						}
 					}
 					const { iss: _iss, sub: _sub, ...mergeableUserInfo } = userInfo;
 					// Drop the token's email AND email_verified so the fetched address keeps its
@@ -329,6 +342,24 @@ export class OAuthProvider implements IOAuthProvider {
 			// this as proof of claim authenticity.
 			this.logger?.warn?.('JWKS not configured - verifying claims only, not signature');
 			return { claims: this.verifyIdTokenClaims(decoded.payload), signatureVerified: false, issuerValidated: false };
+		}
+	}
+
+	/**
+	 * True when this provider's UserInfo endpoint is Microsoft Graph's
+	 * non-OIDC `/v1.0/me` shape (or any other Graph endpoint) rather than a
+	 * standard OIDC UserInfo endpoint — the only case where `id`/`oid`
+	 * correlation (instead of `sub`) is accepted in `getUserInfo`'s fetchEmail
+	 * path. Checked by provider type AND by `userInfoUrl` host so a non-Azure
+	 * provider can't earn this alternate pairing by happening to also lack
+	 * `sub` in its response.
+	 */
+	private isAzureGraphUserInfo(): boolean {
+		if (this.config.provider === 'azure') return true;
+		try {
+			return new URL(this.config.userInfoUrl).hostname === 'graph.microsoft.com';
+		} catch {
+			return false;
 		}
 	}
 

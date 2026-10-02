@@ -6,6 +6,7 @@ import { describe, it, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { OAuthProvider } from '../../dist/lib/OAuthProvider.js';
 import { GitHubProvider } from '../../dist/lib/providers/github.js';
+import { AzureADProvider } from '../../dist/lib/providers/azure.js';
 import { resetCSRFTableCache } from '../../dist/lib/CSRFTokenManager.js';
 
 describe('OAuthProvider', () => {
@@ -1096,6 +1097,108 @@ describe('OAuthProvider', () => {
 				const idTokenClaimsNoEmail = { sub: 'same-sub', iss: 'https://issuer.example.com' };
 				const userInfo = await provider.getUserInfo('access-token', idTokenClaimsNoEmail);
 				assert.equal(userInfo.email, 'user@example.com', 'a matching sub still merges the fetched email');
+				assert.equal(userInfo._emailProvenance, 'unauthenticated');
+			} finally {
+				global.fetch = originalFetch;
+			}
+		});
+
+		it('Azure/Graph UserInfo (id, no sub) with matching oid is correlated and usable via emailClaim/usernameClaim', async () => {
+			// Microsoft Graph's /v1.0/me is not an OIDC UserInfo endpoint: it returns
+			// `id` (the directory object ID), never `sub`. Azure's id token carries
+			// the same value as `oid`, so this alternate pairing must be accepted —
+			// using the REAL Azure preset (provider: 'azure', userInfoUrl pointing at
+			// graph.microsoft.com) so the gate is exercised as configured in practice.
+			const originalFetch = global.fetch;
+			global.fetch = async () => ({
+				ok: true,
+				json: async () => ({
+					id: 'aaaa-oid-1234',
+					mail: 'alice@contoso.example',
+					userPrincipalName: 'alice@contoso.onmicrosoft.com',
+				}),
+			});
+
+			const azureConfig = {
+				...AzureADProvider,
+				clientId: 'c',
+				clientSecret: 's',
+				redirectUri: 'http://localhost:9926/oauth/azure/callback',
+				fetchEmail: true,
+				emailClaim: 'mail',
+				usernameClaim: 'userPrincipalName',
+			};
+			provider = new OAuthProvider(azureConfig, mockLogger);
+
+			try {
+				const idTokenClaimsNoEmail = {
+					sub: 'azure-sub-1',
+					oid: 'aaaa-oid-1234',
+					iss: 'https://login.microsoftonline.com/common/v2.0',
+				};
+				const userInfo = await provider.getUserInfo('access-token', idTokenClaimsNoEmail);
+				assert.equal(userInfo._emailProvenance, 'unauthenticated', 'fetchEmail path is always unauthenticated');
+				assert.equal(userInfo.mail, 'alice@contoso.example', 'Graph field is usable via emailClaim');
+				assert.equal(
+					userInfo.userPrincipalName,
+					'alice@contoso.onmicrosoft.com',
+					'Graph field is usable via usernameClaim'
+				);
+				const mapped = provider.mapUserToHarper(userInfo);
+				assert.equal(mapped.username, 'alice@contoso.onmicrosoft.com');
+				assert.equal(mapped.email, 'alice@contoso.example');
+			} finally {
+				global.fetch = originalFetch;
+			}
+		});
+
+		it('Azure/Graph UserInfo with a MISMATCHED oid is rejected', async () => {
+			const originalFetch = global.fetch;
+			global.fetch = async () => ({
+				ok: true,
+				json: async () => ({ id: 'attacker-oid', mail: 'attacker@contoso.example' }),
+			});
+
+			const azureConfig = {
+				...AzureADProvider,
+				clientId: 'c',
+				clientSecret: 's',
+				redirectUri: 'http://localhost:9926/oauth/azure/callback',
+				fetchEmail: true,
+			};
+			provider = new OAuthProvider(azureConfig, mockLogger);
+
+			try {
+				const idTokenClaimsNoEmail = {
+					sub: 'azure-sub-1',
+					oid: 'victim-oid',
+					iss: 'https://login.microsoftonline.com/common/v2.0',
+				};
+				const userInfo = await provider.getUserInfo('access-token', idTokenClaimsNoEmail);
+				assert.equal(userInfo.mail, undefined, "the mismatched oid's Graph fields must not be merged in");
+				assert.equal(userInfo._emailProvenance, 'unauthenticated');
+			} finally {
+				global.fetch = originalFetch;
+			}
+		});
+
+		it('the id/oid pairing is rejected for a non-Azure, non-Graph provider (no alternate pairing outside Azure/Graph)', async () => {
+			// Same Graph-shaped response (id, no sub) and a matching oid claim, but
+			// on a plain generic provider whose userInfoUrl is not graph.microsoft.com
+			// — the alternate pairing must not apply here.
+			const originalFetch = global.fetch;
+			global.fetch = async () => ({
+				ok: true,
+				json: async () => ({ id: 'aaaa-oid-1234', mail: 'alice@contoso.example' }),
+			});
+
+			const genericConfig = { ...mockConfig, fetchEmail: true };
+			provider = new OAuthProvider(genericConfig, mockLogger);
+
+			try {
+				const idTokenClaimsNoEmail = { sub: 'some-sub', oid: 'aaaa-oid-1234', iss: 'https://issuer.example.com' };
+				const userInfo = await provider.getUserInfo('access-token', idTokenClaimsNoEmail);
+				assert.equal(userInfo.mail, undefined, 'id/oid pairing must not correlate outside Azure/Graph');
 				assert.equal(userInfo._emailProvenance, 'unauthenticated');
 			} finally {
 				global.fetch = originalFetch;
