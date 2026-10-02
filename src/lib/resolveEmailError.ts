@@ -14,7 +14,8 @@ export class ResolveEmailError extends Error {
 }
 
 /** Sibling of {@link ResolveEmailError}, not a subtype — two or more verified candidates each
- *  match a different existing Harper account; refuses rather than guessing which one. */
+ *  match a different existing Harper account, and the verified profile-or-primary address
+ *  isn't one of them; refuses rather than guessing which one. */
 export class AmbiguousEmailError extends Error {
 	readonly reason = 'email_ambiguous';
 	constructor(message: string, options?: { cause?: unknown }) {

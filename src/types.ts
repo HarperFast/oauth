@@ -786,9 +786,10 @@ export interface GetUserInfoHelpers {
 	 * mean the same thing to the caller: use the adapter's own fallback policy. Rejects (does
 	 * not resolve to a fallback) with `ResolveEmailError` (invalid pick, a thrown hook, or a
 	 * hook that doesn't settle within 5 seconds), `AmbiguousEmailError` (two or more verified
-	 * addresses match different existing accounts), or `EmailLookupError` (an account lookup
-	 * failed mid-match); an adapter must let any of these propagate rather than catching them
-	 * and using its own default.
+	 * addresses match different existing accounts, and the verified profile-or-primary
+	 * address isn't one of them), or `EmailLookupError` (an account lookup failed mid-match);
+	 * an adapter must let any of these propagate rather than catching them and using its own
+	 * default.
 	 */
 	resolveEmail?: (candidates: readonly EmailCandidate[]) => Promise<string | undefined>;
 }
