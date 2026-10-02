@@ -53,6 +53,27 @@ describe('isAzureJwksUri', () => {
 		assert.equal(isAzureJwksUri('https://login.microsoftonline.com/anything/at/all'), false);
 	});
 
+	it("is also true for either alias shape carrying Azure's documented '?appid=<client-id>' query — not a different shape, just the app identifier", () => {
+		assert.equal(
+			isAzureJwksUri(
+				'https://login.microsoftonline.com/common/discovery/v2.0/keys?appid=11111111-2222-3333-4444-555555555555'
+			),
+			true
+		);
+		assert.equal(
+			isAzureJwksUri(
+				'https://login.microsoftonline.com/common/discovery/keys?appid=11111111-2222-3333-4444-555555555555'
+			),
+			true
+		);
+	});
+
+	it('is false for any other query string on either alias shape', () => {
+		assert.equal(isAzureJwksUri('https://login.microsoftonline.com/common/discovery/v2.0/keys?appid='), false);
+		assert.equal(isAzureJwksUri('https://login.microsoftonline.com/common/discovery/v2.0/keys?foo=bar'), false);
+		assert.equal(isAzureJwksUri('https://login.microsoftonline.com/common/discovery/v2.0/keys?appid=a&appid=b'), false);
+	});
+
 	it('is false for a different host, malformed URL, or absent value', () => {
 		assert.equal(isAzureJwksUri('https://idp.example.com/jwks'), false);
 		assert.equal(isAzureJwksUri('not a url'), false);
@@ -371,6 +392,59 @@ describe('resolveAzureIssuerBinding', () => {
 				assert.equal(config.jwksUri, `https://login.microsoftonline.com/${alias}/discovery/keys`);
 			});
 		}
+
+		it("'?appid=<client-id>' on the v2 alias shape with no pin is ALSO untouched (byte-identical to today) — Azure's documented app-identifying query param, not a different shape", () => {
+			const config = baseConfig({
+				jwksUri:
+					'https://login.microsoftonline.com/common/discovery/v2.0/keys?appid=11111111-2222-3333-4444-555555555555',
+				issuer: null,
+			});
+			resolveAzureIssuerBinding(config, 'azure');
+			assert.equal(
+				config.jwksUri,
+				'https://login.microsoftonline.com/common/discovery/v2.0/keys?appid=11111111-2222-3333-4444-555555555555'
+			);
+			assert.equal(config.issuer, null);
+		});
+
+		it("'?appid=<client-id>' on the v2 alias shape with a pin redirects to the tenant's own endpoint, keeping '?appid='", () => {
+			const config = baseConfig({
+				jwksUri:
+					'https://login.microsoftonline.com/common/discovery/v2.0/keys?appid=11111111-2222-3333-4444-555555555555',
+				issuer: `https://login.microsoftonline.com/${GUID_A}/v2.0`,
+			});
+			resolveAzureIssuerBinding(config, 'azure');
+			assert.equal(
+				config.jwksUri,
+				`https://login.microsoftonline.com/${GUID_A}/discovery/v2.0/keys?appid=11111111-2222-3333-4444-555555555555`
+			);
+			assert.equal(config.issuer, `https://login.microsoftonline.com/${GUID_A}/v2.0`);
+		});
+
+		it("'?appid=<client-id>' on the older v1 keys shape with no pin is ALSO untouched — same shared key pool, same app-identifying query param", () => {
+			const config = baseConfig({
+				jwksUri: 'https://login.microsoftonline.com/common/discovery/keys?appid=11111111-2222-3333-4444-555555555555',
+				issuer: null,
+			});
+			resolveAzureIssuerBinding(config, 'azure');
+			assert.equal(
+				config.jwksUri,
+				'https://login.microsoftonline.com/common/discovery/keys?appid=11111111-2222-3333-4444-555555555555'
+			);
+			assert.equal(config.issuer, null);
+		});
+
+		it("'?appid=<client-id>' on the older v1 keys shape with ANY pin still throws — the query param doesn't change which key pool this is", () => {
+			const config = baseConfig({
+				jwksUri: 'https://login.microsoftonline.com/common/discovery/keys?appid=11111111-2222-3333-4444-555555555555',
+				issuer: `https://login.microsoftonline.com/${GUID_A}/v2.0`,
+			});
+			assert.throws(() => resolveAzureIssuerBinding(config, 'azure'), /shared v1 (key pool|authority)/);
+			assert.equal(
+				config.jwksUri,
+				'https://login.microsoftonline.com/common/discovery/keys?appid=11111111-2222-3333-4444-555555555555'
+			);
+		});
 
 		it('consumers can be pinned to the documented fixed tenant GUID constant', () => {
 			const config = baseConfig({
