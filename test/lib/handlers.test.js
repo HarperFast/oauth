@@ -2563,8 +2563,6 @@ describe('OAuth Handlers', () => {
 		});
 
 		it('is skipped entirely when usernameClaim is not "email" — hdb_user is not keyed by email', async () => {
-			// Two verified candidates that would otherwise be ambiguous (both match an
-			// existing account) must NOT be checked at all under the default usernameClaim.
 			stubAccounts(['personal@example.com', 'work@example.com']);
 			mockHookManager.hasHook = createMockFn(() => false);
 			useCandidateResolvingProvider([
@@ -2585,8 +2583,6 @@ describe('OAuth Handlers', () => {
 			assert.equal(result.status, 302);
 			assert.ok(!result.headers.Location.includes('email_ambiguous'), result.headers.Location);
 			assert.equal(mockRequest.session.update.mock.calls[0].arguments[0].user, 'personal@example.com');
-			// Only the adoption gate's own single check of the resolved username — if the
-			// built-in default had run, it would have scanned BOTH candidates first.
 			assert.deepEqual(
 				getCalls,
 				['personal@example.com'],

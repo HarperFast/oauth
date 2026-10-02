@@ -51,9 +51,7 @@ export const GitHubProvider: OAuthProviderConfig = {
 	async getUserInfo(accessToken: string, helpers: GetUserInfoHelpers): Promise<any> {
 		// Get basic user info using the base getUserInfo method
 		const userInfo = await helpers.getUserInfo(accessToken);
-		// A userinfo endpoint that returns a null/primitive body: nothing can be adopted from
-		// it, so bail before any further read/write of userInfo.* below (including the fetch
-		// that follows — there is nothing to attach its result to).
+		// A non-object body: nothing can be adopted from it, so bail before any userInfo.* access.
 		if (!userInfo || typeof userInfo !== 'object') {
 			return userInfo;
 		}
