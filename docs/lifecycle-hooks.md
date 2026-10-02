@@ -309,6 +309,86 @@ async function handleLogin(oauthUser, tokenResponse, session, request, provider)
 
 ---
 
+### onResolveEmail
+
+An **advanced escape hatch** for choosing which of several provider-reported emails becomes the login identity ([#228](https://github.com/HarperFast/oauth/issues/228)), for policies the plugin's own [built-in default](./configuration.md#github-default-email-when-there-are-several-verified-addresses) can't express. Called only when the provider's authenticated email fetch succeeded — currently GitHub's `/user/emails`, which can return more than one address with independent `verified`/`primary` flags. OIDC providers have a single `email` claim, so this hook never fires for them.
+
+Most applications don't need this hook: GitHub logins with several verified addresses are already resolved by the plugin itself — the built-in default matches an existing Harper account first, refuses an ambiguous match, and otherwise falls back to the public profile email or `primary` address. Register `onResolveEmail` only when that built-in behavior isn't what you want — e.g. preferring a company domain even before any account exists under it, or applying your own policy that doesn't key on existing accounts at all.
+
+**Purpose:** Let an application pick a specific verified address by its own policy, overriding both the provider's own primary/profile choice AND the plugin's built-in existing-account default.
+
+**Signature:**
+
+```typescript
+async function onResolveEmail(
+	candidates: ReadonlyArray<{ email: string; verified: boolean; primary: boolean; profile: boolean }>,
+	provider: string,
+	signal: AbortSignal
+): Promise<string | null | undefined>;
+```
+
+**Parameters:**
+
+- `candidates` - Every email the provider's authenticated fetch returned, verified or not (so you can see the whole picture — e.g. to prompt a user to verify a preferred but currently-unverified address, while still returning a verified one for this login). `profile` marks the provider's public profile address (GitHub's `/user` `email` field) — the address the plugin's original default preferred over `primary` when both exist. An immutable snapshot: mutating it has no effect on anything the plugin validates against.
+- `provider` - Provider name (e.g., `'github'`)
+- `signal` - Aborted when the 5-second deadline is reached. Cancellation is **cooperative**: pass `signal` to your own `fetch`/database call so a timed-out lookup actually stops (e.g. releases a connection) instead of continuing to run after the login has already failed.
+
+**Returns:** The chosen address, or `null`/`undefined` for "no preference" — the plugin falls back to its [built-in default](./configuration.md#github-default-email-when-there-are-several-verified-addresses) (existing-account match, then ambiguity refusal, then the original profile-or-primary default). The existing-account match step only runs when `usernameClaim: 'email'` is configured — `hdb_user` isn't keyed by email otherwise, so there is nothing to match against; a declining hook always falls straight to the original profile-or-primary default in that case.
+
+**Registering this hook is opt-in**, but the built-in default it sits above is not (when `usernameClaim: 'email'`) — a GitHub login with several verified addresses is resolved by the plugin itself whether or not any hook is registered. Leaving `onResolveEmail` unregistered costs nothing beyond that built-in default's own cost (no reads for zero verified addresses, or when the lone verified address already is the verified profile-or-primary default pick — otherwise one read per verified address); the candidate list itself is never built or retained for any purpose beyond resolving this one login.
+
+**SECURITY — enforced by the plugin, not by convention:**
+
+- The returned address **must** be one of `candidates` with `verified === true`, matched exactly (case-sensitive) — return `candidate.email` itself, not a re-typed or re-cased copy. This is checked against the exact snapshot handed to the hook, not a value the hook could have mutated.
+- An invalid result (not a string, not a verified candidate), a thrown error, or a hook that doesn't settle within 5 seconds, **fails the login** — it does **not** fall back to the default selection. Falling back silently on a failed pick could establish a session for a _different_ account than the one the hook was trying to reach (e.g. selecting a work address to adopt an existing work account, but the lookup inside the hook fails) — so an unresolved pick is loud, not quiet.
+- The resolved address is exactly what later becomes `authEvidence.email` / `oauthUser.email` — there is no separate path that could key identity on a different, unvalidated address.
+
+**Error types:** a failure anywhere in resolution (the hook, or the built-in default) throws one of `ResolveEmailError` (invalid/unverified pick, hook throw, hook timeout — `reason=email_selection`), `AmbiguousEmailError` (two or more existing-account matches where the verified profile-or-primary address isn't one of them — `reason=email_ambiguous`), or `EmailLookupError` (an `hdb_user` read failed mid-match — `reason=email_lookup_failed`, retryable). All three are exported from `@harperfast/oauth` for a custom `getUserInfo` adapter (or any code holding a reference to the thrown error) to classify with `instanceof` or by its `reason` property, rather than parsing the message.
+
+**GitHub's default `usernameClaim` is `login` (the handle), not `email`.** Unless you also set `usernameClaim: 'email'` on the GitHub provider config, `onResolveEmail` changes `oauthUser.email` and `authEvidence.email` but **not** `session.user` (still the GitHub handle) — set `usernameClaim: 'email'`, or map the chosen email to a username yourself in `onLogin` (`oauthUser.email` already reflects the resolved address there).
+
+**Example — prefer a company domain, else no preference:**
+
+```javascript
+async function resolveEmail(candidates, provider) {
+	const corporate = candidates.find((c) => c.verified && c.email.endsWith('@acme.example'));
+	return corporate?.email; // undefined → plugin's default selection
+}
+```
+
+**Example — reject a login with no corporate-domain option instead of silently using a personal address**, by throwing from the hook (returning an address that isn't one of the verified candidates fails the login the same way, but throwing documents the intent):
+
+```javascript
+async function resolveEmail(candidates) {
+	const corporate = candidates.find((c) => c.verified && c.email.endsWith('@acme.example'));
+	if (!corporate) {
+		throw new Error('no verified @acme.example address on this GitHub account');
+	}
+	return corporate.email;
+}
+```
+
+**Example — opt out of the built-in existing-account default and reconstruct the plugin's original profile-or-primary pick**, using an `AbortController` wired to `signal` so an interrupted lookup actually stops. This reproduces the old pick whenever it was verified; it cannot reproduce an unverified profile/primary pick, because `onResolveEmail` is never allowed to return an unverified address — see [the upgrade note](./configuration.md#github-default-email-when-there-are-several-verified-addresses) for that edge case:
+
+```javascript
+async function resolveEmail(candidates, provider, signal) {
+	const controller = new AbortController();
+	signal.addEventListener('abort', () => controller.abort());
+	await auditLookup(candidates, { signal: controller.signal }); // your own I/O, cancellable on timeout
+
+	const pick = candidates.find((c) => c.profile) ?? candidates.find((c) => c.primary);
+	return pick?.verified ? pick.email : undefined; // unverified pick: no preference, not a failed login
+}
+```
+
+**Rollout note (for the hook itself):** this hook is opt-in and additive on top of the plugin's own built-in default — an instance that never registers it still gets that default (see its own [upgrade note](./configuration.md#github-default-email-when-there-are-several-verified-addresses)), just never a hook-chosen override. Registering the hook can further change which Harper account a given GitHub login resolves to (relative to what the built-in default alone would have picked), so roll it out deliberately, not as an incidental part of an unrelated deploy:
+
+- **Enable it on every node at once**, not progressively. During a rolling deploy, the same GitHub user hitting an old node (no hook) and a new node (hook registered) can resolve to two different addresses — and, with `usernameClaim: 'email'`, two different Harper accounts — for the same login attempt. A load balancer that isn't sticky per user across the deploy window can bounce between the two outcomes.
+- **Decide what happens to an existing account keyed on the old (default) address** before enabling. This hook changes selection going forward; it does not migrate or link any account already created under the previous default pick. If users should keep their existing account, either keep the hook returning the same address it would have defaulted to for already-provisioned users (e.g. look up the existing account by any of `candidates` first, fall back to your preferred address only for new users), or run your own one-time account-linking step.
+- **Already-established sessions are unaffected either way** — they are not re-evaluated until the next login, so this is only a concern for logins that happen during and after the rollout, not for users already signed in.
+
+---
+
 ### onLogout
 
 Called before the session is cleared during logout.

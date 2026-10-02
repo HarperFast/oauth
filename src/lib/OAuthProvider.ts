@@ -15,6 +15,7 @@ import type {
 	OAuthUser,
 	GetUserInfoHelpers,
 	IOAuthProvider,
+	EmailCandidate,
 } from '../types.ts';
 import { csrfTokenManager } from './CSRFTokenManager.ts';
 import { ADAPTER_EMAIL_PROVENANCE } from './emailProvenance.ts';
@@ -53,6 +54,7 @@ function canAwaitDiscoveredIssuer(config: OAuthProviderConfig): boolean {
 		return false;
 	}
 }
+import { ResolveEmailError } from './resolveEmailError.ts';
 
 export class OAuthProvider implements IOAuthProvider {
 	public config: OAuthProviderConfig;
@@ -201,13 +203,23 @@ export class OAuthProvider implements IOAuthProvider {
 	 *   verified via JWKS (from `verifyIdToken`'s `signatureVerified`). `'signed-oidc'`
 	 *   requires this to be `true` — otherwise `idTokenClaims` is a decoded-only,
 	 *   unverified payload (no JWKS configured) and must not be labeled as signed.
+	 * @param onResolveEmail - Resolves which of several provider-reported emails becomes
+	 *   the login identity (#228). Threaded to a custom adapter as
+	 *   `helpers.resolveEmail`, which validates the result against the SAME candidate
+	 *   snapshot the adapter passed in before returning it — see {@link makeResolveEmailHelper}.
 	 */
-	async getUserInfo(accessToken: string, idTokenClaims: any = null, idTokenSignatureVerified = false): Promise<any> {
+	async getUserInfo(
+		accessToken: string,
+		idTokenClaims: any = null,
+		idTokenSignatureVerified = false,
+		onResolveEmail?: (candidates: readonly EmailCandidate[]) => Promise<string | null | undefined>
+	): Promise<any> {
 		// Check if provider has custom getUserInfo implementation
 		if (typeof this.config.getUserInfo === 'function') {
 			const helpers: GetUserInfoHelpers = {
 				getUserInfo: this.fetchUserInfo.bind(this),
 				logger: this.logger,
+				resolveEmail: onResolveEmail ? this.makeResolveEmailHelper(onResolveEmail) : undefined,
 			};
 			const raw = await this.config.getUserInfo.call(this, accessToken, helpers);
 			// Provenance is trusted ONLY through the ADAPTER_EMAIL_PROVENANCE Symbol,
@@ -281,6 +293,32 @@ export class OAuthProvider implements IOAuthProvider {
 		// Fetch from userinfo endpoint — no id-token correlation, so unauthenticated.
 		const userInfo = await this.fetchUserInfo(accessToken);
 		return { ...userInfo, _emailProvenance: 'unauthenticated' };
+	}
+
+	/**
+	 * Builds `GetUserInfoHelpers.resolveEmail` (#228): validates the hook's result against
+	 * a frozen snapshot — never a reference the hook could have mutated — requiring
+	 * `verified === true`. A rejection here (invalid pick, hook throw, or timeout) must
+	 * propagate; an adapter must not catch it and fall back on its own.
+	 */
+	private makeResolveEmailHelper(
+		onResolveEmail: (candidates: readonly EmailCandidate[]) => Promise<string | null | undefined>
+	): (candidates: readonly EmailCandidate[]) => Promise<string | undefined> {
+		return async (candidates: readonly EmailCandidate[]): Promise<string | undefined> => {
+			const snapshot: readonly EmailCandidate[] = Object.freeze(
+				candidates.map((c) =>
+					Object.freeze({ email: c.email, verified: c.verified, primary: c.primary, profile: c.profile })
+				)
+			);
+			const chosen = await onResolveEmail(snapshot);
+			if (chosen == null) return undefined;
+			if (typeof chosen !== 'string' || !snapshot.some((c) => c.email === chosen && c.verified === true)) {
+				throw new ResolveEmailError(
+					'onResolveEmail hook returned an address that is not one of the verified candidates — refusing to use it'
+				);
+			}
+			return chosen;
+		};
 	}
 
 	/**

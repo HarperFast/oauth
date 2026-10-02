@@ -690,6 +690,149 @@ describe('OAuthProvider', () => {
 				global.fetch = originalFetch;
 			}
 		});
+
+		describe('onResolveEmail selection, real GitHub adapter (#228)', () => {
+			const GITHUB_EMAILS = [
+				{ email: 'work@example.com', primary: false, verified: true },
+				{ email: 'personal@example.com', primary: true, verified: true },
+				{ email: 'claimed-not-verified@example.com', primary: false, verified: false },
+			];
+
+			function mockGitHubFetch() {
+				const originalFetch = global.fetch;
+				global.fetch = async (url) => {
+					if (String(url).includes('api.github.com/user/emails')) {
+						return { ok: true, json: async () => GITHUB_EMAILS };
+					}
+					return { ok: true, json: async () => ({ login: 'alice', email: null }) };
+				};
+				return originalFetch;
+			}
+
+			it('end to end: a validated hook pick becomes email, email_verified, and provenance', async () => {
+				const originalFetch = mockGitHubFetch();
+				try {
+					provider = new OAuthProvider(
+						{ ...mockConfig, provider: 'github', getUserInfo: GitHubProvider.getUserInfo },
+						mockLogger
+					);
+					const onResolveEmail = async (candidates) => {
+						assert.ok(candidates.some((c) => c.email === 'work@example.com' && c.verified === true));
+						return 'work@example.com';
+					};
+					const userInfo = await provider.getUserInfo('token', null, false, onResolveEmail);
+					assert.equal(userInfo.email, 'work@example.com');
+					assert.equal(userInfo.email_verified, true);
+					assert.equal(userInfo._emailProvenance, 'github-authenticated');
+				} finally {
+					global.fetch = originalFetch;
+				}
+			});
+
+			it('rejects a pick that is not one of the verified candidates, instead of falling back', async () => {
+				const originalFetch = mockGitHubFetch();
+				try {
+					provider = new OAuthProvider(
+						{ ...mockConfig, provider: 'github', getUserInfo: GitHubProvider.getUserInfo },
+						mockLogger
+					);
+					// Not in GITHUB_EMAILS at all — an attempt to key identity on an
+					// arbitrary address the authenticated fetch never returned.
+					const onResolveEmail = async () => 'attacker@evil.example';
+					await assert.rejects(
+						() => provider.getUserInfo('token', null, false, onResolveEmail),
+						/not one of the verified candidates/
+					);
+				} finally {
+					global.fetch = originalFetch;
+				}
+			});
+
+			it('rejects a pick that is a real candidate but NOT verified', async () => {
+				const originalFetch = mockGitHubFetch();
+				try {
+					provider = new OAuthProvider(
+						{ ...mockConfig, provider: 'github', getUserInfo: GitHubProvider.getUserInfo },
+						mockLogger
+					);
+					const onResolveEmail = async () => 'claimed-not-verified@example.com';
+					await assert.rejects(
+						() => provider.getUserInfo('token', null, false, onResolveEmail),
+						/not one of the verified candidates/
+					);
+				} finally {
+					global.fetch = originalFetch;
+				}
+			});
+
+			it('mutating the candidates array the hook received does not affect validation', async () => {
+				const originalFetch = mockGitHubFetch();
+				try {
+					provider = new OAuthProvider(
+						{ ...mockConfig, provider: 'github', getUserInfo: GitHubProvider.getUserInfo },
+						mockLogger
+					);
+					const onResolveEmail = async (candidates) => {
+						assert.throws(() => candidates.push({ email: 'attacker@evil.example', verified: true, primary: false }));
+						assert.throws(() => {
+							candidates[0].email = 'attacker@evil.example';
+						});
+						return 'attacker@evil.example'; // still rejected — validated against the real snapshot
+					};
+					await assert.rejects(
+						() => provider.getUserInfo('token', null, false, onResolveEmail),
+						/not one of the verified candidates/
+					);
+				} finally {
+					global.fetch = originalFetch;
+				}
+			});
+
+			it('no hook registered leaves the default (profile-or-primary) selection unchanged', async () => {
+				const originalFetch = mockGitHubFetch();
+				try {
+					provider = new OAuthProvider(
+						{ ...mockConfig, provider: 'github', getUserInfo: GitHubProvider.getUserInfo },
+						mockLogger
+					);
+					const userInfo = await provider.getUserInfo('token');
+					assert.equal(userInfo.email, 'personal@example.com', 'falls back to the primary address');
+					assert.equal(userInfo._emailProvenance, 'github-authenticated');
+				} finally {
+					global.fetch = originalFetch;
+				}
+			});
+
+			it('a hook returning undefined (no preference) falls back to the default selection', async () => {
+				const originalFetch = mockGitHubFetch();
+				try {
+					provider = new OAuthProvider(
+						{ ...mockConfig, provider: 'github', getUserInfo: GitHubProvider.getUserInfo },
+						mockLogger
+					);
+					const userInfo = await provider.getUserInfo('token', null, false, async () => undefined);
+					assert.equal(userInfo.email, 'personal@example.com');
+				} finally {
+					global.fetch = originalFetch;
+				}
+			});
+
+			it('propagates a thrown hook error rather than falling back to the default account', async () => {
+				const originalFetch = mockGitHubFetch();
+				try {
+					provider = new OAuthProvider(
+						{ ...mockConfig, provider: 'github', getUserInfo: GitHubProvider.getUserInfo },
+						mockLogger
+					);
+					const onResolveEmail = async () => {
+						throw new Error('lookup failed');
+					};
+					await assert.rejects(() => provider.getUserInfo('token', null, false, onResolveEmail), /lookup failed/);
+				} finally {
+					global.fetch = originalFetch;
+				}
+			});
+		});
 	});
 
 	describe('Token Refresh', () => {

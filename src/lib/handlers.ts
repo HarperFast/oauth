@@ -21,6 +21,7 @@ import type {
 	AuthTrust,
 	EmailProvenance,
 	OAuthAuthEvidence,
+	EmailCandidate,
 } from '../types.ts';
 import {
 	browserSecretMatches,
@@ -35,6 +36,7 @@ import { isClientAuthMethod } from './mcp/clientAuthMethod.ts';
 import { resolveIssuer } from './mcp/wellKnown.ts';
 import { getRequestHeader } from './requestHeaders.ts';
 import type { HookManager } from './hookManager.ts';
+import { ResolveEmailError, AmbiguousEmailError, EmailLookupError } from './resolveEmailError.ts';
 
 /**
  * Sanitize a redirect parameter to prevent open redirect attacks
@@ -220,6 +222,53 @@ async function checkHarperUserExists(name: string): Promise<boolean | null> {
 	} catch {
 		return null;
 	}
+}
+
+/**
+ * Built-in default email resolution (#228), applied when no `onResolveEmail` hook resolves a
+ * preference. Invariant: a `checkHarperUserExists` read that fails (`null`) is never treated
+ * as a match AND never treated as a confirmed non-match either — it throws `EmailLookupError`
+ * rather than risk a wrong pick (mirrors the adoption gate's own `account_lookup_failed`
+ * posture, never conflating "unknown" with "no").
+ *
+ * Two or more matches is refused as ambiguous UNLESS the verified profile-or-primary address
+ * (today's original default pick) is among them — that one isn't a guess: it's the same
+ * verified address this GitHub account would already resolve to today, on the same account
+ * every current login already reaches, so choosing it reproduces pre-#228 behavior rather
+ * than picking between equally-plausible strangers.
+ */
+async function resolveEmailByExistingAccount(
+	candidates: readonly EmailCandidate[],
+	logger?: Logger
+): Promise<string | undefined> {
+	const verified = candidates.filter((c) => c.verified === true);
+	if (verified.length === 0) return undefined;
+	const defaultPick = candidates.find((c) => c.profile) ?? candidates.find((c) => c.primary);
+	const defaultPickVerified = defaultPick?.verified === true;
+	// No read only when the lone verified candidate IS the default pick — nothing to
+	// disambiguate. A lone verified candidate that ISN'T (an unverified default pick plus
+	// one different verified address) still needs the read below.
+	if (verified.length === 1 && defaultPickVerified) return undefined;
+
+	const results = await Promise.all(
+		verified.map((c) => checkHarperUserExists(c.email).then((r) => ({ email: c.email, r })))
+	);
+	if (results.some(({ r }) => r === null)) {
+		throw new EmailLookupError('hdb_user lookup failed while matching a verified email to an existing account');
+	}
+	const matches = new Set(results.filter(({ r }) => r === true).map(({ email }) => email));
+
+	if (matches.size === 0) return undefined;
+	if (matches.size === 1) return [...matches][0];
+
+	if (defaultPickVerified && defaultPick && matches.has(defaultPick.email)) {
+		return defaultPick.email;
+	}
+
+	logger?.warn?.(
+		`OAuth: ${matches.size} verified GitHub emails each match a different existing Harper account — refusing the login rather than guessing which one`
+	);
+	throw new AmbiguousEmailError(`${matches.size} verified emails match different existing Harper accounts`);
 }
 
 export async function handleCallback(
@@ -457,7 +506,22 @@ export async function handleCallback(
 		// getUserInfo also sets _emailProvenance on the returned object; pass
 		// idTokenSignatureVerified so it can't stamp 'signed-oidc' on a
 		// decoded-only (no-JWKS) token.
-		const userInfo = await provider.getUserInfo(tokenResponse.access_token, idTokenClaims, idTokenSignatureVerified);
+		// usernameClaim !== 'email' means hdb_user isn't keyed by email at all, so matching a
+		// candidate email against it would check an unrelated keyspace.
+		const resolveEmail = async (candidates: readonly EmailCandidate[]): Promise<string | null | undefined> => {
+			if (hookManager.hasHook('onResolveEmail')) {
+				const fromHook = await hookManager.callResolveEmail(candidates, providerName);
+				if (fromHook != null) return fromHook;
+			}
+			if (config.usernameClaim !== 'email') return undefined;
+			return resolveEmailByExistingAccount(candidates, logger);
+		};
+		const userInfo = await provider.getUserInfo(
+			tokenResponse.access_token,
+			idTokenClaims,
+			idTokenSignatureVerified,
+			resolveEmail
+		);
 		// Extract provenance before mapUserToHarper discards the meta-field.
 		const emailProvenance: string =
 			typeof userInfo?._emailProvenance === 'string' ? userInfo._emailProvenance : 'unauthenticated';
@@ -815,15 +879,25 @@ export async function handleCallback(
 		// Use a safe, generic reason code — details are in the server log
 		const message = error instanceof Error ? error.message : String(error);
 		let reason = 'unknown';
-		if (message.startsWith('Token exchange failed')) reason = 'token_exchange';
+		// Typed, not message-matched: a selector's own error has no identifying substring.
+		if (
+			error instanceof AmbiguousEmailError ||
+			error instanceof EmailLookupError ||
+			error instanceof ResolveEmailError
+		) {
+			reason = error.reason;
+		} else if (message.startsWith('Token exchange failed')) reason = 'token_exchange';
 		else if (message.includes('claim')) reason = 'user_mapping';
 		else if (message.includes('user info') || message.includes('userinfo')) reason = 'user_info';
 		else if (message.includes('hook') || message.includes('onLogin')) reason = 'login_hook';
 		if (mcpState) {
 			return mcpErrorRedirect(mcpState, 'server_error', reason);
 		}
+		// Matches the adoption gate's own account_lookup_failed convention: a retryable
+		// storage error is server_error, not auth_failed, so a client can tell them apart.
+		const errorCode = error instanceof EmailLookupError ? 'server_error' : 'auth_failed';
 		const errorUrl = buildErrorRedirect(tokenData.originalUrl || config.postLoginRedirect || '/', {
-			error: 'auth_failed',
+			error: errorCode,
 			reason,
 		});
 		return { status: 302, headers: { Location: errorUrl } };
