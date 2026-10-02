@@ -609,14 +609,10 @@ export async function handleCallback(
 					}
 				}
 			} else if (!claimIsTrusted) {
-				// userExists is `false` (confirmed no account) or `null` (lookup error,
-				// e.g. transient). Either way the claim is not from an authenticated
-				// source, so quarantine under a non-resolvable principal rather than
-				// adopt: the random suffix means no later hdb_user can ever be created
-				// to match it, so this is exactly as secure as denying regardless of
-				// whether the account actually exists — and, on a lookup error, more
-				// available than denying outright. `oauthUser` (incl. any app-level role
-				// claim) is preserved for the application's own authz.
+				// userExists is `false` or `null` (lookup error) — either way, quarantine
+				// under a non-resolvable principal: the random suffix means no later
+				// hdb_user can match it, so this is as secure as denying regardless of
+				// whether the account exists, and more available on a lookup error.
 				const quarantinePrincipal = makeQuarantinePrincipal(resolvedUser);
 				if (userExists === null) {
 					logger?.warn?.(

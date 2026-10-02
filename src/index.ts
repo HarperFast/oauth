@@ -173,6 +173,26 @@ export async function handleApplication(scope: Scope): Promise<void> {
 			isInitialized = true;
 		}
 
+		// Normalize the escape-hatch flag and, if disabling, apply it to the
+		// static immediately — before any validation below that can throw (MCP
+		// config, provider issuer checks, ...). A rejected reload must never
+		// leave a stale `true` in effect just because the operator's disabling
+		// snapshot also had an unrelated error. An *enabling* value is NOT
+		// applied here: it must wait until the reload fully succeeds (via
+		// OAuthResource.configure() below), so a rejected reload can never turn
+		// the hatch on for the still-serving (old) providers.
+		const allowUnverifiedClaimInheritance =
+			coerceConfigBoolean(expandEnvVar(options.allowUnverifiedClaimInheritance)) ?? false;
+		if (allowUnverifiedClaimInheritance) {
+			logger?.warn?.(
+				'OAuth: allowUnverifiedClaimInheritance is enabled — this restores legacy behavior that ' +
+					'allows an unverified OAuth claim to inherit an existing Harper account role. ' +
+					'This is a security regression; disable this setting unless you have a specific operational need.'
+			);
+		} else {
+			OAuthResource.allowUnverifiedClaimInheritance = false;
+		}
+
 		// Build the MCP config block up front so we can fail fast on an unsafe
 		// combination before mutating any provider state. expandEnvVarsDeep so
 		// sensitive leaves (mcp.dynamicClientRegistration.initialAccessToken) and
@@ -325,35 +345,6 @@ export async function handleApplication(scope: Scope): Promise<void> {
 						`is a ${pinnedAlg} key. The pinned key's algorithm (${pinnedAlg}) is used.`
 				);
 			}
-		}
-
-		// Normalize the escape-hatch flag. Expand ${VAR} first (like `debug`)
-		// so operators can toggle it via environment variable, then apply strict
-		// coercion: "false" / junk → off; unknown/non-boolean → false (off).
-		const allowUnverifiedClaimInheritance =
-			coerceConfigBoolean(expandEnvVar(options.allowUnverifiedClaimInheritance)) ?? false;
-		if (allowUnverifiedClaimInheritance) {
-			logger?.warn?.(
-				'OAuth: allowUnverifiedClaimInheritance is enabled — this restores legacy behavior that ' +
-					'allows an unverified OAuth claim to inherit an existing Harper account role. ' +
-					'This is a security regression; disable this setting unless you have a specific operational need.'
-			);
-		}
-		// Apply a *disabling* escape-hatch flag to the static immediately,
-		// independently of provider (re)initialization below, which can throw on
-		// a bad provider config (e.g. #231 §4's issuer validation). Without this,
-		// a snapshot that both disables the hatch AND has an unrelated provider
-		// error would abort before ever reaching OAuthResource.configure()'s
-		// assignment, leaving the PREVIOUS snapshot's value (possibly `true`) in
-		// effect even though this snapshot's operator intent was to turn it off.
-		// Only the disabling direction is safe to apply this early: an *enabling*
-		// value must wait for initializeProviders to actually succeed below (via
-		// OAuthResource.configure()) — otherwise a rejected reload would turn the
-		// hatch on for the OLD, still-serving providers, which is a fail-open a
-		// rejected reload must never cause. The all-providers-invalid path below
-		// still forces it to `false` regardless.
-		if (!allowUnverifiedClaimInheritance) {
-			OAuthResource.allowUnverifiedClaimInheritance = false;
 		}
 
 		// Re-initialize providers from new configuration

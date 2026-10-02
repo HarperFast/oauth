@@ -189,16 +189,10 @@ export class OAuthProvider implements IOAuthProvider {
 				this.logger?.debug?.('ID token lacks email; fetching from userinfo (unauthenticated)');
 				try {
 					const userInfo = await this.fetchUserInfo(accessToken);
-					// OIDC Core 5.3.2/5.3.4: the UserInfo Response's `sub` MUST match the
-					// `sub` of the ID token used to obtain the access token, and 5.3.2
-					// requires `sub` to be present at all — a UserInfo response omitting
-					// it is non-conformant and gets no benefit of the doubt. Either case
-					// means this userinfo cannot be correlated to the verified subject
-					// (token/session confusion at the provider, or a misbehaving userinfo
-					// endpoint) — discard it entirely and fall back to the id-token's own
-					// claims, exactly like a fetch failure below, so no field attributable
-					// to an uncorrelated subject (name, picture, role claims, ...) is ever
-					// merged into this login.
+					// OIDC Core 5.3.2/5.3.4: UserInfo's `sub` must be present and match the
+					// id token's. A mismatch or omission cannot be correlated to the
+					// verified subject — discard the whole response (same as a fetch
+					// failure below) rather than merge an uncorrelated subject's fields.
 					if (idTokenClaims.sub != null && userInfo?.sub !== idTokenClaims.sub) {
 						this.logger?.warn?.(
 							'userinfo sub is missing or does not match id-token sub on the fetchEmail path; discarding userinfo and using id-token claims only'

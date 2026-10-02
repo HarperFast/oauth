@@ -552,13 +552,10 @@ export function skipUndefined(source: Record<string, any> | null | undefined): R
  * `''` are explicit values and are kept as-is.
  *
  * `enforceIssuerForJwks` runs {@link validateIssuerForJwks} (#231 §4) — pass
- * `true` only from a static, startup-time build (`initializeProviders`). A
- * dynamically resolved provider (`onResolveProvider`, called from the request
- * path in `index.ts`'s session middleware and `resource.ts`) must NOT throw
- * here: an operator's per-tenant row with a stale/missing `issuer` would
- * otherwise fail every request for that tenant (logging out live sessions,
- * 500ing new logins) instead of just not being adoption-eligible, and with no
- * caching of the failure, on every single request.
+ * `true` only from a static, startup-time build (`initializeProviders`), never
+ * from a request-path dynamic resolution (`onResolveProvider`): throwing there
+ * would fail every request for a misconfigured tenant instead of just leaving
+ * it non-adoption-eligible.
  */
 export function buildProviderConfig(
 	providerConfig: Record<string, any>,
@@ -688,29 +685,17 @@ function hasUsableIssuer(issuer: OAuthProviderConfig['issuer']): boolean {
 }
 
 /**
- * Fail fast at **static, startup-time** config-build (`initializeProviders`
- * only — see `enforceIssuerForJwks` on {@link buildProviderConfig}) when a
- * provider is JWKS-enabled (so its id tokens are signature-verified and can
- * in principle be trusted for account adoption — see HarperFast/oauth#231
- * §4) but has no usable `issuer`. Without this, `issuerValidated` is
- * silently `false` forever and a hookless login that should adopt an
- * existing account is denied at login time, with no indication of why.
+ * A JWKS-enabled provider (so `issuerValidated` can in principle be `true` —
+ * HarperFast/oauth#231 §4) with no usable `issuer` would otherwise deny
+ * adoption silently at login, forever. `domain`/`tenantId` already derive
+ * `issuer` for Okta/Auth0/Azure; this only fires when that's bypassed.
  *
- * Okta and Auth0 ship an empty-string `issuer` placeholder that their preset's
- * `configure(domain)` fills in alongside `jwksUri` — using `domain` (or
- * explicitly setting `issuer`) always satisfies this check. A 'generic' OIDC
- * config (no preset) has the same expectation: setting `jwksUri` means the
- * operator wants signature verification, so `issuer` must be set too.
- *
- * Azure is deliberately excluded: its preset ships `issuer: null` for the
- * multi-tenant `/common` default, which has no single issuer by design
- * (OAuthProvider.verifyIdToken already documents `/common` as "not trusted
- * for adoption", not a misconfiguration) and boots today. Only Azure's
- * `tenantId`-driven `configure()` path sets a real issuer; explicit-endpoint
- * Azure configs are unchanged by this check. Checked against the preset's own
- * `provider` field (`providerPreset`), not `config.provider` — the `microsoft`
- * alias resolves to the Azure preset but can itself be carried through as
- * `config.provider` by an explicit `provider: 'microsoft'` option.
+ * Azure is excluded by provider type, not just its `/common` default: single-
+ * tenant Azure configs with explicit endpoints and no `issuer` are unchanged
+ * by this PR (tracked as a known gap, not fixed here). Checked against the
+ * preset's own `provider` field (`providerPreset`), not `config.provider` —
+ * the `microsoft` alias resolves to the Azure preset but an explicit
+ * `provider: 'microsoft'` option carries that string into `config.provider`.
  */
 function validateIssuerForJwks(
 	config: OAuthProviderConfig,
@@ -749,6 +734,19 @@ export function extractPluginDefaults(options: OAuthPluginConfig): Partial<OAuth
 	return pluginDefaults;
 }
 
+function isUnsetCredential(expandedValue: unknown): boolean {
+	if (expandedValue === undefined || expandedValue === null) return true;
+	if (typeof expandedValue === 'string' && expandedValue.trim() === '') return true;
+	return isUnresolvedEnvPlaceholder(expandedValue);
+}
+
+function describeUnsetCredential(field: string, expandedValue: unknown): string {
+	if (isUnresolvedEnvPlaceholder(expandedValue)) {
+		return `'${field}' references environment variable ${String(expandedValue).trim()}, which is not set`;
+	}
+	return `'${field}' is not set`;
+}
+
 /**
  * Initialize OAuth providers from configuration
  */
@@ -776,6 +774,30 @@ export function initializeProviders(options: OAuthPluginConfig, logger?: Logger)
 			);
 		}
 
+		// Must run before buildProviderConfig (#238's redirectUri checks) so an unconfigured
+		// provider's redirectUri is never evaluated (#259).
+		const expandedClientId = expandEnvVar(providerConfig?.clientId);
+		const expandedClientSecret = expandEnvVar(providerConfig?.clientSecret);
+		const clientIdUnset = isUnsetCredential(expandedClientId);
+		const clientSecretUnset = isUnsetCredential(expandedClientSecret);
+
+		if (clientIdUnset && clientSecretUnset) {
+			logger?.warn?.(`OAuth provider '${providerName}' not configured. Missing: clientId, clientSecret`);
+			continue;
+		}
+		if (clientIdUnset || clientSecretUnset) {
+			const unsetField = clientIdUnset ? 'clientId' : 'clientSecret';
+			const unsetValue = clientIdUnset ? expandedClientId : expandedClientSecret;
+			logger?.error?.(
+				`OAuth provider '${providerName}' is half configured — ${describeUnsetCredential(unsetField, unsetValue)} ` +
+					`while the other credential is set. Skipping until both 'clientId' and 'clientSecret' are set.`
+			);
+			continue;
+		}
+
+		// enforceIssuerForJwks (#231 §4) only runs here, after the configured-ness
+		// precheck above (#259/#260) — an unconfigured or half-configured provider
+		// is already skipped and never reaches the issuer check.
 		const config = buildProviderConfig(providerConfig, providerName, pluginDefaults, /* enforceIssuerForJwks */ true);
 
 		// Check if this provider is properly configured

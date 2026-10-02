@@ -274,6 +274,13 @@ describe('handleToken', () => {
 		assert.equal(res.headers['Pragma'], 'no-cache');
 	});
 
+	it('sets no-store cache headers on an error token response (RFC 6749 §5.1)', async () => {
+		const res = await handleToken({ headers: {} }, { grant_type: 'password' }, mcpConfig);
+		assert.equal(res.status, 400);
+		assert.equal(res.headers['Cache-Control'], 'no-store');
+		assert.equal(res.headers['Pragma'], 'no-cache');
+	});
+
 	it('coerces string TTLs (from ${ENV}/quoted YAML) to numeric seconds', async () => {
 		seedCode('code-1');
 		const res = await handleToken(
