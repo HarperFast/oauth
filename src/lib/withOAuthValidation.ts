@@ -243,9 +243,11 @@ async function validateOAuthForRequest(context: MaybeContext, options: OAuthVali
  *   itself survives — "provider not configured" may be a recoverable
  *   config issue.
  * - Expired-token path (`validateAndRefreshSession` returns `{valid: false}`):
- *   `clearOAuthSession` persists `{ user: null }` and clears in-memory fields —
- *   terminal logout. `requireAuth: false` resources pass through but observe an
- *   invalidated session.
+ *   `clearOAuthSession` persists `{ user: null }` and clears in-memory fields — terminal
+ *   logout. Either step can fail; `clearOAuthSession` still does what it can and reports the
+ *   failure via `SessionValidationResult.clearFailed`, which this wrapper doesn't act on —
+ *   unlike the global middleware, `requireAuth: false` passes through on any invalidation
+ *   either way.
  */
 export function withOAuthValidation<T extends abstract new (...args: any[]) => any>(
 	ResourceClass: T,
