@@ -190,6 +190,28 @@ export OAUTH_REDIRECT_URI="https://yourdomain.com/oauth/callback"
 
 [Microsoft Graph Permissions](https://learn.microsoft.com/en-us/graph/permissions-reference)
 
+### Multi-Tenant Apps and Account Adoption
+
+`tenantId` set to a real tenant GUID derives a fixed issuer, same as any other provider. Leaving `tenantId` unset (or set to `common`/`organizations`/`consumers`) accepts sign-ins from any tenant, but — because there's no single fixed issuer for those — ID tokens aren't trusted for [account adoption](./configuration.md#account-adoption-gate) by default: logins work, but a login that would otherwise adopt an existing Harper account is denied instead (or a new login is quarantined), exactly as for any other unverified claim.
+
+To make a multi-tenant app adoption-eligible for **one specific tenant**, pin `issuer` to that tenant's own issuer URI alongside the multi-tenant `tenantId`:
+
+```yaml
+'@harperfast/oauth':
+  providers:
+    azure:
+      tenantId: 'common' # still accepts sign-ins from any tenant
+      issuer: 'https://login.microsoftonline.com/<your-tenant-guid>/v2.0' # only this tenant adopts
+      clientId: ${OAUTH_AZURE_CLIENT_ID}
+      clientSecret: ${OAUTH_AZURE_CLIENT_SECRET}
+```
+
+The plugin verifies the token against that one tenant's own signing keys (never Microsoft's shared, tenant-independent key set), so this is exactly as safe as configuring a single-tenant app directly. `issuer` must be a single tenant GUID — not an array — since listing more than one tenant here would let those tenants adopt each other's Harper accounts if they ever shared an email; configure a separate provider entry per tenant instead if you need more than one.
+
+### `userInfoUrl` fetchEmail and the `profile` scope
+
+If you override `userInfoUrl` away from Microsoft Graph, or set a custom `scope`, keep `profile` in `scope` whenever `fetchEmail: true` is set — the Graph UserInfo correlation needs the ID token's `oid` claim, which Azure only includes when `profile` was requested. The plugin warns at startup if this combination can't work.
+
 ---
 
 ## Auth0 (OIDC)
@@ -313,6 +335,22 @@ To include groups in the ID token:
 
 [Okta OAuth Documentation](https://developer.okta.com/docs/guides/implement-oauth-for-okta/main/)
 
+### Using a Custom Authorization Server
+
+`domain` alone derives the **org authorization server** (`/oauth2/v1/*`), whose issuer is just `https://{domain}`. If you're using a [custom authorization server](https://developer.okta.com/docs/concepts/auth-servers/) instead (e.g. `default`, or a generated ID), set `authServer` alongside `domain` — the plugin derives both the path-inclusive endpoints and the issuer for you:
+
+```yaml
+'@harperfast/oauth':
+  providers:
+    okta:
+      domain: ${OAUTH_OKTA_DOMAIN}
+      authServer: 'default' # or your custom auth server's ID
+      clientId: ${OAUTH_OKTA_CLIENT_ID}
+      clientSecret: ${OAUTH_OKTA_CLIENT_SECRET}
+```
+
+Without `authServer`, pointing `authorizationUrl`/`tokenUrl`/`userInfoUrl`/`jwksUri` at a custom authorization server directly (bypassing `domain`) used to require setting `issuer` explicitly too, or OIDC discovery derives it for you in the background — see [Understanding `issuer`](#understanding-issuer) below.
+
 ---
 
 ## Custom OIDC Provider
@@ -346,6 +384,16 @@ export OAUTH_CUSTOM_TOKEN_URL="https://provider.com/oauth/token"
 export OAUTH_CUSTOM_USERINFO_URL="https://provider.com/oauth/userinfo"
 export OAUTH_CUSTOM_JWKS_URL="https://provider.com/.well-known/jwks.json"
 ```
+
+### `issuer` is usually unnecessary
+
+When `jwksUri` is set but `issuer` isn't, the plugin derives it in the background via [OIDC discovery](https://openid.net/specs/openid-connect-discovery-1_0.html): it probes `.well-known/openid-configuration` at your `authorizationUrl`'s own origin and validates the result strictly against your configured endpoints before trusting it. This never blocks startup, and the first login that needs it waits only briefly for an in-flight attempt. On success, the server log names the exact value — copy it into `issuer` to pin it and skip discovery on future logins:
+
+```
+OIDC discovery for provider 'custom': issuer derived via discovery: https://provider.com/ — add issuer: https://provider.com/ to pin it.
+```
+
+Discovery only runs for an `https://` `authorizationUrl` — a non-`https` one (and, separately, `jwksUri` with no usable `issuer` and no way to derive one) still fails fast at startup, since no amount of waiting fixes that. See [Understanding `issuer`](./configuration.md#account-adoption-gate) for what a missing/undiscoverable issuer means for account adoption.
 
 ---
 
