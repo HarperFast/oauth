@@ -2,6 +2,16 @@
 
 All notable changes to `@harperfast/oauth` are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Entries prior to 2.2.0 were backfilled from the [GitHub release notes](https://github.com/HarperFast/oauth/releases).
 
+## [Unreleased]
+
+### Changed
+
+- **MCP access tokens now carry `typ: at+jwt` in their JWT header** (RFC 9068 §2.1), closing a gap `docs/mcp-oauth-conformance.md` tracked from the 2026-07-28 conformance pass (#202). `withMCPAuth`'s production verifier (`verifyAccessTokenWithKeySet`) now enforces the header (RFC 9068 §4: the resource server MUST verify `typ`), accepting `at+jwt` and the prior default `JWT` — a token already minted with `typ: JWT` keeps verifying rather than being invalidated outright; since every token minted from here on carries `typ: at+jwt`, the `JWT` allowance is self-limiting (it stops mattering once any pre-upgrade token could have expired) but isn't itself time-boxed in code — tracked for removal in #258. **Compatibility:** a consumer that pinned `typ: JWT` on these tokens must accept `at+jwt` going forward.
+
+### Fixed
+
+- **Token error responses are now tested for `Cache-Control: no-store` / `Pragma: no-cache`.** The error path (`token.ts:errorResponse`) already applied the same `NO_STORE_HEADERS` as the success path; only the success-path assertion existed. No behavior change — closes the other half of the no-store conformance gap (#202).
+
 ## [2.8.1] - 2026-10-02
 
 ### Fixed

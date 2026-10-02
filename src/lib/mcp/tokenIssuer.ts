@@ -32,6 +32,18 @@ function keyAlg(key: { alg?: string }): SupportedSigningAlg {
 	return alg as SupportedSigningAlg;
 }
 
+/**
+ * `typ` acceptance for production verification (RFC 9068 §4: the RS MUST
+ * verify `typ`). Accepts `at+jwt`, plus legacy `JWT` until #258 removes that
+ * branch. Case-insensitive with an optional `application/` prefix, per RFC
+ * 9068's note that either form is acceptable.
+ */
+function typAccepted(typ: unknown): boolean {
+	if (typeof typ !== 'string') return false;
+	const normalized = typ.toLowerCase().replace(/^application\//, '');
+	return normalized === 'at+jwt' || normalized === 'jwt';
+}
+
 export interface MintAccessTokenParams {
 	issuer: string;
 	subject: string;
@@ -65,14 +77,18 @@ export function signAccessToken(
 	const jti = params.jti ?? randomUUID();
 	const payload: Record<string, unknown> = { client_id: params.clientId };
 	if (params.scope) payload.scope = params.scope;
+	const alg = keyAlg(key);
 	const token = jwt.sign(payload, key.private_key_pem, {
-		algorithm: keyAlg(key),
+		algorithm: alg,
 		keyid: key.kid,
 		issuer: params.issuer,
 		audience: params.audience,
 		subject: params.subject,
 		jwtid: jti,
 		expiresIn: params.ttlSeconds,
+		// RFC 9068 §2.1. `alg`/`kid` repeat `algorithm`/`keyid` only to satisfy
+		// JwtHeader's type (jsonwebtoken's own header merge leaves them unchanged).
+		header: { typ: 'at+jwt', alg, kid: key.kid },
 	});
 	return { token, jti };
 }
@@ -85,7 +101,8 @@ export interface VerifyOptions {
 /**
  * Verify an access token against a public key. Primarily for tests; Stage 5
  * performs production verification against the published JWKS via
- * {@link verifyAccessTokenWithKeySet}.
+ * {@link verifyAccessTokenWithKeySet}, which also enforces `typ` — this
+ * function does not.
  */
 export function verifyAccessToken(token: string, publicKeyPem: string, options?: VerifyOptions): jwt.JwtPayload {
 	return jwt.verify(token, publicKeyPem, {
@@ -114,10 +131,8 @@ export interface VerifyWithKeySetOptions {
  *
  * Signature verification pins `algorithms` to the selected key's declared
  * `alg` (blocking `alg: none`, RS/HS confusion, and cross-alg substitution),
- * and `audience` + `issuer` are enforced. Throws on any
- * failure so callers (withMCPAuth) can fail closed. This is the production
- * counterpart to {@link verifyAccessToken} and keeps all `jsonwebtoken` usage
- * inside this module.
+ * and `audience` + `issuer` + `typ` (see {@link typAccepted}) are enforced.
+ * Throws on any failure so callers (withMCPAuth) can fail closed.
  */
 export function verifyAccessTokenWithKeySet(
 	token: string,
@@ -128,11 +143,14 @@ export function verifyAccessTokenWithKeySet(
 		throw new Error('no signing keys available');
 	}
 
-	// Decode (without verifying) only to read the header's `kid` for key
-	// selection. The signature is still verified below against the selected key.
+	// Decode (without verifying) to read the header's `kid` (key selection) and
+	// `typ` (checked below); the signature itself is verified further down.
 	const decoded = jwt.decode(token, { complete: true });
 	if (!decoded || typeof decoded === 'string') {
 		throw new Error('malformed token');
+	}
+	if (!typAccepted(decoded.header?.typ)) {
+		throw new Error('invalid typ header (expected at+jwt, or JWT during the migration window)');
 	}
 
 	const kid = decoded.header?.kid;
