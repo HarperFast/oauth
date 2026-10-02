@@ -708,8 +708,12 @@ export interface OAuthProviderConfig {
 	validateToken?: (accessToken: string, logger?: Logger) => Promise<boolean>;
 	/** Interval for periodic token validation (ms) - only for tokens without expiration */
 	tokenValidationInterval?: number;
-	/** Provider-specific configuration function (e.g., for tenant/domain setup) */
-	configure?: (param: string) => Partial<OAuthProviderConfig>;
+	/**
+	 * Provider-specific configuration function (e.g., for tenant/domain setup).
+	 * `extra` is preset-specific — currently only Okta's, for an optional
+	 * custom authorization server identifier (HarperFast/oauth#264).
+	 */
+	configure?: (param: string, extra?: string) => Partial<OAuthProviderConfig>;
 }
 
 /**

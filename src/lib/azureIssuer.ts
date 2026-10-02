@@ -1,0 +1,183 @@
+/**
+ * Azure AD / Entra ID issuer resolution (HarperFast/oauth#264).
+ *
+ * `/common`, `/organizations` and `/consumers` are shared, tenant-independent
+ * authorities with no single fixed issuer and no key set exclusive to one
+ * tenant — a signature alone cannot prove which tenant a token belongs to.
+ * A real tenant GUID, by contrast, is a tenant-exclusive authority: its
+ * issuer and its JWKS response are both specific to that one tenant.
+ *
+ * This module gives every alias authority exactly one way to become usable:
+ * the operator pins `issuer` to a single Azure tenant-GUID issuer string.
+ * `resolveAzureIssuerBinding` then rewrites the effective `jwksUri` to that
+ * same tenant's own, non-shared endpoint and sets `issuer` to its canonical
+ * form — collapsing the pinned-alias case into the already-safe, already-
+ * simple tenant-GUID case, with no new verification branch, resolver, or
+ * cache: `OAuthProvider` ends up with an ordinary single-tenant config.
+ * Left unpinned, an alias authority is untouched (byte-identical to today).
+ *
+ * Called from both `buildProviderConfig` (surfacing a misconfiguration as a
+ * startup error as early as possible) and `OAuthProvider`'s own constructor
+ * (the one point every construction path — including `TenantManager`, which
+ * builds its config without going through `buildProviderConfig` at all —
+ * is guaranteed to cross). Safe to call twice: once the rewrite has already
+ * happened, the config simply looks like a real-tenant-GUID config, and a
+ * second call is a no-op.
+ */
+
+import type { Logger, OAuthProviderConfig } from '../types.ts';
+
+/** Entra ID's documented, permanent nickname for the "personal Microsoft accounts" tenant. */
+export const AZURE_CONSUMERS_TENANT_ID = '9188040d-6c67-4c5b-b112-36a304b66dad';
+
+const AZURE_HOST = 'login.microsoftonline.com';
+const GUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const ALIAS_SEGMENTS = new Set(['common', 'organizations', 'consumers']);
+
+function azureTenantUri(kind: 'issuer' | 'keys', guid: string): string {
+	return kind === 'issuer' ? `https://${AZURE_HOST}/${guid}/v2.0` : `https://${AZURE_HOST}/${guid}/discovery/v2.0/keys`;
+}
+
+/**
+ * The `{segment}` of an exact `https://login.microsoftonline.com/{segment}/discovery/v2.0/keys`
+ * URL — full-URL match: exact host, no port/userinfo/query/fragment, exactly
+ * one path segment before the fixed suffix. `null` for anything else,
+ * including a lookalike with extra path segments or a different host.
+ */
+function azureJwksSegment(jwksUri: string | null | undefined): string | null {
+	if (!jwksUri) return null;
+	let url: URL;
+	try {
+		url = new URL(jwksUri);
+	} catch {
+		return null;
+	}
+	if (url.protocol !== 'https:') return null;
+	if (url.hostname !== AZURE_HOST) return null;
+	if (url.port !== '' || url.username !== '' || url.password !== '' || url.search !== '' || url.hash !== '') {
+		return null;
+	}
+	const match = /^\/([^/]+)\/discovery\/v2\.0\/keys$/.exec(url.pathname);
+	return match ? match[1] : null;
+}
+
+/**
+ * The tenant GUID of a single Azure-shaped tenant issuer string
+ * (`https://login.microsoftonline.com/{guid}/v2.0`, case-insensitive),
+ * lowercased. `null` for an array, a non-Azure-shaped string, or an absent
+ * issuer.
+ */
+function azureIssuerGuid(issuer: OAuthProviderConfig['issuer']): string | null {
+	if (typeof issuer !== 'string' || issuer === '') return null;
+	let url: URL;
+	try {
+		url = new URL(issuer);
+	} catch {
+		return null;
+	}
+	if (url.protocol !== 'https:') return null;
+	if (url.hostname !== AZURE_HOST) return null;
+	if (url.port !== '' || url.username !== '' || url.password !== '' || url.search !== '' || url.hash !== '') {
+		return null;
+	}
+	const match = /^\/([^/]+)\/v2\.0\/?$/.exec(url.pathname);
+	if (!match) return null;
+	const guid = match[1].toLowerCase();
+	return GUID_RE.test(guid) ? guid : null;
+}
+
+/** True when `issuer` is a value `jwt.verify` would actually check against. */
+function hasUsableIssuer(issuer: OAuthProviderConfig['issuer']): boolean {
+	if (Array.isArray(issuer)) return issuer.some((value) => typeof value === 'string' && value !== '');
+	return typeof issuer === 'string' && issuer !== '';
+}
+
+/**
+ * Cheap hostname check — true whenever `jwksUri`'s host is Azure's own,
+ * regardless of path shape. Generic OIDC discovery (`discovery.ts`) must
+ * never run against it: `resolveAzureIssuerBinding` above is the only
+ * legitimate way to derive an Azure issuer, and a config this function
+ * excludes either already has a usable issuer (handled) or is an
+ * intentionally unpinned alias authority (byte-identical to today).
+ */
+export function isAzureJwksUri(jwksUri: string | null | undefined): boolean {
+	if (!jwksUri) return false;
+	try {
+		return new URL(jwksUri).hostname === AZURE_HOST;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Resolve (and validate) an Azure issuer binding on `config`, in place.
+ * A no-op for any `jwksUri` that isn't the exact Azure v2.0 keys-endpoint
+ * shape. Throws naming the provider for an unsafe or malformed combination
+ * (an array/non-Azure pin on an alias authority, or a pin naming a different
+ * tenant than a real-tenant-GUID `jwksUri`) — never silently builds a config
+ * that could widen trust or that could never validate anything.
+ */
+export function resolveAzureIssuerBinding(config: OAuthProviderConfig, providerName: string, logger?: Logger): void {
+	const segment = azureJwksSegment(config.jwksUri);
+	if (!segment) return;
+	const lowerSegment = segment.toLowerCase();
+
+	if (GUID_RE.test(lowerSegment)) {
+		// A real, tenant-exclusive authority: the issuer is fully determined by
+		// the URL itself. An operator-pinned issuer must name the same tenant —
+		// Azure's signing keys are not guaranteed exclusive to one tenant-specific
+		// endpoint over time, so a mismatched pin paired with this endpoint could
+		// otherwise accept a different tenant's token.
+		if (hasUsableIssuer(config.issuer)) {
+			const pinnedGuid = azureIssuerGuid(config.issuer);
+			if (pinnedGuid !== lowerSegment) {
+				throw new Error(
+					`OAuth provider '${providerName}' (azure) has a jwksUri for tenant '${lowerSegment}' but an ` +
+						`explicit 'issuer' naming a different tenant (${JSON.stringify(config.issuer)}). The jwksUri's ` +
+						`tenant and the pinned issuer's tenant must be the same GUID.`
+				);
+			}
+			return;
+		}
+		config.issuer = azureTenantUri('issuer', lowerSegment);
+		return;
+	}
+
+	if (!ALIAS_SEGMENTS.has(lowerSegment)) return; // Not a recognized Azure shape; leave it alone.
+
+	// Shared, tenant-independent authority (/common, /organizations, /consumers):
+	// adoption-eligible only when the operator pins exactly one tenant-GUID
+	// issuer. Unpinned, this is byte-identical to today (plain jwks-rsa against
+	// the shared endpoint, issuer never set, issuerValidated always false).
+	if (!hasUsableIssuer(config.issuer)) return;
+
+	if (Array.isArray(config.issuer)) {
+		throw new Error(
+			`OAuth provider '${providerName}' (azure) pins 'issuer' to an array on a shared authority ` +
+				`('${lowerSegment}'). Pin exactly one Azure tenant issuer (e.g. ` +
+				`'https://login.microsoftonline.com/<tenant-guid>/v2.0') — an array would make every listed tenant ` +
+				`adoption-eligible through one provider, re-opening the cross-tenant adoption question account-level ` +
+				`identity binding (not issuer validation) is meant to answer. Configure a separate provider entry ` +
+				`per tenant if more than one tenant needs to be trusted.`
+		);
+	}
+
+	const pinnedGuid = azureIssuerGuid(config.issuer);
+	if (!pinnedGuid) {
+		throw new Error(
+			`OAuth provider '${providerName}' (azure) pins 'issuer' to ${JSON.stringify(config.issuer)} on a shared ` +
+				`authority ('${lowerSegment}'), which is not a usable Azure tenant issuer. Set 'issuer' to exactly one ` +
+				`tenant issuer URI, e.g. 'https://login.microsoftonline.com/<tenant-guid>/v2.0' (use ` +
+				`'${AZURE_CONSUMERS_TENANT_ID}' for the personal-Microsoft-account tenant).`
+		);
+	}
+
+	// Collapse into the tenant-exclusive case above: verify against that one
+	// tenant's own, non-shared JWKS endpoint — never the shared alias pool.
+	logger?.info?.(
+		`OAuth provider '${providerName}' (azure): pinned issuer resolves to tenant '${pinnedGuid}'; verifying ` +
+			`against that tenant's own JWKS endpoint instead of the shared '${lowerSegment}' key set.`
+	);
+	config.jwksUri = azureTenantUri('keys', pinnedGuid);
+	config.issuer = azureTenantUri('issuer', pinnedGuid);
+}

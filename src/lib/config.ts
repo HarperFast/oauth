@@ -9,6 +9,7 @@ import { getProvider } from './providers/index.ts';
 import { redactSecrets } from './redact.ts';
 import { algFromPrivateKeyPem } from './mcp/keyStore.ts';
 import { isCimdClientId, cimdEnabled } from './mcp/cimd.ts';
+import { resolveAzureIssuerBinding, isAzureJwksUri } from './azureIssuer.ts';
 import type { OAuthProviderConfig, OAuthPluginConfig, ProviderRegistry, Logger } from '../types.ts';
 
 /**
@@ -555,13 +556,16 @@ export function skipUndefined(source: Record<string, any> | null | undefined): R
  * `true` only from a static, startup-time build (`initializeProviders`), never
  * from a request-path dynamic resolution (`onResolveProvider`): throwing there
  * would fail every request for a misconfigured tenant instead of just leaving
- * it non-adoption-eligible.
+ * it non-adoption-eligible. `logger`, when passed, only reaches advisory
+ * warnings (`checkGraphProfileScope`) and `resolveAzureIssuerBinding`'s own
+ * info log — nothing here throws because of a missing logger.
  */
 export function buildProviderConfig(
 	providerConfig: Record<string, any>,
 	providerName: string,
 	pluginDefaults: Partial<OAuthProviderConfig> = {},
-	enforceIssuerForJwks = false
+	enforceIssuerForJwks = false,
+	logger?: Logger
 ): OAuthProviderConfig {
 	const options = providerConfig || {};
 
@@ -644,31 +648,59 @@ export function buildProviderConfig(
 		redirectUri,
 	};
 
-	// Handle provider-specific configuration
-	if (providerPreset?.configure) {
-		let providerConfig;
+	// Handle provider-specific configuration. Dispatches on the *resolved
+	// preset's own* `provider` field, not `config.provider` — an explicit
+	// `provider: 'microsoft'` option overwrites `config.provider` with that
+	// alias string (via the `...expandedOptions` spread above) even though
+	// `getProvider('microsoft')` already resolved the Azure preset; switching
+	// on `config.provider` would silently skip `configure()` for that case.
+	// Gated on `config.provider` being non-empty, though: an explicit
+	// `provider: ''` is a deliberate escape hatch (keep the preset's other
+	// defaults but never run its `configure()`), and must still suppress
+	// dispatch even though `providerPreset` still resolved.
+	if (config.provider && providerPreset?.configure) {
+		let derivedConfig;
 
-		switch (config.provider) {
+		switch (providerPreset.provider) {
 			case 'azure':
 				if (expandedOptions.tenantId) {
-					providerConfig = providerPreset.configure(expandedOptions.tenantId);
+					derivedConfig = providerPreset.configure(expandedOptions.tenantId);
 				}
 				break;
 			case 'auth0':
 			case 'okta':
 				if (expandedOptions.domain) {
-					providerConfig = providerPreset.configure(expandedOptions.domain);
+					derivedConfig = providerPreset.configure(expandedOptions.domain, expandedOptions.authServer);
 				}
 				break;
 		}
 
-		if (providerConfig) {
-			Object.assign(config, providerConfig);
+		if (derivedConfig) {
+			// An explicit operator `issuer` always wins over a shortcut-derived
+			// one (#264) — narrowly: every other `configure()`-returned field
+			// (the endpoint URLs) keeps today's unconditional-overwrite behavior,
+			// so a `domain`/`tenantId` shortcut's endpoints stay mutually
+			// coherent rather than mixing a stale explicit endpoint with
+			// freshly-derived others.
+			const pinnedIssuer = expandedOptions.issuer;
+			Object.assign(config, derivedConfig);
+			if (pinnedIssuer !== undefined) {
+				config.issuer = pinnedIssuer;
+			}
 		}
 	}
 
+	// Azure issuer binding (#264): a real tenant GUID's issuer is fully
+	// determined by its own jwksUri; a shared alias authority (/common,
+	// /organizations, /consumers) only becomes usable when the operator pins
+	// a single Azure-shaped tenant issuer, in which case verification is
+	// redirected to that tenant's own, non-shared endpoint. A no-op for any
+	// non-Azure-shaped jwksUri. Throws for an unsafe/malformed combination.
+	resolveAzureIssuerBinding(config, providerName, logger);
+
 	if (enforceIssuerForJwks) {
 		validateIssuerForJwks(config, providerName, providerPreset);
+		checkGraphProfileScope(config, providerName, logger);
 	}
 
 	return config;
@@ -685,15 +717,45 @@ function hasUsableIssuer(issuer: OAuthProviderConfig['issuer']): boolean {
 }
 
 /**
+ * True when a JWKS-enabled, issuer-less provider is a candidate for
+ * background OIDC discovery (HarperFast/oauth#264): `jwksUri` is set, no
+ * usable `issuer` resulted (from a preset shortcut or an explicit pin —
+ * includes the Azure cases `resolveAzureIssuerBinding` already resolved),
+ * `authorizationUrl` parses as `https:` (discovery must not depend on the
+ * network for a config that's wrong independent of it — a non-https
+ * `authorizationUrl` can never be fixed by a fetch), and the endpoint isn't
+ * Azure's own host (an *unpinned* alias authority is intentionally
+ * issuer-less — generic discovery must never probe it; see `azureIssuer.ts`).
+ */
+export function needsIssuerDiscovery(config: OAuthProviderConfig): boolean {
+	if (!config.jwksUri) return false;
+	if (hasUsableIssuer(config.issuer)) return false;
+	if (isAzureJwksUri(config.jwksUri)) return false;
+	try {
+		return new URL(config.authorizationUrl).protocol === 'https:';
+	} catch {
+		return false;
+	}
+}
+
+/**
  * A JWKS-enabled provider (so `issuerValidated` can in principle be `true` —
  * HarperFast/oauth#231 §4) with no usable `issuer` would otherwise deny
  * adoption silently at login, forever. `domain`/`tenantId` already derive
- * `issuer` for Okta/Auth0/Azure; this only fires when that's bypassed.
+ * `issuer` for Okta/Auth0/Azure; `resolveAzureIssuerBinding` derives it for
+ * a pinned Azure alias or a real tenant GUID (HarperFast/oauth#264); this
+ * only fires when all of that is bypassed.
  *
- * Azure is excluded by provider type, not just its `/common` default: single-
- * tenant Azure configs with explicit endpoints and no `issuer` are unchanged
- * by this PR (tracked as a known gap in HarperFast/oauth#264, not fixed
- * here). Checked against the
+ * Boot must not depend on the network: a provider `needsIssuerDiscovery`
+ * defers to that background attempt (`src/index.ts` starts it once this
+ * provider is published) instead of throwing — only a config that's wrong
+ * *independent* of the network (no `authorizationUrl`, or a non-`https` one)
+ * still hard-fails here, exactly as before #264.
+ *
+ * Azure is excluded by provider type, not just its `/common` default: an
+ * *unpinned* alias authority is intentionally issuer-less (HarperFast/oauth#264
+ * §"adoption requires a pin") and must not hard-fail; a pinned one, or a real
+ * tenant GUID, already has a usable issuer by this point. Checked against the
  * preset's own `provider` field (`providerPreset`), not `config.provider` —
  * the `microsoft` alias resolves to the Azure preset but an explicit
  * `provider: 'microsoft'` option carries that string into `config.provider`.
@@ -706,15 +768,84 @@ function validateIssuerForJwks(
 	if (!config.jwksUri) return;
 	if (config.provider === 'azure' || providerPreset?.provider === 'azure') return;
 	if (hasUsableIssuer(config.issuer)) return;
+	if (needsIssuerDiscovery(config)) return;
 
 	throw new Error(
-		`OAuth provider '${providerName}' (${config.provider}) has a 'jwksUri' but no usable 'issuer'. ` +
-			`Without a validated issuer, ID token signature verification still runs but 'issuerValidated' is ` +
-			`always false, so this provider's logins can never satisfy the account-adoption gate (a hookless ` +
-			`login that should adopt an existing Harper account is silently denied instead). Set 'issuer' ` +
-			`explicitly on provider '${providerName}' (e.g. your OIDC server's issuer URI), or use the preset's ` +
-			`'domain'/'tenantId' shortcut if you're not already, which derives it for you.`
+		`OAuth provider '${providerName}' (${config.provider}) has a 'jwksUri' but no usable 'issuer', and OIDC ` +
+			`discovery cannot run for it (its 'authorizationUrl' is missing or not https). Without a validated ` +
+			`issuer, ID token signature verification still runs but 'issuerValidated' is always false, so this ` +
+			`provider's logins can never satisfy the account-adoption gate. Set 'issuer' explicitly on provider ` +
+			`'${providerName}' (e.g. your OIDC server's issuer URI), or use the preset's 'domain'/'tenantId' ` +
+			`shortcut if you're not already, which derives it for you.`
 	);
+}
+
+/**
+ * The exact condition `OAuthProvider`'s private `isAzureGraphUserInfo` checks
+ * — `config.provider === 'azure'`, **or** `userInfoUrl`'s host is
+ * `graph.microsoft.com` — duplicated here (deliberately, not imported: it's
+ * a private method) so this startup check warns for exactly the same
+ * configs that method's alternate `id`/`oid` correlation applies to.
+ */
+function isAzureGraphUserInfoConfig(config: OAuthProviderConfig): boolean {
+	if (config.provider === 'azure') return true;
+	try {
+		return new URL(config.userInfoUrl).hostname === 'graph.microsoft.com';
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Warns (never throws) when a statically configured provider's `fetchEmail`
+ * correlation against Microsoft Graph's non-OIDC `/v1.0/me` can never
+ * succeed: that correlation needs the ID token's `oid` claim, which Azure
+ * only includes when the `profile` scope was requested (#263; the Azure
+ * preset's default `scope` already includes it). A custom `scope` that
+ * drops `profile` silently loses the correlation at login time with no
+ * indication why — this surfaces it at startup instead. Advisory only: it
+ * degrades a UserInfo correlation, not the account-adoption gate's safety,
+ * so a throwing logger must not abort provider initialization either.
+ */
+function checkGraphProfileScope(config: OAuthProviderConfig, providerName: string, logger?: Logger): void {
+	if (!config.fetchEmail) return;
+	if (!isAzureGraphUserInfoConfig(config)) return;
+	const scopes = (config.scope ?? '').split(/\s+/).filter(Boolean);
+	if (scopes.includes('profile')) return;
+	try {
+		logger?.warn?.(
+			`OAuth provider '${providerName}': 'fetchEmail' is enabled against a Microsoft Graph UserInfo endpoint, ` +
+				`but 'scope' does not include 'profile'. Azure only includes the 'oid' claim on the ID token when ` +
+				`'profile' is requested, and 'oid' is required to correlate Graph's '/v1.0/me' response (which has ` +
+				`no 'sub') with the ID token — without it, that fallback discards the UserInfo response instead of ` +
+				`merging the email. Add 'profile' to provider '${providerName}''s 'scope'.`
+		);
+	} catch {
+		/* a throwing logger must not abort provider initialization */
+	}
+}
+
+/**
+ * Re-derive OIDC discovery targets from an *already-built* provider
+ * registry (HarperFast/oauth#264) — a pure function with no side effects.
+ * Call only after the registry is confirmed published (see `src/index.ts`);
+ * this function itself never starts a fetch.
+ */
+export function collectDiscoveryTargets(
+	providers: ProviderRegistry
+): Array<{ authorizationUrl: string; jwksUri: string; tokenUrl: string; providerName: string }> {
+	const targets: Array<{ authorizationUrl: string; jwksUri: string; tokenUrl: string; providerName: string }> = [];
+	for (const [providerName, { config }] of Object.entries(providers)) {
+		if (needsIssuerDiscovery(config)) {
+			targets.push({
+				authorizationUrl: config.authorizationUrl,
+				jwksUri: config.jwksUri!,
+				tokenUrl: config.tokenUrl,
+				providerName,
+			});
+		}
+	}
+	return targets;
 }
 
 /**
@@ -799,7 +930,13 @@ export function initializeProviders(options: OAuthPluginConfig, logger?: Logger)
 		// enforceIssuerForJwks (#231 §4) only runs here, after the configured-ness
 		// precheck above (#259/#260) — an unconfigured or half-configured provider
 		// is already skipped and never reaches the issuer check.
-		const config = buildProviderConfig(providerConfig, providerName, pluginDefaults, /* enforceIssuerForJwks */ true);
+		const config = buildProviderConfig(
+			providerConfig,
+			providerName,
+			pluginDefaults,
+			/* enforceIssuerForJwks */ true,
+			logger
+		);
 
 		// Check if this provider is properly configured
 		const requiredFields = ['clientId', 'clientSecret', 'authorizationUrl', 'tokenUrl', 'userInfoUrl'];

@@ -15,6 +15,8 @@ import {
 	normalizeMcpSecurityConfig,
 	isUnresolvedEnvPlaceholder,
 	skipUndefined,
+	needsIssuerDiscovery,
+	collectDiscoveryTargets,
 } from '../../dist/lib/config.js';
 import { interactivePrivateKeyJwtEnabled } from '../../dist/lib/mcp/clientAuthMethod.js';
 
@@ -1410,8 +1412,13 @@ describe('OAuth Configuration', () => {
 			});
 		});
 
-		describe('issuer required for JWKS-enabled providers, static startup only (#231 §4)', () => {
-			it('throws naming the provider and key when a generic provider sets jwksUri but no issuer', () => {
+		describe('issuer required for JWKS-enabled providers, static startup only (#231 §4, relaxed by #264)', () => {
+			it('does NOT throw for a generic provider with an https authorizationUrl, jwksUri and no issuer — defers to OIDC discovery instead (#264)', () => {
+				// #264 relaxes #231 §4's hard-fail: an `https` explicit-endpoint
+				// config is no longer necessarily wrong — it may just need one
+				// background discovery round-trip the operator never has to think
+				// about. Only a config that's wrong independent of the network
+				// (next test) still hard-fails.
 				const providerConfig = {
 					provider: 'generic',
 					clientId: 'c',
@@ -1419,6 +1426,23 @@ describe('OAuth Configuration', () => {
 					authorizationUrl: 'https://idp.example.com/authorize',
 					tokenUrl: 'https://idp.example.com/token',
 					userInfoUrl: 'https://idp.example.com/userinfo',
+					jwksUri: 'https://idp.example.com/jwks',
+					redirectUri: 'https://app.test.com/oauth',
+				};
+
+				const config = buildProviderConfig(providerConfig, 'custom-idp', {}, true);
+				assert.equal(config.issuer, undefined);
+				assert.equal(needsIssuerDiscovery(config), true, 'eligible for background OIDC discovery');
+			});
+
+			it('still throws naming the provider and key when authorizationUrl is not https — discovery cannot help a config that is wrong independent of the network (#264)', () => {
+				const providerConfig = {
+					provider: 'generic',
+					clientId: 'c',
+					clientSecret: 's',
+					authorizationUrl: 'http://idp.example.com/authorize',
+					tokenUrl: 'http://idp.example.com/token',
+					userInfoUrl: 'http://idp.example.com/userinfo',
 					jwksUri: 'https://idp.example.com/jwks',
 					redirectUri: 'https://app.test.com/oauth',
 				};
@@ -1433,10 +1457,11 @@ describe('OAuth Configuration', () => {
 				);
 			});
 
-			it('throws when Okta is configured with explicit endpoints (bypassing domain) and no issuer', () => {
+			it('does NOT throw when Okta is configured with explicit endpoints (bypassing domain) and no issuer — defers to discovery (#264)', () => {
 				// A custom Okta authorization-server config with explicit endpoints —
-				// the regression this closes: previously issuer stayed '' and adoption
-				// was silently denied at login instead of failing fast at startup.
+				// #231 §4 used to fail fast at startup for this; #264 relaxes that to
+				// a background discovery attempt instead, since the https endpoint
+				// may well be resolvable.
 				const providerConfig = {
 					provider: 'okta',
 					clientId: 'c',
@@ -1448,7 +1473,9 @@ describe('OAuth Configuration', () => {
 					redirectUri: 'https://app.test.com/oauth',
 				};
 
-				assert.throws(() => buildProviderConfig(providerConfig, 'okta-custom-as', {}, true), /issuer/);
+				const config = buildProviderConfig(providerConfig, 'okta-custom-as', {}, true);
+				assert.ok(!config.issuer, 'no usable issuer (Okta preset default is an empty string)');
+				assert.equal(needsIssuerDiscovery(config), true);
 			});
 
 			it('does NOT throw the same config without enforceIssuerForJwks — the dynamic/request-time path (#231 follow-up)', () => {
@@ -1563,7 +1590,7 @@ describe('OAuth Configuration', () => {
 				assert.ok(!config.jwksUri, 'GitHub preset has no jwksUri (null)');
 			});
 
-			it('a non-empty issuer array with only blank entries is NOT usable (hasUsableIssuer)', () => {
+			it('a non-empty issuer array with only blank entries is NOT usable (hasUsableIssuer) — still eligible for discovery with an https authorizationUrl', () => {
 				const providerConfig = {
 					provider: 'generic',
 					clientId: 'c',
@@ -1576,10 +1603,27 @@ describe('OAuth Configuration', () => {
 					redirectUri: 'https://app.test.com/oauth',
 				};
 
+				const config = buildProviderConfig(providerConfig, 'custom-idp', {}, true);
+				assert.equal(needsIssuerDiscovery(config), true);
+			});
+
+			it('a non-empty issuer array with only blank entries still hard-fails with a non-https authorizationUrl', () => {
+				const providerConfig = {
+					provider: 'generic',
+					clientId: 'c',
+					clientSecret: 's',
+					authorizationUrl: 'http://idp.example.com/authorize',
+					tokenUrl: 'http://idp.example.com/token',
+					userInfoUrl: 'http://idp.example.com/userinfo',
+					jwksUri: 'https://idp.example.com/jwks',
+					issuer: [''],
+					redirectUri: 'https://app.test.com/oauth',
+				};
+
 				assert.throws(() => buildProviderConfig(providerConfig, 'custom-idp', {}, true), /issuer/);
 			});
 
-			it('initializeProviders propagates the throw (fails fast at startup, not a silent per-login deny)', () => {
+			it('initializeProviders does NOT throw for an https explicit-endpoint provider missing issuer — it defers to background discovery (#264)', () => {
 				const options = {
 					providers: {
 						'custom-idp': {
@@ -1589,6 +1633,28 @@ describe('OAuth Configuration', () => {
 							authorizationUrl: 'https://idp.example.com/authorize',
 							tokenUrl: 'https://idp.example.com/token',
 							userInfoUrl: 'https://idp.example.com/userinfo',
+							jwksUri: 'https://idp.example.com/jwks',
+							redirectUri: 'https://app.test.com/oauth',
+						},
+					},
+				};
+
+				const providers = initializeProviders(options, undefined);
+				assert.ok(providers['custom-idp'], 'provider still initializes');
+				assert.equal(providers['custom-idp'].config.issuer, undefined);
+				assert.equal(collectDiscoveryTargets(providers).length, 1, 'eligible for background OIDC discovery');
+			});
+
+			it('initializeProviders still propagates the throw for a non-https authorizationUrl (fails fast at startup, not a silent per-login deny)', () => {
+				const options = {
+					providers: {
+						'custom-idp': {
+							provider: 'generic',
+							clientId: 'c',
+							clientSecret: 's',
+							authorizationUrl: 'http://idp.example.com/authorize',
+							tokenUrl: 'http://idp.example.com/token',
+							userInfoUrl: 'http://idp.example.com/userinfo',
 							jwksUri: 'https://idp.example.com/jwks',
 							redirectUri: 'https://app.test.com/oauth',
 						},
@@ -1631,10 +1697,11 @@ describe('OAuth Configuration', () => {
 				);
 			});
 
-			it('a configured provider alongside an unconfigured one in the same config still gets the §4 fail-fast', () => {
+			it('a configured provider alongside an unconfigured one in the same config still gets the §4 fail-fast for a non-https authorizationUrl', () => {
 				// Mirrors the test above but with a second, fully configured provider
 				// present: the unconfigured one is skipped silently while the
-				// configured one still throws for its missing issuer.
+				// configured one still throws for its missing issuer (non-https —
+				// discovery can't help, so #231 §4's hard-fail still applies).
 				delete process.env.OAUTH_TEST_231_UNSET_CLIENT_ID_2;
 				const options = {
 					providers: {
@@ -1650,9 +1717,9 @@ describe('OAuth Configuration', () => {
 							provider: 'generic',
 							clientId: 'c',
 							clientSecret: 's',
-							authorizationUrl: 'https://idp.example.com/authorize',
-							tokenUrl: 'https://idp.example.com/token',
-							userInfoUrl: 'https://idp.example.com/userinfo',
+							authorizationUrl: 'http://idp.example.com/authorize',
+							tokenUrl: 'http://idp.example.com/token',
+							userInfoUrl: 'http://idp.example.com/userinfo',
 							jwksUri: 'https://idp.example.com/jwks',
 							redirectUri: 'https://app.test.com/oauth',
 						},

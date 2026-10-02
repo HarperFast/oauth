@@ -136,6 +136,28 @@ export function validateTenantId(tenantId: string): void {
 }
 
 /**
+ * Validates an Okta custom authorization server identifier (e.g. 'default',
+ * or a generated ID like 'aus1a2b3c4d5e6f7g8h9'). Same shape constraints as
+ * a tenant ID — a single, safe path segment — so it can never redirect the
+ * generated endpoint URLs anywhere but under
+ * `https://{domain}/oauth2/{authServer}/...` (HarperFast/oauth#264).
+ *
+ * @param authServer - Auth server identifier to validate
+ * @throws Error if the identifier is invalid or unsafe
+ */
+export function validateOktaAuthServer(authServer: string): void {
+	if (!authServer || typeof authServer !== 'string') {
+		throw new Error('Okta authServer must be a non-empty string');
+	}
+	if (authServer.length < 1 || authServer.length > 64) {
+		throw new Error('Okta authServer must be 1-64 characters long');
+	}
+	if (!/^[a-zA-Z0-9_-]+$/.test(authServer)) {
+		throw new Error('Okta authServer must contain only alphanumeric characters, hyphens, and underscores');
+	}
+}
+
+/**
  * Sanitizes tenant name for safe HTML output
  *
  * Prevents XSS attacks by HTML-escaping special characters.

@@ -19,6 +19,8 @@ export interface TenantConfig {
 	provider: 'okta' | 'azure' | 'auth0' | string;
 	/** Provider-specific domain (for Okta/Auth0) or tenant ID (for Azure) */
 	domain?: string;
+	/** Okta-specific custom authorization server identifier (e.g. 'default'); omitted uses the org authorization server. */
+	authServer?: string;
 	/** Azure AD specific tenant ID (alternative to domain) */
 	azureTenantId?: string;
 	/** OAuth client ID for this tenant */
@@ -86,7 +88,7 @@ export class TenantManager {
 					if (!tenant.domain) {
 						throw new Error(`${normalizedProvider} provider requires domain configuration`);
 					}
-					providerSpecificConfig = baseProvider.configure(tenant.domain);
+					providerSpecificConfig = baseProvider.configure(tenant.domain, tenant.authServer);
 					break;
 
 				case 'azure':

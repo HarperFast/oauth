@@ -12,7 +12,9 @@ import {
 	extractPluginDefaults,
 	normalizeMcpSecurityConfig,
 	coerceConfigBoolean,
+	collectDiscoveryTargets,
 } from './lib/config.ts';
+import { startIssuerDiscovery } from './lib/discovery.ts';
 import { OAuthResource } from './lib/resource.ts';
 import { validateAndRefreshSession } from './lib/sessionValidator.ts';
 import { clearOAuthSession } from './lib/handlers.ts';
@@ -352,6 +354,33 @@ export async function handleApplication(scope: Scope): Promise<void> {
 		const newProviders = initializeProviders(options, logger);
 		Object.keys(providers).forEach((key) => delete providers[key]);
 		Object.assign(providers, newProviders);
+
+		// Schedule OIDC discovery (HarperFast/oauth#264) for any provider that
+		// needs it, immediately once `providers` is live. On a reload (not the
+		// very first boot), `OAuthResource.providers` already references this
+		// same object from a prior `configure()` call, so the `Object.assign`
+		// above is the point this registry actually starts serving — earlier
+		// than `OAuthResource.configure`/`resources.set` below, which is why
+		// this is scheduled here rather than after them: nothing between here
+		// and the end of this function can retroactively un-serve `providers`,
+		// so a later throw (a throwing logger on the messages below, or
+		// `resources.set` itself) can't suppress discovery for a registry
+		// that's already live, and a throw *before* this line (any reason,
+		// including `initializeProviders`'s reserved-name check) means
+		// `providers` was never reached, so a discarded reload attempt never
+		// starts or logs discovery for any provider in it. Wrapped in its own
+		// try/catch purely as defense in depth — `collectDiscoveryTargets`/
+		// `startIssuerDiscovery` can't throw by design.
+		try {
+			for (const target of collectDiscoveryTargets(providers)) {
+				startIssuerDiscovery(target.authorizationUrl, target.jwksUri, target.tokenUrl, target.providerName, logger);
+			}
+		} catch (error) {
+			logger?.error?.(
+				'OAuth: failed to schedule OIDC issuer discovery:',
+				error instanceof Error ? error.message : String(error)
+			);
+		}
 
 		// Extract plugin defaults for dynamic provider resolution
 		pluginDefaults = extractPluginDefaults(options);
