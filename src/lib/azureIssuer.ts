@@ -274,7 +274,11 @@ function azureDerivedIssuer(
 		rawAuthorizeSegment !== null && (ALIAS_SEGMENTS.has(rawAuthorizeSegment) || GUID_RE.test(rawAuthorizeSegment))
 			? rawAuthorizeSegment
 			: null;
-	if (authorizeSegment && authorizeSegment !== guid) {
+	// 'consumers' and AZURE_CONSUMERS_TENANT_ID name the SAME tenant (Azure's
+	// fixed GUID for personal Microsoft accounts) — not a mismatch, even
+	// though the alias string and the GUID string are never equal.
+	const isConsumersAliasMatch = authorizeSegment === 'consumers' && guid === AZURE_CONSUMERS_TENANT_ID;
+	if (authorizeSegment && authorizeSegment !== guid && !isConsumersAliasMatch) {
 		try {
 			logger?.warn?.(
 				`OAuth provider '${providerName}' (azure) has a jwksUri for tenant '${guid}' but an 'authorizationUrl' ` +
