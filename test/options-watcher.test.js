@@ -406,6 +406,45 @@ describe('OAuth Plugin Options Watcher', () => {
 		assert.equal(OAuthResource.getProviders().google, undefined, 'the unconfigured provider is skipped');
 	});
 
+	it('a live reload adding a half-configured provider skips only that provider and applies the rest (#259)', async () => {
+		await handleApplication(scope);
+		assert.ok(OAuthResource.getProviders().github, 'github starts configured');
+
+		let errorLogged = false;
+		let errorLoggedAboutGoogle = false;
+		scope.logger.error = (msg) => {
+			if (typeof msg === 'string' && msg.includes('Failed to update OAuth configuration')) errorLogged = true;
+			if (typeof msg === 'string' && msg.includes('google') && msg.includes('half configured')) {
+				errorLoggedAboutGoogle = true;
+			}
+		};
+
+		// google has a clientId but no clientSecret anywhere: a regression that throws instead
+		// of skipping would reject the whole reload, dropping github too.
+		scope.options._config = {
+			debug: false,
+			providers: {
+				github: {
+					provider: 'github',
+					clientId: 'test-client-id',
+					clientSecret: 'test-client-secret',
+					redirectUri: 'https://app.test.com/oauth',
+				},
+				google: {
+					provider: 'google',
+					clientId: 'google-client-id',
+					redirectUri: 'https://app.test.com/oauth',
+				},
+			},
+		};
+		configChangeListeners[0]();
+		await waitFor(() => errorLoggedAboutGoogle);
+
+		assert.equal(errorLogged, false, 'the reload must not be rejected over the half-configured provider');
+		assert.ok(OAuthResource.getProviders().github, 'the already-configured provider survives the reload');
+		assert.equal(OAuthResource.getProviders().google, undefined, 'the half-configured provider is skipped');
+	});
+
 	it('a live reload with an unresolved DCR initialAccessToken placeholder is rejected and the previous config keeps serving (#240)', async () => {
 		scope.options._config.mcp = {
 			enabled: true,

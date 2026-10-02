@@ -735,11 +735,11 @@ export function initializeProviders(options: OAuthPluginConfig, logger?: Logger)
 		if (clientIdUnset || clientSecretUnset) {
 			const unsetField = clientIdUnset ? 'clientId' : 'clientSecret';
 			const unsetValue = clientIdUnset ? expandedClientId : expandedClientSecret;
-			throw new Error(
+			logger?.error?.(
 				`OAuth provider '${providerName}' is half configured — ${describeUnsetCredential(unsetField, unsetValue)} ` +
-					`while the other credential is set. Set both 'clientId' and 'clientSecret' for '${providerName}' ` +
-					`(or remove both to leave it disabled).`
+					`while the other credential is set. Skipping until both 'clientId' and 'clientSecret' are set.`
 			);
+			continue;
 		}
 
 		const config = buildProviderConfig(providerConfig, providerName, pluginDefaults);

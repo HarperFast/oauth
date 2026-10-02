@@ -1847,8 +1847,11 @@ describe('OAuth Configuration', () => {
 				assert.throws(() => initializeProviders(options, mockLogger), /redirectUri/);
 			});
 
-			it('4. clientId set, clientSecret an unset placeholder: refuses, naming the variable', () => {
+			it('4. clientId set, clientSecret an unset placeholder: skipped with an error naming the variable, other providers still initialize', () => {
 				delete process.env.OAUTH_TEST_259_CLIENT_SECRET_2;
+				const errors = [];
+				const logger = { ...mockLogger, error: (msg) => errors.push(msg) };
+
 				const options = {
 					redirectUri: 'https://app.test.com/oauth',
 					providers: {
@@ -1859,22 +1862,29 @@ describe('OAuth Configuration', () => {
 							tokenUrl: 'https://github.com/login/oauth/access_token',
 							userInfoUrl: 'https://api.github.com/user',
 						},
+						google: {
+							clientId: 'google-client',
+							clientSecret: 'google-secret',
+							authorizationUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
+							tokenUrl: 'https://oauth2.googleapis.com/token',
+							userInfoUrl: 'https://openidconnect.googleapis.com/v1/userinfo',
+						},
 					},
 				};
 
-				assert.throws(
-					() => initializeProviders(options, mockLogger),
-					(error) => {
-						assert.match(error.message, /github/);
-						assert.match(error.message, /half configured/);
-						assert.match(error.message, /OAUTH_TEST_259_CLIENT_SECRET_2/);
-						return true;
-					}
-				);
+				const providers = initializeProviders(options, logger);
+
+				assert.equal(providers.github, undefined, 'the half-configured provider is skipped');
+				assert.ok(providers.google, 'other providers still initialize');
+				assert.ok(errors.some((msg) => msg.includes('github') && msg.includes('half configured')));
+				assert.ok(errors.some((msg) => msg.includes('OAUTH_TEST_259_CLIENT_SECRET_2')));
 			});
 
-			it('4b. clientSecret set, clientId an unset placeholder: refuses, naming the variable (mirror of 4)', () => {
+			it('4b. clientSecret set, clientId an unset placeholder: skipped with an error naming the variable (mirror of 4)', () => {
 				delete process.env.OAUTH_TEST_259_CLIENT_ID_2B;
+				const errors = [];
+				const logger = { ...mockLogger, error: (msg) => errors.push(msg) };
+
 				const options = {
 					redirectUri: 'https://app.test.com/oauth',
 					providers: {
@@ -1888,15 +1898,11 @@ describe('OAuth Configuration', () => {
 					},
 				};
 
-				assert.throws(
-					() => initializeProviders(options, mockLogger),
-					(error) => {
-						assert.match(error.message, /github/);
-						assert.match(error.message, /half configured/);
-						assert.match(error.message, /OAUTH_TEST_259_CLIENT_ID_2B/);
-						return true;
-					}
-				);
+				const providers = initializeProviders(options, logger);
+
+				assert.equal(providers.github, undefined, 'the half-configured provider is skipped');
+				assert.ok(errors.some((msg) => msg.includes('github') && msg.includes('half configured')));
+				assert.ok(errors.some((msg) => msg.includes('OAUTH_TEST_259_CLIENT_ID_2B')));
 			});
 
 			it('5. both credentials unset placeholders and redirectUri an unset placeholder: skipped with a warning', () => {
@@ -1953,7 +1959,10 @@ describe('OAuth Configuration', () => {
 				);
 			});
 
-			it('7. clientId set, clientSecret whitespace-only: refuses, naming clientSecret', () => {
+			it('7. clientId set, clientSecret whitespace-only: skipped with an error naming clientSecret', () => {
+				const errors = [];
+				const logger = { ...mockLogger, error: (msg) => errors.push(msg) };
+
 				const options = {
 					redirectUri: 'https://app.test.com/oauth',
 					providers: {
@@ -1967,15 +1976,11 @@ describe('OAuth Configuration', () => {
 					},
 				};
 
-				assert.throws(
-					() => initializeProviders(options, mockLogger),
-					(error) => {
-						assert.match(error.message, /github/);
-						assert.match(error.message, /half configured/);
-						assert.match(error.message, /clientSecret/);
-						return true;
-					}
-				);
+				const providers = initializeProviders(options, logger);
+
+				assert.equal(providers.github, undefined, 'the half-configured provider is skipped');
+				assert.ok(errors.some((msg) => msg.includes('github') && msg.includes('half configured')));
+				assert.ok(errors.some((msg) => msg.includes('clientSecret')));
 			});
 		});
 	});
