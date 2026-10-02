@@ -188,6 +188,24 @@ describe('OAuth Handlers', () => {
 				assert.ok(attrs.includes(attr), `cookie carries ${attr}`);
 			}
 		});
+
+		it('redirects to originalUrl with a reason code when CSRF state storage fails, instead of letting the error escape (#227)', async () => {
+			const storageError = new Error('Outstanding write transactions have too long of queue, please try again later');
+			mockProvider.generateCSRFToken = createMockFn(async () => {
+				throw storageError;
+			});
+
+			const result = await handleLogin(mockRequest, mockTarget, mockProvider, mockConfig, 'test-provider', mockLogger);
+
+			assert.equal(result.status, 302);
+			const location = new URL(result.headers.Location, 'http://localhost');
+			assert.equal(location.pathname, '/page');
+			assert.equal(location.searchParams.get('error'), 'server_error');
+			assert.equal(location.searchParams.get('reason'), 'state_storage');
+			assert.equal(result.headers['Set-Cookie'], undefined);
+			assert.equal(mockLogger.error.mock.calls.length, 1);
+			assert.equal(mockLogger.error.mock.calls[0].arguments[1], storageError);
+		});
 	});
 
 	describe('handleCallback', () => {

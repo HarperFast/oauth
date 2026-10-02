@@ -160,12 +160,28 @@ export async function handleLogin(
 
 	// Generate CSRF token with metadata
 	// Bind token to provider to prevent cross-provider CSRF attacks
-	const csrfToken = await provider.generateCSRFToken({
-		originalUrl,
-		sessionId: request.session?.id,
-		providerName, // Bind state token to this provider
-		browserNonceHash: hashBrowserSecret(browserSecret),
-	});
+	let csrfToken: string;
+	try {
+		csrfToken = await provider.generateCSRFToken({
+			originalUrl,
+			sessionId: request.session?.id,
+			providerName, // Bind state token to this provider
+			browserNonceHash: hashBrowserSecret(browserSecret),
+		});
+	} catch (error) {
+		// State storage failed (e.g. a wedged write queue, #2450) — the sign-in
+		// can't proceed either way, but land on the app's sign-in page with a
+		// reason code instead of core's raw error response. No Set-Cookie: the
+		// browser secret is only useful once a state token exists. Details stay
+		// in the server log via this error; CSRFTokenManager.set already logs too.
+		logger?.error?.('OAuth login: failed to store CSRF state:', error);
+		return {
+			status: 302,
+			headers: {
+				Location: buildErrorRedirect(originalUrl, { error: 'server_error', reason: 'state_storage' }),
+			},
+		};
+	}
 
 	// Build authorization URL with CSRF token as state parameter
 	const authUrl = provider.getAuthorizationUrl(csrfToken, config.redirectUri || '');
