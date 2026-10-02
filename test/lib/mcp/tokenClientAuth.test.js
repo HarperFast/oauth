@@ -9,7 +9,7 @@
 import { describe, it, before, after, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, generateKeyPairSync, randomBytes, sign } from 'node:crypto';
-import { _resetGrantRateLimiter, handleToken } from '../../../dist/lib/mcp/token.js';
+import { _resetAudienceWarningLimiter, _resetGrantRateLimiter, handleToken } from '../../../dist/lib/mcp/token.js';
 import { MAX_ASSERTION_LENGTH } from '../../../dist/lib/mcp/clientAssertion.js';
 import { buildAuthorizationServerMetadata } from '../../../dist/lib/mcp/wellKnown.js';
 import { resetMCPAssertionJtisTableCache } from '../../../dist/lib/mcp/assertionJtiStore.js';
@@ -170,9 +170,13 @@ describe('handleToken — shared client authenticator', () => {
 	let fetches;
 	let jtiPatch;
 	let logLines;
+	let warningLines;
 	const logger = {
 		info: (m) => logLines.push(m),
-		warn: (m) => logLines.push(m),
+		warn: (m) => {
+			logLines.push(m);
+			warningLines.push(m);
+		},
 		error: (m) => logLines.push(m),
 		debug: () => {},
 	};
@@ -191,12 +195,14 @@ describe('handleToken — shared client authenticator', () => {
 			resetMCPRefreshFamiliesTableCache,
 			resetMCPKeysTableCache,
 			resetMCPAssertionJtisTableCache,
+			_resetAudienceWarningLimiter,
 			_clearCimdCache,
 			_clearJwksCache,
 		]) {
 			reset();
 		}
 		logLines = [];
+		warningLines = [];
 		clients = new Map([
 			['public-1', { client_id: 'public-1', token_endpoint_auth_method: 'none', client_id_issued_at: 1 }],
 			[
@@ -688,11 +694,55 @@ describe('handleToken — shared client authenticator', () => {
 			);
 		});
 
-		it('accepts the issuer as audience and rejects the token endpoint by default', async () => {
-			assertInvalidClient(
+		it('gives one operator hint for repeated token-endpoint-audience refusals, without changing the client response', async () => {
+			const assertion = signAssertion({ claims: { aud: TOKEN_ENDPOINT } });
+			const rejected = await exchange(body(assertion), { config: MIXED });
+			assert.deepEqual(rejected, {
+				status: 401,
+				body: {
+					error: 'invalid_client',
+					error_description:
+						'client_assertion verification failed: client_assertion aud does not match an accepted audience',
+				},
+				headers: { 'Cache-Control': 'no-store', 'Pragma': 'no-cache' },
+			});
+			assert.equal(warningLines.length, 1);
+			assert.match(warningLines[0], /interactive CIMD client/);
+			assert.ok(warningLines[0].includes(ASSISTANT));
+			assert.match(warningLines[0], /token-endpoint URL rather than the issuer/);
+			assert.match(warningLines[0], /mcp\.clientIdMetadataDocuments\.privateKeyJwt\.tokenEndpointAudience/);
+			assert.match(warningLines[0], /clientIds: \[/);
+			assert.match(warningLines[0], /expiresAt: /);
+			assert.match(warningLines[0], /an expiry you choose/);
+			const [, payload, signature] = assertion.split('.');
+			assert.ok(
+				!logLines.some((line) => line.includes(assertion) || line.includes(payload) || line.includes(signature))
+			);
+
+			assert.deepEqual(
 				await exchange(body(signAssertion({ claims: { aud: TOKEN_ENDPOINT } })), { config: MIXED }),
+				rejected
+			);
+			assert.equal(warningLines.length, 1, 'a second refusal inside five minutes adds no warning');
+		});
+
+		it('does not hint for a different rejected audience', async () => {
+			assertInvalidClient(
+				await exchange(body(signAssertion({ claims: { aud: 'https://other.example.com/token' } })), {
+					config: MIXED,
+				}),
 				/aud does not match/
 			);
+			assert.ok(!warningLines.some((line) => line.includes('tokenEndpointAudience')));
+		});
+
+		it('does not hint from an audience claim with an invalid signature', async () => {
+			const wrongSigner = { ...KEY_1, privateKey: KEY_2.privateKey };
+			assertInvalidClient(
+				await exchange(body(signAssertion({ key: wrongSigner, claims: { aud: TOKEN_ENDPOINT } })), { config: MIXED }),
+				/signature verification failed/
+			);
+			assert.ok(!warningLines.some((line) => line.includes('tokenEndpointAudience')));
 		});
 
 		describe('opt-in token-endpoint audience exception', () => {
@@ -708,6 +758,7 @@ describe('handleToken — shared client authenticator', () => {
 				const res = await exchange(body(signAssertion({ claims: { aud: TOKEN_ENDPOINT } })), { config });
 				assert.equal(res.status, 200, JSON.stringify(res.body));
 				assert.ok(logLines.some((l) => /aud form token_endpoint/.test(l)));
+				assert.equal(warningLines.length, 0);
 			});
 
 			it('stops applying at its expiry, checked on the request', async () => {
@@ -716,6 +767,8 @@ describe('handleToken — shared client authenticator', () => {
 					await exchange(body(signAssertion({ claims: { aud: TOKEN_ENDPOINT } })), { config }),
 					/aud does not match/
 				);
+				assert.equal(warningLines.length, 1);
+				assert.match(warningLines[0], /exception has expired/);
 			});
 
 			it('applies only to the listed client IDs', async () => {
@@ -724,6 +777,8 @@ describe('handleToken — shared client authenticator', () => {
 					await exchange(body(signAssertion({ claims: { aud: TOKEN_ENDPOINT } })), { config }),
 					/aud does not match/
 				);
+				assert.equal(warningLines.length, 1);
+				assert.match(warningLines[0], /does not list this client ID/);
 			});
 
 			it('does not apply when the keys come from an allowlisted foreign origin', async () => {

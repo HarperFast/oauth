@@ -848,6 +848,14 @@ refuses. To keep ChatGPT working on such a server, before the cutover:
 Once `expiresAt` passes, ChatGPT's token-endpoint-audience assertions are
 refused (`invalid_client`) until the exception is renewed.
 
+**Troubleshooting: ChatGPT gets an audience error.** When a signature-verified interactive
+assertion names the token endpoint URL as `aud` and the audience check refuses
+it, an available warning logger names the client ID, explains why the exception
+did not apply, and shows `mcp.clientIdMetadataDocuments.privateKeyJwt.tokenEndpointAudience`
+with `{ clientIds: [...], expiresAt }` and an expiry you choose. It warns at most
+once per client ID per five minutes on each node; the client still receives the
+generic `invalid_client` audience error.
+
 ### Presented client authentication at the token endpoint
 
 These rules apply to every client on `authorization_code` and `refresh_token`:
