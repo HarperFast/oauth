@@ -377,16 +377,21 @@ describe('OAuth Plugin Options Watcher', () => {
 			}
 		};
 
-		// Add a second provider whose credentials come from env vars nobody has set
-		// yet — initializeProviders must skip it with a warning, not reject the
-		// whole reload (previously: buildProviderConfig threw on its missing
-		// redirectUri before the "not configured" check ever ran).
+		// Add a second provider whose credentials come from env vars nobody has set yet, and
+		// drop the plugin-level redirectUri in favor of a per-provider one on github — google
+		// then has no redirectUri anywhere, so if the skip ever stopped happening before
+		// redirectUri validation (#238), this reload would be rejected instead of applied.
 		delete process.env.OAUTH_TEST_RELOAD_GOOGLE_CLIENT_ID;
 		delete process.env.OAUTH_TEST_RELOAD_GOOGLE_CLIENT_SECRET;
 		scope.options._config = {
-			...scope.options._config,
+			debug: false,
 			providers: {
-				...scope.options._config.providers,
+				github: {
+					provider: 'github',
+					clientId: 'test-client-id',
+					clientSecret: 'test-client-secret',
+					redirectUri: 'https://app.test.com/oauth',
+				},
 				google: {
 					provider: 'google',
 					clientId: '${OAUTH_TEST_RELOAD_GOOGLE_CLIENT_ID}',

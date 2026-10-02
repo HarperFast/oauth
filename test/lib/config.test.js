@@ -1784,11 +1784,11 @@ describe('OAuth Configuration', () => {
 				const logger = { ...mockLogger, warn: (msg) => warnings.push(msg) };
 
 				const options = {
-					redirectUri: 'https://app.test.com/oauth',
+					// No plugin-level redirectUri: github has none at all, so if the skip ever
+					// stopped happening before redirectUri validation (#238), this would throw
+					// instead of being skipped with a warning.
 					providers: {
 						github: {
-							// No redirectUri here or at the plugin level would normally throw
-							// (#238) — it must never be evaluated for an unconfigured provider.
 							clientId: '${OAUTH_TEST_259_CLIENT_ID}',
 							clientSecret: '${OAUTH_TEST_259_CLIENT_SECRET}',
 						},
@@ -1798,6 +1798,7 @@ describe('OAuth Configuration', () => {
 							authorizationUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
 							tokenUrl: 'https://oauth2.googleapis.com/token',
 							userInfoUrl: 'https://openidconnect.googleapis.com/v1/userinfo',
+							redirectUri: 'https://app.test.com/oauth',
 						},
 					},
 				};
@@ -1868,6 +1869,32 @@ describe('OAuth Configuration', () => {
 						assert.match(error.message, /github/);
 						assert.match(error.message, /half configured/);
 						assert.match(error.message, /OAUTH_TEST_259_CLIENT_SECRET_2/);
+						return true;
+					}
+				);
+			});
+
+			it('4b. clientSecret set, clientId an unset placeholder: refuses, naming the variable (mirror of 4)', () => {
+				delete process.env.OAUTH_TEST_259_CLIENT_ID_2B;
+				const options = {
+					redirectUri: 'https://app.test.com/oauth',
+					providers: {
+						github: {
+							clientId: '${OAUTH_TEST_259_CLIENT_ID_2B}',
+							clientSecret: 'github-secret',
+							authorizationUrl: 'https://github.com/login/oauth/authorize',
+							tokenUrl: 'https://github.com/login/oauth/access_token',
+							userInfoUrl: 'https://api.github.com/user',
+						},
+					},
+				};
+
+				assert.throws(
+					() => initializeProviders(options, mockLogger),
+					(error) => {
+						assert.match(error.message, /github/);
+						assert.match(error.message, /half configured/);
+						assert.match(error.message, /OAUTH_TEST_259_CLIENT_ID_2B/);
 						return true;
 					}
 				);
