@@ -616,7 +616,8 @@ describe('resolveCimdClient — document validation', () => {
 			/no token endpoint authentication method/
 		);
 		assert.match(
-			permittedAuthMethod(record, { enabled: true }).error,
+			permittedAuthMethod(record, { enabled: true, clientIdMetadataDocuments: { privateKeyJwt: { enabled: true } } })
+				.error,
 			/prefers private_key_jwt but its keys are unusable/
 		);
 	});

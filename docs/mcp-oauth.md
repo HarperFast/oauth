@@ -718,13 +718,14 @@ lists ChatGPT's client ID and has not expired. The recording was not made agains
 covers one session per case, shows no key rotation, and does not show whether
 each refresh presented the refresh token returned by the previous one.
 
-| Configuration                                                               | `private_key_jwt` advertised | `token_endpoint_auth_signing_alg_values_supported` | ChatGPT is permitted | ChatGPT's recorded request shape                                  |
-| --------------------------------------------------------------------------- | ---------------------------- | -------------------------------------------------- | -------------------- | ----------------------------------------------------------------- |
-| CIMD on, `privateKeyJwt.enabled` absent or `true`, headless off             | yes                          | `RS256`, `ES256`, `EdDSA`                          | `private_key_jwt`    | refused (`invalid_client`) unless an unexpired exception lists it |
-| CIMD on, `privateKeyJwt.enabled: false`, headless off                       | no                           | omitted                                            | `none`               | the `none` form is accepted                                       |
-| CIMD on, headless on, `privateKeyJwt.enabled` absent, `true` or `false`     | yes                          | `RS256`, `ES256`, `EdDSA`                          | `private_key_jwt`    | refused (`invalid_client`) unless an unexpired exception lists it |
-| CIMD off, headless off, `privateKeyJwt.enabled: false`                      | no                           | omitted                                            | not resolved         | —                                                                 |
-| CIMD off with headless on, or with `privateKeyJwt.enabled` absent or `true` | startup error                | —                                                  | —                    | —                                                                 |
+| Configuration                                                           | `private_key_jwt` advertised | `token_endpoint_auth_signing_alg_values_supported` | ChatGPT is permitted | ChatGPT's recorded request shape                                  |
+| ----------------------------------------------------------------------- | ---------------------------- | -------------------------------------------------- | -------------------- | ----------------------------------------------------------------- |
+| CIMD on, `privateKeyJwt.enabled` absent, headless off                   | no                           | omitted                                            | `none`               | the `none` form is accepted                                       |
+| CIMD on, `privateKeyJwt.enabled: true`, headless off                    | yes                          | `RS256`, `ES256`, `EdDSA`                          | `private_key_jwt`    | refused (`invalid_client`) unless an unexpired exception lists it |
+| CIMD on, `privateKeyJwt.enabled: false`, headless off                   | no                           | omitted                                            | `none`               | the `none` form is accepted                                       |
+| CIMD on, headless on, `privateKeyJwt.enabled` absent, `true` or `false` | yes                          | `RS256`, `ES256`, `EdDSA`                          | `private_key_jwt`    | refused (`invalid_client`) unless an unexpired exception lists it |
+| CIMD off, headless off, `privateKeyJwt.enabled` absent or `false`       | no                           | omitted                                            | not resolved         | —                                                                 |
+| CIMD off with headless on, or with `privateKeyJwt.enabled: true`        | startup error                | —                                                  | —                    | —                                                                 |
 
 Enabling or disabling Dynamic Client Registration does not change these arrays:
 stored clients keep authenticating with their registered secrets, so the secret
@@ -791,14 +792,15 @@ also accepts the exact advertised token endpoint URL as the sole `aud`:
   stored clients.
 
 The accepted audience form (`issuer` or `token_endpoint`) is logged; the
-assertion never is. This departs from RFC 7523bis §4, which forbids the token
-endpoint as an audience.
+assertion never is. RFC 7523bis §4 forbids the token endpoint as an audience
+by default because a malicious authorization server can advertise our token
+endpoint as its own and collect an assertion that can be replayed across servers.
 
 ```yaml
 mcp:
   clientIdMetadataDocuments:
     privateKeyJwt:
-      enabled: true # default; set false to omit interactive private_key_jwt when headless is off
+      enabled: true # opt in to interactive private_key_jwt when headless is off
       jwksUriAllowedOrigins: # optional; exact https origins besides the client ID's own
         - https://keys.example.com
       tokenEndpointAudience: # optional, off unless set; requires an expiry
@@ -812,31 +814,31 @@ Enabled interactive verification requires CIMD resolution and an `https:` issuer
 When MCP is enabled, a declared `privateKeyJwt.enabled` must be the boolean
 `true` or `false`. Non-boolean values, including strings such as `"false"` and
 `null`, fail config normalization with the full path and accepted values in the
-error. Omission still selects the enabled default. Unresolved placeholders and
+error. An own `undefined` property also fails, while omission leaves the interactive setting off. Unresolved placeholders and
 empty values keep their specific startup errors; MCP-off coercion and
 warn-and-drop behavior is unchanged.
 
-On upgrade, omitting `privateKeyJwt.enabled` activates interactive verification
-for an MCP-enabled server with CIMD enabled and headless agents off; when the
-headless grant was enabled, its advertisement already activated that path.
-For a CIMD document that lists `private_key_jwt` with usable keys but omits
-`token_endpoint_auth_method`, the server intersects its declared methods with
+On upgrade, omitting `privateKeyJwt.enabled` keeps interactive verification off
+when headless agents are off; when the headless grant is enabled, its advertisement
+already activates that path.
+When `private_key_jwt` is advertised, a CIMD document that lists it with
+usable keys but omits `token_endpoint_auth_method` intersects its declared methods with
 the advertised and permitted methods; it chooses the sole member, or
 `private_key_jwt` when both it and `none` remain. A singular preference for
 `none` can select `none` instead. A client selected for `private_key_jwt` must
-present a verified assertion on code exchange and refresh. Set `privateKeyJwt.enabled: false`
-to restore the previous metadata when headless agents are off; a
-document that also declares `none` then selects `none`.
+present a verified assertion on code exchange and refresh. Set `privateKeyJwt.enabled: true`
+to opt in when headless agents are off; a document that also declares `none`
+selects `none` while the setting is absent or false.
 
 #### ChatGPT's token-endpoint audience
 
-Interactive `private_key_jwt` is advertised by default; enabling
-`mcp.clientCredentials` also advertises it when `privateKeyJwt.enabled: false`.
+Interactive `private_key_jwt` is opt-in through `privateKeyJwt.enabled: true`; enabling
+`mcp.clientCredentials` also advertises it when the interactive setting is absent or false.
 On a server that selects `private_key_jwt` for ChatGPT, which prefers it,
 ChatGPT must present a verified assertion on every code exchange and refresh
 once its host is admitted. Its recorded
 assertions use the token endpoint as `aud`, which the issuer-only policy
-refuses. To serve that request shape, before the cutover:
+refuses. To serve that request shape with key authentication now:
 
 1. Configure the exact-ID exception with an expiry you choose, as a date-time
    with an explicit timezone:
@@ -845,10 +847,11 @@ refuses. To serve that request shape, before the cutover:
    mcp:
      clientIdMetadataDocuments:
        privateKeyJwt:
+         enabled: true
          tokenEndpointAudience:
            clientIds:
              - https://chatgpt.com/oauth/client.json
-           expiresAt: '${CHATGPT_AUDIENCE_EXCEPTION_EXPIRES_AT}' # for example 2027-01-31T00:00:00Z
+           expiresAt: '${CHATGPT_AUDIENCE_EXCEPTION_EXPIRES_AT}' # choose an expiry, for example 2027-01-31T00:00:00Z
    ```
 
    An unset variable leaves the placeholder unparseable, and startup fails.

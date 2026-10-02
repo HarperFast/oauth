@@ -661,7 +661,6 @@ describe('handleToken — shared client authenticator', () => {
 		beforeEach(() => seedCode('code-1', ASSISTANT, ASSISTANT_REDIRECT, 'private_key_jwt'));
 
 		for (const [name, config] of [
-			['the default configuration', DEFAULT],
 			['a server advertising it for headless agents', MIXED],
 			['the interactive setting', SETTING_ON],
 		]) {
@@ -1268,7 +1267,7 @@ describe('handleToken — shared client authenticator', () => {
 			// advertises: private_key_jwt in the metadata (and so the method ChatGPT is permitted).
 			// Outcomes: the recorded request (token-endpoint aud), its issuer-audience variant, the none-only form.
 			const MATRIX = [
-				['CIMD on, interactive setting absent, headless off', DEFAULT, true, [401, 200, 401]],
+				['CIMD on, interactive setting absent, headless off', DEFAULT, false, [401, 401, 200]],
 				['interactive setting false, headless off', interactiveOff(DEFAULT), false, [401, 401, 200]],
 				['interactive setting true', SETTING_ON, true, [401, 200, 401]],
 				['headless on, interactive setting absent', MIXED, true, [401, 200, 401]],
@@ -1281,7 +1280,7 @@ describe('handleToken — shared client authenticator', () => {
 					[200, 200, 401],
 				],
 				['interactive setting true, expired exception', exceptionOn(SETTING_ON, Date.now() - 1), true, [401, 200, 401]],
-				['interactive setting absent, exact-ID exception', exceptionOn(DEFAULT), true, [200, 200, 401]],
+				['interactive setting absent, exact-ID exception', exceptionOn(DEFAULT), false, [401, 401, 200]],
 			];
 
 			for (const [name, config, advertises, [recorded, issuerAud, noneOnly]] of MATRIX) {

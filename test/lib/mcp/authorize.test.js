@@ -881,10 +881,19 @@ describe('handleAuthorize — CIMD interstitial', () => {
 	describe('client-authentication binding', () => {
 		const CHATGPT_QUERY = { ...CIMD_QUERY, client_id: CHATGPT_CLIENT_ID, redirect_uri: CHATGPT_REDIRECT_URI };
 
-		it('captures private_key_jwt for ChatGPT by default', async () => {
+		it('captures none for ChatGPT when the interactive setting is absent', async () => {
 			_setFetch(makeCimdFetch(CHATGPT_CIMD_DOCUMENT));
 			const { entries, harnesses } = makeProviderRegistry('github');
 			const response = await handleAuthorize(makeRequest(), makeTarget(CHATGPT_QUERY), { enabled: true }, entries);
+			assert.equal(response.status, 200);
+			assert.equal(harnesses.github.generatedTokens[0].mcp.clientAuthMethod, 'none');
+		});
+
+		it('captures private_key_jwt for ChatGPT when the interactive setting is true', async () => {
+			_setFetch(makeCimdFetch(CHATGPT_CIMD_DOCUMENT));
+			const { entries, harnesses } = makeProviderRegistry('github');
+			const config = { enabled: true, clientIdMetadataDocuments: { privateKeyJwt: { enabled: true } } };
+			const response = await handleAuthorize(makeRequest(), makeTarget(CHATGPT_QUERY), config, entries);
 			assert.equal(response.status, 200);
 			assert.equal(harnesses.github.generatedTokens[0].mcp.clientAuthMethod, 'private_key_jwt');
 		});

@@ -401,12 +401,6 @@ describe('OAuth Configuration', () => {
 
 		describe('interactive private_key_jwt settings', () => {
 			it('refuses declared non-boolean privateKeyJwt.enabled, including undefined, while MCP is active', () => {
-				const dropped = { clientIdMetadataDocuments: { privateKeyJwt: {} } };
-				assert.equal(
-					interactivePrivateKeyJwtEnabled(dropped),
-					true,
-					'a warn-and-drop normalization would activate the default-on predicate'
-				);
 				for (const value of [undefined, 'yes', 'true', 'false', 1, 1n, null, {}, []]) {
 					const cfg = { enabled: true, clientIdMetadataDocuments: { privateKeyJwt: { enabled: value } } };
 					assert.throws(
@@ -444,7 +438,7 @@ describe('OAuth Configuration', () => {
 				const absent = { enabled: true, clientIdMetadataDocuments: { privateKeyJwt: {} } };
 				normalizeMcpSecurityConfig(absent);
 				assert.equal('enabled' in absent.clientIdMetadataDocuments.privateKeyJwt, false);
-				assert.equal(interactivePrivateKeyJwtEnabled(absent), true);
+				assert.equal(interactivePrivateKeyJwtEnabled(absent), false);
 			});
 
 			it('keeps MCP-off coercion, warn-and-drop and placeholder behavior', () => {

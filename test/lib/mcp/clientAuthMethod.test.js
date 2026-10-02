@@ -1,7 +1,7 @@
 /**
  * Tests for token-endpoint authentication method selection
  * (clientAuthMethod.ts): what the server advertises, and the one method it
- * permits per client, including the default-on and explicit-false paths.
+ * permits per client, including the opt-in and headless paths.
  */
 
 import { describe, it } from 'node:test';
@@ -49,14 +49,13 @@ const CHATGPT = interactive(
 );
 
 describe('advertised methods and algorithms', () => {
-	it('advertises private_key_jwt by default', () => {
+	it('omits interactive private_key_jwt when the setting is absent', () => {
 		assert.deepEqual(advertisedTokenEndpointAuthMethods(DEFAULT), [
 			'none',
 			'client_secret_basic',
 			'client_secret_post',
-			'private_key_jwt',
 		]);
-		assert.deepEqual(advertisedAssertionSigningAlgorithms(DEFAULT), ['RS256', 'ES256', 'EdDSA']);
+		assert.equal(advertisedAssertionSigningAlgorithms(DEFAULT), undefined);
 	});
 
 	it('omits private_key_jwt when explicitly disabled without headless agents', () => {
@@ -81,7 +80,7 @@ describe('advertised methods and algorithms', () => {
 			clientIdMetadataDocuments: { enabled: false, privateKeyJwt: { enabled: true } },
 		};
 		const cases = [
-			[DEFAULT, false, true],
+			[DEFAULT, false, false],
 			[SETTING_OFF, false, false],
 			[HEADLESS_ONLY, true, false],
 			[MIXED, true, true],
@@ -118,8 +117,8 @@ describe('advertised methods and algorithms', () => {
 });
 
 describe('permittedAuthMethod — ChatGPT document', () => {
-	it('resolves to private_key_jwt by default and to none when explicitly disabled', () => {
-		assert.deepEqual(permittedAuthMethod(CHATGPT, DEFAULT), { method: 'private_key_jwt' });
+	it('resolves to none when interactive private_key_jwt is absent or explicitly disabled', () => {
+		assert.deepEqual(permittedAuthMethod(CHATGPT, DEFAULT), { method: 'none' });
 		assert.deepEqual(permittedAuthMethod(CHATGPT, SETTING_OFF), { method: 'none' });
 	});
 
@@ -147,7 +146,7 @@ describe('permittedAuthMethod — selection rules', () => {
 			{ jwks_uri: 'https://chatgpt.com/oauth/jwks.json' }
 		);
 		assert.deepEqual(permittedAuthMethod(noPreference, SETTING_ON), { method: 'private_key_jwt' });
-		assert.deepEqual(permittedAuthMethod(noPreference, DEFAULT), { method: 'private_key_jwt' });
+		assert.deepEqual(permittedAuthMethod(noPreference, DEFAULT), { method: 'none' });
 		assert.deepEqual(permittedAuthMethod(noPreference, SETTING_OFF), { method: 'none' });
 	});
 

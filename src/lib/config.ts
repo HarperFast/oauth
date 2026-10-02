@@ -111,10 +111,9 @@ export function coerceConfigBoolean(value: unknown): boolean | undefined {
  * (byte-identical-boot contract) and fail closed once it's on. `mcp.enabled`
  * itself passes `false` explicitly — see {@link normalizeMcpSecurityConfig}
  * for why that one field keeps the pre-#207 warn-and-drop behavior.
- * `requireBoolean` is used by the default-on interactive private_key_jwt gate:
- * while MCP is active, a declared value other than a boolean cannot be
- * dropped to the enabled default. Placeholders and empty strings retain their
- * more specific errors.
+ * `requireBoolean` is used by the interactive private_key_jwt gate: while
+ * MCP is active, a declared value other than a boolean is refused rather than
+ * silently dropped. Placeholders and empty strings retain their specific errors.
  */
 function normalizeBooleanField(
 	obj: Record<string, any>,
@@ -348,10 +347,9 @@ function validateDcrInitialAccessToken(dcr: Record<string, any>): void {
  *   `String.includes` would turn into substring matching) is wrapped into a
  *   single-element array; anything that isn't a string or array of strings is
  *   rejected rather than treated as "no restriction".
- * - `mcp.clientIdMetadataDocuments.privateKeyJwt`: `enabled` defaults to true
- *   when absent. With MCP active, an explicit non-boolean throws instead of
- *   dropping to that enabled default; with MCP off it keeps its previous
- *   coercion and warn-and-drop behavior. `jwksUriAllowedOrigins` is
+ * - `mcp.clientIdMetadataDocuments.privateKeyJwt`: `enabled` is opt-in.
+ *   With MCP active, a declared non-boolean throws; with MCP off it keeps
+ *   its previous coercion and warn-and-drop behavior. `jwksUriAllowedOrigins` is
  *   normalized to exact https origins;
  *   `tokenEndpointAudience` needs exact CIMD client IDs and a parseable
  *   `expiresAt` (normalized to epoch ms). Invalid values throw.

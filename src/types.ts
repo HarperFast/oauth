@@ -323,7 +323,7 @@ export interface MCPClientIdMetadataDocumentsConfig {
 export interface MCPCimdPrivateKeyJwtConfig {
 	/**
 	 * Advertise `private_key_jwt` (and the interactive signing algorithms) in
-	 * the authorization server metadata. Default: true when MCP is enabled.
+	 * the authorization server metadata. Default: false; set true to opt in.
 	 * An interactive CIMD client with usable keys selects it when it is the sole
 	 * available method, or when both it and `none` remain without a singular
 	 * preference for `none`; only a client selected for `private_key_jwt` must

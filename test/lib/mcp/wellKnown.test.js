@@ -165,10 +165,10 @@ describe('MCP well-known: AS metadata document (RFC 8414)', () => {
 	describe('signing algorithms = the union of what the enabled verification paths accept', () => {
 		const metadata = (config) => buildAuthorizationServerMetadata(makeRequest(), { enabled: true, ...config });
 
-		it('interactive verification is enabled by default', async () => {
+		it('interactive verification is off until enabled', async () => {
 			const doc = await metadata({});
-			assert.ok(doc.token_endpoint_auth_methods_supported.includes('private_key_jwt'));
-			assert.deepEqual(doc.token_endpoint_auth_signing_alg_values_supported, ['RS256', 'ES256', 'EdDSA']);
+			assert.ok(!doc.token_endpoint_auth_methods_supported.includes('private_key_jwt'));
+			assert.equal(doc.token_endpoint_auth_signing_alg_values_supported, undefined);
 		});
 
 		it('headless only (interactive CIMD resolution off): EdDSA', async () => {
@@ -209,19 +209,22 @@ describe('MCP well-known: AS metadata document (RFC 8414)', () => {
 		for (const mcpConfig of [{ enabled: true }, { enabled: true, clientCredentials: { enabled: false } }]) {
 			const doc = await buildAuthorizationServerMetadata(makeRequest(), mcpConfig);
 			assert.ok(!doc.grant_types_supported.includes('client_credentials'));
-			assert.ok(doc.token_endpoint_auth_methods_supported.includes('private_key_jwt'));
-			assert.deepEqual(doc.token_endpoint_auth_signing_alg_values_supported, ['RS256', 'ES256', 'EdDSA']);
+			assert.ok(!doc.token_endpoint_auth_methods_supported.includes('private_key_jwt'));
+			assert.equal(doc.token_endpoint_auth_signing_alg_values_supported, undefined);
 		}
 	});
 
-	it('advertises interactive private_key_jwt by default and omits it when explicitly false', async () => {
+	it('advertises interactive private_key_jwt on opt-in and omits it otherwise', async () => {
 		const off = await buildAuthorizationServerMetadata(makeRequest(), {
 			enabled: true,
 			clientIdMetadataDocuments: { privateKeyJwt: { enabled: false } },
 		});
 		assert.deepEqual(off.token_endpoint_auth_methods_supported, ['none', 'client_secret_basic', 'client_secret_post']);
 		assert.equal(off.token_endpoint_auth_signing_alg_values_supported, undefined);
-		const on = await buildAuthorizationServerMetadata(makeRequest(), { enabled: true });
+		const on = await buildAuthorizationServerMetadata(makeRequest(), {
+			enabled: true,
+			clientIdMetadataDocuments: { privateKeyJwt: { enabled: true } },
+		});
 		assert.ok(on.token_endpoint_auth_methods_supported.includes('private_key_jwt'));
 		assert.deepEqual(on.token_endpoint_auth_signing_alg_values_supported, ['RS256', 'ES256', 'EdDSA']);
 		assert.ok(!on.grant_types_supported.includes('client_credentials'), 'the headless grant stays off');
