@@ -18,9 +18,6 @@
  * resolver seams (_setDnsLookup, _setFetch), so no network is involved. The
  * document's inline Ed25519 key derives from HEADLESS_KEY_LABEL, which
  * mcp-runtime.test.ts uses to sign that client's assertions.
- *
- * NativeMcpControl is an ordinary TEST-ONLY resource with no export metadata:
- * the positive control proving native application MCP is generating tools.
  */
 import { createHash, createPrivateKey, createPublicKey } from 'node:crypto';
 import { server, databases, Resource } from 'harper';
