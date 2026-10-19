@@ -26,6 +26,7 @@ describe('OAuth Plugin Options Watcher', () => {
 	let closeListeners;
 	let resources;
 	let lastResourceSet;
+	let registrations;
 
 	beforeEach(() => {
 		// Reset listeners and resources
@@ -33,6 +34,7 @@ describe('OAuth Plugin Options Watcher', () => {
 		closeListeners = [];
 		resources = {};
 		lastResourceSet = null;
+		registrations = [];
 
 		// Create mock scope
 		scope = {
@@ -70,7 +72,7 @@ describe('OAuth Plugin Options Watcher', () => {
 				},
 			},
 			resources: {
-				set(name, resource) {
+				set(name, resource, exportTypes) {
 					// If resource is a class with loadAsInstance = false (Resource API v2),
 					// instantiate it to match Harper's behavior
 					if (typeof resource === 'function' && resource.loadAsInstance === false) {
@@ -79,6 +81,7 @@ describe('OAuth Plugin Options Watcher', () => {
 						resources[name] = resource;
 					}
 					lastResourceSet = { name, resource };
+					registrations.push({ name, resource, exportTypes });
 				},
 			},
 			on(event, listener) {
@@ -659,6 +662,83 @@ describe('OAuth Plugin Options Watcher', () => {
 		await waitFor(() => OAuthResource.allowUnverifiedClaimInheritance === true);
 
 		assert.equal(OAuthResource.allowUnverifiedClaimInheritance, true);
+	});
+
+	describe('native MCP export metadata (#281)', () => {
+		const githubConfig = () => ({
+			debug: false,
+			redirectUri: 'https://app.test.com/oauth',
+			providers: {
+				github: { provider: 'github', clientId: 'test-client-id', clientSecret: 'test-client-secret' },
+			},
+		});
+
+		async function reloadTo(config) {
+			const before = registrations.length;
+			scope.options._config = config;
+			configChangeListeners[0]();
+			await waitFor(() => registrations.length > before);
+			return registrations.at(-1);
+		}
+
+		function assertExcludedFromMcp(registration, label) {
+			assert.equal(registration.name, 'oauth', `${label}: registers the oauth resource`);
+			assert.deepEqual(registration.exportTypes, { mcp: false }, `${label}: excludes oauth from native MCP tools`);
+		}
+
+		it('excludes the configured OAuthResource registration from native MCP at startup', async () => {
+			await handleApplication(scope);
+			assert.equal(registrations.length, 1);
+			assertExcludedFromMcp(registrations[0], 'configured startup');
+			assert.equal(registrations[0].resource, OAuthResource, 'REST handler is still the OAuthResource class');
+		});
+
+		it('excludes the no-provider fallback registration from native MCP at startup and keeps its REST 503', async () => {
+			scope.options._config = { debug: false, providers: {} };
+			await handleApplication(scope);
+			assert.equal(registrations.length, 1);
+			assertExcludedFromMcp(registrations[0], 'no-provider startup');
+			const response = await registrations[0].resource.get();
+			assert.equal(response.status, 503);
+			assert.equal(response.body.error, 'No valid OAuth providers configured');
+		});
+
+		it('keeps native MCP exclusion across configured -> fallback -> configured -> configured reloads', async () => {
+			scope.options._config = { ...githubConfig(), mcp: { enabled: true, issuer: 'https://app.example.com' } };
+			await handleApplication(scope);
+			assertExcludedFromMcp(registrations.at(-1), 'configured startup');
+
+			const fallback = await reloadTo({ debug: false, providers: {} });
+			assertExcludedFromMcp(fallback, 'configured -> fallback');
+			assert.notEqual(fallback.resource, OAuthResource, 'fallback replaces the provider resource');
+			assert.equal((await fallback.resource.get()).status, 503, 'fallback keeps its REST 503 response');
+			assert.equal(OAuthResource.mcpConfig, undefined, 'fallback clears the stale MCP OAuth config');
+
+			const restored = await reloadTo(githubConfig());
+			assertExcludedFromMcp(restored, 'fallback -> configured');
+			assert.equal(restored.resource, OAuthResource, 'restoring providers restores the OAuthResource class');
+			assert.ok(OAuthResource.getProviders().github, 'restoring providers restores the github provider');
+			assert.notEqual(OAuthResource.mcpConfig?.enabled, true, 'restoring without mcp does not revive stale MCP config');
+
+			const repeated = await reloadTo({ ...githubConfig(), debug: true });
+			assertExcludedFromMcp(repeated, 'repeated configured update');
+			assert.equal(repeated.resource, OAuthResource);
+
+			for (const [index, registration] of registrations.entries()) {
+				assertExcludedFromMcp(registration, `registration ${index}`);
+			}
+		});
+
+		it('keeps native MCP exclusion across fallback -> configured reloads from a no-provider start', async () => {
+			scope.options._config = { debug: false, providers: {} };
+			await handleApplication(scope);
+			assertExcludedFromMcp(registrations.at(-1), 'no-provider startup');
+
+			const configured = await reloadTo(githubConfig());
+			assertExcludedFromMcp(configured, 'fallback -> configured');
+			assert.equal(configured.resource, OAuthResource);
+			assert.ok(OAuthResource.getProviders().github);
+		});
 	});
 
 	describe('reload ordering vs. a per-key OptionsWatcher merge', () => {
