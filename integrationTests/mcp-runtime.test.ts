@@ -442,7 +442,7 @@ suite('Native application MCP: the OAuth resource is not a generated tool (#281)
 	});
 
 	test(
-		'a reload to no providers keeps the OAuth fallback out of native MCP and serves its REST error',
+		'serves the no-provider REST error while OAuth tools remain absent from the current catalog',
 		{ timeout: 120_000 },
 		async () => {
 			const noProviderYaml = configuredYaml.replace(/^ {2}providers:\n(?: {4}.*\n)+/m, '  providers: {}\n');
@@ -457,7 +457,7 @@ suite('Native application MCP: the OAuth resource is not a generated tool (#281)
 	);
 
 	test(
-		'restoring providers restores login without restoring the generated OAuth tools',
+		'restores REST login while OAuth tools remain absent from the current catalog',
 		{ timeout: 120_000 },
 		async () => {
 			await writeFile(`${configPath}.tmp`, configuredYaml);
