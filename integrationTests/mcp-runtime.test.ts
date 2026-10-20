@@ -313,6 +313,8 @@ suite('MCP runtime: replay retention and concurrent refresh', (ctx: ContextWithH
 
 suite('Native application MCP: the OAuth resource is not a generated tool (#281)', (ctx) => {
 	const harperBinPath = process.env.HARPER_INTEGRATION_TEST_INSTALL_SCRIPT || getHarperBinPath();
+	// Bounds each request and its body read; the polling deadlines below cannot interrupt a stalled await.
+	const requestTimeoutMs = 10_000;
 	let configPath: string;
 	let configuredYaml: string;
 	let authorization: string;
@@ -342,12 +344,19 @@ suite('Native application MCP: the OAuth resource is not a generated tool (#281)
 				...(sessionId && { 'mcp-session-id': sessionId, 'mcp-protocol-version': '2025-06-18' }),
 			},
 			body: JSON.stringify({ jsonrpc: '2.0', ...message }),
+			signal: AbortSignal.timeout(requestTimeoutMs),
 		});
 	}
 
 	async function request(sessionId: string, method: string, params: object): Promise<any> {
-		const res = await rpc(sessionId, { id: randomUUID(), method, params });
-		const body = await res.json();
+		let res: Response;
+		let body: any;
+		try {
+			res = await rpc(sessionId, { id: randomUUID(), method, params });
+			body = await res.json();
+		} catch (error) {
+			throw new Error(`${method}: no complete JSON-RPC response`, { cause: error });
+		}
 		strictEqual(res.status, 200, `${method}: ${JSON.stringify(body)}`);
 		return body;
 	}
@@ -392,8 +401,17 @@ suite('Native application MCP: the OAuth resource is not a generated tool (#281)
 		const deadline = Date.now() + 30_000;
 		let last = '';
 		while (Date.now() < deadline) {
-			const res = await fetch(new URL('/oauth/test/login', started.harper.httpURL), { redirect: 'manual' });
-			const text = await res.text();
+			let res: Response;
+			let text: string;
+			try {
+				res = await fetch(new URL('/oauth/test/login', started.harper.httpURL), {
+					redirect: 'manual',
+					signal: AbortSignal.timeout(requestTimeoutMs),
+				});
+				text = await res.text();
+			} catch (error) {
+				throw new Error(`REST login (${expected}): no complete response (last: ${last})`, { cause: error });
+			}
 			last = `${res.status} ${res.headers.get('location') ?? text.slice(0, 200)}`;
 			if (expected === 'redirect') {
 				if (last.startsWith('302 http://idp.test/authorize?')) return;
@@ -407,24 +425,32 @@ suite('Native application MCP: the OAuth resource is not a generated tool (#281)
 		throw new Error(`REST login did not reach ${expected} within 30s (last: ${last})`);
 	}
 
-	test('excludes get_oauth/create_oauth at startup and keeps REST login', async (t) => {
+	test('excludes get_oauth/create_oauth at startup and keeps REST login', { timeout: 120_000 }, async (t) => {
 		const { version } = JSON.parse(await readFile(join(dirname(harperBinPath), '..', '..', 'package.json'), 'utf8'));
 		t.diagnostic(`Harper ${version}, Node ${process.version}`);
 		await waitForLogin('redirect');
 		await assertOAuthToolsExcluded('startup');
 	});
 
-	test('a reload to no providers keeps the OAuth fallback out of native MCP and serves its REST error', async () => {
-		const noProviderYaml = configuredYaml.replace(/^ {2}providers:\n(?: {4}.*\n)+/m, '  providers: {}\n');
-		ok(noProviderYaml !== configuredYaml, 'fixture config has a providers block');
-		await writeFile(configPath, noProviderYaml);
-		await waitForLogin('fallback');
-		await assertOAuthToolsExcluded('no-provider reload');
-	});
+	test(
+		'a reload to no providers keeps the OAuth fallback out of native MCP and serves its REST error',
+		{ timeout: 120_000 },
+		async () => {
+			const noProviderYaml = configuredYaml.replace(/^ {2}providers:\n(?: {4}.*\n)+/m, '  providers: {}\n');
+			ok(noProviderYaml !== configuredYaml, 'fixture config has a providers block');
+			await writeFile(configPath, noProviderYaml);
+			await waitForLogin('fallback');
+			await assertOAuthToolsExcluded('no-provider reload');
+		}
+	);
 
-	test('restoring providers restores login without restoring the generated OAuth tools', async () => {
-		await writeFile(configPath, configuredYaml);
-		await waitForLogin('redirect');
-		await assertOAuthToolsExcluded('provider reload');
-	});
+	test(
+		'restoring providers restores login without restoring the generated OAuth tools',
+		{ timeout: 120_000 },
+		async () => {
+			await writeFile(configPath, configuredYaml);
+			await waitForLogin('redirect');
+			await assertOAuthToolsExcluded('provider reload');
+		}
+	);
 });

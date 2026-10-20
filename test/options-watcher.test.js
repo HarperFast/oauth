@@ -287,12 +287,15 @@ describe('OAuth Plugin Options Watcher', () => {
 			},
 		};
 
-		// Trigger change event
+		const startupSet = lastResourceSet;
 		configChangeListeners[0]();
 
-		// Resource should be updated
-		assert.ok(lastResourceSet, 'Resource should be re-set after config change');
+		await waitFor(() => lastResourceSet !== startupSet);
 		assert.equal(lastResourceSet.name, 'oauth', 'OAuth resource should be updated');
+		assert.equal(lastResourceSet.resource, OAuthResource);
+		assert.deepEqual(lastResourceSet.exportTypes, { mcp: false }, 'reloaded resource excluded from native MCP (#281)');
+		assert.deepEqual(Object.keys(OAuthResource.providers), ['google'], 'reload applied the new provider');
+		assert.equal(OAuthResource.debugMode, true, 'reload applied debug mode');
 	});
 
 	it('should handle debug mode toggle', async () => {
@@ -307,13 +310,13 @@ describe('OAuth Plugin Options Watcher', () => {
 			debug: true,
 		};
 
-		// Trigger change event
+		const startupSet = lastResourceSet;
 		configChangeListeners[0]();
 
-		// The resource should be updated with debug mode
-		// Note: We can't easily test the debug mode behavior without a full Harper environment
-		// but we can verify the resource was re-set
-		assert.ok(lastResourceSet, 'Resource should be updated after debug mode change');
+		await waitFor(() => lastResourceSet !== startupSet);
+		assert.equal(lastResourceSet.resource, OAuthResource);
+		assert.deepEqual(lastResourceSet.exportTypes, { mcp: false }, 'reloaded resource excluded from native MCP (#281)');
+		assert.equal(OAuthResource.debugMode, true, 'reload applied debug mode');
 	});
 
 	it('should handle provider removal and restoration', async () => {
@@ -764,12 +767,18 @@ describe('OAuth Plugin Options Watcher', () => {
 			},
 		};
 
-		// Trigger change event
+		const startupSet = lastResourceSet;
 		configChangeListeners[0]();
 
-		// Resource should be updated with new providers
-		assert.ok(lastResourceSet, 'Resource should be updated after adding provider');
+		await waitFor(() => lastResourceSet !== startupSet);
 		assert.equal(lastResourceSet.name, 'oauth', 'OAuth resource should be updated');
+		assert.equal(lastResourceSet.resource, OAuthResource);
+		assert.deepEqual(lastResourceSet.exportTypes, { mcp: false }, 'reloaded resource excluded from native MCP (#281)');
+		assert.deepEqual(
+			Object.keys(OAuthResource.providers).sort(),
+			['azure', 'github'],
+			'reload applied the new provider'
+		);
 	});
 
 	it('should handle config update errors gracefully', async () => {
