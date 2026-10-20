@@ -37,7 +37,7 @@
 import { suite, test, before, after } from 'node:test';
 import { strictEqual, ok } from 'node:assert/strict';
 import { createHash, createPrivateKey, randomUUID, sign } from 'node:crypto';
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, rm, writeFile } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { createRequire } from 'node:module';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -45,6 +45,7 @@ import {
 	setupHarperWithFixture,
 	teardownHarper,
 	type ContextWithHarper,
+	type HarperTestContext,
 	type StartedHarperTestContext,
 } from '@harperfast/integration-testing';
 
@@ -318,10 +319,11 @@ suite('Native application MCP: the OAuth resource is not a generated tool (#281)
 	let configPath: string;
 	let configuredYaml: string;
 	let authorization: string;
+	const harperCtx: HarperTestContext = ctx;
 	let started: StartedHarperTestContext;
 
 	before(async () => {
-		started = await setupHarperWithFixture(ctx, fixturePath, {
+		started = await setupHarperWithFixture(harperCtx, fixturePath, {
 			harperBinPath,
 			config: { logging: { stdStreams: true }, mcp: { application: { mountPath: '/mcp' } } },
 		});
@@ -331,7 +333,14 @@ suite('Native application MCP: the OAuth resource is not a generated tool (#281)
 	});
 
 	after(async () => {
-		await teardownHarper(started);
+		if (started) {
+			await teardownHarper(started);
+			return;
+		}
+		// Setup rejected. After copying the fixture the helper has recorded only the data root, not a
+		// process or address teardownHarper could release, so remove that directory alone.
+		const dataRootDir = harperCtx.harper?.dataRootDir;
+		if (dataRootDir) await rm(dataRootDir, { recursive: true, force: true, maxRetries: 10 });
 	});
 
 	async function rpc(sessionId: string | undefined, message: object): Promise<Response> {
