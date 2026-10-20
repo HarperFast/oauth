@@ -37,7 +37,7 @@
 import { suite, test, before, after } from 'node:test';
 import { strictEqual, ok } from 'node:assert/strict';
 import { createHash, createPrivateKey, randomUUID, sign } from 'node:crypto';
-import { readFile, rm, writeFile } from 'node:fs/promises';
+import { readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { createRequire } from 'node:module';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -447,7 +447,10 @@ suite('Native application MCP: the OAuth resource is not a generated tool (#281)
 		async () => {
 			const noProviderYaml = configuredYaml.replace(/^ {2}providers:\n(?: {4}.*\n)+/m, '  providers: {}\n');
 			ok(noProviderYaml !== configuredYaml, 'fixture config has a providers block');
-			await writeFile(configPath, noProviderYaml);
+			// Replace the watched file atomically: an in-place write can be read while truncated, which
+			// OptionsWatcher reports as remove then ready, never as the change this plugin listens for.
+			await writeFile(`${configPath}.tmp`, noProviderYaml);
+			await rename(`${configPath}.tmp`, configPath);
 			await waitForLogin('fallback');
 			await assertOAuthToolsExcluded('no-provider reload');
 		}
@@ -457,7 +460,8 @@ suite('Native application MCP: the OAuth resource is not a generated tool (#281)
 		'restoring providers restores login without restoring the generated OAuth tools',
 		{ timeout: 120_000 },
 		async () => {
-			await writeFile(configPath, configuredYaml);
+			await writeFile(`${configPath}.tmp`, configuredYaml);
+			await rename(`${configPath}.tmp`, configPath);
 			await waitForLogin('redirect');
 			await assertOAuthToolsExcluded('provider reload');
 		}
