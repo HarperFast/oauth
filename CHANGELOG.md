@@ -2,6 +2,12 @@
 
 All notable changes to `@harperfast/oauth` are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Entries prior to 2.2.0 were backfilled from the [GitHub release notes](https://github.com/HarperFast/oauth/releases).
 
+## [Unreleased]
+
+### Fixed
+
+- Exclude OAuth authentication endpoints from Harper's generated application MCP tools. REST endpoints are unchanged (#281).
+
 ## [2.9.0] - 2026-10-02
 
 ### Added

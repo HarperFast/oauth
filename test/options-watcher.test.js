@@ -70,7 +70,7 @@ describe('OAuth Plugin Options Watcher', () => {
 				},
 			},
 			resources: {
-				set(name, resource) {
+				set(name, resource, exportTypes) {
 					// If resource is a class with loadAsInstance = false (Resource API v2),
 					// instantiate it to match Harper's behavior
 					if (typeof resource === 'function' && resource.loadAsInstance === false) {
@@ -78,7 +78,7 @@ describe('OAuth Plugin Options Watcher', () => {
 					} else {
 						resources[name] = resource;
 					}
-					lastResourceSet = { name, resource };
+					lastResourceSet = { name, resource, exportTypes };
 				},
 			},
 			on(event, listener) {
@@ -94,6 +94,8 @@ describe('OAuth Plugin Options Watcher', () => {
 
 		// Should have registered the oauth resource
 		assert.ok(resources.oauth, 'OAuth resource should be registered');
+		assert.equal(lastResourceSet.resource, OAuthResource);
+		assert.deepEqual(lastResourceSet.exportTypes, { mcp: false }, 'excluded from native MCP tools (#281)');
 
 		// Should have registered a change listener
 		assert.equal(configChangeListeners.length, 1, 'Should register one change listener');
@@ -285,12 +287,15 @@ describe('OAuth Plugin Options Watcher', () => {
 			},
 		};
 
-		// Trigger change event
+		const startupSet = lastResourceSet;
 		configChangeListeners[0]();
 
-		// Resource should be updated
-		assert.ok(lastResourceSet, 'Resource should be re-set after config change');
+		await waitFor(() => lastResourceSet !== startupSet);
 		assert.equal(lastResourceSet.name, 'oauth', 'OAuth resource should be updated');
+		assert.equal(lastResourceSet.resource, OAuthResource);
+		assert.deepEqual(lastResourceSet.exportTypes, { mcp: false }, 'reloaded resource excluded from native MCP (#281)');
+		assert.deepEqual(Object.keys(OAuthResource.providers), ['google'], 'reload applied the new provider');
+		assert.equal(OAuthResource.debugMode, true, 'reload applied debug mode');
 	});
 
 	it('should handle debug mode toggle', async () => {
@@ -305,16 +310,16 @@ describe('OAuth Plugin Options Watcher', () => {
 			debug: true,
 		};
 
-		// Trigger change event
+		const startupSet = lastResourceSet;
 		configChangeListeners[0]();
 
-		// The resource should be updated with debug mode
-		// Note: We can't easily test the debug mode behavior without a full Harper environment
-		// but we can verify the resource was re-set
-		assert.ok(lastResourceSet, 'Resource should be updated after debug mode change');
+		await waitFor(() => lastResourceSet !== startupSet);
+		assert.equal(lastResourceSet.resource, OAuthResource);
+		assert.deepEqual(lastResourceSet.exportTypes, { mcp: false }, 'reloaded resource excluded from native MCP (#281)');
+		assert.equal(OAuthResource.debugMode, true, 'reload applied debug mode');
 	});
 
-	it('should handle provider removal', async () => {
+	it('should handle provider removal and restoration', async () => {
 		await handleApplication(scope);
 		const previousResource = resources.oauth;
 
@@ -333,6 +338,17 @@ describe('OAuth Plugin Options Watcher', () => {
 		const response = await resources.oauth.get();
 		assert.equal(response.status, 503, 'Should return 503 when no providers configured');
 		assert.ok(response.body.error.includes('No valid OAuth providers'), 'Should have appropriate error message');
+		assert.deepEqual(lastResourceSet.exportTypes, { mcp: false }, 'fallback excluded from native MCP tools (#281)');
+
+		const fallbackResource = resources.oauth;
+		scope.options._config = {
+			redirectUri: 'https://app.test.com/oauth',
+			providers: { github: { provider: 'github', clientId: 'test-client-id', clientSecret: 'test-client-secret' } },
+		};
+		configChangeListeners[0]();
+		await waitFor(() => resources.oauth !== fallbackResource);
+		assert.equal(lastResourceSet.resource, OAuthResource);
+		assert.deepEqual(lastResourceSet.exportTypes, { mcp: false }, 'restored provider excluded from native MCP');
 	});
 
 	it('should clear MCP config when a live reload drops all providers (fail closed)', async () => {
@@ -751,12 +767,18 @@ describe('OAuth Plugin Options Watcher', () => {
 			},
 		};
 
-		// Trigger change event
+		const startupSet = lastResourceSet;
 		configChangeListeners[0]();
 
-		// Resource should be updated with new providers
-		assert.ok(lastResourceSet, 'Resource should be updated after adding provider');
+		await waitFor(() => lastResourceSet !== startupSet);
 		assert.equal(lastResourceSet.name, 'oauth', 'OAuth resource should be updated');
+		assert.equal(lastResourceSet.resource, OAuthResource);
+		assert.deepEqual(lastResourceSet.exportTypes, { mcp: false }, 'reloaded resource excluded from native MCP (#281)');
+		assert.deepEqual(
+			Object.keys(OAuthResource.providers).sort(),
+			['azure', 'github'],
+			'reload applied the new provider'
+		);
 	});
 
 	it('should handle config update errors gracefully', async () => {
@@ -824,6 +846,7 @@ describe('OAuth Plugin Options Watcher', () => {
 		assert.ok(resources.oauth, 'OAuth resource should exist');
 		const response = await resources.oauth.get();
 		assert.equal(response.status, 503, 'Should return 503 when providers missing');
+		assert.deepEqual(lastResourceSet.exportTypes, { mcp: false }, 'fallback excluded from native MCP tools (#281)');
 	});
 
 	it('should handle invalid provider configuration', async () => {

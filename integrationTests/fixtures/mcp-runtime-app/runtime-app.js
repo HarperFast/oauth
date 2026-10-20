@@ -20,7 +20,7 @@
  * mcp-runtime.test.ts uses to sign that client's assertions.
  */
 import { createHash, createPrivateKey, createPublicKey } from 'node:crypto';
-import { server, databases } from 'harper';
+import { server, databases, Resource } from 'harper';
 import { MCPAssertionJtiStore, jtiKey } from './node_modules/@harperfast/oauth/dist/lib/mcp/assertionJtiStore.js';
 import { _setDnsLookup, _setFetch } from './node_modules/@harperfast/oauth/dist/lib/mcp/cimd.js';
 import { MCPClientStore } from './node_modules/@harperfast/oauth/dist/lib/mcp/clientStore.js';
@@ -141,3 +141,11 @@ async function handle(request) {
 }
 
 server.http(handle, { urlPath: '/mcp-test' });
+
+export class NativeMcpControl extends Resource {
+	static loadAsInstance = false;
+
+	get() {
+		return { control: 'native-mcp' };
+	}
+}

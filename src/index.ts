@@ -402,28 +402,32 @@ export async function handleApplication(scope: Scope): Promise<void> {
 			// stale config after the plugin is no longer validly configured.
 			OAuthResource.mcpConfig = undefined;
 			OAuthResource.allowUnverifiedClaimInheritance = false;
-			resources.set('oauth', {
-				async get() {
-					return {
-						status: 503,
-						body: {
-							error: 'No valid OAuth providers configured',
-							message: 'Please check your OAuth configuration',
-							example: options.providers
-								? 'Check that all required fields are provided'
-								: {
-										providers: {
-											github: {
-												provider: 'github',
-												clientId: '${OAUTH_GITHUB_CLIENT_ID}',
-												clientSecret: '${OAUTH_GITHUB_CLIENT_SECRET}',
+			resources.set(
+				'oauth',
+				{
+					async get() {
+						return {
+							status: 503,
+							body: {
+								error: 'No valid OAuth providers configured',
+								message: 'Please check your OAuth configuration',
+								example: options.providers
+									? 'Check that all required fields are provided'
+									: {
+											providers: {
+												github: {
+													provider: 'github',
+													clientId: '${OAUTH_GITHUB_CLIENT_ID}',
+													clientSecret: '${OAUTH_GITHUB_CLIENT_SECRET}',
+												},
 											},
 										},
-									},
-						},
-					};
+							},
+						};
+					},
 				},
-			});
+				{ mcp: false }
+			);
 		} else {
 			// Configure the OAuth resource with providers and settings.
 			// mcpConfig was built and validated above.
@@ -439,7 +443,7 @@ export async function handleApplication(scope: Scope): Promise<void> {
 			);
 
 			// Register the OAuth resource class
-			resources.set('oauth', OAuthResource);
+			resources.set('oauth', OAuthResource, { mcp: false });
 
 			// Log all configured providers
 			logger?.info?.('OAuth plugin ready:', {

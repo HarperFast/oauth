@@ -37,10 +37,17 @@
 import { suite, test, before, after } from 'node:test';
 import { strictEqual, ok } from 'node:assert/strict';
 import { createHash, createPrivateKey, randomUUID, sign } from 'node:crypto';
+import { readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { createRequire } from 'node:module';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { setupHarperWithFixture, teardownHarper, type ContextWithHarper } from '@harperfast/integration-testing';
+import {
+	setupHarperWithFixture,
+	teardownHarper,
+	type ContextWithHarper,
+	type HarperTestContext,
+	type StartedHarperTestContext,
+} from '@harperfast/integration-testing';
 
 const require = createRequire(import.meta.url);
 
@@ -303,4 +310,160 @@ suite('MCP runtime: replay retention and concurrent refresh', (ctx: ContextWithH
 			for (const token of live) strictEqual((await refresh(token)).status, 400, 'the stored token dies too');
 		}
 	});
+});
+
+suite('Native application MCP: the OAuth resource is not a generated tool (#281)', (ctx) => {
+	const harperBinPath = process.env.HARPER_INTEGRATION_TEST_INSTALL_SCRIPT || getHarperBinPath();
+	// Bounds each request and its body read; the polling deadlines below cannot interrupt a stalled await.
+	const requestTimeoutMs = 10_000;
+	let configPath: string;
+	let configuredYaml: string;
+	let authorization: string;
+	const harperCtx: HarperTestContext = ctx;
+	let started: StartedHarperTestContext;
+
+	before(async () => {
+		started = await setupHarperWithFixture(harperCtx, fixturePath, {
+			harperBinPath,
+			config: { logging: { stdStreams: true }, mcp: { application: { mountPath: '/mcp' } } },
+		});
+		configPath = join(started.harper.dataRootDir, 'components', 'mcp-runtime-app', 'config.yaml');
+		configuredYaml = await readFile(configPath, 'utf8');
+		authorization = `Basic ${Buffer.from(`${started.harper.admin.username}:${started.harper.admin.password}`).toString('base64')}`;
+	});
+
+	after(async () => {
+		if (started) {
+			await teardownHarper(started);
+			return;
+		}
+		// Setup rejected. After copying the fixture the helper has recorded only the data root, not a
+		// process or address teardownHarper could release, so remove that directory alone.
+		const dataRootDir = harperCtx.harper?.dataRootDir;
+		if (dataRootDir) await rm(dataRootDir, { recursive: true, force: true, maxRetries: 10 });
+	});
+
+	async function rpc(sessionId: string | undefined, message: object): Promise<Response> {
+		return fetch(new URL('/mcp', started.harper.httpURL), {
+			method: 'POST',
+			headers: {
+				'Authorization': authorization,
+				'Content-Type': 'application/json',
+				'Accept': 'application/json, text/event-stream',
+				...(sessionId && { 'mcp-session-id': sessionId, 'mcp-protocol-version': '2025-06-18' }),
+			},
+			body: JSON.stringify({ jsonrpc: '2.0', ...message }),
+			signal: AbortSignal.timeout(requestTimeoutMs),
+		});
+	}
+
+	async function request(sessionId: string, method: string, params: object): Promise<any> {
+		let res: Response;
+		let body: any;
+		try {
+			res = await rpc(sessionId, { id: randomUUID(), method, params });
+			body = await res.json();
+		} catch (error) {
+			throw new Error(`${method}: no complete JSON-RPC response`, { cause: error });
+		}
+		strictEqual(res.status, 200, `${method}: ${JSON.stringify(body)}`);
+		return body;
+	}
+
+	async function assertOAuthToolsExcluded(label: string): Promise<void> {
+		const init = await rpc(undefined, {
+			id: randomUUID(),
+			method: 'initialize',
+			params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'oauth-281', version: '1' } },
+		});
+		const sessionId = init.headers.get('mcp-session-id');
+		ok(sessionId, `initialize: ${init.status} ${await init.text()}`);
+		strictEqual((await rpc(sessionId, { method: 'notifications/initialized' })).status, 202);
+
+		// Harper 5.1 rebuilds application tools on a schema-change event after component load.
+		const deadline = Date.now() + 20_000;
+		let list = await request(sessionId, 'tools/list', {});
+		while (
+			!list.result.tools.some((tool: { name: string }) => tool.name === 'get_NativeMcpControl') &&
+			Date.now() < deadline
+		) {
+			await sleep(250);
+			list = await request(sessionId, 'tools/list', {});
+		}
+		const names: string[] = list.result.tools.map((tool: { name: string }) => tool.name);
+		strictEqual(list.result.nextCursor, undefined, `${label}: one page lists every tool`);
+		ok(names.includes('get_NativeMcpControl'), `${label}: control tool listed (${names})`);
+		const control = await request(sessionId, 'tools/call', { name: 'get_NativeMcpControl', arguments: {} });
+		ok(
+			!control.result?.isError && JSON.stringify(control.result).includes('native-mcp'),
+			`${label}: control tool callable: ${JSON.stringify(control)}`
+		);
+
+		for (const name of ['get_oauth', 'create_oauth']) {
+			ok(!names.includes(name), `${label}: ${name} must not be a native MCP tool (${names})`);
+			const call = await request(sessionId, 'tools/call', { name, arguments: {} });
+			strictEqual(call.error?.code, -32601, `${label}: ${name} must be an unknown tool: ${JSON.stringify(call)}`);
+		}
+	}
+
+	async function waitForLogin(expected: 'redirect' | 'fallback'): Promise<void> {
+		const deadline = Date.now() + 30_000;
+		let last = '';
+		while (Date.now() < deadline) {
+			let res: Response;
+			let text: string;
+			try {
+				res = await fetch(new URL('/oauth/test/login', started.harper.httpURL), {
+					redirect: 'manual',
+					signal: AbortSignal.timeout(requestTimeoutMs),
+				});
+				text = await res.text();
+			} catch (error) {
+				throw new Error(`REST login (${expected}): no complete response (last: ${last})`, { cause: error });
+			}
+			last = `${res.status} ${res.headers.get('location') ?? text.slice(0, 200)}`;
+			if (expected === 'redirect') {
+				if (last.startsWith('302 http://idp.test/authorize?')) return;
+			} else if (res.status === 200) {
+				// The fallback's `{ status: 503, body }` has no headers, so Harper serializes the whole object.
+				const payload = JSON.parse(text);
+				if (payload.status === 503 && payload.body?.error === 'No valid OAuth providers configured') return;
+			}
+			await sleep(250);
+		}
+		throw new Error(`REST login did not reach ${expected} within 30s (last: ${last})`);
+	}
+
+	test('excludes get_oauth/create_oauth at startup and keeps REST login', { timeout: 120_000 }, async (t) => {
+		const { version } = JSON.parse(await readFile(join(dirname(harperBinPath), '..', '..', 'package.json'), 'utf8'));
+		t.diagnostic(`Harper ${version}, Node ${process.version}`);
+		await waitForLogin('redirect');
+		await assertOAuthToolsExcluded('startup');
+	});
+
+	test(
+		'serves the no-provider REST error while OAuth tools remain absent from the current catalog',
+		{ timeout: 120_000 },
+		async () => {
+			const noProviderYaml = configuredYaml.replace(/^ {2}providers:\n(?: {4}.*\n)+/m, '  providers: {}\n');
+			ok(noProviderYaml !== configuredYaml, 'fixture config has a providers block');
+			// Replace the watched file atomically: an in-place write can be read while truncated, which
+			// OptionsWatcher reports as remove then ready, never as the change this plugin listens for.
+			await writeFile(`${configPath}.tmp`, noProviderYaml);
+			await rename(`${configPath}.tmp`, configPath);
+			await waitForLogin('fallback');
+			await assertOAuthToolsExcluded('no-provider reload');
+		}
+	);
+
+	test(
+		'restores REST login while OAuth tools remain absent from the current catalog',
+		{ timeout: 120_000 },
+		async () => {
+			await writeFile(`${configPath}.tmp`, configuredYaml);
+			await rename(`${configPath}.tmp`, configPath);
+			await waitForLogin('redirect');
+			await assertOAuthToolsExcluded('provider reload');
+		}
+	);
 });

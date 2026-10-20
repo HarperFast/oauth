@@ -1,0 +1,13 @@
+{
+	"tool": "dispatch-repo-config",
+	"version": 1,
+	"full_regression": {
+		"checks": [
+			"Lint, Build & Test (22)",
+			"Lint, Build & Test (24)",
+			"Test with Bun",
+			"Integration Tests (Node 22)",
+			"Integration Tests (Node 24)"
+		]
+	}
+}
