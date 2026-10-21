@@ -14,6 +14,13 @@ All notable changes to `@harperfast/oauth` are documented here. The format is ba
 
 - `withMCPAuth` now resolves `request.user` via `server.getUser(sub, null, request)` on each authenticated request by default (failing closed with `401` when `getUser` rejects or returns `active: false`, and returning `503 Retry-After: 5` if lookup exceeds `userLookupTimeoutMs`). Pass `{ resolveUser: false }` to skip `getUser` lookup and leave `request.user` untouched (#279).
 
+### Security
+
+- **MCP Bearer validator path & quarantine hardening** (#279):
+  - Quarantined `unverified:<claim>#<hash>` subjects (#231) and role-less subjects are never resolved to a Harper `request.user` on native `/mcp` or `withMCPAuth` routes.
+  - The core Bearer validator returns `authCacheable: false` so Harper's header-only `authorizationCache` cannot replay a `/mcp`-bound token onto non-MCP REST routes or after `mcp.enabled` is disabled on live reload; an origin-root `mcp.resource` (`pathname === '/'`) and ambiguous path segments (`.`, `..`, `%2e`, `%2f`, `%5c`, `\`, `//`) always abstain/reject so an MCP token cannot grant blanket REST access across `/`.
+  - Disabling `mcp.enabled` on a live config reload disposes the registered Bearer validator immediately before any subsequent provider or MCP config check in the same snapshot can throw.
+
 ### Fixed
 
 - Exclude OAuth authentication endpoints from Harper's generated application MCP tools. REST endpoints are unchanged (#281).

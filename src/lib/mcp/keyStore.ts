@@ -150,6 +150,17 @@ let pendingWrite: Promise<MCPSigningKeyRecord[]> | null = null;
 // Single-entry memo: derive public key from PEM only when PEM changes.
 let pinnedPublicKeyMemo: { pem: string; publicPem: string } | null = null;
 
+// Stable projection memo for `getAllPublicKeys`: avoids per-request array/object
+// allocations and preserves array reference identity (`===`) across cache
+// refreshes while the live key set is unchanged.
+let publicKeysProjectionMemo: {
+	sourceRecords: MCPSigningKeyRecord[];
+	accessTtl: number;
+	computedAtSec: number;
+	nextBoundarySec: number;
+	projected: MCPPublicKeyRecord[];
+} | null = null;
+
 // Cache timestamp function — overridable in tests via _setCacheNowMs.
 let _getCacheNowMs: () => number = () => Date.now();
 
@@ -184,10 +195,12 @@ export function resetMCPKeysTableCache(): void {
 	enumCache = null;
 	pendingWrite = null;
 	pinnedPublicKeyMemo = null;
+	publicKeysProjectionMemo = null;
 }
 
 function invalidateEnumCache(): void {
 	enumCache = null;
+	publicKeysProjectionMemo = null;
 }
 
 function encodeRecord(record: MCPSigningKeyRecord): Record<string, any> {
@@ -510,9 +523,51 @@ export class MCPKeyStore {
 			const records = await this.enumerateKeys();
 			const accessTtl = coerceInterval(mcpConfig?.accessTokenTtl) || DEFAULT_ACCESS_TOKEN_TTL;
 			const nowSeconds = Math.floor(Date.now() / 1000);
+			if (
+				publicKeysProjectionMemo &&
+				publicKeysProjectionMemo.sourceRecords === records &&
+				publicKeysProjectionMemo.accessTtl === accessTtl &&
+				nowSeconds >= publicKeysProjectionMemo.computedAtSec &&
+				nowSeconds <= publicKeysProjectionMemo.nextBoundarySec
+			) {
+				return publicKeysProjectionMemo.projected;
+			}
 			const { live } = partitionRetired(records, accessTtl, nowSeconds);
+			const gcThreshold = 2 * accessTtl;
+			let nextBoundarySec = Number.POSITIVE_INFINITY;
+			for (let i = 1; i < records.length; i++) {
+				const boundary = records[i - 1].created_at + gcThreshold;
+				if (nowSeconds <= boundary && boundary < nextBoundarySec) {
+					nextBoundarySec = boundary;
+				}
+			}
+			const prevProjected = publicKeysProjectionMemo?.projected;
 			// Strip private_key_pem: the private half must never leave the key store.
-			return live.map((k) => ({ kid: k.kid, alg: k.alg, public_key_pem: k.public_key_pem, created_at: k.created_at }));
+			const projected =
+				prevProjected &&
+				prevProjected.length === live.length &&
+				prevProjected.every(
+					(p, i) =>
+						p.kid === live[i].kid &&
+						p.alg === live[i].alg &&
+						p.public_key_pem === live[i].public_key_pem &&
+						p.created_at === live[i].created_at
+				)
+					? prevProjected
+					: live.map((k) => ({
+							kid: k.kid,
+							alg: k.alg,
+							public_key_pem: k.public_key_pem,
+							created_at: k.created_at,
+						}));
+			publicKeysProjectionMemo = {
+				sourceRecords: records,
+				accessTtl,
+				computedAtSec: nowSeconds,
+				nextBoundarySec,
+				projected,
+			};
+			return projected;
 		} catch (error) {
 			this.logger?.error?.(
 				'Failed to read MCP signing keys for JWKS:',

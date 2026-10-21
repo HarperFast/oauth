@@ -676,6 +676,31 @@ suite('Native application MCP: the OAuth resource is not a generated tool (#281)
 			strictEqual(nonMcpRes.status, 401, 'MCP token scoped to /mcp must be rejected on non-MCP route');
 			await nonMcpRes.body?.cancel();
 
+			const dotSegmentRes = await fetch(`${started.harper.httpURL.replace(/\/$/, '')}/mcp/%2e%2e/NativeMcpControl`, {
+				headers: { Authorization: bearerAuth },
+				signal: AbortSignal.timeout(requestTimeoutMs),
+			});
+			strictEqual(dotSegmentRes.status, 401, 'dot-segment /mcp/%2e%2e/... path must never authenticate via MCP token');
+			await dotSegmentRes.body?.cancel();
+
+			const unprovisionedToken = await mintTestToken({ sub: 'unprovisioned-agent-no-hdb-user' });
+			const unprovCustomRes = await fetch(new URL('/mcp-custom', started.harper.httpURL), {
+				headers: { Authorization: `Bearer ${unprovisionedToken}` },
+				signal: AbortSignal.timeout(requestTimeoutMs),
+			});
+			strictEqual(unprovCustomRes.status, 200, 'role-less MCP subject still authenticates on withMCPAuth routes');
+			const unprovCustomBody = (await unprovCustomRes.json()) as any;
+			strictEqual(unprovCustomBody.user, null);
+			strictEqual(unprovCustomBody.mcpSub, 'unprovisioned-agent-no-hdb-user');
+
+			const unprovNativeRes = await rpc(
+				undefined,
+				{ id: randomUUID(), method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {} } },
+				`Bearer ${unprovisionedToken}`
+			);
+			strictEqual(unprovNativeRes.status, 401, 'role-less MCP subject must be rejected with 401 on native /mcp');
+			await unprovNativeRes.body?.cancel();
+
 			const opTokens = (await sendOperation(started.harper, {
 				operation: 'create_authentication_tokens',
 				username: 'mcp-oauth-user',
@@ -695,25 +720,29 @@ suite('Native application MCP: the OAuth resource is not a generated tool (#281)
 				await writeFile(`${configPath}.tmp`, mcpDisabledYaml);
 				await rename(`${configPath}.tmp`, configPath);
 				const disableDeadline = Date.now() + 30_000;
+				let disabledStatus = 0;
 				while (Date.now() < disableDeadline) {
 					const wk = await fetch(new URL('/.well-known/oauth-protected-resource/mcp', started.harper.httpURL), {
 						signal: AbortSignal.timeout(requestTimeoutMs),
 					});
 					await wk.body?.cancel();
-					if (wk.status === 404) break;
+					if (wk.status === 404) {
+						const disabledRes = await rpc(
+							undefined,
+							{ id: randomUUID(), method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {} } },
+							bearerAuth
+						);
+						disabledStatus = disabledRes.status;
+						await disabledRes.body?.cancel();
+						if (disabledStatus === 401) break;
+					}
 					await sleep(200);
 				}
-				const disabledRes = await rpc(
-					undefined,
-					{ id: randomUUID(), method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {} } },
-					bearerAuth
-				);
 				strictEqual(
-					disabledRes.status,
+					disabledStatus,
 					401,
 					'disabling mcp.enabled on reload must dispose the Bearer validator and reject previously used tokens (authCacheable: false)'
 				);
-				await disabledRes.body?.cancel();
 			} finally {
 				await writeFile(`${configPath}.tmp`, configuredYaml);
 				await rename(`${configPath}.tmp`, configPath);

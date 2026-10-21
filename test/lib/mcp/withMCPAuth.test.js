@@ -723,4 +723,23 @@ describe('withMCPAuth — hardening', () => {
 		assert.equal(res.headers['Access-Control-Allow-Origin'], '*');
 		assert.equal(res.headers['Access-Control-Expose-Headers'], 'WWW-Authenticate');
 	});
+
+	it('rejects dot-segments, encoded dots/slashes, backslashes, and double-slashes before any token work', async () => {
+		const token = mint();
+		const { handler, calls } = spyHandler();
+		const wrapped = withMCPAuth(handler, opts());
+		for (const badPath of [
+			'/mcp/../SomeTable/1',
+			'/mcp/.',
+			'/mcp/%2e%2e/SomeTable/1',
+			'/mcp/%2fSomeTable/1',
+			'/mcp\\SomeTable',
+			'//mcp',
+			'/mcp//tools',
+		]) {
+			const res = await wrapped(req(`Bearer ${token}`, { pathname: badPath }), NEXT);
+			assert.equal(res.status, 401, `ambiguous path ${badPath} must be rejected with 401`);
+		}
+		assert.equal(calls.length, 0, 'handler must not run for any ambiguous path');
+	});
 });

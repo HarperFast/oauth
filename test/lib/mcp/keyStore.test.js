@@ -779,10 +779,29 @@ describe('MCPKeyStore', () => {
 
 		seedKey(stored, { kid: 'k1' });
 
-		await store.getAllPublicKeys();
-		await store.getAllPublicKeys();
+		const first = await store.getAllPublicKeys();
+		const second = await store.getAllPublicKeys();
 
 		assert.equal(searchCalls, 1, 'second call served from cache');
+		assert.equal(second, first, 'returns the exact same projected array reference across cache hits');
+	});
+
+	it('cache: getAllPublicKeys preserves projected array reference across 5s TTL refresh when live keys are unchanged', async () => {
+		seedKey(stored, { kid: 'k1' });
+		let fakeNow = Date.now();
+		_setCacheNowMs(() => fakeNow);
+		try {
+			const first = await store.getAllPublicKeys();
+			fakeNow += 6_000;
+			const afterRefresh = await store.getAllPublicKeys();
+			assert.equal(
+				afterRefresh,
+				first,
+				'projected array reference is preserved across TTL refresh when live keys match'
+			);
+		} finally {
+			_setCacheNowMs(null);
+		}
 	});
 
 	it('cache: stale-empty cache after first-boot — getAllPublicKeys sees the new key', async () => {

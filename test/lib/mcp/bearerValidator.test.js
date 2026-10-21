@@ -52,11 +52,12 @@ const silentLogger = { error() {}, warn() {}, info() {}, debug() {} };
 
 function makeValidator(extra = {}) {
 	const events = [];
+	const defaultKeys = extra.keys ?? [key];
 	const validator = createMCPBearerValidator({
 		getConfig: () => config,
 		keyStore: {
 			async getAllPublicKeys() {
-				return extra.keys ?? [key];
+				return defaultKeys;
 			},
 		},
 		logger: silentLogger,
@@ -131,12 +132,41 @@ describe('createMCPBearerValidator — ownership ("not mine" returns undefined)'
 			},
 		});
 
-		for (const badPath of ['/SomeTable/1', '/mcponaut']) {
+		for (const badPath of [
+			'/SomeTable/1',
+			'/mcponaut',
+			'/mcp/../SomeTable/1',
+			'/mcp/%2e%2e/SomeTable/1',
+			'/mcp/%2E/tools',
+			'/mcp%2f../SomeTable/1',
+			'/mcp\\..\\SomeTable/1',
+			'//mcp',
+		]) {
 			const res = validator(token, req({ pathname: badPath }));
-			assert.equal(res, undefined);
+			assert.equal(res, undefined, `expected undefined for path: ${badPath}`);
 		}
 		assert.equal(keyReads, 0, 'off-path route must not read signing keys');
 		assert.equal(events.length, 0, 'off-path route must not emit audit events');
+	});
+
+	it('abstains synchronously when mcp.resource has root pathname "/" so MCP tokens never become blanket credentials for all REST routes', () => {
+		const rootResource = 'https://app.example.com';
+		const token = mint({ subject: 'alice@example.com', audience: rootResource });
+		let keyReads = 0;
+		const { validator, events } = makeValidator({
+			getConfig: () => ({ enabled: true, issuer: ISSUER, resource: rootResource }),
+			keyStore: {
+				async getAllPublicKeys() {
+					keyReads++;
+					return [key];
+				},
+			},
+		});
+
+		assert.equal(validator(token, req({ pathname: '/SomeTable/1' })), undefined);
+		assert.equal(validator(token, req({ pathname: '/' })), undefined);
+		assert.equal(keyReads, 0);
+		assert.equal(events.length, 0);
 	});
 });
 
@@ -290,6 +320,22 @@ describe('createMCPBearerValidator — owned-token rejections (fail closed with 
 
 		await assertCredentialRejection(validator(token, req()));
 	});
+
+	it('maps an unexpected untagged error during async validation to a tagged 401 credentialRejectionError', async () => {
+		const token = mint();
+		let calls = 0;
+		const { validator } = makeValidator({
+			getConfig: () => {
+				calls++;
+				if (calls > 1) {
+					throw new Error('unexpected post-await failure');
+				}
+				return config;
+			},
+		});
+
+		await assertCredentialRejection(validator(token, req()), /MCP bearer token validation failed/);
+	});
 });
 
 describe('createMCPBearerValidator — happy path', () => {
@@ -319,17 +365,6 @@ describe('createMCPBearerValidator — happy path', () => {
 		assert.equal(result?.authCacheable, false);
 	});
 
-	it('returns authCacheable: false even when resource pathname is "/" so key retirement and mcp.enabled flips apply immediately', async () => {
-		const rootResource = 'https://app.example.com';
-		const token = mint({ subject: 'alice@example.com', audience: rootResource });
-		const { validator } = makeValidator({
-			getConfig: () => ({ enabled: true, issuer: ISSUER, resource: rootResource }),
-		});
-		const result = await validator(token, req({ pathname: '/SomeTable/1' }));
-		assert.equal(result?.username, 'alice@example.com');
-		assert.equal(result?.authCacheable, false);
-	});
-
 	it('clamps authExpiresAt to at most 365 days in the future so Harper effectiveExpiry does not throw', async () => {
 		const twoYearsSeconds = 2 * 365 * 24 * 60 * 60;
 		const token = mint({ subject: 'alice@example.com', ttlSeconds: twoYearsSeconds });
@@ -344,7 +379,17 @@ describe('createMCPBearerValidator — happy path', () => {
 
 	it('memoizes verified tokens across repeat calls while re-checking pathOwned, mcp.enabled, and active keys', async () => {
 		const token = mint({ subject: 'alice@example.com', ttlSeconds: 1800 });
-		let activeKeys = [key];
+		let pemReads = 0;
+		const trackedKey = {
+			kid: key.kid,
+			alg: key.alg,
+			get public_key_pem() {
+				pemReads++;
+				return key.public_key_pem;
+			},
+			created_at: key.created_at,
+		};
+		let activeKeys = [trackedKey];
 		let liveCfg = { enabled: true, issuer: ISSUER, resource: RESOURCE };
 		const { validator } = makeValidator({
 			getConfig: () => liveCfg,
@@ -356,7 +401,9 @@ describe('createMCPBearerValidator — happy path', () => {
 		});
 
 		const first = await validator(token, req());
+		assert.equal(pemReads, 1, 'first call must run signature verification');
 		const second = await validator(token, req());
+		assert.equal(pemReads, 1, 'second call with same key-set reference must hit the verified-token memo');
 		assert.equal(first?.username, 'alice@example.com');
 		assert.equal(second?.username, 'alice@example.com');
 		assert.equal(second?.authCacheable, false);
@@ -367,6 +414,11 @@ describe('createMCPBearerValidator — happy path', () => {
 		// Key rotation invalidates the memoized entry immediately.
 		activeKeys = [makeKey('rotated-kid')];
 		await assert.rejects(validator(token, req()), (err) => isCredentialRejection(err));
+
+		// Disabling mcp.enabled after memoization abstains synchronously.
+		activeKeys = [trackedKey];
+		liveCfg = { enabled: false, issuer: ISSUER, resource: RESOURCE };
+		assert.equal(validator(token, req()), undefined);
 	});
 });
 

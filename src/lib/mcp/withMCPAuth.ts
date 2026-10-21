@@ -64,14 +64,11 @@ interface VerifiedTokenMemoEntry {
 	exp: number;
 	issuer: string;
 	resource: string;
-	keys: Array<{ kid: string; alg?: string; public_key_pem: string }>;
+	keysRef: MCPPublicKeyRecord[];
 }
 
 const MAX_VERIFIED_TOKEN_MEMO_ENTRIES = 256;
 
-/**
- * Shared access-token verification for `withMCPAuth` and `bearerValidator.ts`.
- */
 export async function verifyMCPAccessToken(
 	token: string,
 	params: {
@@ -110,10 +107,7 @@ export async function verifyMCPAccessToken(
 		memoHit.issuer === issuer &&
 		memoHit.resource === resource &&
 		memoHit.exp > nowSec &&
-		memoHit.keys.length === keys.length &&
-		memoHit.keys.every(
-			(k, i) => k.kid === keys[i].kid && k.alg === keys[i].alg && k.public_key_pem === keys[i].public_key_pem
-		)
+		memoHit.keysRef === keys
 	) {
 		verifiedTokenMemo!.delete(token);
 		verifiedTokenMemo!.set(token, memoHit);
@@ -162,7 +156,7 @@ export async function verifyMCPAccessToken(
 			exp,
 			issuer,
 			resource,
-			keys: keys.map((k) => ({ kid: k.kid, alg: k.alg, public_key_pem: k.public_key_pem })),
+			keysRef: keys,
 		});
 	}
 
@@ -283,16 +277,26 @@ export function getRequestPathname(request: Request | undefined): string | undef
 	);
 }
 
+const AMBIGUOUS_PATH_RE = /(?:^|\/)\.\.?(?:\/|$)|\/\/|\\|%(?:2e|2f|5c)/i;
+
+export function hasAmbiguousPathSegments(pathname: string | undefined): boolean {
+	return typeof pathname === 'string' && AMBIGUOUS_PATH_RE.test(pathname);
+}
+
 /**
  * True when `pathname` is `routePath` or a segment-bounded sub-path of it
- * ('/mcp' matches '/mcp' and '/mcp/x' but not '/mcponaut'). Trailing slashes on
- * `routePath` are ignored. Mirrors Harper's `matchesRoute` urlPath semantics so
- * the default-group fallback behaves like the urlPath registration.
+ * ('/mcp' matches '/mcp' and '/mcp/x' but not '/mcponaut') and contains no
+ * dot-segments, encoded dots/slashes, backslashes, or empty `//` segments.
+ * Trailing slashes on `routePath` are ignored. Mirrors Harper's `matchesRoute`
+ * urlPath semantics so the default-group fallback behaves like urlPath registration.
  */
 export function pathOwned(pathname: string | undefined, routePath: string): boolean {
 	const path = routePath.length > 1 && routePath.endsWith('/') ? routePath.slice(0, -1) : routePath;
 	const p = pathname ?? '/';
-	return p === path || p.startsWith(path + '/');
+	if (AMBIGUOUS_PATH_RE.test(p)) return false;
+	if (p === path) return true;
+	if (path === '/') return p.startsWith('/');
+	return p.length > path.length && p.charCodeAt(path.length) === 47 && p.startsWith(path);
 }
 
 /**
@@ -386,6 +390,9 @@ export function withMCPAuth(handler: HttpListener, options: WithMCPAuthOptions =
 		// before any token work.
 		if ((fullRequestPathname ?? request.url ?? '').length > 2048) {
 			return deny('request path exceeds the maximum allowed length');
+		}
+		if (hasAmbiguousPathSegments(fullRequestPathname) || hasAmbiguousPathSegments(requestPathname)) {
+			return deny('request path is invalid');
 		}
 
 		const cfg = getConfig();

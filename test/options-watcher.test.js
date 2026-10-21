@@ -1176,5 +1176,44 @@ describe('OAuth Plugin Options Watcher', () => {
 			await waitFor(() => lastResourceSet !== disabledSet);
 			assert.equal(registerCount, 2, 'should re-register on re-enable after a throwing disposer');
 		});
+
+		it('a reload that disables mcp.enabled disposes the bearer validator immediately even when the same snapshot errors', async () => {
+			let disposedCount = 0;
+			scope.server.registerBearerValidator = () => () => {
+				disposedCount++;
+			};
+			scope.options._config.mcp = { enabled: true, issuer: 'https://app.example.com' };
+			await handleApplication(scope);
+			assert.equal(OAuthResource.mcpConfig?.enabled, true);
+
+			let errorLogged = false;
+			scope.logger.error = (msg) => {
+				if (typeof msg === 'string' && msg.includes('Failed to update OAuth configuration')) errorLogged = true;
+			};
+
+			// Snapshot both disables mcp.enabled AND has a reserved 'mcp' provider name that throws in initializeProviders.
+			scope.options._config = {
+				...scope.options._config,
+				mcp: { enabled: false, issuer: 'https://app.example.com' },
+				providers: {
+					...scope.options._config.providers,
+					mcp: { provider: 'generic', clientId: 'x', clientSecret: 'y' },
+				},
+			};
+			configChangeListeners[0]();
+			await waitFor(() => errorLogged);
+
+			assert.ok(errorLogged, 'the rejected reload should be logged');
+			assert.equal(
+				OAuthResource.mcpConfig?.enabled,
+				false,
+				'mcp.enabled must be disabled immediately on a disabling reload'
+			);
+			assert.equal(
+				disposedCount,
+				1,
+				'bearer validator must be disposed immediately even when the reload snapshot errors'
+			);
+		});
 	});
 });

@@ -227,6 +227,19 @@ export async function handleApplication(scope: Scope): Promise<void> {
 			OAuthResource.allowUnverifiedClaimInheritance = false;
 		}
 
+		// Apply a disabling `mcp.enabled` value immediately — before any MCP or
+		// provider validation below can throw on an unrelated field in the same
+		// snapshot — so an operator setting `mcp.enabled: false` always disposes
+		// the bearer validator and disables MCP even if the reload is rejected.
+		const rawMcpEnabled =
+			options.mcp && typeof options.mcp === 'object' ? coerceConfigBoolean(expandEnvVar(options.mcp.enabled)) : false;
+		if (rawMcpEnabled !== true) {
+			if (OAuthResource.mcpConfig) {
+				OAuthResource.mcpConfig = { ...OAuthResource.mcpConfig, enabled: false };
+			}
+			disposeBearerValidator();
+		}
+
 		// Build the MCP config block up front so we can fail fast on an unsafe
 		// combination before mutating any provider state. expandEnvVarsDeep so
 		// sensitive leaves (mcp.dynamicClientRegistration.initialAccessToken) and

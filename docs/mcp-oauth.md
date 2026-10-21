@@ -311,13 +311,14 @@ scope closes):
   with zero async overhead (while a plugin MCP token presented to a non-MCP
   route with no matching validator still receives `401` from Harper's deferred
   operation-token rejection, without reading signing keys or flooding the audit
-  log). Note: configuring `mcp.resource` with a root path (e.g.
-  `https://my-app.example.com` or `https://my-app.example.com/`) scopes the
-  validator across all application paths and makes it authoritative for any JWT
-  carrying the configured `mcp.issuer` (so any co-hosted JWT issuer on those
-  routes must use a distinct `iss`); leave `mcp.resource` unset (defaulting to
-  `<issuer>/mcp`) or give it an explicit sub-path to keep tokens scoped to that
-  route. (Harper's `authentication()` middleware also checks
+  log). Note: configuring `mcp.resource` with an origin-root path (e.g.
+  `https://my-app.example.com` or `https://my-app.example.com/`, where
+  `pathname === '/'`) also abstains synchronously in the core Bearer validator
+  so an MCP token can never act as a blanket REST credential across every
+  Harper table and route on `/`; leave `mcp.resource` unset (defaulting to
+  `<issuer>/mcp`) or configure a dedicated path prefix (such as `/mcp`) for
+  core Bearer validator routes, or use `withMCPAuth` on a custom route.
+  (Harper's `authentication()` middleware also checks
   `validateOperationToken` first and only invokes registered Bearer validators
   when operation-token verification throws `'invalid token'`.)
 - **Authoritatively rejects (`credentialRejectionError(reason, 401)`)** once a
