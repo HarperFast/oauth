@@ -14,6 +14,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync } from 'node:crypto';
+import { credentialRejectionError } from 'harper';
 import { withMCPAuth } from '../../../dist/lib/mcp/withMCPAuth.js';
 import { signAccessToken } from '../../../dist/lib/mcp/tokenIssuer.js';
 import { SIGNING_KEY_ID } from '../../../dist/lib/mcp/keyStore.js';
@@ -319,16 +320,39 @@ describe('withMCPAuth — happy path', () => {
 		assert.equal(request.user, harperUser);
 	});
 
-	it('falls back to { username: sub } when getUser returns undefined (e.g. client_credentials principal)', async () => {
-		const token = mint({ subject: 'https://agent.example.com/client.json' });
+	it('accepts a role-less user view ({ username: sub }) returned by Harper getUser for subjects with no hdb_user row', async () => {
+		const sub = 'https://agent.example.com/client.json';
+		const token = mint({ subject: sub });
 		const request = req(`Bearer ${token}`);
-		const res = await withMCPAuth(spyHandler().handler, opts({ getUser: async () => undefined }))(request, NEXT);
+		const res = await withMCPAuth(spyHandler().handler, opts({ getUser: async (username) => ({ username }) }))(
+			request,
+			NEXT
+		);
 
 		assert.equal(res.status, 200);
-		assert.deepEqual(request.user, { username: 'https://agent.example.com/client.json' });
+		assert.deepEqual(request.user, { username: sub });
 	});
 
-	it('fails closed with 401 when getUser throws (e.g. inactive user in hdb_user)', async () => {
+	it('binds default server.getUser to server when resolving request.user', async () => {
+		const token = mint();
+		const request = req(`Bearer ${token}`);
+		const prevServer = globalThis.server;
+		globalThis.server = {
+			tag: 'bound-server',
+			async getUser(username) {
+				return { username, boundTag: this.tag };
+			},
+		};
+		try {
+			const res = await withMCPAuth(spyHandler().handler, opts())(request, NEXT);
+			assert.equal(res.status, 200);
+			assert.deepEqual(request.user, { username: 'alice@example.com', boundTag: 'bound-server' });
+		} finally {
+			globalThis.server = prevServer;
+		}
+	});
+
+	it('fails closed with 401 when getUser throws a credential rejection (e.g. inactive user in hdb_user)', async () => {
 		const token = mint();
 		const events = [];
 		const request = req(`Bearer ${token}`);
@@ -338,7 +362,7 @@ describe('withMCPAuth — happy path', () => {
 			opts({
 				emitAudit: (p) => events.push(p),
 				getUser: async () => {
-					throw new Error('User is not active');
+					throw credentialRejectionError('User is not active', 401);
 				},
 			})
 		)(request, NEXT);
@@ -350,6 +374,29 @@ describe('withMCPAuth — happy path', () => {
 		assert.equal(request.mcp, undefined, 'request.mcp must not be populated on denial');
 		assert.equal(events.length, 1);
 		assert.equal(events[0].event, 'oauth.mcp.token.rejected');
+	});
+
+	it('returns 503 Retry-After without emitting oauth.mcp.token.rejected when getUser fails with a transient error', async () => {
+		const token = mint();
+		const events = [];
+		const request = req(`Bearer ${token}`);
+		const { handler, calls } = spyHandler();
+		const res = await withMCPAuth(
+			handler,
+			opts({
+				emitAudit: (p) => events.push(p),
+				getUser: async () => {
+					throw new Error('RocksDB I/O error');
+				},
+			})
+		)(request, NEXT);
+
+		assert.equal(res.status, 503);
+		assert.equal(res.headers['Retry-After'], '1');
+		assert.equal(calls.length, 0, 'handler must not run when getUser throws');
+		assert.equal(request.user, undefined);
+		assert.equal(request.mcp, undefined);
+		assert.equal(events.length, 0, 'transient user-store error must not be audited as a rejected token');
 	});
 
 	it('fails closed with 401 when getUser returns an object with active === false', async () => {
@@ -392,9 +439,9 @@ describe('withMCPAuth — happy path', () => {
 		assert.equal(request.mcp.sub, quarantinedSub, 'request.mcp still carries the quarantined subject');
 	});
 
-	it('preserves an already-populated request.user without calling getUser', async () => {
+	it('preserves an already-populated request.user when its username matches token sub without calling getUser', async () => {
 		const token = mint();
-		const existingUser = { username: 'upstream-user', role: { id: 'admin' } };
+		const existingUser = { username: 'alice@example.com', role: { id: 'admin' } };
 		let getUserCalled = false;
 		const request = req(`Bearer ${token}`);
 		request.user = existingUser;
@@ -411,6 +458,25 @@ describe('withMCPAuth — happy path', () => {
 		assert.equal(res.status, 200);
 		assert.equal(getUserCalled, false);
 		assert.equal(request.user, existingUser);
+	});
+
+	it('fails closed with 401 when an already-populated request.user does not match token sub', async () => {
+		const token = mint();
+		const events = [];
+		const request = req(`Bearer ${token}`);
+		request.user = { username: 'different-user', role: { id: 'admin' } };
+		const { handler, calls } = spyHandler();
+		const res = await withMCPAuth(
+			handler,
+			opts({
+				emitAudit: (p) => events.push(p),
+			})
+		)(request, NEXT);
+
+		assert.equal(res.status, 401);
+		assert.equal(calls.length, 0);
+		assert.equal(events.length, 1);
+		assert.equal(events[0].reason, 'token subject does not match the authenticated user');
 	});
 
 	it('forwards next to the wrapped handler', async () => {

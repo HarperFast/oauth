@@ -34,8 +34,6 @@ export { publicKeyToJwk, signAccessToken, verifyAccessToken, verifyAccessTokenWi
 export type { VerifyWithKeySetOptions } from './tokenIssuer.ts';
 export { withMCPAuth } from './withMCPAuth.ts';
 export type { WithMCPAuthOptions } from './withMCPAuth.ts';
-export { createMCPBearerValidator, registerMCPBearerValidator } from './bearerValidator.ts';
-export type { MCPBearerValidatorOptions, MCPBearerValidationResult, MCPBearerValidator } from './bearerValidator.ts';
 
 /**
  * Dispatch POST /oauth/mcp/<action>.

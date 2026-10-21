@@ -9,25 +9,15 @@
  * Metadata document Stage 2 serves. This is the bearer-token counterpart to the
  * cookie/session `withOAuthValidation` wrapper.
  *
- * ── Native `/mcp` vs. custom routes ──────────────────────────────────────────
- *
- * When running on a Harper version with `server.registerBearerValidator`
- * (`HarperFast/harper#3313`), the plugin automatically registers its MCP token
- * verifier with Harper's core authentication pipeline so Harper's built-in
- * `/mcp` endpoint accepts plugin-issued Bearer tokens directly. Use
- * `withMCPAuth` when your application registers its own custom HTTP MCP route
- * handler and wants the RFC 9728 `WWW-Authenticate: Bearer resource_metadata="..."`
- * challenge plus `request.mcp` claims (and `request.user` resolution).
- *
  * ── Registration (READ THIS — core auth will eat the token otherwise) ────────
  *
- * On custom routes without `server.registerBearerValidator` (or where you want
- * the RFC 9728 `WWW-Authenticate: Bearer resource_metadata="..."` challenge on
- * 401), Harper's core auth is a default-group HTTP middleware that consumes
+ * Harper's core auth is a default-group HTTP middleware that consumes
  * `Authorization: Bearer` and 401s any token it can't validate, stamping
  * `WWW-Authenticate: Basic` (security/auth.ts) — NOT the Bearer challenge MCP
- * clients require. So withMCPAuth must own the response for its route and core
- * auth must not run on top of it.
+ * clients require. On Harper versions without `server.registerBearerValidator`
+ * (or when you want the RFC 9728 `WWW-Authenticate: Bearer resource_metadata="..."`
+ * challenge and `request.mcp` claims on a custom route), `withMCPAuth` must own
+ * the response for its route.
  *
  * PRIMARY — register on a urlPath subroute (recommended):
  *
@@ -62,9 +52,81 @@ import { protectedResourceMetadataUrl, resolveIssuer, resolveResource } from './
 import { emitMCPAuditEvent, type MCPTokenRejectedAuditPayload } from './audit.ts';
 import { getRequestHeader } from '../requestHeaders.ts';
 
-/** Minimal surface withMCPAuth needs from a key source (lets tests inject one). */
-interface KeySource {
+/** Minimal surface MCP token verifiers need from a key source (lets tests inject one). */
+export interface KeySource {
 	getAllPublicKeys(mcpConfig?: MCPConfig): Promise<MCPPublicKeyRecord[]>;
+}
+
+export type VerifyMCPAccessTokenResult =
+	| { ok: true; claims: MCPRequestClaims; exp?: number }
+	| { ok: false; reason: string };
+
+/**
+ * Shared access-token verification used by both `withMCPAuth` and the Harper
+ * core bearer validator (`bearerValidator.ts`). Loads signing keys, re-checks
+ * live `mcp.enabled` after the key lookup await, verifies signature/`aud`/`iss`,
+ * and validates required MCP claim shapes.
+ */
+export async function verifyMCPAccessToken(
+	token: string,
+	params: {
+		cfg: MCPConfig;
+		getConfig: () => MCPConfig | undefined;
+		keyStore: KeySource;
+		resource: string;
+		issuer: string;
+		logger?: Logger;
+		caller: string;
+	}
+): Promise<VerifyMCPAccessTokenResult> {
+	const { cfg, getConfig, keyStore, resource, issuer, logger, caller } = params;
+	let keys: MCPPublicKeyRecord[];
+	try {
+		keys = await keyStore.getAllPublicKeys(cfg);
+	} catch (error) {
+		logger?.error?.(
+			`${caller}: failed to load MCP signing keys:`,
+			error instanceof Error ? error.message : String(error)
+		);
+		keys = [];
+	}
+	if (!getConfig()?.enabled) {
+		return { ok: false, reason: 'MCP authentication is not enabled' };
+	}
+	if (keys.length === 0) {
+		return { ok: false, reason: 'no signing keys available to verify token' };
+	}
+
+	let payload: any;
+	try {
+		payload = verifyAccessTokenWithKeySet(token, keys, { audience: resource, issuer });
+	} catch (error) {
+		logger?.debug?.(`${caller}: token verification failed:`, error instanceof Error ? error.message : String(error));
+		return { ok: false, reason: 'access token is invalid, expired, or not issued for this resource' };
+	}
+
+	// Audience binding (RFC 8707): jwt.verify already enforced `aud` contains
+	// `resource`, but require a single string `aud` so a multi-audience token
+	// minted elsewhere can't ride in.
+	if (typeof payload.sub !== 'string' || !payload.sub) return { ok: false, reason: 'token missing subject' };
+	if (typeof payload.client_id !== 'string' || !payload.client_id) {
+		return { ok: false, reason: 'token missing client_id' };
+	}
+	if (typeof payload.aud !== 'string' || !payload.aud) return { ok: false, reason: 'token audience is invalid' };
+	if (payload.scope !== undefined && typeof payload.scope !== 'string') {
+		return { ok: false, reason: 'token scope is invalid' };
+	}
+
+	return {
+		ok: true,
+		claims: {
+			sub: payload.sub,
+			client_id: payload.client_id,
+			aud: payload.aud,
+			scope: payload.scope,
+		},
+		exp: typeof payload.exp === 'number' && Number.isFinite(payload.exp) ? payload.exp : undefined,
+	};
 }
 
 export interface WithMCPAuthOptions {
@@ -138,9 +200,10 @@ function extractBearerToken(headers: any): string | undefined {
  * `routePath` are ignored. Mirrors Harper's `matchesRoute` urlPath semantics so
  * the default-group fallback behaves like the urlPath registration.
  */
-function pathOwned(pathname: string | undefined, routePath: string): boolean {
+export function pathOwned(pathname: string | undefined, routePath: string): boolean {
 	const path = routePath.length > 1 && routePath.endsWith('/') ? routePath.slice(0, -1) : routePath;
 	const p = pathname ?? '/';
+	if (path === '/') return p.startsWith('/');
 	return p === path || p.startsWith(path + '/');
 }
 
@@ -157,6 +220,7 @@ export function withMCPAuth(handler: HttpListener, options: WithMCPAuthOptions =
 
 	const { path, onAuthError } = options;
 	const getConfig = options.getConfig ?? (() => OAuthResource.mcpConfig);
+	let defaultKeyStore: MCPKeyStore | undefined;
 
 	return async function mcpAuthListener(request: Request, next: (req: Request) => any): Promise<any> {
 		const logger = options.logger ?? OAuthResource.logger;
@@ -247,61 +311,74 @@ export function withMCPAuth(handler: HttpListener, options: WithMCPAuthOptions =
 		// A bearer token was presented — any denial below is a rejected token (audited).
 		tokenPresented = true;
 
-		let keys: MCPPublicKeyRecord[];
-		try {
-			const keyStore: KeySource = options.keyStore ?? new MCPKeyStore(logger);
-			keys = await keyStore.getAllPublicKeys(cfg);
-		} catch (error) {
-			logger?.error?.(
-				'withMCPAuth: failed to load MCP signing keys:',
-				error instanceof Error ? error.message : String(error)
-			);
-			keys = [];
-		}
-		if (keys.length === 0) {
-			// No keys means no token could have been issued yet (or the table is
-			// unavailable) — reject rather than treating it as "nothing to verify
-			// against, so allow".
-			return deny('no signing keys available to verify token');
-		}
-
 		const resource = resolveResource(request as any, cfg);
 		const issuer = resolveIssuer(request as any, cfg);
+		const keyStore: KeySource = options.keyStore ?? (defaultKeyStore ??= new MCPKeyStore(logger));
 
-		let payload: any;
-		try {
-			payload = verifyAccessTokenWithKeySet(token, keys, { audience: resource, issuer });
-		} catch (error) {
-			logger?.debug?.(
-				'withMCPAuth: token verification failed:',
-				error instanceof Error ? error.message : String(error)
-			);
-			return deny('access token is invalid, expired, or not issued for this resource');
+		const verified = await verifyMCPAccessToken(token, {
+			cfg,
+			getConfig,
+			keyStore,
+			resource,
+			issuer,
+			logger,
+			caller: 'withMCPAuth',
+		});
+		if (!verified.ok) {
+			return deny(verified.reason);
 		}
 
-		// Audience binding (RFC 8707): jwt.verify already enforced `aud` contains
-		// `resource`, but require a single string `aud` so a multi-audience token
-		// minted elsewhere can't ride in.
-		if (typeof payload.sub !== 'string' || !payload.sub) return deny('token missing subject');
-		if (typeof payload.client_id !== 'string' || !payload.client_id) return deny('token missing client_id');
-		if (typeof payload.aud !== 'string' || !payload.aud) return deny('token audience is invalid');
-		if (payload.scope !== undefined && typeof payload.scope !== 'string') {
-			return deny('token scope is invalid');
+		const { claims } = verified;
+		if (request.user != null) {
+			const existingUsername = typeof request.user === 'string' ? request.user : request.user?.username;
+			if (
+				typeof existingUsername !== 'string' ||
+				existingUsername !== claims.sub ||
+				isQuarantinePrincipal(claims.sub)
+			) {
+				return deny('token subject does not match the authenticated user');
+			}
 		}
 
 		let resolvedUser: any;
-		const shouldPopulateUser = request.user == null && !isQuarantinePrincipal(payload.sub);
+		const shouldPopulateUser = request.user == null && !isQuarantinePrincipal(claims.sub);
 		if (shouldPopulateUser) {
-			const getUser = options.getUser ?? (harper as any).server?.getUser ?? (globalThis as any).server?.getUser;
+			const serverObj = (harper as any).server ?? (globalThis as any).server;
+			const getUser =
+				options.getUser ?? (typeof serverObj?.getUser === 'function' ? serverObj.getUser.bind(serverObj) : undefined);
 			if (typeof getUser === 'function') {
 				try {
-					resolvedUser = await getUser(payload.sub, null, request);
+					resolvedUser = await getUser(claims.sub, null, request);
 				} catch (error) {
-					logger?.debug?.(
+					const isRejectedUser =
+						(harper as any).isCredentialRejection?.(error) === true ||
+						(error as any)?.statusCode === 401 ||
+						(error as any)?.statusCode === 403;
+					if (isRejectedUser) {
+						logger?.debug?.(
+							'withMCPAuth: Harper user rejected for token subject:',
+							error instanceof Error ? error.message : String(error)
+						);
+						return deny('token subject is not an active user');
+					}
+					logger?.error?.(
 						'withMCPAuth: failed to resolve Harper user for token subject:',
 						error instanceof Error ? error.message : String(error)
 					);
-					return deny('token subject could not be resolved as an active user');
+					return {
+						status: 503,
+						headers: {
+							'Content-Type': 'application/json',
+							'Retry-After': '1',
+						},
+						body: JSON.stringify({
+							error: 'temporarily_unavailable',
+							error_description: 'unable to verify user status, please retry',
+						}),
+					};
+				}
+				if (!getConfig()?.enabled) {
+					return deny('MCP authentication is not enabled');
 				}
 				if (resolvedUser && typeof resolvedUser === 'object' && resolvedUser.active === false) {
 					return deny('token subject is not an active user');
@@ -309,15 +386,9 @@ export function withMCPAuth(handler: HttpListener, options: WithMCPAuthOptions =
 			}
 		}
 
-		const claims: MCPRequestClaims = {
-			sub: payload.sub,
-			client_id: payload.client_id,
-			aud: payload.aud,
-			scope: payload.scope,
-		};
 		request.mcp = claims;
 		if (shouldPopulateUser) {
-			request.user = resolvedUser ?? { username: payload.sub };
+			request.user = resolvedUser ?? { username: claims.sub };
 		}
 
 		// Token is valid — hand off to the app's handler. Its response is returned

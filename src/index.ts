@@ -65,15 +65,9 @@ export { getProvider } from './lib/providers/index.ts';
 export { withOAuthValidation, getOAuthProviders } from './lib/withOAuthValidation.ts';
 export type { OAuthValidationOptions } from './lib/withOAuthValidation.ts';
 
-// Export MCP bearer-token guard (Stage 5) for app-owned MCP routes and core bearer validator
+// Export MCP bearer-token guard (Stage 5) for app-owned MCP routes
 export { withMCPAuth } from './lib/mcp/withMCPAuth.ts';
 export type { WithMCPAuthOptions } from './lib/mcp/withMCPAuth.ts';
-export { createMCPBearerValidator, registerMCPBearerValidator } from './lib/mcp/bearerValidator.ts';
-export type {
-	MCPBearerValidatorOptions,
-	MCPBearerValidationResult,
-	MCPBearerValidator,
-} from './lib/mcp/bearerValidator.ts';
 export type { MCPRequestClaims } from './types.ts';
 
 function isHttpsOrLoopbackIssuer(issuer: string): boolean {
@@ -162,8 +156,20 @@ export async function handleApplication(scope: Scope): Promise<void> {
 	let debugMode = false;
 	let isInitialized = false;
 	let warnedMissingBearerValidator = false;
+	let unregisterBearerValidator: (() => void) | undefined;
 	let pluginDefaults: any = {}; // Store plugin defaults for dynamic provider resolution
 	const dynamicProviderCache = new DynamicProviderCache(); // TTL cache for dynamically-resolved providers
+
+	function disposeBearerValidator() {
+		if (!unregisterBearerValidator) return;
+		const dispose = unregisterBearerValidator;
+		unregisterBearerValidator = undefined;
+		try {
+			dispose();
+		} catch (error) {
+			logger?.error?.('Failed to unregister MCP bearer validator:', error);
+		}
+	}
 
 	// Create hookManager instance scoped to this application
 	const hookManager = new HookManager(logger);
@@ -410,6 +416,7 @@ export async function handleApplication(scope: Scope): Promise<void> {
 			// stale config after the plugin is no longer validly configured.
 			OAuthResource.mcpConfig = undefined;
 			OAuthResource.allowUnverifiedClaimInheritance = false;
+			disposeBearerValidator();
 			resources.set(
 				'oauth',
 				{
@@ -453,17 +460,27 @@ export async function handleApplication(scope: Scope): Promise<void> {
 			// Register the OAuth resource class
 			resources.set('oauth', OAuthResource, { mcp: false });
 
-			if (
-				mcpConfig?.enabled &&
-				typeof (server as any).registerBearerValidator !== 'function' &&
-				!warnedMissingBearerValidator
-			) {
-				warnedMissingBearerValidator = true;
-				logger?.warn?.(
-					'MCP: scope.server.registerBearerValidator is not available in this Harper version; ' +
-						"plugin-issued MCP bearer tokens will not authenticate Harper's native /mcp endpoint " +
-						'(upgrade Harper to a version with server.registerBearerValidator, or guard a custom route with withMCPAuth).'
-				);
+			if (mcpConfig?.enabled) {
+				if (typeof (server as any).registerBearerValidator === 'function') {
+					if (!unregisterBearerValidator) {
+						try {
+							unregisterBearerValidator = registerMCPBearerValidator(server, () => OAuthResource.mcpConfig, {
+								logger,
+							});
+						} catch (error) {
+							logger?.error?.('Failed to register MCP bearer validator:', error);
+						}
+					}
+				} else if (!warnedMissingBearerValidator) {
+					logger?.warn?.(
+						'MCP: scope.server.registerBearerValidator is not available in this Harper version; ' +
+							"plugin-issued MCP bearer tokens will not authenticate Harper's native /mcp endpoint " +
+							'(upgrade Harper to a version with server.registerBearerValidator, or guard a custom route with withMCPAuth).'
+					);
+					warnedMissingBearerValidator = true;
+				}
+			} else {
+				disposeBearerValidator();
 			}
 
 			// Log all configured providers
@@ -634,12 +651,6 @@ export async function handleApplication(scope: Scope): Promise<void> {
 	// not support deregistration).
 	registerWellKnownHandlers(server, () => OAuthResource.mcpConfig, logger);
 
-	// Register the MCP bearer-token validator with Harper's core authentication
-	// pipeline (HarperFast/harper#3313) when available. Reads live mcpConfig at
-	// request time and returns undefined when MCP is disabled or the token is
-	// not issued by this plugin.
-	const unregisterBearerValidator = registerMCPBearerValidator(server, () => OAuthResource.mcpConfig, { logger });
-
 	// Watch for configuration changes (errors caught internally)
 	scope.options.on('change', () => {
 		runUpdate().catch((error) => {
@@ -649,7 +660,7 @@ export async function handleApplication(scope: Scope): Promise<void> {
 
 	// Clean up on scope close
 	scope.on('close', () => {
-		unregisterBearerValidator?.();
+		disposeBearerValidator();
 		logger?.info?.('OAuth plugin shutting down');
 	});
 }

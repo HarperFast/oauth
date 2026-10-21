@@ -1003,30 +1003,72 @@ describe('OAuth Plugin Options Watcher', () => {
 	});
 
 	describe('MCP core Bearer validator registration (#279)', () => {
-		it('registers a bearer validator when scope.server.registerBearerValidator is available and disposes on close', async () => {
+		it('registers lazily when mcp.enabled is true, exercises live config, and disposes on disable or close', async () => {
 			let registeredValidator = null;
-			let disposed = false;
+			let disposedCount = 0;
 			const warnings = [];
 			scope.logger.warn = (msg) => warnings.push(msg);
 			scope.server.registerBearerValidator = (validator) => {
 				registeredValidator = validator;
 				return () => {
-					disposed = true;
+					disposedCount++;
 				};
 			};
-			scope.options._config.mcp = { enabled: true, issuer: 'https://app.example.com' };
 
+			// Startup with MCP off: validator is not registered on the server.
 			await handleApplication(scope);
+			assert.equal(registeredValidator, null, 'must not register a bearer validator while mcp.enabled is off');
 
-			assert.equal(typeof registeredValidator, 'function', 'should register the MCP bearer validator');
+			// Live reload enabling MCP registers the validator.
+			const startupSet = lastResourceSet;
+			scope.options._config = {
+				...scope.options._config,
+				mcp: { enabled: true, issuer: 'https://app.example.com' },
+			};
+			configChangeListeners[0]();
+			await waitFor(() => lastResourceSet !== startupSet);
+
+			assert.equal(typeof registeredValidator, 'function', 'should register the MCP bearer validator when enabled');
 			assert.equal(
 				warnings.some((w) => typeof w === 'string' && w.includes('registerBearerValidator')),
 				false,
 				'should not warn when registerBearerValidator is present'
 			);
 
+			// Exercise the registered validator: non-owned token abstains synchronously.
+			assert.equal(
+				registeredValidator('opaque-token', { pathname: '/mcp', headers: { host: 'app.example.com' } }),
+				undefined
+			);
+
+			// Exercise the registered validator: owned token on a non-MCP route fails closed with 401.
+			const forgedOwnedToken = `a.${Buffer.from(JSON.stringify({ iss: 'https://app.example.com' })).toString('base64url')}.c`;
+			await assert.rejects(
+				registeredValidator(forgedOwnedToken, { pathname: '/SomeTable/1', headers: { host: 'app.example.com' } }),
+				(err) => err.statusCode === 401 && /token audience does not match the requested resource/.test(err.message)
+			);
+
+			// Live reload disabling MCP disposes the validator.
+			const enabledSet = lastResourceSet;
+			scope.options._config = {
+				...scope.options._config,
+				mcp: { enabled: false, issuer: 'https://app.example.com' },
+			};
+			configChangeListeners[0]();
+			await waitFor(() => lastResourceSet !== enabledSet);
+			assert.equal(disposedCount, 1, 'should dispose the bearer validator when mcp.enabled is disabled on reload');
+
+			// Re-enable MCP and verify scope close also disposes.
+			const disabledSet = lastResourceSet;
+			scope.options._config = {
+				...scope.options._config,
+				mcp: { enabled: true, issuer: 'https://app.example.com' },
+			};
+			configChangeListeners[0]();
+			await waitFor(() => lastResourceSet !== disabledSet);
+
 			closeListeners[0]();
-			assert.equal(disposed, true, 'should dispose the registered bearer validator on scope close');
+			assert.equal(disposedCount, 2, 'should dispose the registered bearer validator on scope close');
 		});
 
 		it('warns once when mcp.enabled is true and scope.server.registerBearerValidator is missing', async () => {

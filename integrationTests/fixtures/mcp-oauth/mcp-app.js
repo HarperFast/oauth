@@ -17,6 +17,7 @@ const mcpHandler = (request) => ({
 		client_id: request.mcp?.client_id ?? null,
 		aud: request.mcp?.aud ?? null,
 		scope: request.mcp?.scope ?? null,
+		user: request.user ?? null,
 	}),
 });
 

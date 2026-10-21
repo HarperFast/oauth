@@ -1,18 +1,5 @@
 /**
- * Tests for createMCPBearerValidator / registerMCPBearerValidator (#279).
- *
- * Verifies the Harper core Bearer-validator contract (HarperFast/harper#3313):
- * - Non-plugin tokens (MCP disabled, non-JWT, or `iss !== resolveIssuer`) return
- *   `undefined` ("not mine") with zero audit noise so Harper's own operation
- *   tokens and other validators are unaffected.
- * - Tokens claiming this plugin's `iss` are owned by the plugin: any failure
- *   (bad signature, unknown kid, expired, wrong audience, wrong typ, missing
- *   claims, no keys, or a quarantined `unverified:<claim>#<hash>` subject)
- *   emits `oauth.mcp.token.rejected` and throws a tagged credential rejection
- *   (`statusCode: 401`, `isCredentialRejection(err) === true`) so Harper core
- *   fails closed in place rather than falling through.
- * - Valid tokens return `{ username: sub, authExpiresAt: exp, authCacheable: false }`
- *   with no extra fields outside Harper's strict `RESULT_FIELDS` allowlist.
+ * Unit tests for createMCPBearerValidator / registerMCPBearerValidator (#279).
  */
 
 import { describe, it } from 'node:test';
@@ -86,17 +73,17 @@ function req({ pathname = '/mcp', url, host = 'app.example.com' } = {}) {
 }
 
 describe('createMCPBearerValidator — ownership ("not mine" returns undefined)', () => {
-	it('returns undefined when MCP is disabled or unconfigured', async () => {
+	it('returns undefined synchronously when MCP is disabled or unconfigured', () => {
 		const token = mint();
 		for (const cfg of [undefined, { enabled: false, issuer: ISSUER }]) {
 			const { validator, events } = makeValidator({ getConfig: () => cfg });
-			const res = await validator(token, req());
+			const res = validator(token, req());
 			assert.equal(res, undefined);
 			assert.equal(events.length, 0);
 		}
 	});
 
-	it('returns undefined for non-JWT or malformed compact tokens without auditing', async () => {
+	it('returns undefined synchronously for non-JWT or malformed compact tokens without auditing', () => {
 		const { validator, events } = makeValidator();
 		const nonJwts = [
 			'',
@@ -114,16 +101,16 @@ describe('createMCPBearerValidator — ownership ("not mine" returns undefined)'
 			'a.' + 'x'.repeat(17000) + '.c',
 		];
 		for (const bad of nonJwts) {
-			const res = await validator(bad, req());
+			const res = validator(bad, req());
 			assert.equal(res, undefined, `expected undefined for non-owned token: ${bad.slice(0, 40)}`);
 		}
 		assert.equal(events.length, 0, 'non-owned tokens must never emit rejection audit events');
 	});
 
-	it('returns undefined when the token iss belongs to another issuer (e.g. Harper operation token)', async () => {
+	it('returns undefined synchronously when the token iss belongs to another issuer (e.g. Harper operation token)', () => {
 		const otherToken = mint({ issuer: 'https://other-issuer.example.com' });
 		const { validator, events } = makeValidator();
-		const res = await validator(otherToken, req());
+		const res = validator(otherToken, req());
 		assert.equal(res, undefined);
 		assert.equal(events.length, 0);
 	});
@@ -182,6 +169,19 @@ describe('createMCPBearerValidator — owned-token rejections (fail closed with 
 		assert.equal(events[0].aud, RESOURCE);
 	});
 
+	it('rejects a token minted for /mcp when presented to a non-MCP route (RFC 8707 path binding)', async () => {
+		const token = mint();
+		const { validator, events } = makeValidator();
+
+		await assertCredentialRejection(
+			validator(token, req({ pathname: '/SomeTable/1' })),
+			/token audience does not match the requested resource/
+		);
+		assert.equal(events.length, 1);
+		assert.equal(events[0].reason, 'token audience does not match the requested resource');
+		assert.equal(events[0].aud, RESOURCE);
+	});
+
 	it('rejects a token with a disallowed typ header that claims our issuer', async () => {
 		const wrongTypToken = jwt.sign(
 			{
@@ -214,6 +214,23 @@ describe('createMCPBearerValidator — owned-token rejections (fail closed with 
 		});
 		await assertCredentialRejection(throwing.validator(token, req()), /no signing keys available/);
 		assert.equal(throwing.events.length, 1);
+	});
+
+	it('fails closed when MCP is disabled during an in-flight key lookup', async () => {
+		const token = mint();
+		let liveCfg = { enabled: true, issuer: ISSUER, resource: RESOURCE };
+		const { validator, events } = makeValidator({
+			getConfig: () => liveCfg,
+			keyStore: {
+				async getAllPublicKeys() {
+					liveCfg = { enabled: false, issuer: ISSUER, resource: RESOURCE };
+					return [key];
+				},
+			},
+		});
+
+		await assertCredentialRejection(validator(token, req()), /MCP authentication is not enabled/);
+		assert.equal(events.length, 1);
 	});
 
 	it('rejects a quarantined unverified:<claim>#<16-hex> subject (#231)', async () => {
@@ -263,13 +280,24 @@ describe('createMCPBearerValidator — happy path', () => {
 		assert.equal(result.username, 'alice@example.com');
 		assert.equal(typeof result.authExpiresAt, 'number');
 		assert.ok(result.authExpiresAt > Math.floor(Date.now() / 1000));
-		assert.equal(result.authCacheable, false, 'must opt out of header-only authorizationCache');
+		assert.equal(result.authCacheable, false, 'must opt out of header-only authorizationCache for sub-path resource');
 		assert.deepEqual(
 			Object.keys(result).sort(),
 			['authCacheable', 'authExpiresAt', 'username'],
 			'must only return fields permitted by Harper security/bearerValidators.ts RESULT_FIELDS'
 		);
 		assert.equal(events.length, 0);
+	});
+
+	it('sets authCacheable: true when issuer is pinned and resource pathname is "/"', async () => {
+		const rootResource = 'https://app.example.com';
+		const token = mint({ subject: 'alice@example.com', audience: rootResource });
+		const { validator } = makeValidator({
+			getConfig: () => ({ enabled: true, issuer: ISSUER, resource: rootResource }),
+		});
+		const result = await validator(token, req({ pathname: '/SomeTable/1' }));
+		assert.equal(result?.username, 'alice@example.com');
+		assert.equal(result?.authCacheable, true);
 	});
 });
 
