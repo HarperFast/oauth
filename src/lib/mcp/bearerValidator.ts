@@ -76,8 +76,10 @@ function extractUnverifiedIssuer(token: string): string | undefined {
 		) {
 			return parsed.iss;
 		}
-	} catch {}
-	return undefined;
+		return undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 function extractResourcePathname(resourceUrl: string): string {
@@ -165,7 +167,9 @@ export function createMCPBearerValidator(options: MCPBearerValidatorOptions = {}
 						aud: resource,
 						timestamp: new Date().toISOString(),
 					});
-				} catch {}
+				} catch {
+					throw credentialRejection(reason);
+				}
 				throw credentialRejection(reason);
 			};
 

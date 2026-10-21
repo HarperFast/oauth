@@ -68,7 +68,7 @@ any custom route registration. Note that Harper core's `resolveUser` requires
 `sub` to resolve to an active `hdb_user` record with a provisioned `role`
 (`user.role.permission`); either provision matching Harper users or map the
 OAuth identity to an existing Harper username in an `onLogin` hook (returning
-`{ session: { user: '<harper-username>' } }`).
+`{ user: '<harper-username>' }`).
 
 **Option B — Custom HTTP route with `withMCPAuth` (`resources.ts`):**
 If you are registering your own custom HTTP route handler (or running on an
@@ -428,7 +428,7 @@ server.http(
 		getConfig: () => ({
 			enabled: true,
 			issuer: 'https://my-app.example.com',
-			resource: 'https://my-app.example.com/custom-mcp',
+			resource: 'https://my-app.example.com/mcp',
 		}),
 	}),
 	{ urlPath: '/custom-mcp' }

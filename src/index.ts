@@ -473,7 +473,7 @@ export async function handleApplication(scope: Scope): Promise<void> {
 					}
 					if (!unregisterBearerValidator && !registerFailed && !warnedMissingBearerValidator) {
 						logger?.warn?.(
-							'MCP: scope.server.registerBearerValidator is not available in this Harper version; ' +
+							'MCP: scope.server.registerBearerValidator (or harper.credentialRejectionError) is not available in this Harper version; ' +
 								"plugin-issued MCP bearer tokens will not authenticate Harper's native /mcp endpoint " +
 								'(upgrade Harper to a version with server.registerBearerValidator, or guard a custom route with withMCPAuth).'
 						);
