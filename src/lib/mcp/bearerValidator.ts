@@ -13,11 +13,6 @@ import { resolveIssuer, resolveResource } from './wellKnown.ts';
 import { emitMCPAuditEvent, type MCPTokenRejectedAuditPayload } from './audit.ts';
 import { getRequestPathname, pathOwned, verifyMCPAccessToken, type KeySource } from './withMCPAuth.ts';
 
-/**
- * Result returned to Harper's `runBearerValidators` (`security/bearerValidators.ts`).
- * Harper strictly validates that no extra properties are present beyond
- * `username`, `authExpiresAt`, and `authCacheable`.
- */
 export interface MCPBearerValidationResult {
 	username: string;
 	authExpiresAt?: number;

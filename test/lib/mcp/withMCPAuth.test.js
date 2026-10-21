@@ -290,8 +290,6 @@ describe('withMCPAuth — happy path', () => {
 			aud: RESOURCE,
 			scope: 'mcp:read',
 		});
-		// The handler observes request.mcp already populated; without a resolved
-		// Harper user carrying role.permission, request.user stays undefined.
 		assert.equal(calls[0].request.mcp.sub, 'alice@example.com');
 		assert.equal(request.user, undefined);
 	});
@@ -385,7 +383,6 @@ describe('withMCPAuth — happy path', () => {
 		assert.equal(events.length, 1);
 		assert.equal(events[0].event, 'oauth.mcp.token.rejected');
 
-		// Also verify symbol-only credential rejection (real Harper does not re-export isCredentialRejection on barrel)
 		const symErr = new Error('User is not active');
 		Object.defineProperty(symErr, Symbol('harper.credentialRejection'), { value: true });
 		const symRes = await withMCPAuth(
@@ -399,7 +396,7 @@ describe('withMCPAuth — happy path', () => {
 		assert.equal(symRes.status, 401);
 	});
 
-	it('returns 503 Retry-After without emitting oauth.mcp.token.rejected when getUser fails with a transient error', async () => {
+	it('fails closed with 401 and emits oauth.mcp.token.rejected when getUser throws an untagged error', async () => {
 		const token = mint();
 		const events = [];
 		const request = req(`Bearer ${token}`);
@@ -409,19 +406,43 @@ describe('withMCPAuth — happy path', () => {
 			opts({
 				emitAudit: (p) => events.push(p),
 				getUser: async () => {
-					throw new Error('storage I/O error');
+					throw new Error('user disabled');
 				},
 			})
 		)(request, NEXT);
 
-		assert.equal(res.status, 503);
-		assert.equal(res.headers['Retry-After'], '1');
-		assert.equal(res.headers['Access-Control-Allow-Origin'], '*');
-		assert.equal(res.headers['Access-Control-Expose-Headers'], 'Retry-After');
+		assert.equal(res.status, 401);
+		assert.equal(res.headers['WWW-Authenticate'], EXPECTED_CHALLENGE);
 		assert.equal(calls.length, 0, 'handler must not run when getUser throws');
 		assert.equal(request.user, undefined);
 		assert.equal(request.mcp, undefined);
-		assert.equal(events.length, 0, 'transient user-store error must not be audited as a rejected token');
+		assert.equal(events.length, 1);
+		assert.equal(events[0].event, 'oauth.mcp.token.rejected');
+		assert.equal(events[0].reason, 'failed to resolve Harper user');
+	});
+
+	it('returns 503 Retry-After without emitting oauth.mcp.token.rejected when getUser times out', async () => {
+		const token = mint();
+		const events = [];
+		const request = req(`Bearer ${token}`);
+		const { handler, calls } = spyHandler();
+		const res = await withMCPAuth(
+			handler,
+			opts({
+				emitAudit: (p) => events.push(p),
+				userLookupTimeoutMs: 20,
+				getUser: () => new Promise(() => {}),
+			})
+		)(request, NEXT);
+
+		assert.equal(res.status, 503);
+		assert.equal(res.headers['Retry-After'], '5');
+		assert.equal(res.headers['Access-Control-Allow-Origin'], '*');
+		assert.equal(res.headers['Access-Control-Expose-Headers'], 'Retry-After');
+		assert.equal(calls.length, 0);
+		assert.equal(request.user, undefined);
+		assert.equal(request.mcp, undefined);
+		assert.equal(events.length, 0);
 	});
 
 	it('fails closed with 401 when getUser returns an object with active === false', async () => {

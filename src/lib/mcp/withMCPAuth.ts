@@ -21,6 +21,7 @@
  *
  * PRIMARY — register on a urlPath subroute (recommended):
  *
+ *   // In config.yaml: mcp.resource: https://<origin>/custom-mcp
  *   server.http(withMCPAuth(myMcpHandler), { urlPath: '/custom-mcp' });
  *
  *   Harper's routed dispatch (server/middlewareChain.ts) runs ONLY the matched
@@ -31,6 +32,7 @@
  *
  * FALLBACK — register in the default group, ahead of core auth:
  *
+ *   // In config.yaml: mcp.resource: https://<origin>/custom-mcp
  *   server.http(withMCPAuth(myMcpHandler, { path: '/custom-mcp' }), { before: 'authentication' });
  *
  *   When the route shares the default chain with auth (no urlPath), pass `path`
@@ -40,9 +42,14 @@
  *   This mirrors the precedent in Harper's own server/static.ts. In this mode
  *   the wrapped handler MUST terminate the request (not call `next`): when
  *   `withMCPAuth` leaves `request.user` unset (for example on a role-less
- *   `client_credentials` agent or a quarantined subject), calling `next` would
- *   hand the request to core `authentication()`, which would reject the bearer
- *   token with `WWW-Authenticate: Basic`.
+ *   `client_credentials` agent or a quarantined subject), calling `next` hands
+ *   the request to core `authentication()`, which rejects the bearer token
+ *   (`401 WWW-Authenticate: Basic` on Harpers without `registerBearerValidator`,
+ *   or a deferred `401` without `WWW-Authenticate` when the validator is
+ *   registered); and when `withMCPAuth` has populated `request.user`, core
+ *   `authentication()` treats the request as already authenticated and runs the
+ *   rest of the default chain as that Harper user without enforcing the token's
+ *   `scope`.
  */
 
 import * as harper from 'harper';
@@ -168,23 +175,14 @@ export interface WithMCPAuthOptions {
 	 * guards). Defaults to the plugin's `emitMCPAuditEvent`. Injectable for tests.
 	 */
 	emitAudit?: (payload: MCPTokenRejectedAuditPayload) => void;
-	/**
-	 * Optional Harper user resolver (`server.getUser(username, null, request)`).
-	 * Defaults to `harper.server?.getUser ?? globalThis.server?.getUser`. When
-	 * available and `request.user` is not already set (and `sub` is not a
-	 * quarantined `unverified:<claim>#<hash>` principal), `withMCPAuth` resolves
-	 * `payload.sub` and populates `request.user` when the returned user carries a
-	 * plain-object `role.permission`, failing closed with 401 if `getUser` throws a
-	 * tagged credential rejection (or 401/403) or returns `active === false`, and
-	 * 503 if `getUser` throws an untagged error or exceeds the 5 s lookup deadline.
-	 * Injectable for tests.
-	 */
+	/** Resolver used to populate `request.user`; defaults to `server.getUser`. */
 	getUser?: (username: string, password: string | null, request: Request) => Promise<any> | any;
 }
 
 type HttpListener = (request: Request, next: (req: Request) => any) => any;
 
 const USER_LOOKUP_TIMEOUT_MS = 5_000;
+const USER_LOOKUP_TIMEOUT = Symbol('oauth.mcp.userLookupTimeout');
 
 function isPlainObject(value: unknown): value is Record<string, any> {
 	return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -202,7 +200,11 @@ async function resolveUserWithDeadline<T>(promiseOrValue: T | Promise<T>, timeou
 			pending,
 			new Promise<never>((_resolve, reject) => {
 				timer = setTimeout(() => {
-					reject(new Error(`server.getUser timed out after ${timeoutMs}ms`));
+					const err = new Error(`server.getUser timed out after ${timeoutMs}ms`) as Error & {
+						[USER_LOOKUP_TIMEOUT]?: boolean;
+					};
+					err[USER_LOOKUP_TIMEOUT] = true;
+					reject(err);
 				}, timeoutMs);
 				timer.unref?.();
 			}),
@@ -397,8 +399,9 @@ export function withMCPAuth(handler: HttpListener, options: WithMCPAuthOptions =
 			const getUser =
 				options.getUser ?? (typeof serverObj?.getUser === 'function' ? serverObj.getUser.bind(serverObj) : undefined);
 			if (typeof getUser === 'function') {
+				const lookupTimeoutMs = (options as any).userLookupTimeoutMs ?? USER_LOOKUP_TIMEOUT_MS;
 				try {
-					resolvedUser = await resolveUserWithDeadline(getUser(claims.sub, null, request), USER_LOOKUP_TIMEOUT_MS);
+					resolvedUser = await resolveUserWithDeadline(getUser(claims.sub, null, request), lookupTimeoutMs);
 				} catch (error) {
 					const isRejectedUser =
 						(harper as any).isCredentialRejection?.(error) === true ||
@@ -414,23 +417,30 @@ export function withMCPAuth(handler: HttpListener, options: WithMCPAuthOptions =
 						);
 						return deny('token subject is not an active user');
 					}
+					if ((error as any)?.[USER_LOOKUP_TIMEOUT] === true) {
+						logger?.error?.(
+							'withMCPAuth: timed out resolving Harper user for token subject:',
+							error instanceof Error ? error.message : String(error)
+						);
+						return {
+							status: 503,
+							headers: {
+								'Content-Type': 'application/json',
+								'Retry-After': '5',
+								'Access-Control-Allow-Origin': '*',
+								'Access-Control-Expose-Headers': 'Retry-After',
+							},
+							body: JSON.stringify({
+								error: 'temporarily_unavailable',
+								error_description: 'unable to verify user status, please retry',
+							}),
+						};
+					}
 					logger?.error?.(
 						'withMCPAuth: failed to resolve Harper user for token subject:',
 						error instanceof Error ? error.message : String(error)
 					);
-					return {
-						status: 503,
-						headers: {
-							'Content-Type': 'application/json',
-							'Retry-After': '1',
-							'Access-Control-Allow-Origin': '*',
-							'Access-Control-Expose-Headers': 'Retry-After',
-						},
-						body: JSON.stringify({
-							error: 'temporarily_unavailable',
-							error_description: 'unable to verify user status, please retry',
-						}),
-					};
+					return deny('failed to resolve Harper user');
 				}
 				if (!getConfig()?.enabled) {
 					return deny('MCP authentication is not enabled');
@@ -442,7 +452,6 @@ export function withMCPAuth(handler: HttpListener, options: WithMCPAuthOptions =
 		}
 
 		request.mcp = claims;
-		// Only populate request.user when getUser returned a role-bearing principal (parity with Harper's principalFromClaim).
 		if (
 			shouldPopulateUser &&
 			isPlainObject(resolvedUser) &&
