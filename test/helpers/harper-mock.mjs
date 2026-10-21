@@ -30,6 +30,22 @@ export class RequestTarget {}
 export const logger = {
 	trace() {}, debug() {}, info() {}, warn() {}, error() {}, fatal() {}, notify() {},
 };
+const CREDENTIAL_REJECTION = Symbol('harper.bearerValidator.credentialRejection');
+export function markCredentialRejection(error) {
+	if (!error || typeof error !== 'object') {
+		throw new TypeError('markCredentialRejection expects an Error or object');
+	}
+	error[CREDENTIAL_REJECTION] = true;
+	return error;
+}
+export function credentialRejectionError(message = 'Invalid bearer credential', statusCode = 401) {
+	const error = new Error(message);
+	error.statusCode = statusCode;
+	return markCredentialRejection(error);
+}
+export function isCredentialRejection(error) {
+	return Boolean(error && typeof error === 'object' && error[CREDENTIAL_REJECTION] === true);
+}
 `;
 
 const HARPER_MOCK_URL = 'harper-mock:harper';

@@ -4,6 +4,12 @@ All notable changes to `@harperfast/oauth` are documented here. The format is ba
 
 ## [Unreleased]
 
+### Added
+
+- **MCP Bearer validator registration with Harper core authentication (`server.registerBearerValidator`) and `request.user` population in `withMCPAuth`** (#279):
+  - When running on a Harper version that exposes `server.registerBearerValidator` (`HarperFast/harper#3313`), the plugin registers its MCP access-token verifier with Harper's core authentication pipeline at startup (and disposes it on scope close). Valid MCP access tokens return `{ username: payload.sub }` so Harper's `authentication()` middleware resolves `request.user` via `getUser(username, null, request)` for native `/mcp` requests without needing a custom route wrapper. Non-MCP tokens (or requests when `mcp.enabled` is false or no signing keys exist yet) return `null` (abstain) so native Harper operation tokens and other plugins' Bearer validators continue unaffected; invalid tokens with an MCP access-token header (`typ: 'at+jwt'` or transition-era `typ: 'JWT'`) throw `credentialRejectionError('Invalid token', 'Bearer')` and emit `oauth.mcp.token.rejected`. When `mcp.enabled: true` on an older Harper build without `server.registerBearerValidator`, the plugin logs a one-time warning and continues running.
+  - `withMCPAuth` now also populates `request.user` alongside `request.mcp` (resolving via `server.getUser(payload.sub, null, request)` when available and failing closed with `401` if `getUser` rejects or returns an inactive user, while keeping roleless quarantine subjects `unverified:<claim>#<hash>` as literal strings without calling `getUser`), so downstream handlers and `Resource` methods invoked under a custom `withMCPAuth` route see `request.user` populated consistently with core auth.
+
 ### Fixed
 
 - Exclude OAuth authentication endpoints from Harper's generated application MCP tools. REST endpoints are unchanged (#281).

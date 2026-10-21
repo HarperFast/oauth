@@ -9,13 +9,25 @@
  * Metadata document Stage 2 serves. This is the bearer-token counterpart to the
  * cookie/session `withOAuthValidation` wrapper.
  *
+ * ── Native `/mcp` vs. custom routes ──────────────────────────────────────────
+ *
+ * When running on a Harper version with `server.registerBearerValidator`
+ * (`HarperFast/harper#3313`), the plugin automatically registers its MCP token
+ * verifier with Harper's core authentication pipeline so Harper's built-in
+ * `/mcp` endpoint accepts plugin-issued Bearer tokens directly. Use
+ * `withMCPAuth` when your application registers its own custom HTTP MCP route
+ * handler and wants the RFC 9728 `WWW-Authenticate: Bearer resource_metadata="..."`
+ * challenge plus `request.mcp` claims (and `request.user` resolution).
+ *
  * ── Registration (READ THIS — core auth will eat the token otherwise) ────────
  *
- * Harper's core auth is a default-group HTTP middleware that consumes
- * `Authorization: Bearer` and 401s any token it can't validate as a Harper
- * *operation* token, stamping `WWW-Authenticate: Basic` (security/auth.ts) — NOT
- * the Bearer challenge MCP clients require. So withMCPAuth must own the response
- * for its route and core auth must not run on top of it.
+ * On custom routes without `server.registerBearerValidator` (or where you want
+ * the RFC 9728 `WWW-Authenticate: Bearer resource_metadata="..."` challenge on
+ * 401), Harper's core auth is a default-group HTTP middleware that consumes
+ * `Authorization: Bearer` and 401s any token it can't validate, stamping
+ * `WWW-Authenticate: Basic` (security/auth.ts) — NOT the Bearer challenge MCP
+ * clients require. So withMCPAuth must own the response for its route and core
+ * auth must not run on top of it.
  *
  * PRIMARY — register on a urlPath subroute (recommended):
  *
@@ -40,8 +52,10 @@
  *   auth runs afterward and re-rejects the bearer token.
  */
 
+import * as harper from 'harper';
 import type { Logger, MCPConfig, MCPPublicKeyRecord, MCPRequestClaims, Request } from '../../types.ts';
 import { OAuthResource } from '../resource.ts';
+import { isQuarantinePrincipal } from '../quarantinePrincipal.ts';
 import { MCPKeyStore } from './keyStore.ts';
 import { verifyAccessTokenWithKeySet } from './tokenIssuer.ts';
 import { protectedResourceMetadataUrl, resolveIssuer, resolveResource } from './wellKnown.ts';
@@ -89,6 +103,16 @@ export interface WithMCPAuthOptions {
 	 * guards). Defaults to the plugin's `emitMCPAuditEvent`. Injectable for tests.
 	 */
 	emitAudit?: (payload: MCPTokenRejectedAuditPayload) => void;
+	/**
+	 * Optional Harper user resolver (`server.getUser(username, null, request)`).
+	 * Defaults to `harper.server?.getUser ?? globalThis.server?.getUser`. When
+	 * available and `request.user` is not already set (and `sub` is not a
+	 * quarantined `unverified:<claim>#<hash>` principal), `withMCPAuth` resolves
+	 * `payload.sub` so `request.user` carries the Harper user object (and role
+	 * permissions) alongside `request.mcp`, failing closed if `getUser` throws
+	 * or resolves an inactive user (`active === false`). Injectable for tests.
+	 */
+	getUser?: (username: string, password: string | null, request: Request) => Promise<any> | any;
 }
 
 type HttpListener = (request: Request, next: (req: Request) => any) => any;
@@ -265,6 +289,26 @@ export function withMCPAuth(handler: HttpListener, options: WithMCPAuthOptions =
 			return deny('token scope is invalid');
 		}
 
+		let resolvedUser: any;
+		const shouldPopulateUser = request.user == null && !isQuarantinePrincipal(payload.sub);
+		if (shouldPopulateUser) {
+			const getUser = options.getUser ?? (harper as any).server?.getUser ?? (globalThis as any).server?.getUser;
+			if (typeof getUser === 'function') {
+				try {
+					resolvedUser = await getUser(payload.sub, null, request);
+				} catch (error) {
+					logger?.debug?.(
+						'withMCPAuth: failed to resolve Harper user for token subject:',
+						error instanceof Error ? error.message : String(error)
+					);
+					return deny('token subject could not be resolved as an active user');
+				}
+				if (resolvedUser && typeof resolvedUser === 'object' && resolvedUser.active === false) {
+					return deny('token subject is not an active user');
+				}
+			}
+		}
+
 		const claims: MCPRequestClaims = {
 			sub: payload.sub,
 			client_id: payload.client_id,
@@ -272,6 +316,9 @@ export function withMCPAuth(handler: HttpListener, options: WithMCPAuthOptions =
 			scope: payload.scope,
 		};
 		request.mcp = claims;
+		if (shouldPopulateUser) {
+			request.user = resolvedUser ?? { username: payload.sub };
+		}
 
 		// Token is valid — hand off to the app's handler. Its response is returned
 		// verbatim (no double-wrapping). `next` is forwarded so the handler may

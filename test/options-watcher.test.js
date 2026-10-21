@@ -1001,4 +1001,52 @@ describe('OAuth Plugin Options Watcher', () => {
 			await waitFor(() => fetchCount > 0);
 		});
 	});
+
+	describe('MCP core Bearer validator registration (#279)', () => {
+		it('registers a bearer validator when scope.server.registerBearerValidator is available and disposes on close', async () => {
+			let registeredValidator = null;
+			let disposed = false;
+			const warnings = [];
+			scope.logger.warn = (msg) => warnings.push(msg);
+			scope.server.registerBearerValidator = (validator) => {
+				registeredValidator = validator;
+				return () => {
+					disposed = true;
+				};
+			};
+			scope.options._config.mcp = { enabled: true, issuer: 'https://app.example.com' };
+
+			await handleApplication(scope);
+
+			assert.equal(typeof registeredValidator, 'function', 'should register the MCP bearer validator');
+			assert.equal(
+				warnings.some((w) => typeof w === 'string' && w.includes('registerBearerValidator')),
+				false,
+				'should not warn when registerBearerValidator is present'
+			);
+
+			closeListeners[0]();
+			assert.equal(disposed, true, 'should dispose the registered bearer validator on scope close');
+		});
+
+		it('warns once when mcp.enabled is true and scope.server.registerBearerValidator is missing', async () => {
+			const warnings = [];
+			scope.logger.warn = (msg) => {
+				if (typeof msg === 'string' && msg.includes('registerBearerValidator')) {
+					warnings.push(msg);
+				}
+			};
+			scope.options._config.mcp = { enabled: true, issuer: 'https://app.example.com' };
+
+			await handleApplication(scope);
+			assert.equal(warnings.length, 1, 'should warn once at startup when registerBearerValidator is unavailable');
+
+			// Trigger a config reload while MCP remains enabled — must not warn a second time.
+			const startupSet = lastResourceSet;
+			scope.options._config = { ...scope.options._config, debug: true };
+			configChangeListeners[0]();
+			await waitFor(() => lastResourceSet !== startupSet);
+			assert.equal(warnings.length, 1, 'should not repeat the missing-hook warning on reload');
+		});
+	});
 });

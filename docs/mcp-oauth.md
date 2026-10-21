@@ -42,10 +42,7 @@ asserts each one, see [MCP OAuth conformance](./mcp-oauth-conformance.md).
 
 ## Quickstart
 
-Two pieces: turn on the authorization server in `config.yaml`, and guard your MCP
-route handler with `withMCPAuth`.
-
-**1. Enable the authorization server** (`config.yaml`):
+Enable the authorization server in `config.yaml`:
 
 ```yaml
 '@harperfast/oauth':
@@ -59,14 +56,24 @@ route handler with `withMCPAuth`.
     issuer: https://my-app.example.com # required; pin to your public origin
 ```
 
-**2. Guard your MCP handler** (`resources.ts`):
+On Harper builds that ship `server.registerBearerValidator` (`HarperFast/harper#3313`),
+the plugin automatically registers its MCP token verifier with Harper's core
+authentication pipeline. Native `/mcp` endpoints (Harper's built-in Streamable
+HTTP MCP server and generated application tools) accept `Authorization: Bearer`
+access tokens minted by this plugin and resolve `request.user` via
+`server.getUser(sub, null, request)` without any custom route registration.
+
+If you are registering your own custom HTTP route handler instead of (or in
+addition to) Harper's built-in `/mcp` server, guard it with `withMCPAuth`
+(`resources.ts`):
 
 ```typescript
 import { server } from 'harper';
 import { withMCPAuth } from '@harperfast/oauth';
 
-// Your MCP endpoint. request.mcp is guaranteed present here — the guard rejects
-// missing/invalid tokens before your handler runs, so no optional-chaining needed.
+// Your custom MCP endpoint. request.mcp is guaranteed present here — the guard
+// rejects missing/invalid tokens before your handler runs, and resolves
+// request.user via server.getUser(sub, null, request) when available.
 function mcpHandler(request) {
 	const { sub, client_id, scope } = request.mcp; // verified token claims
 	// Harper HTTP listeners return { status, body, headers? }; MCP messages are
@@ -74,22 +81,22 @@ function mcpHandler(request) {
 	return { status: 200, body: JSON.stringify({ jsonrpc: '2.0', result: { hello: sub } }) };
 }
 
-// Register on a urlPath subroute so Harper's core auth never sees the request.
-server.http(withMCPAuth(mcpHandler), { urlPath: '/mcp' });
+// Register on a urlPath subroute so the route has its own dispatch chain.
+server.http(withMCPAuth(mcpHandler), { urlPath: '/custom-mcp' });
 ```
 
-That's it. An MCP client pointed at `https://my-app.example.com/mcp` now
-discovers the authorization server, registers itself, walks the user through your
-GitHub login, and presents a bearer token on every subsequent call — which
-`withMCPAuth` verifies before `mcpHandler` runs.
+That's it. An MCP client pointed at `https://my-app.example.com/mcp` (or your
+custom route) discovers the authorization server, registers itself, walks the
+user through your GitHub login, and presents a bearer token on every subsequent
+call.
 
-> **Why `urlPath`, not the default route?** Harper's core auth is a default-group
-> middleware that consumes `Authorization: Bearer` and rejects any token that
-> isn't a Harper _operation_ token — answering with `WWW-Authenticate: Basic`,
-> not the `Bearer` challenge MCP clients need. Registering on a `urlPath`
-> subroute gives the route its own dispatch chain that core auth never runs on.
-> See [The `withMCPAuth` wrapper](#the-withmcpauth-wrapper) for the default-group
-> fallback.
+> **Why `urlPath` for custom `withMCPAuth` routes?** On older Harper builds
+> without `server.registerBearerValidator` (where the plugin logs a one-time
+> startup warning), or when you want `withMCPAuth`'s RFC 9728
+> `WWW-Authenticate: Bearer resource_metadata="…"` challenge on a custom route,
+> registering on a `urlPath` subroute gives the route its own dispatch chain
+> independent of the default chain. See [The `withMCPAuth` wrapper](#the-withmcpauth-wrapper)
+> for details and the default-group fallback.
 
 ---
 
@@ -251,12 +258,41 @@ are not a resource requirement).
 
 ---
 
-## The `withMCPAuth` wrapper
+## Native `/mcp` integration & the `withMCPAuth` wrapper
 
-`withMCPAuth(handler, options?)` wraps an MCP route handler so every request must
-present a valid access token minted by this plugin before the handler runs. It is
-the bearer-token counterpart to `withOAuthValidation` (which guards
-cookie/session routes).
+### Core Bearer validator (`server.registerBearerValidator`)
+
+On Harper versions that expose `server.registerBearerValidator` (`HarperFast/harper#3313`),
+the plugin registers a Bearer validator with Harper's core authentication
+pipeline at startup (and cleans it up when the application scope closes):
+
+- **Abstains (`null`)** when `mcp.enabled` is not `true`, or when the Bearer
+  token is not a 3-segment JWT or does not declare an MCP access-token `typ`
+  (`at+jwt` or transition-era `JWT`), or when no MCP signing keys exist yet —
+  so native Harper operation tokens and other plugins' Bearer validators
+  continue down the chain unaffected.
+- **Authoritatively rejects (`credentialRejectionError('Invalid token', 'Bearer')`)**
+  when a token has the MCP access-token shape (`at+jwt` / `JWT`) and signing
+  keys exist, but fails signature, issuer (`mcp.issuer`), or audience
+  (`mcp.resource`) verification — emitting `oauth.mcp.token.rejected` and
+  stopping core auth from falling back to another validator.
+- **Accepts (`{ username: payload.sub }`)** when verification succeeds, handing
+  the subject to Harper's `authentication()` middleware so it resolves
+  `request.user = await getUser(username, null, request)` before native `/mcp`
+  and resource handlers run.
+
+On older Harper builds without `server.registerBearerValidator`, the plugin
+logs a one-time warning when `mcp.enabled: true` and continues running; use
+`withMCPAuth` on a custom route for those builds.
+
+### The `withMCPAuth` wrapper
+
+`withMCPAuth(handler, options?)` wraps a custom HTTP route handler so every
+request must present a valid access token minted by this plugin before the
+handler runs. It is the bearer-token counterpart to `withOAuthValidation`
+(which guards cookie/session routes), and provides the RFC 9728
+`WWW-Authenticate: Bearer resource_metadata="…"` challenge directly on custom
+routes.
 
 On any failure it **fails closed** with the spec 401:
 
@@ -268,11 +304,17 @@ Content-Type: application/json
 {"error":"invalid_token","error_description":"<reason>"}
 ```
 
-When a valid token is presented, the wrapper attaches the verified claims and
+When a valid token is presented, the wrapper attaches the verified claims on
+`request.mcp`, populates `request.user` (when not already set by core auth), and
 calls your handler:
 
 ```typescript
 request.mcp = { sub, client_id, aud, scope };
+// request.user is resolved via server.getUser(sub, null, request) when available,
+// or falls back to the sub string; quarantine subjects (unverified:<claim>#<hash>)
+// never call getUser and keep request.user as the literal quarantine string so
+// roleless isolation is preserved. If getUser throws or returns active === false,
+// withMCPAuth fails closed with 401 before invoking the handler.
 ```
 
 Tokens are read from the `Authorization: Bearer` header only (RFC 6750 §2.1) —

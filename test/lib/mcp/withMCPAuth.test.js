@@ -291,6 +291,126 @@ describe('withMCPAuth — happy path', () => {
 		});
 		// The handler observes request.mcp already populated.
 		assert.equal(calls[0].request.mcp.sub, 'alice@example.com');
+		assert.deepEqual(request.user, { username: 'alice@example.com' });
+	});
+
+	it('resolves request.user via getUser(sub, null, request) when available (#279)', async () => {
+		const token = mint();
+		const harperUser = {
+			username: 'alice@example.com',
+			active: true,
+			role: { id: 'developer', permission: { super_user: false } },
+		};
+		const getUserCalls = [];
+		const getUser = async (username, password, requestArg) => {
+			getUserCalls.push({ username, password, requestArg });
+			return harperUser;
+		};
+		const request = req(`Bearer ${token}`);
+		const { handler, calls } = spyHandler();
+		const res = await withMCPAuth(handler, opts({ getUser }))(request, NEXT);
+
+		assert.equal(res.status, 200);
+		assert.equal(calls.length, 1);
+		assert.equal(getUserCalls.length, 1);
+		assert.equal(getUserCalls[0].username, 'alice@example.com');
+		assert.equal(getUserCalls[0].password, null);
+		assert.equal(getUserCalls[0].requestArg, request);
+		assert.equal(request.user, harperUser);
+	});
+
+	it('falls back to { username: sub } when getUser returns undefined (e.g. client_credentials principal)', async () => {
+		const token = mint({ subject: 'https://agent.example.com/client.json' });
+		const request = req(`Bearer ${token}`);
+		const res = await withMCPAuth(spyHandler().handler, opts({ getUser: async () => undefined }))(request, NEXT);
+
+		assert.equal(res.status, 200);
+		assert.deepEqual(request.user, { username: 'https://agent.example.com/client.json' });
+	});
+
+	it('fails closed with 401 when getUser throws (e.g. inactive user in hdb_user)', async () => {
+		const token = mint();
+		const events = [];
+		const request = req(`Bearer ${token}`);
+		const { handler, calls } = spyHandler();
+		const res = await withMCPAuth(
+			handler,
+			opts({
+				emitAudit: (p) => events.push(p),
+				getUser: async () => {
+					throw new Error('User is not active');
+				},
+			})
+		)(request, NEXT);
+
+		assert.equal(res.status, 401);
+		assert.equal(res.headers['WWW-Authenticate'], EXPECTED_CHALLENGE);
+		assert.equal(calls.length, 0, 'handler must not run when getUser rejects');
+		assert.equal(request.user, undefined, 'request.user must not be populated on denial');
+		assert.equal(request.mcp, undefined, 'request.mcp must not be populated on denial');
+		assert.equal(events.length, 1);
+		assert.equal(events[0].event, 'oauth.mcp.token.rejected');
+	});
+
+	it('fails closed with 401 when getUser returns an object with active === false', async () => {
+		const token = mint();
+		const request = req(`Bearer ${token}`);
+		const { handler, calls } = spyHandler();
+		const res = await withMCPAuth(
+			handler,
+			opts({
+				getUser: async () => ({ username: 'alice@example.com', active: false }),
+			})
+		)(request, NEXT);
+
+		assert.equal(res.status, 401);
+		assert.equal(calls.length, 0);
+		assert.equal(request.user, undefined);
+		assert.equal(request.mcp, undefined);
+	});
+
+	it('does NOT populate request.user or call getUser for a quarantined subject (#231)', async () => {
+		const quarantinedSub = 'unverified:alice@example.com#0123456789abcdef';
+		const token = mint({ subject: quarantinedSub });
+		let getUserCalled = false;
+		const request = req(`Bearer ${token}`);
+		const { handler, calls } = spyHandler();
+		const res = await withMCPAuth(
+			handler,
+			opts({
+				getUser: async () => {
+					getUserCalled = true;
+					return { username: quarantinedSub, active: true };
+				},
+			})
+		)(request, NEXT);
+
+		assert.equal(res.status, 200);
+		assert.equal(calls.length, 1);
+		assert.equal(getUserCalled, false, 'getUser must never be called for a quarantine principal');
+		assert.equal(request.user, undefined, 'request.user must remain undefined for a quarantine principal');
+		assert.equal(request.mcp.sub, quarantinedSub, 'request.mcp still carries the quarantined subject');
+	});
+
+	it('preserves an already-populated request.user without calling getUser', async () => {
+		const token = mint();
+		const existingUser = { username: 'upstream-user', role: { id: 'admin' } };
+		let getUserCalled = false;
+		const request = req(`Bearer ${token}`);
+		request.user = existingUser;
+		const res = await withMCPAuth(
+			spyHandler().handler,
+			opts({
+				getUser: async () => {
+					getUserCalled = true;
+					return { username: 'other' };
+				},
+			})
+		)(request, NEXT);
+
+		assert.equal(res.status, 200);
+		assert.equal(getUserCalled, false);
+		assert.equal(request.user, existingUser);
 	});
 
 	it('forwards next to the wrapped handler', async () => {
