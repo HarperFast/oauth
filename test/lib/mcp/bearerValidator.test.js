@@ -251,7 +251,7 @@ describe('createMCPBearerValidator — owned-token rejections (fail closed with 
 		assert.equal(events.length, 1);
 	});
 
-	it('rejects when no signing keys are available or keyStore throws', async () => {
+	it('rejects when no signing keys are available or keyStore throws (without false token.rejected audit on transient error)', async () => {
 		const token = mint();
 		const empty = makeValidator({ keys: [] });
 		await assertCredentialRejection(empty.validator(token, req()), /no signing keys available/);
@@ -264,8 +264,8 @@ describe('createMCPBearerValidator — owned-token rejections (fail closed with 
 				},
 			},
 		});
-		await assertCredentialRejection(throwing.validator(token, req()), /no signing keys available/);
-		assert.equal(throwing.events.length, 1);
+		await assertCredentialRejection(throwing.validator(token, req()), /temporarily unable to load MCP signing keys/);
+		assert.equal(throwing.events.length, 0, 'transient keyStore error must not emit oauth.mcp.token.rejected');
 	});
 
 	it('fails closed when MCP is disabled during an in-flight key lookup', async () => {
@@ -285,16 +285,25 @@ describe('createMCPBearerValidator — owned-token rejections (fail closed with 
 		assert.equal(events.length, 1);
 	});
 
-	it('rejects a quarantined unverified:<claim>#<16-hex> subject (#231)', async () => {
+	it('rejects a quarantined unverified:<claim>#<16-hex> subject and logs a warning once per validator (#231)', async () => {
 		const quarantined = mint({ subject: 'unverified:alice@example.com#0123456789abcdef' });
-		const { validator, events } = makeValidator();
+		const warnings = [];
+		const { validator, events } = makeValidator({
+			logger: { ...silentLogger, warn: (...args) => warnings.push(args.join(' ')) },
+		});
 
 		await assertCredentialRejection(
 			validator(quarantined, req()),
 			/unverified subject cannot authenticate as a Harper user/
 		);
-		assert.equal(events.length, 1);
+		await assertCredentialRejection(
+			validator(quarantined, req()),
+			/unverified subject cannot authenticate as a Harper user/
+		);
+		assert.equal(events.length, 2);
 		assert.equal(events[0].reason, 'unverified subject cannot authenticate as a Harper user');
+		assert.equal(warnings.length, 1, 'must warn only once per validator instance for quarantined subjects');
+		assert.match(warnings[0], /quarantined unverified subject/);
 	});
 
 	it('rejects an oversized request path (>2048 chars) without emitting audit', async () => {

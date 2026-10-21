@@ -306,7 +306,8 @@ scope closes):
   `mcp.issuer` is unset, when the Bearer token is not a 3-segment compact JWT
   whose unverified payload `iss` matches `resolveIssuer(request, mcpConfig)`, or
   when the request path (`originalPathname ?? pathname`) is outside
-  `mcp.resource`'s path prefix (`pathOwned`) — so native Harper operation tokens
+  `mcp.resource`'s path prefix or contains ambiguous path segments (`.`, `..`,
+  `%2e`, `%2f`, `%5c`, `\`, `//`) — so native Harper operation tokens
   and other plugins' Bearer validators on non-MCP routes continue down the chain
   with zero async overhead (while a plugin MCP token presented to a non-MCP
   route with no matching validator still receives `401` from Harper's deferred
@@ -329,14 +330,23 @@ scope closes):
     `aud`, `exp`) fails, or `sub` is a quarantined `unverified:<claim>#<hash>`
     principal (#231), it emits `oauth.mcp.token.rejected` and throws
     `credentialRejectionError(reason, 401)`, stopping core auth from falling
-    back to another validator.
+    back to another validator. (If loading signing keys from the `mcp_keys`
+    table throws a transient error, it rejects with
+    `credentialRejectionError('temporarily unable to load MCP signing keys')`
+    without emitting a false `oauth.mcp.token.rejected` audit event.)
 - **Accepts (`{ username: sub, authExpiresAt, authCacheable: false }`)**
   when verification succeeds (`authExpiresAt` is clamped to at most 365 days in
   the future to match Harper's `effectiveExpiry` bound, and `authCacheable` is
-  always `false` so every request re-evaluates `pathOwned` and live
+  always `false` so every request re-evaluates the route path prefix and live
   `OAuthResource.mcpConfig`, preventing Harper's header-keyed
   `authorizationCache` from replaying an `/mcp` token on non-MCP routes or after
-  `mcp.enabled` is disabled on reload). Harper's `authentication()` middleware
+  `mcp.enabled` is disabled on reload). Verified tokens are memoized in an
+  in-process 1024-entry LRU cache keyed by token, `issuer`, `resource`, and the
+  `MCPKeyStore` active key-set reference (invalidating immediately on expiry,
+  key rotation, or key retirement): on Node 22+, non-plugin tokens abstain in
+  `~1.1 µs` on `/mcp` (`<0.1 µs` off-path), repeat MCP token calls hit the memo
+  in `~0.9 µs`, and cold cryptographic verification takes `~31 µs` (RS256) or
+  `~69 µs` (ES256). Harper's `authentication()` middleware
   then resolves `request.user` via `server.getUser(username, null, request)` and
   requires a provisioned role (`user.role.permission`); unprovisioned subjects
   without an `hdb_user` row receive `401` from core auth unless mapped to a

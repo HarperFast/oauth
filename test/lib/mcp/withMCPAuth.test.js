@@ -742,4 +742,88 @@ describe('withMCPAuth — hardening', () => {
 		}
 		assert.equal(calls.length, 0, 'handler must not run for any ambiguous path');
 	});
+
+	it('path: "/" matches only exact "/" and falls through to next() on other paths', async () => {
+		const token = mint();
+		const { handler, calls } = spyHandler();
+		const wrapped = withMCPAuth(handler, opts({ path: '/' }));
+
+		const rootRes = await wrapped(req(`Bearer ${token}`, { pathname: '/' }), NEXT);
+		assert.equal(rootRes.status, 200);
+		assert.equal(calls.length, 1);
+
+		const otherRes = await wrapped(req(undefined, { pathname: '/other' }), NEXT);
+		assert.equal(otherRes.__next, true, 'non-root path must pass through to next() when path is "/"');
+		assert.equal(calls.length, 1);
+	});
+
+	it('returns 503 Retry-After without emitting oauth.mcp.token.rejected when keyStore throws (#279)', async () => {
+		const token = mint();
+		const events = [];
+		const { handler, calls } = spyHandler();
+		const res = await withMCPAuth(
+			handler,
+			opts({
+				emitAudit: (p) => events.push(p),
+				keyStore: {
+					async getAllPublicKeys() {
+						throw new Error('storage read failure');
+					},
+				},
+			})
+		)(req(`Bearer ${token}`), NEXT);
+
+		assert.equal(res.status, 503);
+		assert.equal(res.headers['Retry-After'], '5');
+		assert.equal(res.headers['Access-Control-Allow-Origin'], '*');
+		assert.equal(res.headers['Access-Control-Expose-Headers'], 'Retry-After');
+		assert.equal(calls.length, 0);
+		assert.equal(events.length, 0, 'transient keyStore error must not emit false token.rejected audit');
+	});
+
+	it('memoizes verified tokens across repeat calls and isolates request.mcp mutations (#279)', async () => {
+		const token = mint();
+		let pemReads = 0;
+		const trackedKey = {
+			kid: key.kid,
+			alg: key.alg,
+			get public_key_pem() {
+				pemReads++;
+				return key.public_key_pem;
+			},
+			created_at: key.created_at,
+		};
+		const activeKeys = [trackedKey];
+		const seenSubs = [];
+		const wrapped = withMCPAuth(
+			(request) => {
+				seenSubs.push(request.mcp.sub);
+				request.mcp.sub = 'mutated-by-handler';
+				return { status: 200 };
+			},
+			opts({
+				keyStore: {
+					async getAllPublicKeys() {
+						return activeKeys;
+					},
+				},
+			})
+		);
+
+		const req1 = req(`Bearer ${token}`);
+		const res1 = await wrapped(req1, NEXT);
+		assert.equal(res1.status, 200);
+		assert.equal(pemReads, 1, 'first call verifies signature');
+		assert.equal(req1.mcp.sub, 'mutated-by-handler');
+
+		const req2 = req(`Bearer ${token}`);
+		const res2 = await wrapped(req2, NEXT);
+		assert.equal(res2.status, 200);
+		assert.equal(pemReads, 1, 'repeat call on same wrapper hits verifiedTokenMemo without re-verifying signature');
+		assert.deepEqual(
+			seenSubs,
+			['alice@example.com', 'alice@example.com'],
+			'memoized claims must be isolated from handler mutation'
+		);
+	});
 });

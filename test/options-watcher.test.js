@@ -114,14 +114,12 @@ describe('OAuth Plugin Options Watcher', () => {
 		await assert.rejects(handleApplication(scope), /mcp\.issuer is not set/);
 	});
 
-	it('should fail to start when mcp.enabled and mcp.resource is not a valid http(s) URL', async () => {
+	it('should fail to start when mcp.enabled and mcp.resource is not a valid http(s) URL (redacting embedded credentials)', async () => {
 		for (const badResource of [
 			'not a valid url',
 			'ftp://app.example.com/mcp',
 			'https://app.example.com/mcp?foo=bar',
 			'https://app.example.com/mcp#frag',
-			'https://user:pass@app.example.com/mcp',
-			'',
 		]) {
 			scope.options._config.mcp = {
 				enabled: true,
@@ -130,6 +128,28 @@ describe('OAuth Plugin Options Watcher', () => {
 			};
 			await assert.rejects(handleApplication(scope), /mcp\.resource must be an absolute http\(s\) URL/);
 		}
+
+		scope.options._config.mcp = {
+			enabled: true,
+			issuer: 'https://app.example.com',
+			resource: 'https://user:secretpass@app.example.com/mcp',
+		};
+		await assert.rejects(handleApplication(scope), (err) => {
+			assert.match(err.message, /mcp\.resource must be an absolute http\(s\) URL/);
+			assert.ok(!err.message.includes('secretpass'), `must redact credentials in error: ${err.message}`);
+			return true;
+		});
+	});
+
+	it('should treat an empty or whitespace-only mcp.resource as unset (falling back to <issuer>/mcp)', async () => {
+		scope.options._config.mcp = {
+			enabled: true,
+			issuer: 'https://app.example.com',
+			resource: '   ',
+		};
+		await handleApplication(scope);
+		assert.ok(resources.oauth, 'OAuth resource should be registered');
+		assert.equal(OAuthResource.mcpConfig.resource, undefined);
 	});
 
 	it('should start when mcp.enabled and mcp.issuer is a valid https origin', async () => {

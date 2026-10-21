@@ -83,21 +83,7 @@ function isCredentialRejectionError(err: unknown): err is Error {
 }
 
 function credentialRejection(reason: string): Error {
-	try {
-		const err = (harper as any).credentialRejectionError?.(reason, 401);
-		if (isCredentialRejectionError(err)) {
-			return err;
-		}
-	} catch {
-		// Fall through to synthesized tagged error below.
-	}
-	const fallback = new Error(reason) as Error & { statusCode: number };
-	fallback.statusCode = 401;
-	Object.defineProperty(fallback, Symbol.for('harper.credentialRejection'), {
-		value: true,
-		enumerable: false,
-	});
-	return fallback;
+	return (harper as any).credentialRejectionError(reason, 401);
 }
 
 export function createMCPBearerValidator(options: MCPBearerValidatorOptions = {}): MCPBearerValidator {
@@ -111,6 +97,8 @@ export function createMCPBearerValidator(options: MCPBearerValidatorOptions = {}
 	let cachedResource: string | undefined;
 	let cachedResourcePathname: string | null | undefined;
 	let cachedResourcePrefix: string | undefined;
+	let loggedSyncError = false;
+	let warnedQuarantineSubject = false;
 
 	return function mcpBearerValidator(
 		token: string,
@@ -164,11 +152,21 @@ export function createMCPBearerValidator(options: MCPBearerValidatorOptions = {}
 				return undefined;
 			}
 
-			const unverifiedIss = extractUnverifiedIssuer(token);
-			if (!unverifiedIss || unverifiedIss !== issuer) {
-				return undefined;
+			const memoHit = verifiedTokenMemo.get(token);
+			if (!memoHit || memoHit.issuer !== issuer) {
+				const unverifiedIss = extractUnverifiedIssuer(token);
+				if (!unverifiedIss || unverifiedIss !== issuer) {
+					return undefined;
+				}
 			}
-		} catch {
+		} catch (err) {
+			if (!loggedSyncError) {
+				loggedSyncError = true;
+				(options.logger ?? OAuthResource.logger)?.error?.(
+					'MCP bearer validator: unexpected error in synchronous ownership check:',
+					err instanceof Error ? err.message : String(err)
+				);
+			}
 			return undefined;
 		}
 
@@ -192,7 +190,7 @@ export function createMCPBearerValidator(options: MCPBearerValidatorOptions = {}
 							timestamp: new Date().toISOString(),
 						});
 					} catch {
-						// Audit is best-effort.
+						// Ignore audit sink errors so rejection still completes.
 					}
 					throw credentialRejection(reason);
 				};
@@ -212,10 +210,20 @@ export function createMCPBearerValidator(options: MCPBearerValidatorOptions = {}
 					verifiedTokenMemo,
 				});
 				if (!verified.ok) {
+					if (verified.transientError) {
+						throw credentialRejection(verified.reason);
+					}
 					return reject(verified.reason);
 				}
 
 				if (isQuarantinePrincipal(verified.claims.sub)) {
+					if (!warnedQuarantineSubject) {
+						warnedQuarantineSubject = true;
+						logger?.warn?.(
+							'MCP bearer validator: rejected token with quarantined unverified subject; ' +
+								'configure an onLogin hook or verified identity claim so MCP tokens resolve to a Harper user.'
+						);
+					}
 					return reject('unverified subject cannot authenticate as a Harper user');
 				}
 
@@ -226,11 +234,18 @@ export function createMCPBearerValidator(options: MCPBearerValidatorOptions = {}
 				return {
 					username: verified.claims.sub,
 					...(authExpiresAt !== undefined ? { authExpiresAt } : {}),
-					// Harper's authorizationCache is keyed by Authorization header alone without re-checking pathOwned.
+					// Harper's authorizationCache is keyed by Authorization header alone without re-checking path.
 					authCacheable: false,
 				};
 			} catch (err) {
-				throw isCredentialRejectionError(err) ? err : credentialRejection('MCP bearer token validation failed');
+				if (isCredentialRejectionError(err)) {
+					throw err;
+				}
+				logger?.error?.(
+					'MCP bearer validator: unexpected validation error:',
+					err instanceof Error ? err.message : String(err)
+				);
+				throw credentialRejection('MCP bearer token validation failed');
 			}
 		})();
 	};

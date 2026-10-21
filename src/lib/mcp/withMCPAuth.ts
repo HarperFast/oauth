@@ -54,10 +54,24 @@ import { getRequestHeader } from '../requestHeaders.ts';
 
 /** Minimal surface MCP token verifiers need from a key source (lets tests inject one). */
 export interface KeySource {
+	/**
+	 * Return the active public signing keys. Implementations MUST return a new
+	 * array reference whenever the live key set changes (e.g. rotation or
+	 * retirement) so `verifyMCPAccessToken`'s reference-equality memo check
+	 * (`memoHit.keysRef === keys`) invalidates immediately.
+	 */
 	getAllPublicKeys(mcpConfig?: MCPConfig): Promise<MCPPublicKeyRecord[]>;
+	/**
+	 * Optional verification-path variant that propagates key-store read errors
+	 * instead of swallowing them as `[]` (used for JWKS). When absent,
+	 * `verifyMCPAccessToken` falls back to `getAllPublicKeys`.
+	 */
+	getPublicKeysForVerification?(mcpConfig?: MCPConfig): Promise<MCPPublicKeyRecord[]>;
 }
 
-type VerifyMCPAccessTokenResult = { ok: true; claims: MCPRequestClaims; exp?: number } | { ok: false; reason: string };
+type VerifyMCPAccessTokenResult =
+	| { ok: true; claims: MCPRequestClaims; exp?: number }
+	| { ok: false; reason: string; transientError?: boolean };
 
 interface VerifiedTokenMemoEntry {
 	claims: MCPRequestClaims;
@@ -67,7 +81,7 @@ interface VerifiedTokenMemoEntry {
 	keysRef: MCPPublicKeyRecord[];
 }
 
-const MAX_VERIFIED_TOKEN_MEMO_ENTRIES = 256;
+const MAX_VERIFIED_TOKEN_MEMO_ENTRIES = 1024;
 
 export async function verifyMCPAccessToken(
 	token: string,
@@ -85,13 +99,16 @@ export async function verifyMCPAccessToken(
 	const { cfg, getConfig, keyStore, resource, issuer, logger, caller, verifiedTokenMemo } = params;
 	let keys: MCPPublicKeyRecord[];
 	try {
-		keys = await keyStore.getAllPublicKeys(cfg);
+		keys =
+			typeof keyStore.getPublicKeysForVerification === 'function'
+				? await keyStore.getPublicKeysForVerification(cfg)
+				: await keyStore.getAllPublicKeys(cfg);
 	} catch (error) {
 		logger?.error?.(
 			`${caller}: failed to load MCP signing keys:`,
 			error instanceof Error ? error.message : String(error)
 		);
-		keys = [];
+		return { ok: false, reason: 'temporarily unable to load MCP signing keys', transientError: true };
 	}
 	if (!getConfig()?.enabled) {
 		return { ok: false, reason: 'MCP authentication is not enabled' };
@@ -111,7 +128,7 @@ export async function verifyMCPAccessToken(
 	) {
 		verifiedTokenMemo!.delete(token);
 		verifiedTokenMemo!.set(token, memoHit);
-		return { ok: true, claims: memoHit.claims, exp: memoHit.exp };
+		return { ok: true, claims: { ...memoHit.claims }, exp: memoHit.exp };
 	}
 
 	let payload: any;
@@ -152,7 +169,7 @@ export async function verifyMCPAccessToken(
 			if (oldest !== undefined) verifiedTokenMemo.delete(oldest);
 		}
 		verifiedTokenMemo.set(token, {
-			claims,
+			claims: { ...claims },
 			exp,
 			issuer,
 			resource,
@@ -203,7 +220,10 @@ export interface WithMCPAuthOptions {
 	 * guards). Defaults to the plugin's `emitMCPAuditEvent`. Injectable for tests.
 	 */
 	emitAudit?: (payload: MCPTokenRejectedAuditPayload) => void;
-	/** Whether to resolve `request.user` via `getUser` / `server.getUser`; defaults to `true`. */
+	/**
+	 * When `false`, skips resolving `request.user` via `server.getUser` and
+	 * populates only `request.mcp` (pre-#279 behavior).
+	 */
 	resolveUser?: boolean;
 	/** Resolver used to populate `request.user`; defaults to `server.getUser`. */
 	getUser?: (username: string, password: string | null, request: Request) => Promise<any> | any;
@@ -290,12 +310,11 @@ export function hasAmbiguousPathSegments(pathname: string | undefined): boolean 
  * Trailing slashes on `routePath` are ignored. Mirrors Harper's `matchesRoute`
  * urlPath semantics so the default-group fallback behaves like urlPath registration.
  */
-export function pathOwned(pathname: string | undefined, routePath: string): boolean {
+function pathOwned(pathname: string | undefined, routePath: string): boolean {
 	const path = routePath.length > 1 && routePath.endsWith('/') ? routePath.slice(0, -1) : routePath;
 	const p = pathname ?? '/';
 	if (AMBIGUOUS_PATH_RE.test(p)) return false;
 	if (p === path) return true;
-	if (path === '/') return p.startsWith('/');
 	return p.length > path.length && p.charCodeAt(path.length) === 47 && p.startsWith(path);
 }
 
@@ -313,6 +332,7 @@ export function withMCPAuth(handler: HttpListener, options: WithMCPAuthOptions =
 	const { path, onAuthError } = options;
 	const getConfig = options.getConfig ?? (() => OAuthResource.mcpConfig);
 	let defaultKeyStore: MCPKeyStore | undefined;
+	const verifiedTokenMemo = new Map<string, VerifiedTokenMemoEntry>();
 
 	return async function mcpAuthListener(request: Request, next: (req: Request) => any): Promise<any> {
 		const logger = options.logger ?? OAuthResource.logger;
@@ -421,8 +441,24 @@ export function withMCPAuth(handler: HttpListener, options: WithMCPAuthOptions =
 			issuer,
 			logger,
 			caller: 'withMCPAuth',
+			verifiedTokenMemo,
 		});
 		if (!verified.ok) {
+			if (verified.transientError) {
+				return {
+					status: 503,
+					headers: {
+						'Content-Type': 'application/json',
+						'Retry-After': '5',
+						'Access-Control-Allow-Origin': '*',
+						'Access-Control-Expose-Headers': 'Retry-After',
+					},
+					body: JSON.stringify({
+						error: 'temporarily_unavailable',
+						error_description: verified.reason,
+					}),
+				};
+			}
 			return deny(verified.reason);
 		}
 
@@ -504,7 +540,7 @@ export function withMCPAuth(handler: HttpListener, options: WithMCPAuthOptions =
 			}
 		}
 
-		request.mcp = claims;
+		request.mcp = { ...claims };
 		let didPopulateUser = false;
 		if (
 			shouldPopulateUser &&

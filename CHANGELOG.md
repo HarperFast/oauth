@@ -12,7 +12,8 @@ All notable changes to `@harperfast/oauth` are documented here. The format is ba
 
 ### Changed
 
-- `withMCPAuth` now resolves `request.user` via `server.getUser(sub, null, request)` on each authenticated request by default (failing closed with `401` when `getUser` rejects or returns `active: false`, and returning `503 Retry-After: 5` if lookup exceeds `userLookupTimeoutMs`). Pass `{ resolveUser: false }` to skip `getUser` lookup and leave `request.user` untouched (#279).
+- `withMCPAuth` now resolves `request.user` via `server.getUser(sub, null, request)` on each authenticated request by default (failing closed with `401` when `getUser` rejects or returns `active: false`, and returning `503 Retry-After: 5` if lookup exceeds `userLookupTimeoutMs` or loading signing keys throws a transient error). Pass `{ resolveUser: false }` to skip `getUser` lookup and leave `request.user` untouched (#279).
+- When `mcp.enabled: true` and `mcp.resource` is set, startup and config reloads now validate that `mcp.resource` is a valid `http(s)` URL with no query string, fragment, or embedded credentials (treating an empty or whitespace-only `mcp.resource` as unset so it falls back to `<issuer>/mcp`) (#279).
 
 ### Security
 

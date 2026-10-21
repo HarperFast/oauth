@@ -39,6 +39,7 @@ import { strictEqual, ok } from 'node:assert/strict';
 import { createHash, createPrivateKey, randomBytes, randomUUID, sign } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { request as httpRequest } from 'node:http';
 import { join, dirname } from 'node:path';
 import { createRequire } from 'node:module';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -676,12 +677,36 @@ suite('Native application MCP: the OAuth resource is not a generated tool (#281)
 			strictEqual(nonMcpRes.status, 401, 'MCP token scoped to /mcp must be rejected on non-MCP route');
 			await nonMcpRes.body?.cancel();
 
-			const dotSegmentRes = await fetch(`${started.harper.httpURL.replace(/\/$/, '')}/mcp/%2e%2e/NativeMcpControl`, {
-				headers: { Authorization: bearerAuth },
-				signal: AbortSignal.timeout(requestTimeoutMs),
-			});
-			strictEqual(dotSegmentRes.status, 401, 'dot-segment /mcp/%2e%2e/... path must never authenticate via MCP token');
-			await dotSegmentRes.body?.cancel();
+			const sendRawPath = (rawPath: string) =>
+				new Promise<number>((resolve, reject) => {
+					const parsed = new URL(started.harper.httpURL);
+					const req = httpRequest(
+						{
+							hostname: parsed.hostname,
+							port: parsed.port,
+							path: rawPath,
+							method: 'GET',
+							headers: { Authorization: bearerAuth },
+							timeout: requestTimeoutMs,
+						},
+						(res) => {
+							res.resume();
+							res.on('end', () => resolve(res.statusCode ?? 0));
+						}
+					);
+					req.on('error', reject);
+					req.end();
+				});
+			strictEqual(
+				await sendRawPath('/mcp/%2e%2e/NativeMcpControl'),
+				401,
+				'raw wire /mcp/%2e%2e/... path must never authenticate via MCP token'
+			);
+			strictEqual(
+				await sendRawPath('/mcp//NativeMcpControl'),
+				401,
+				'raw wire /mcp//... double-slash path must never authenticate via MCP token'
+			);
 
 			const unprovisionedToken = await mintTestToken({ sub: 'unprovisioned-agent-no-hdb-user' });
 			const unprovCustomRes = await fetch(new URL('/mcp-custom', started.harper.httpURL), {
@@ -713,6 +738,34 @@ suite('Native application MCP: the OAuth resource is not a generated tool (#281)
 			});
 			strictEqual(opRes.status, 200, 'Harper operation_token must remain unaffected by MCP Bearer validator');
 			await opRes.body?.cancel();
+
+			const foreignBearer = 'Bearer foreign-bearer-token-for-mcp-test';
+			const foreignControlRes = await fetch(new URL('/NativeMcpControl', started.harper.httpURL), {
+				headers: { Authorization: foreignBearer },
+				signal: AbortSignal.timeout(requestTimeoutMs),
+			});
+			strictEqual(
+				foreignControlRes.status,
+				200,
+				'non-plugin Bearer token must fall through MCP validator (undefined) to subsequent registered validators'
+			);
+			await foreignControlRes.body?.cancel();
+
+			const foreignMcpInit = await rpc(
+				undefined,
+				{
+					id: randomUUID(),
+					method: 'initialize',
+					params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'foreign', version: '1' } },
+				},
+				foreignBearer
+			);
+			strictEqual(
+				foreignMcpInit.status,
+				200,
+				'non-plugin Bearer token on /mcp must fall through MCP validator to subsequent registered validators'
+			);
+			await foreignMcpInit.body?.cancel();
 
 			const mcpDisabledYaml = configuredYaml.replace('    enabled: true\n', '    enabled: false\n');
 			ok(mcpDisabledYaml !== configuredYaml, 'fixture config has mcp.enabled: true');

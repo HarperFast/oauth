@@ -9,11 +9,13 @@
  *   GET /mcp-test/family?id                     → the stored family, or { exists: false }
  *   GET /mcp-test/revoke?id                     → {} (MCPRefreshFamilyStore.revoke)
  *   GET /mcp-test/rotate?id&hash                → {} (MCPRefreshFamilyStore.rotate)
- *   GET /mcp-test/capabilities                  → { hasBearerValidator, hasCredentialRejectionError }
- *   GET /mcp-test/mint-token?sub&aud&iss&ttl    → { token } (signed with MCPKeyStore active key)
- *   GET /mcp-test/whoami                        → withMCPAuth-guarded identity inspection route
- *   POST /mcp-test/disable-mcp                  → flips live OAuthResource.mcpConfig.enabled = false and disposes validator
- *   POST /mcp-test/enable-mcp                   → restores live OAuthResource.mcpConfig.enabled = true and re-registers validator
+ *   GET /mcp-test/capabilities                  → { hasBearerValidator }
+ *   GET /mcp-test/mint-token?sub&aud&iss&ttl    → { accessToken } (signed with MCPKeyStore active key)
+ *
+ * Also registers `GET /mcp-custom` (wrapped with `withMCPAuth`) and a second
+ * test bearer validator (when `server.registerBearerValidator` is available) for
+ * `'foreign-bearer-token-for-mcp-test'` so the integration suite can verify
+ * validator-chain fallthrough alongside `operation_token`.
  *
  * These routes are server.http handlers and run outside a request transaction;
  * Harper's REST handler runs POST /oauth/mcp/token inside one.
@@ -204,6 +206,14 @@ registerHooks({
 });
 
 server.http(handle, { urlPath: '/mcp-test' });
+if (typeof server.registerBearerValidator === 'function') {
+	server.registerBearerValidator((token) => {
+		if (token === 'foreign-bearer-token-for-mcp-test') {
+			return { username: 'mcp-oauth-user' };
+		}
+		return undefined;
+	});
+}
 server.http(
 	withMCPAuth((request) =>
 		json({

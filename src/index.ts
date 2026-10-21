@@ -293,14 +293,18 @@ export async function handleApplication(scope: Scope): Promise<void> {
 				// Unparseable URL — validOrigin stays false.
 			}
 			if (!validOrigin) {
+				const redactedIssuer = String(mcpConfig.issuer).replace(/(\/\/)[^/@]+@/g, '$1<redacted>@');
 				throw new Error(
-					`mcp.issuer must be an absolute http(s) origin like "https://your-host" (got: "${mcpConfig.issuer}")`
+					`mcp.issuer must be an absolute http(s) origin like "https://your-host" (got: "${redactedIssuer}")`
 				);
 			}
 		}
+		if (typeof mcpConfig?.resource === 'string' && mcpConfig.resource.trim() === '') {
+			delete mcpConfig.resource;
+		}
 		if (mcpConfig?.enabled && mcpConfig.resource !== undefined) {
 			let validResource = false;
-			if (typeof mcpConfig.resource === 'string' && mcpConfig.resource.trim() !== '') {
+			if (typeof mcpConfig.resource === 'string') {
 				try {
 					const parsedResource = new URL(mcpConfig.resource);
 					validResource =
@@ -310,12 +314,13 @@ export async function handleApplication(scope: Scope): Promise<void> {
 						parsedResource.username === '' &&
 						parsedResource.password === '';
 				} catch {
-					// Unparseable URL — validResource stays false.
+					validResource = false;
 				}
 			}
 			if (!validResource) {
+				const redactedResource = String(mcpConfig.resource).replace(/(\/\/)[^/@]+@/g, '$1<redacted>@');
 				throw new Error(
-					`mcp.resource must be an absolute http(s) URL without query, fragment, or credentials (got: "${String(mcpConfig.resource)}")`
+					`mcp.resource must be an absolute http(s) URL without query, fragment, or credentials (got: "${redactedResource}")`
 				);
 			}
 		}
