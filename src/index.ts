@@ -285,6 +285,27 @@ export async function handleApplication(scope: Scope): Promise<void> {
 				);
 			}
 		}
+		if (mcpConfig?.enabled && mcpConfig.resource !== undefined) {
+			let validResource = false;
+			if (typeof mcpConfig.resource === 'string' && mcpConfig.resource.trim() !== '') {
+				try {
+					const parsedResource = new URL(mcpConfig.resource);
+					validResource =
+						(parsedResource.protocol === 'http:' || parsedResource.protocol === 'https:') &&
+						parsedResource.search === '' &&
+						parsedResource.hash === '' &&
+						parsedResource.username === '' &&
+						parsedResource.password === '';
+				} catch {
+					// Unparseable URL — validResource stays false.
+				}
+			}
+			if (!validResource) {
+				throw new Error(
+					`mcp.resource must be an absolute http(s) URL without query, fragment, or credentials (got: "${String(mcpConfig.resource)}")`
+				);
+			}
+		}
 		// client_credentials mints tokens for headless agents with no human in
 		// the loop, so its prerequisites are startup errors, not runtime 4xxs:
 		// the CIMD allowlist must be pinned (hosting a reachable metadata

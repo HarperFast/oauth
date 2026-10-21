@@ -604,7 +604,11 @@ suite('Native application MCP: the OAuth resource is not a generated tool (#281)
 				harperSupportsBearerValidator(harperBinPath),
 				'runtime server.registerBearerValidator capability matches installed Harper binary'
 			);
-			if (process.env.REQUIRE_BEARER_VALIDATOR) {
+			if (
+				process.env.REQUIRE_BEARER_VALIDATOR &&
+				process.env.REQUIRE_BEARER_VALIDATOR !== '0' &&
+				process.env.REQUIRE_BEARER_VALIDATOR !== 'false'
+			) {
 				ok(
 					caps.hasBearerValidator,
 					'REQUIRE_BEARER_VALIDATOR is set, so the Harper under test must expose server.registerBearerValidator'

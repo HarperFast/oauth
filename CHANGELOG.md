@@ -12,7 +12,7 @@ All notable changes to `@harperfast/oauth` are documented here. The format is ba
 
 ### Changed
 
-- `withMCPAuth(..., { path: '/' })` (and an origin-only `mcp.resource` whose path is `/`) now matches sub-paths under `/` rather than only the exact root path `/` (#279).
+- `withMCPAuth` now resolves `request.user` via `server.getUser(sub, null, request)` on each authenticated request by default (failing closed with `401` when `getUser` rejects or returns `active: false`, and returning `503 Retry-After: 5` if lookup exceeds `userLookupTimeoutMs`). Pass `{ resolveUser: false }` to skip `getUser` lookup and leave `request.user` untouched (#279).
 
 ### Fixed
 

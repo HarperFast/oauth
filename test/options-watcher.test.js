@@ -114,6 +114,24 @@ describe('OAuth Plugin Options Watcher', () => {
 		await assert.rejects(handleApplication(scope), /mcp\.issuer is not set/);
 	});
 
+	it('should fail to start when mcp.enabled and mcp.resource is not a valid http(s) URL', async () => {
+		for (const badResource of [
+			'not a valid url',
+			'ftp://app.example.com/mcp',
+			'https://app.example.com/mcp?foo=bar',
+			'https://app.example.com/mcp#frag',
+			'https://user:pass@app.example.com/mcp',
+			'',
+		]) {
+			scope.options._config.mcp = {
+				enabled: true,
+				issuer: 'https://app.example.com',
+				resource: badResource,
+			};
+			await assert.rejects(handleApplication(scope), /mcp\.resource must be an absolute http\(s\) URL/);
+		}
+	});
+
 	it('should start when mcp.enabled and mcp.issuer is a valid https origin', async () => {
 		scope.options._config.mcp = { enabled: true, issuer: 'https://app.example.com' };
 		await handleApplication(scope);

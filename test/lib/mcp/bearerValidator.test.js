@@ -341,6 +341,33 @@ describe('createMCPBearerValidator — happy path', () => {
 		assert.ok(result?.authExpiresAt >= beforeSec + maxAllowed - 1);
 		assert.ok(result?.authExpiresAt <= afterSec + maxAllowed);
 	});
+
+	it('memoizes verified tokens across repeat calls while re-checking pathOwned, mcp.enabled, and active keys', async () => {
+		const token = mint({ subject: 'alice@example.com', ttlSeconds: 1800 });
+		let activeKeys = [key];
+		let liveCfg = { enabled: true, issuer: ISSUER, resource: RESOURCE };
+		const { validator } = makeValidator({
+			getConfig: () => liveCfg,
+			keyStore: {
+				async getAllPublicKeys() {
+					return activeKeys;
+				},
+			},
+		});
+
+		const first = await validator(token, req());
+		const second = await validator(token, req());
+		assert.equal(first?.username, 'alice@example.com');
+		assert.equal(second?.username, 'alice@example.com');
+		assert.equal(second?.authCacheable, false);
+
+		// Off-path request still abstains synchronously even after token is memoized.
+		assert.equal(validator(token, req({ pathname: '/SomeTable/1' })), undefined);
+
+		// Key rotation invalidates the memoized entry immediately.
+		activeKeys = [makeKey('rotated-kid')];
+		await assert.rejects(validator(token, req()), (err) => isCredentialRejection(err));
+	});
 });
 
 describe('registerMCPBearerValidator', () => {

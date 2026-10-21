@@ -14,10 +14,8 @@
  * Harper's core auth is a default-group HTTP middleware that consumes
  * `Authorization: Bearer` and 401s any token it can't validate, stamping
  * `WWW-Authenticate: Basic` (security/auth.ts) — NOT the Bearer challenge MCP
- * clients require. On Harper versions without `server.registerBearerValidator`
- * (or when you want the RFC 9728 `WWW-Authenticate: Bearer resource_metadata="..."`
- * challenge and `request.mcp` claims on a custom route), `withMCPAuth` must own
- * the response for its route.
+ * clients require. For custom routes (or on Harper versions without
+ * `server.registerBearerValidator`), `withMCPAuth` must own the response.
  *
  * PRIMARY — register on a urlPath subroute (recommended):
  *
@@ -59,15 +57,20 @@ export interface KeySource {
 	getAllPublicKeys(mcpConfig?: MCPConfig): Promise<MCPPublicKeyRecord[]>;
 }
 
-export type VerifyMCPAccessTokenResult =
-	| { ok: true; claims: MCPRequestClaims; exp?: number }
-	| { ok: false; reason: string };
+type VerifyMCPAccessTokenResult = { ok: true; claims: MCPRequestClaims; exp?: number } | { ok: false; reason: string };
+
+interface VerifiedTokenMemoEntry {
+	claims: MCPRequestClaims;
+	exp: number;
+	issuer: string;
+	resource: string;
+	keys: Array<{ kid: string; alg?: string; public_key_pem: string }>;
+}
+
+const MAX_VERIFIED_TOKEN_MEMO_ENTRIES = 256;
 
 /**
- * Shared access-token verification used by both `withMCPAuth` and the Harper
- * core bearer validator (`bearerValidator.ts`). Loads signing keys, re-checks
- * live `mcp.enabled` after the key lookup await, verifies signature/`aud`/`iss`,
- * and validates required MCP claim shapes.
+ * Shared access-token verification for `withMCPAuth` and `bearerValidator.ts`.
  */
 export async function verifyMCPAccessToken(
 	token: string,
@@ -79,9 +82,10 @@ export async function verifyMCPAccessToken(
 		issuer: string;
 		logger?: Logger;
 		caller: string;
+		verifiedTokenMemo?: Map<string, VerifiedTokenMemoEntry>;
 	}
 ): Promise<VerifyMCPAccessTokenResult> {
-	const { cfg, getConfig, keyStore, resource, issuer, logger, caller } = params;
+	const { cfg, getConfig, keyStore, resource, issuer, logger, caller, verifiedTokenMemo } = params;
 	let keys: MCPPublicKeyRecord[];
 	try {
 		keys = await keyStore.getAllPublicKeys(cfg);
@@ -97,6 +101,23 @@ export async function verifyMCPAccessToken(
 	}
 	if (keys.length === 0) {
 		return { ok: false, reason: 'no signing keys available to verify token' };
+	}
+
+	const nowSec = Math.floor(Date.now() / 1000);
+	const memoHit = verifiedTokenMemo?.get(token);
+	if (
+		memoHit &&
+		memoHit.issuer === issuer &&
+		memoHit.resource === resource &&
+		memoHit.exp > nowSec &&
+		memoHit.keys.length === keys.length &&
+		memoHit.keys.every(
+			(k, i) => k.kid === keys[i].kid && k.alg === keys[i].alg && k.public_key_pem === keys[i].public_key_pem
+		)
+	) {
+		verifiedTokenMemo!.delete(token);
+		verifiedTokenMemo!.set(token, memoHit);
+		return { ok: true, claims: memoHit.claims, exp: memoHit.exp };
 	}
 
 	let payload: any;
@@ -119,15 +140,36 @@ export async function verifyMCPAccessToken(
 		return { ok: false, reason: 'token scope is invalid' };
 	}
 
+	const claims: MCPRequestClaims = {
+		sub: payload.sub,
+		client_id: payload.client_id,
+		aud: payload.aud,
+		scope: payload.scope,
+	};
+	const exp = typeof payload.exp === 'number' && Number.isFinite(payload.exp) ? payload.exp : undefined;
+	if (
+		verifiedTokenMemo &&
+		exp !== undefined &&
+		exp > nowSec &&
+		(payload.nbf === undefined || (typeof payload.nbf === 'number' && payload.nbf <= nowSec))
+	) {
+		if (verifiedTokenMemo.size >= MAX_VERIFIED_TOKEN_MEMO_ENTRIES) {
+			const oldest = verifiedTokenMemo.keys().next().value;
+			if (oldest !== undefined) verifiedTokenMemo.delete(oldest);
+		}
+		verifiedTokenMemo.set(token, {
+			claims,
+			exp,
+			issuer,
+			resource,
+			keys: keys.map((k) => ({ kid: k.kid, alg: k.alg, public_key_pem: k.public_key_pem })),
+		});
+	}
+
 	return {
 		ok: true,
-		claims: {
-			sub: payload.sub,
-			client_id: payload.client_id,
-			aud: payload.aud,
-			scope: payload.scope,
-		},
-		exp: typeof payload.exp === 'number' && Number.isFinite(payload.exp) ? payload.exp : undefined,
+		claims,
+		exp,
 	};
 }
 
@@ -167,6 +209,8 @@ export interface WithMCPAuthOptions {
 	 * guards). Defaults to the plugin's `emitMCPAuditEvent`. Injectable for tests.
 	 */
 	emitAudit?: (payload: MCPTokenRejectedAuditPayload) => void;
+	/** Whether to resolve `request.user` via `getUser` / `server.getUser`; defaults to `true`. */
+	resolveUser?: boolean;
 	/** Resolver used to populate `request.user`; defaults to `server.getUser`. */
 	getUser?: (username: string, password: string | null, request: Request) => Promise<any> | any;
 	/** Timeout in milliseconds for `getUser` resolution; defaults to 5000. */
@@ -248,7 +292,6 @@ export function getRequestPathname(request: Request | undefined): string | undef
 export function pathOwned(pathname: string | undefined, routePath: string): boolean {
 	const path = routePath.length > 1 && routePath.endsWith('/') ? routePath.slice(0, -1) : routePath;
 	const p = pathname ?? '/';
-	if (path === '/') return p.startsWith('/');
 	return p === path || p.startsWith(path + '/');
 }
 
@@ -389,7 +432,8 @@ export function withMCPAuth(handler: HttpListener, options: WithMCPAuthOptions =
 		}
 
 		let resolvedUser: any;
-		const shouldPopulateUser = request.user == null && !isQuarantinePrincipal(claims.sub);
+		const shouldPopulateUser =
+			options.resolveUser !== false && request.user == null && !isQuarantinePrincipal(claims.sub);
 		if (shouldPopulateUser) {
 			const serverObj = (harper as any).server ?? (globalThis as any).server;
 			const getUser =

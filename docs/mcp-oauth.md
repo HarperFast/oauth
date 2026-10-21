@@ -312,13 +312,14 @@ scope closes):
   route with no matching validator still receives `401` from Harper's deferred
   operation-token rejection, without reading signing keys or flooding the audit
   log). Note: configuring `mcp.resource` with a root path (e.g.
-  `https://my-app.example.com` or `https://my-app.example.com/`) binds
-  `pathOwned` to `/`, making tokens valid across every application route prefix;
-  leave `mcp.resource` unset (defaulting to `<issuer>/mcp`) or give it an
-  explicit sub-path to keep tokens scoped to that route. (Harper's
-  `authentication()` middleware also checks `validateOperationToken` first and
-  only invokes registered Bearer validators when operation-token verification
-  throws `'invalid token'`.)
+  `https://my-app.example.com` or `https://my-app.example.com/`) scopes the
+  validator across all application paths and makes it authoritative for any JWT
+  carrying the configured `mcp.issuer` (so any co-hosted JWT issuer on those
+  routes must use a distinct `iss`); leave `mcp.resource` unset (defaulting to
+  `<issuer>/mcp`) or give it an explicit sub-path to keep tokens scoped to that
+  route. (Harper's `authentication()` middleware also checks
+  `validateOperationToken` first and only invokes registered Bearer validators
+  when operation-token verification throws `'invalid token'`.)
 - **Authoritatively rejects (`credentialRejectionError(reason, 401)`)** once a
   token's unverified `iss` claims this plugin's MCP issuer on a route covered by
   `mcp.resource`:
@@ -442,6 +443,7 @@ middleware instead of terminating at the handler). This mirrors Harper's own
 | `getConfig`           | `() => MCPConfig \| undefined`                       | live plugin config         | MCP config source, read per request. Override for tests.                                                                                                                                 |
 | `logger`              | `Logger`                                             | plugin logger              | Logger for verification failures. Override for tests.                                                                                                                                    |
 | `keyStore`            | `{ getAllPublicKeys(): Promise<...> }`               | the plugin's `MCPKeyStore` | Signing-key source. Override for tests.                                                                                                                                                  |
+| `resolveUser`         | `boolean`                                            | `true`                     | Whether to resolve `request.user` via `getUser` / `server.getUser`. Set `false` to skip `getUser` lookup and leave `request.user` untouched.                                             |
 | `getUser`             | `(username, password, request) => Promise<...> \| …` | `server.getUser`           | Harper user resolver used to populate `request.user`. Override for tests.                                                                                                                |
 | `userLookupTimeoutMs` | `number`                                             | `5000`                     | Deadline in milliseconds for `getUser` resolution; returns `503 Retry-After: 5` directly if exceeded.                                                                                    |
 

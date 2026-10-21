@@ -13,36 +13,28 @@ import { resolveIssuer, resolveResource } from './wellKnown.ts';
 import { emitMCPAuditEvent, type MCPTokenRejectedAuditPayload } from './audit.ts';
 import { getRequestPathname, pathOwned, verifyMCPAccessToken, type KeySource } from './withMCPAuth.ts';
 
-export interface MCPBearerValidationResult {
+interface MCPBearerValidationResult {
 	username: string;
 	authExpiresAt?: number;
 	authCacheable?: boolean;
 }
 
-export type MCPBearerValidator = (
+type MCPBearerValidator = (
 	token: string,
 	request: Request
 ) => Promise<MCPBearerValidationResult | undefined> | undefined;
 
-export interface MCPBearerValidatorOptions {
+interface MCPBearerValidatorOptions {
 	getConfig?: () => MCPConfig | undefined;
 	logger?: Logger;
 	keyStore?: KeySource;
 	emitAudit?: (payload: MCPTokenRejectedAuditPayload) => void;
 }
 
-/**
- * Maximum token length inspected during unverified `iss` extraction, bounding
- * base64url + JSON work on arbitrary non-plugin Bearer headers.
- */
 const MAX_TOKEN_LENGTH = 16384;
 const MAX_AUTH_EXPIRY_OFFSET_SECONDS = 365 * 24 * 60 * 60;
 
-/**
- * Decode ONLY the unverified payload's `iss` claim from a compact JWS (`a.b.c`)
- * to determine whether this plugin owns the token. Returns `undefined` for any
- * non-JWT or payload without a non-empty string `iss`.
- */
+/** Decode ONLY the unverified payload's `iss` claim from a compact JWS (`a.b.c`). */
 function extractUnverifiedIssuer(token: string): string | undefined {
 	if (typeof token !== 'string' || !token || token.length > MAX_TOKEN_LENGTH) {
 		return undefined;
@@ -89,6 +81,7 @@ function credentialRejection(reason: string): Error {
 export function createMCPBearerValidator(options: MCPBearerValidatorOptions = {}): MCPBearerValidator {
 	const getConfig = options.getConfig ?? (() => OAuthResource.mcpConfig);
 	let defaultKeyStore: MCPKeyStore | undefined;
+	const verifiedTokenMemo = new Map<string, any>();
 	let cachedCfg: MCPConfig | undefined;
 	let cachedIssuerInput: string | undefined;
 	let cachedResourceInput: string | undefined;
@@ -105,11 +98,6 @@ export function createMCPBearerValidator(options: MCPBearerValidatorOptions = {}
 			return undefined;
 		}
 
-		const unverifiedIss = extractUnverifiedIssuer(token);
-		if (!unverifiedIss) {
-			return undefined;
-		}
-
 		if (
 			cfg !== cachedCfg ||
 			cfg.issuer !== cachedIssuerInput ||
@@ -118,23 +106,27 @@ export function createMCPBearerValidator(options: MCPBearerValidatorOptions = {}
 			!cachedResource ||
 			cachedResourcePathname === undefined
 		) {
+			const nextIssuer = resolveIssuer({} as any, cfg);
+			const nextResource = resolveResource({} as any, cfg);
+			const nextResourcePathname = extractResourcePathname(nextResource);
 			cachedCfg = cfg;
 			cachedIssuerInput = cfg.issuer;
 			cachedResourceInput = cfg.resource;
-			cachedIssuer = resolveIssuer({} as any, cfg);
-			cachedResource = resolveResource({} as any, cfg);
-			cachedResourcePathname = extractResourcePathname(cachedResource);
+			cachedIssuer = nextIssuer;
+			cachedResource = nextResource;
+			cachedResourcePathname = nextResourcePathname;
 		}
 		const issuer = cachedIssuer;
 		const resource = cachedResource;
 		const resourcePathname = cachedResourcePathname;
 
-		if (unverifiedIss !== issuer) {
+		const requestPathname = getRequestPathname(request);
+		if (resourcePathname !== null && resourcePathname !== '/' && !pathOwned(requestPathname, resourcePathname)) {
 			return undefined;
 		}
 
-		const requestPathname = getRequestPathname(request);
-		if (resourcePathname !== null && !pathOwned(requestPathname, resourcePathname)) {
+		const unverifiedIss = extractUnverifiedIssuer(token);
+		if (!unverifiedIss || unverifiedIss !== issuer) {
 			return undefined;
 		}
 
@@ -156,7 +148,7 @@ export function createMCPBearerValidator(options: MCPBearerValidatorOptions = {}
 						timestamp: new Date().toISOString(),
 					});
 				} catch {
-					// Audit is best-effort; still throw the credential rejection below.
+					void 0;
 				}
 				throw credentialRejection(reason);
 			};
@@ -173,6 +165,7 @@ export function createMCPBearerValidator(options: MCPBearerValidatorOptions = {}
 				issuer,
 				logger,
 				caller: 'MCP bearer validator',
+				verifiedTokenMemo,
 			});
 			if (!verified.ok) {
 				return reject(verified.reason);
@@ -198,12 +191,7 @@ export function createMCPBearerValidator(options: MCPBearerValidatorOptions = {}
 	};
 }
 
-/**
- * Register the MCP bearer validator with `server.registerBearerValidator` when
- * the host Harper runtime supports it (`HarperFast/harper#3313`). Returns a
- * disposer when registered, or `undefined` when the host runtime does not
- * expose `server.registerBearerValidator`.
- */
+/** Register the MCP bearer validator with `server.registerBearerValidator` when supported. */
 export function registerMCPBearerValidator(
 	server: any,
 	getConfig: () => MCPConfig | undefined = () => OAuthResource.mcpConfig,

@@ -333,6 +333,31 @@ describe('withMCPAuth — happy path', () => {
 		assert.equal(request.mcp.sub, sub);
 	});
 
+	it('skips getUser lookup and leaves request.user undefined when resolveUser: false is set', async () => {
+		const token = mint();
+		let getUserCalled = false;
+		const request = req(`Bearer ${token}`);
+		const res = await withMCPAuth(
+			spyHandler().handler,
+			opts({
+				resolveUser: false,
+				getUser: async () => {
+					getUserCalled = true;
+					return {
+						username: 'alice@example.com',
+						active: true,
+						role: { id: 'developer', permission: { super_user: false } },
+					};
+				},
+			})
+		)(request, NEXT);
+
+		assert.equal(res.status, 200);
+		assert.equal(getUserCalled, false, 'getUser must not be called when resolveUser is false');
+		assert.equal(request.user, undefined);
+		assert.equal(request.mcp.sub, 'alice@example.com');
+	});
+
 	it('binds default server.getUser to server when resolving request.user', async () => {
 		const token = mint();
 		const request = req(`Bearer ${token}`);

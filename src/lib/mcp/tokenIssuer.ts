@@ -12,9 +12,32 @@
  * JOSE implementation and is deferred (see #127).
  */
 
-import { createPublicKey, randomUUID } from 'node:crypto';
+import { createPublicKey, randomUUID, type KeyObject } from 'node:crypto';
 import jwt from 'jsonwebtoken';
 import type { MCPPublicKeyRecord, MCPSigningKeyRecord } from '../../types.ts';
+
+const MAX_PARSED_PUBLIC_KEYS = 32;
+const parsedPublicKeyCache = new Map<string, KeyObject>();
+
+function getPublicKeyObject(publicKeyPem: string): KeyObject | string {
+	const cached = parsedPublicKeyCache.get(publicKeyPem);
+	if (cached) {
+		parsedPublicKeyCache.delete(publicKeyPem);
+		parsedPublicKeyCache.set(publicKeyPem, cached);
+		return cached;
+	}
+	try {
+		const parsed = createPublicKey(publicKeyPem);
+		if (parsedPublicKeyCache.size >= MAX_PARSED_PUBLIC_KEYS) {
+			const oldest = parsedPublicKeyCache.keys().next().value;
+			if (oldest !== undefined) parsedPublicKeyCache.delete(oldest);
+		}
+		parsedPublicKeyCache.set(publicKeyPem, parsed);
+		return parsed;
+	} catch {
+		return publicKeyPem;
+	}
+}
 
 /** Signing algorithms the issuer can mint and verify. */
 export const SUPPORTED_SIGNING_ALGS = ['RS256', 'ES256'] as const;
@@ -163,7 +186,7 @@ export function verifyAccessTokenWithKeySet(
 		key = keys[0];
 	}
 
-	return jwt.verify(token, key.public_key_pem, {
+	return jwt.verify(token, getPublicKeyObject(key.public_key_pem), {
 		algorithms: [keyAlg(key)],
 		audience: options.audience,
 		issuer: options.issuer,
