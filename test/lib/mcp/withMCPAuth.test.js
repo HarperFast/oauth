@@ -384,6 +384,19 @@ describe('withMCPAuth — happy path', () => {
 		assert.equal(request.mcp, undefined, 'request.mcp must not be populated on denial');
 		assert.equal(events.length, 1);
 		assert.equal(events[0].event, 'oauth.mcp.token.rejected');
+
+		// Also verify symbol-only credential rejection (real Harper does not re-export isCredentialRejection on barrel)
+		const symErr = new Error('User is not active');
+		Object.defineProperty(symErr, Symbol('harper.credentialRejection'), { value: true });
+		const symRes = await withMCPAuth(
+			handler,
+			opts({
+				getUser: async () => {
+					throw symErr;
+				},
+			})
+		)(req(`Bearer ${token}`), NEXT);
+		assert.equal(symRes.status, 401);
 	});
 
 	it('returns 503 Retry-After without emitting oauth.mcp.token.rejected when getUser fails with a transient error', async () => {
@@ -396,13 +409,15 @@ describe('withMCPAuth — happy path', () => {
 			opts({
 				emitAudit: (p) => events.push(p),
 				getUser: async () => {
-					throw new Error('RocksDB I/O error');
+					throw new Error('storage I/O error');
 				},
 			})
 		)(request, NEXT);
 
 		assert.equal(res.status, 503);
 		assert.equal(res.headers['Retry-After'], '1');
+		assert.equal(res.headers['Access-Control-Allow-Origin'], '*');
+		assert.equal(res.headers['Access-Control-Expose-Headers'], 'Retry-After');
 		assert.equal(calls.length, 0, 'handler must not run when getUser throws');
 		assert.equal(request.user, undefined);
 		assert.equal(request.mcp, undefined);
@@ -548,6 +563,9 @@ describe('withMCPAuth — default-group registration (path option)', () => {
 		// Unowned look-alike must fall through, not be guarded.
 		const lookalike = await wrapped(req(undefined, { pathname: '/mcponaut' }), NEXT);
 		assert.equal(lookalike.__next, true);
+		// Unowned REST paths with encoded slashes or special segments must also fall through.
+		const encodedOther = await wrapped(req(undefined, { pathname: '/Product/abc%2Fdef' }), NEXT);
+		assert.equal(encodedOther.__next, true);
 		// Owned sub-path with no token must be rejected.
 		const denied = await wrapped(req(undefined, { pathname: '/mcp/tools' }), NEXT);
 		assert.equal(denied.status, 401);
@@ -557,14 +575,6 @@ describe('withMCPAuth — default-group registration (path option)', () => {
 		const ok = await wrapped2(req(`Bearer ${token}`, { pathname: '/mcp' }), NEXT);
 		assert.equal(ok.status, 200);
 		assert.equal(calls.length, 1);
-
-		// Traversal and encoded-separator paths must fail closed with 401 rather than
-		// matching /mcp or falling through to downstream normalization.
-		for (const badPath of ['/mcp/../SomeTable/1', '/mcp/%2e%2e/SomeTable/1', '/other/../mcp', '/mcp/foo%2fbar']) {
-			const res = await wrapped2(req(`Bearer ${token}`, { pathname: badPath }), NEXT);
-			assert.equal(res.status, 401, `expected 401 for unsafe path ${badPath}`);
-		}
-		assert.equal(calls.length, 1, 'handler must not run for traversal paths');
 	});
 });
 

@@ -41,6 +41,7 @@ export interface MCPBearerValidatorOptions {
  * base64url + JSON work on arbitrary non-plugin Bearer headers.
  */
 const MAX_TOKEN_LENGTH = 16384;
+const MAX_AUTH_EXPIRY_OFFSET_SECONDS = 365 * 24 * 60 * 60;
 
 /**
  * Decode ONLY the unverified payload's `iss` claim from a compact JWS (`a.b.c`)
@@ -75,9 +76,7 @@ function extractUnverifiedIssuer(token: string): string | undefined {
 		) {
 			return parsed.iss;
 		}
-	} catch {
-		return undefined;
-	}
+	} catch {}
 	return undefined;
 }
 
@@ -166,9 +165,7 @@ export function createMCPBearerValidator(options: MCPBearerValidatorOptions = {}
 						aud: resource,
 						timestamp: new Date().toISOString(),
 					});
-				} catch {
-					// Keep the fail-closed 401 if a custom audit sink throws.
-				}
+				} catch {}
 				throw credentialRejection(reason);
 			};
 
@@ -191,13 +188,14 @@ export function createMCPBearerValidator(options: MCPBearerValidatorOptions = {}
 				return reject('unverified subject cannot authenticate as a Harper user');
 			}
 
+			const authExpiresAt =
+				verified.exp !== undefined
+					? Math.min(verified.exp, Math.floor(Date.now() / 1000) + MAX_AUTH_EXPIRY_OFFSET_SECONDS)
+					: undefined;
 			return {
 				username: verified.claims.sub,
-				...(verified.exp !== undefined ? { authExpiresAt: verified.exp } : {}),
-				// Harper's authorizationCache is keyed by Authorization header alone across
-				// all routes and outlives validator disposal until authExpiresAt; always
-				// opt out so route scoping (pathOwned), key retirement, and live mcp.enabled
-				// flips take effect immediately on every request.
+				...(authExpiresAt !== undefined ? { authExpiresAt } : {}),
+				// Harper's authorizationCache is keyed by Authorization header alone without re-checking pathOwned.
 				authCacheable: false,
 			};
 		})();

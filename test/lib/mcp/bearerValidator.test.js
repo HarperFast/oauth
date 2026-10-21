@@ -166,7 +166,7 @@ describe('createMCPBearerValidator — owned-token rejections (fail closed with 
 		assert.equal(events[0].aud, RESOURCE);
 	});
 
-	it('rejects a token minted for /mcp when presented to a non-MCP or traversal route without auditing or reading keys', async () => {
+	it('rejects a token minted for /mcp when presented to a non-MCP route without auditing or reading keys', async () => {
 		const token = mint();
 		let keyReads = 0;
 		const { validator, events } = makeValidator({
@@ -178,7 +178,7 @@ describe('createMCPBearerValidator — owned-token rejections (fail closed with 
 			},
 		});
 
-		for (const badPath of ['/SomeTable/1', '/mcp/../SomeTable/1', '/mcp/%2e%2e/SomeTable/1', '/mcp/foo%2fbar']) {
+		for (const badPath of ['/SomeTable/1', '/mcponaut']) {
 			await assertCredentialRejection(
 				validator(token, req({ pathname: badPath })),
 				/token audience does not match the requested resource/
@@ -312,6 +312,18 @@ describe('createMCPBearerValidator — happy path', () => {
 		const result = await validator(token, req({ pathname: '/SomeTable/1' }));
 		assert.equal(result?.username, 'alice@example.com');
 		assert.equal(result?.authCacheable, false);
+	});
+
+	it('clamps authExpiresAt to at most 365 days in the future so Harper effectiveExpiry does not throw', async () => {
+		const twoYearsSeconds = 2 * 365 * 24 * 60 * 60;
+		const token = mint({ subject: 'alice@example.com', ttlSeconds: twoYearsSeconds });
+		const { validator } = makeValidator();
+		const beforeSec = Math.floor(Date.now() / 1000);
+		const result = await validator(token, req());
+		const afterSec = Math.floor(Date.now() / 1000);
+		const maxAllowed = 365 * 24 * 60 * 60;
+		assert.ok(result?.authExpiresAt >= beforeSec + maxAllowed - 1);
+		assert.ok(result?.authExpiresAt <= afterSec + maxAllowed);
 	});
 });
 

@@ -21,25 +21,28 @@
  *
  * PRIMARY — register on a urlPath subroute (recommended):
  *
- *   server.http(withMCPAuth(myMcpHandler), { urlPath: '/mcp' });
+ *   server.http(withMCPAuth(myMcpHandler), { urlPath: '/custom-mcp' });
  *
  *   Harper's routed dispatch (server/middlewareChain.ts) runs ONLY the matched
  *   subroute's chain and returns — the default chain (where core auth lives)
- *   never runs for '/mcp', so the Bearer challenge can't be clobbered. This is
+ *   never runs for '/custom-mcp', so the Bearer challenge can't be clobbered. This is
  *   the same isolation the `/.well-known/*` discovery endpoints rely on to stay
  *   unauthenticated. No `path` option and no ordering hint are needed.
  *
  * FALLBACK — register in the default group, ahead of core auth:
  *
- *   server.http(withMCPAuth(myMcpHandler, { path: '/mcp' }), { before: 'authentication' });
+ *   server.http(withMCPAuth(myMcpHandler, { path: '/custom-mcp' }), { before: 'authentication' });
  *
  *   When the route shares the default chain with auth (no urlPath), pass `path`
  *   so the wrapper guards only that path and calls `next()` for everything else
  *   (otherwise it would 401 unrelated routes), and register with
  *   `{ before: 'authentication' }` so it runs outermost — ahead of core auth.
  *   This mirrors the precedent in Harper's own server/static.ts. In this mode
- *   the wrapped handler MUST terminate the request (not call `next`), or core
- *   auth runs afterward and re-rejects the bearer token.
+ *   the wrapped handler MUST terminate the request (not call `next`): when
+ *   `withMCPAuth` leaves `request.user` unset (for example on a role-less
+ *   `client_credentials` agent or a quarantined subject), calling `next` would
+ *   hand the request to core `authentication()`, which would reject the bearer
+ *   token with `WWW-Authenticate: Basic`.
  */
 
 import * as harper from 'harper';
@@ -241,51 +244,15 @@ export function getRequestPathname(request: Request | undefined): string | undef
 }
 
 /**
- * True when `pathname` contains backslashes, NUL bytes, percent-encoded path
- * separators/NULs, malformed percent-encoding, or `.`/`..` dot-segments (raw or
- * percent-encoded). Rejecting these prevents `/mcp/../SomeTable/1` or
- * `/mcp/%2e%2e/SomeTable/1` from matching `/mcp` before downstream router
- * normalization resolves a different target.
- */
-function hasUnsafePathSegments(pathname: string): boolean {
-	if (pathname.includes('\\') || pathname.includes('\0') || /%2f|%5c|%00/i.test(pathname)) {
-		return true;
-	}
-	for (const seg of pathname.split('/')) {
-		if (!seg) continue;
-		if (seg === '.' || seg === '..') return true;
-		if (seg.includes('%')) {
-			try {
-				const decoded = decodeURIComponent(seg);
-				if (
-					decoded === '.' ||
-					decoded === '..' ||
-					decoded.includes('/') ||
-					decoded.includes('\\') ||
-					decoded.includes('\0')
-				) {
-					return true;
-				}
-			} catch {
-				return true;
-			}
-		}
-	}
-	return false;
-}
-
-/**
  * True when `pathname` is `routePath` or a segment-bounded sub-path of it
- * ('/mcp' matches '/mcp' and '/mcp/x' but not '/mcponaut') and contains no
- * dot-segments or encoded path separators. Trailing slashes on `routePath` are
- * ignored. Mirrors Harper's `matchesRoute` urlPath semantics so the
- * default-group fallback behaves like the urlPath registration.
+ * ('/mcp' matches '/mcp' and '/mcp/x' but not '/mcponaut'). Trailing slashes
+ * on `routePath` are ignored. Mirrors Harper's `matchesRoute` urlPath semantics
+ * so the default-group fallback behaves like the urlPath registration.
  */
 export function pathOwned(pathname: string | undefined, routePath: string): boolean {
 	const path = routePath.length > 1 && routePath.endsWith('/') ? routePath.slice(0, -1) : routePath;
 	const p = pathname ?? '/';
-	if (!p.startsWith('/') || hasUnsafePathSegments(p)) return false;
-	if (path === '/') return true;
+	if (path === '/') return p.startsWith('/');
 	return p === path || p.startsWith(path + '/');
 }
 
@@ -309,13 +276,9 @@ export function withMCPAuth(handler: HttpListener, options: WithMCPAuthOptions =
 		const requestPathname = getRequestPathname(request);
 
 		// Default-group registration: only guard our own path; let everything
-		// else continue down the chain (to core auth and other middleware),
-		// unless the path contains traversal/encoded-separator segments that
-		// could normalize into the guarded route downstream.
+		// else continue down the chain (to core auth and other middleware).
 		if (path && !pathOwned(requestPathname, path)) {
-			if (!requestPathname || !hasUnsafePathSegments(requestPathname)) {
-				return next(request);
-			}
+			return next(request);
 		}
 
 		// Build the spec 401. protectedResourceMetadataUrl derefs mcpConfig
@@ -383,9 +346,6 @@ export function withMCPAuth(handler: HttpListener, options: WithMCPAuthOptions =
 		if ((requestPathname ?? request.url ?? '').length > 2048) {
 			return deny('request path exceeds the maximum allowed length');
 		}
-		if (requestPathname && hasUnsafePathSegments(requestPathname)) {
-			return deny('request path is invalid');
-		}
 
 		const cfg = getConfig();
 		// Fail closed: a route guarded by withMCPAuth never serves while MCP is
@@ -442,6 +402,9 @@ export function withMCPAuth(handler: HttpListener, options: WithMCPAuthOptions =
 				} catch (error) {
 					const isRejectedUser =
 						(harper as any).isCredentialRejection?.(error) === true ||
+						(typeof error === 'object' &&
+							error !== null &&
+							Object.getOwnPropertySymbols(error).some((s) => s.description === 'harper.credentialRejection')) ||
 						(error as any)?.statusCode === 401 ||
 						(error as any)?.statusCode === 403;
 					if (isRejectedUser) {
@@ -460,6 +423,8 @@ export function withMCPAuth(handler: HttpListener, options: WithMCPAuthOptions =
 						headers: {
 							'Content-Type': 'application/json',
 							'Retry-After': '1',
+							'Access-Control-Allow-Origin': '*',
+							'Access-Control-Expose-Headers': 'Retry-After',
 						},
 						body: JSON.stringify({
 							error: 'temporarily_unavailable',
@@ -477,11 +442,7 @@ export function withMCPAuth(handler: HttpListener, options: WithMCPAuthOptions =
 		}
 
 		request.mcp = claims;
-		// Parity with Harper's principalFromClaim (security/bearerValidators.ts):
-		// core server.getUser answers an unknown username with a role-less `{ username }`
-		// view. Only populate `request.user` when the resolved user carries a plain-object
-		// `role.permission`, so a role-less subject (such as a client_credentials agent)
-		// never becomes a truthy `request.user` on a custom route.
+		// Only populate request.user when getUser returned a role-bearing principal (parity with Harper's principalFromClaim).
 		if (
 			shouldPopulateUser &&
 			isPlainObject(resolvedUser) &&

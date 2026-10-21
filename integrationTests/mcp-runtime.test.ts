@@ -641,7 +641,6 @@ suite('Native application MCP: the OAuth resource is not a generated tool (#281)
 				`tools/call executes as mapped Harper user mcp-oauth-user: ${JSON.stringify(control)}`
 			);
 
-			// Wrong-audience token -> 401
 			const wrongAudToken = await mintTestToken({ aud: 'https://other.test/mcp' });
 			const wrongAudRes = await rpc(
 				undefined,
@@ -651,7 +650,6 @@ suite('Native application MCP: the OAuth resource is not a generated tool (#281)
 			strictEqual(wrongAudRes.status, 401, 'wrong-audience MCP token must be rejected with 401');
 			await wrongAudRes.body?.cancel();
 
-			// Expired token -> 401
 			const expiredToken = await mintTestToken({ ttl: -60 });
 			const expiredRes = await rpc(
 				undefined,
@@ -661,7 +659,6 @@ suite('Native application MCP: the OAuth resource is not a generated tool (#281)
 			strictEqual(expiredRes.status, 401, 'expired MCP token must be rejected with 401');
 			await expiredRes.body?.cancel();
 
-			// Valid /mcp token presented to a non-MCP REST route -> 401 (pathOwned)
 			const nonMcpRes = await fetch(new URL('/NativeMcpControl', started.harper.httpURL), {
 				headers: { Authorization: bearerAuth },
 				signal: AbortSignal.timeout(requestTimeoutMs),
@@ -669,7 +666,6 @@ suite('Native application MCP: the OAuth resource is not a generated tool (#281)
 			strictEqual(nonMcpRes.status, 401, 'MCP token scoped to /mcp must be rejected on non-MCP route');
 			await nonMcpRes.body?.cancel();
 
-			// Non-plugin Bearer token (Harper operation_token) is unaffected -> 200
 			const opTokens = (await sendOperation(started.harper, {
 				operation: 'create_authentication_tokens',
 				username: 'mcp-oauth-user',

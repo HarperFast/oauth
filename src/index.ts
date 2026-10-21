@@ -163,9 +163,9 @@ export async function handleApplication(scope: Scope): Promise<void> {
 	function disposeBearerValidator() {
 		if (!unregisterBearerValidator) return;
 		const dispose = unregisterBearerValidator;
-		unregisterBearerValidator = undefined;
 		try {
 			dispose();
+			unregisterBearerValidator = undefined;
 		} catch (error) {
 			logger?.error?.('Failed to unregister MCP bearer validator:', error);
 		}
@@ -461,23 +461,24 @@ export async function handleApplication(scope: Scope): Promise<void> {
 			resources.set('oauth', OAuthResource, { mcp: false });
 
 			if (mcpConfig?.enabled) {
-				if (typeof (server as any).registerBearerValidator === 'function') {
-					if (!unregisterBearerValidator) {
-						try {
-							unregisterBearerValidator = registerMCPBearerValidator(server, () => OAuthResource.mcpConfig, {
-								logger,
-							});
-						} catch (error) {
-							logger?.error?.('Failed to register MCP bearer validator:', error);
-						}
+				if (!unregisterBearerValidator) {
+					let registerFailed = false;
+					try {
+						unregisterBearerValidator = registerMCPBearerValidator(server, () => OAuthResource.mcpConfig, {
+							logger,
+						});
+					} catch (error) {
+						registerFailed = true;
+						logger?.error?.('Failed to register MCP bearer validator:', error);
 					}
-				} else if (!warnedMissingBearerValidator) {
-					logger?.warn?.(
-						'MCP: scope.server.registerBearerValidator is not available in this Harper version; ' +
-							"plugin-issued MCP bearer tokens will not authenticate Harper's native /mcp endpoint " +
-							'(upgrade Harper to a version with server.registerBearerValidator, or guard a custom route with withMCPAuth).'
-					);
-					warnedMissingBearerValidator = true;
+					if (!unregisterBearerValidator && !registerFailed && !warnedMissingBearerValidator) {
+						logger?.warn?.(
+							'MCP: scope.server.registerBearerValidator is not available in this Harper version; ' +
+								"plugin-issued MCP bearer tokens will not authenticate Harper's native /mcp endpoint " +
+								'(upgrade Harper to a version with server.registerBearerValidator, or guard a custom route with withMCPAuth).'
+						);
+						warnedMissingBearerValidator = true;
+					}
 				}
 			} else {
 				disposeBearerValidator();
