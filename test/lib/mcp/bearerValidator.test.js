@@ -2,10 +2,17 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync } from 'node:crypto';
 import jwt from 'jsonwebtoken';
-import { isCredentialRejection } from 'harper';
 import { createMCPBearerValidator, registerMCPBearerValidator } from '../../../dist/lib/mcp/bearerValidator.js';
 import { signAccessToken } from '../../../dist/lib/mcp/tokenIssuer.js';
 import { SIGNING_KEY_ID } from '../../../dist/lib/mcp/keyStore.js';
+
+function isCredentialRejection(error) {
+	return Boolean(
+		error &&
+		typeof error === 'object' &&
+		Object.getOwnPropertySymbols(error).some((s) => s.description === 'harper.credentialRejection' && error[s] === true)
+	);
+}
 
 const ISSUER = 'https://as.example.com';
 const RESOURCE = 'https://app.example.com/mcp';
@@ -111,6 +118,26 @@ describe('createMCPBearerValidator — ownership ("not mine" returns undefined)'
 		assert.equal(res, undefined);
 		assert.equal(events.length, 0);
 	});
+
+	it('returns undefined synchronously when a token minted for /mcp is presented to a non-MCP route without auditing or reading keys', () => {
+		const token = mint();
+		let keyReads = 0;
+		const { validator, events } = makeValidator({
+			keyStore: {
+				async getAllPublicKeys() {
+					keyReads++;
+					return [key];
+				},
+			},
+		});
+
+		for (const badPath of ['/SomeTable/1', '/mcponaut']) {
+			const res = validator(token, req({ pathname: badPath }));
+			assert.equal(res, undefined);
+		}
+		assert.equal(keyReads, 0, 'off-path route must not read signing keys');
+		assert.equal(events.length, 0, 'off-path route must not emit audit events');
+	});
 });
 
 describe('createMCPBearerValidator — owned-token rejections (fail closed with credentialRejectionError)', () => {
@@ -166,26 +193,15 @@ describe('createMCPBearerValidator — owned-token rejections (fail closed with 
 		assert.equal(events[0].aud, RESOURCE);
 	});
 
-	it('rejects a token minted for /mcp when presented to a non-MCP route without auditing or reading keys', async () => {
+	it('fails closed with credentialRejectionError when mcp.resource is not a valid URL', async () => {
 		const token = mint();
-		let keyReads = 0;
 		const { validator, events } = makeValidator({
-			keyStore: {
-				async getAllPublicKeys() {
-					keyReads++;
-					return [key];
-				},
-			},
+			getConfig: () => ({ enabled: true, issuer: ISSUER, resource: 'not a valid url' }),
 		});
 
-		for (const badPath of ['/SomeTable/1', '/mcponaut']) {
-			await assertCredentialRejection(
-				validator(token, req({ pathname: badPath })),
-				/token audience does not match the requested resource/
-			);
-		}
-		assert.equal(keyReads, 0, 'pre-verification route mismatch must not read signing keys');
-		assert.equal(events.length, 0, 'pre-verification route mismatch must not emit audit events');
+		await assertCredentialRejection(validator(token, req()), /MCP resource URL is invalid/);
+		assert.equal(events.length, 1);
+		assert.equal(events[0].reason, 'MCP resource URL is invalid');
 	});
 
 	it('rejects a token with a disallowed typ header that claims our issuer', async () => {

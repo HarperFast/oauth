@@ -1053,9 +1053,14 @@ describe('OAuth Plugin Options Watcher', () => {
 			);
 
 			const forgedOwnedToken = `a.${Buffer.from(JSON.stringify({ iss: 'https://app.example.com' })).toString('base64url')}.c`;
-			await assert.rejects(
+			assert.equal(
 				registeredValidator(forgedOwnedToken, { pathname: '/SomeTable/1', headers: { host: 'app.example.com' } }),
-				(err) => err.statusCode === 401 && /token audience does not match the requested resource/.test(err.message)
+				undefined,
+				'off-path requests abstain synchronously so other validators on non-MCP routes can run'
+			);
+			await assert.rejects(
+				registeredValidator(forgedOwnedToken, { pathname: '/mcp', headers: { host: 'app.example.com' } }),
+				(err) => err.statusCode === 401
 			);
 
 			const enabledSet = lastResourceSet;
@@ -1117,6 +1122,41 @@ describe('OAuth Plugin Options Watcher', () => {
 			configChangeListeners[0]();
 			await waitFor(() => lastResourceSet !== startupSet);
 			assert.equal(warnings.length, 1, 'should not repeat the missing-hook warning on reload');
+		});
+
+		it('clears the disposer handle even when the disposer throws so a subsequent re-enable registers again', async () => {
+			let registerCount = 0;
+			let shouldThrowOnDispose = true;
+			scope.server.registerBearerValidator = () => {
+				registerCount++;
+				return () => {
+					if (shouldThrowOnDispose) {
+						throw new Error('disposer failed');
+					}
+				};
+			};
+			scope.options._config.mcp = { enabled: true, issuer: 'https://app.example.com' };
+
+			await handleApplication(scope);
+			assert.equal(registerCount, 1);
+
+			const startupSet = lastResourceSet;
+			scope.options._config = {
+				...scope.options._config,
+				mcp: { enabled: false, issuer: 'https://app.example.com' },
+			};
+			configChangeListeners[0]();
+			await waitFor(() => lastResourceSet !== startupSet);
+
+			shouldThrowOnDispose = false;
+			const disabledSet = lastResourceSet;
+			scope.options._config = {
+				...scope.options._config,
+				mcp: { enabled: true, issuer: 'https://app.example.com' },
+			};
+			configChangeListeners[0]();
+			await waitFor(() => lastResourceSet !== disabledSet);
+			assert.equal(registerCount, 2, 'should re-register on re-enable after a throwing disposer');
 		});
 	});
 });

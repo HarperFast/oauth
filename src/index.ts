@@ -165,9 +165,10 @@ export async function handleApplication(scope: Scope): Promise<void> {
 		const dispose = unregisterBearerValidator;
 		try {
 			dispose();
-			unregisterBearerValidator = undefined;
 		} catch (error) {
 			logger?.error?.('Failed to unregister MCP bearer validator:', error);
+		} finally {
+			unregisterBearerValidator = undefined;
 		}
 	}
 

@@ -54,7 +54,7 @@ import {
 const require = createRequire(import.meta.url);
 
 function getHarperBinPath(): string {
-	return join(dirname(require.resolve('harper')), 'bin', 'harper.js');
+	return process.env.HARPER_BIN_PATH || join(dirname(require.resolve('harper')), 'bin', 'harper.js');
 }
 
 function harperSupportsBearerValidator(binPath: string): boolean {
@@ -62,7 +62,7 @@ function harperSupportsBearerValidator(binPath: string): boolean {
 }
 
 function formParserKeepsRepeatedValues(): boolean {
-	const parserPath = join(dirname(require.resolve('harper')), 'server', 'serverHelpers', 'contentTypes.js');
+	const parserPath = join(dirname(dirname(getHarperBinPath())), 'server', 'serverHelpers', 'contentTypes.js');
 	const { getDeserializer } = require(parserPath);
 	const parsed = getDeserializer('application/x-www-form-urlencoded')(
 		'resource=first&resource=second&client_id=first&client_id=second'
@@ -604,6 +604,12 @@ suite('Native application MCP: the OAuth resource is not a generated tool (#281)
 				harperSupportsBearerValidator(harperBinPath),
 				'runtime server.registerBearerValidator capability matches installed Harper binary'
 			);
+			if (process.env.REQUIRE_BEARER_VALIDATOR) {
+				ok(
+					caps.hasBearerValidator,
+					'REQUIRE_BEARER_VALIDATOR is set, so the Harper under test must expose server.registerBearerValidator'
+				);
+			}
 			if (!caps.hasBearerValidator) {
 				t.skip('installed Harper does not expose server.registerBearerValidator (HarperFast/harper#3313)');
 				return;
@@ -678,6 +684,45 @@ suite('Native application MCP: the OAuth resource is not a generated tool (#281)
 			});
 			strictEqual(opRes.status, 200, 'Harper operation_token must remain unaffected by MCP Bearer validator');
 			await opRes.body?.cancel();
+
+			const mcpDisabledYaml = configuredYaml.replace('    enabled: true\n', '    enabled: false\n');
+			ok(mcpDisabledYaml !== configuredYaml, 'fixture config has mcp.enabled: true');
+			try {
+				await writeFile(`${configPath}.tmp`, mcpDisabledYaml);
+				await rename(`${configPath}.tmp`, configPath);
+				const disableDeadline = Date.now() + 30_000;
+				while (Date.now() < disableDeadline) {
+					const wk = await fetch(new URL('/.well-known/oauth-protected-resource/mcp', started.harper.httpURL), {
+						signal: AbortSignal.timeout(requestTimeoutMs),
+					});
+					await wk.body?.cancel();
+					if (wk.status === 404) break;
+					await sleep(200);
+				}
+				const disabledRes = await rpc(
+					undefined,
+					{ id: randomUUID(), method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {} } },
+					bearerAuth
+				);
+				strictEqual(
+					disabledRes.status,
+					401,
+					'disabling mcp.enabled on reload must dispose the Bearer validator and reject previously used tokens (authCacheable: false)'
+				);
+				await disabledRes.body?.cancel();
+			} finally {
+				await writeFile(`${configPath}.tmp`, configuredYaml);
+				await rename(`${configPath}.tmp`, configPath);
+				const restoreDeadline = Date.now() + 30_000;
+				while (Date.now() < restoreDeadline) {
+					const wk = await fetch(new URL('/.well-known/oauth-protected-resource/mcp', started.harper.httpURL), {
+						signal: AbortSignal.timeout(requestTimeoutMs),
+					});
+					await wk.body?.cancel();
+					if (wk.status === 200) break;
+					await sleep(200);
+				}
+			}
 		}
 	);
 });

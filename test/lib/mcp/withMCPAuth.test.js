@@ -597,6 +597,45 @@ describe('withMCPAuth — default-group registration (path option)', () => {
 		assert.equal(ok.status, 200);
 		assert.equal(calls.length, 1);
 	});
+
+	it('matches mount-relative request.pathname when Harper sets originalPathname for a mounted app', async () => {
+		const token = mint();
+		const { handler, calls } = spyHandler();
+		const wrapped = withMCPAuth(handler, opts({ path: '/mcp' }));
+		const mountedReq = {
+			...req(`Bearer ${token}`, { pathname: '/mcp' }),
+			originalPathname: '/app1/mcp',
+		};
+		const ok = await wrapped(mountedReq, NEXT);
+		assert.equal(ok.status, 200);
+		assert.equal(calls.length, 1);
+	});
+
+	it('clears a populated request.user if a default-group handler mistakenly calls next(request)', async () => {
+		const token = mint();
+		const resolvedUser = {
+			username: 'alice@example.com',
+			active: true,
+			role: { id: 'developer', permission: { super_user: false } },
+		};
+		let seenInsideHandler;
+		const fallthroughHandler = (request, next) => {
+			seenInsideHandler = request.user;
+			return next(request);
+		};
+		const wrapped = withMCPAuth(
+			fallthroughHandler,
+			opts({
+				path: '/mcp',
+				getUser: async () => resolvedUser,
+			})
+		);
+		const request = req(`Bearer ${token}`, { pathname: '/mcp' });
+		const res = await wrapped(request, NEXT);
+		assert.equal(seenInsideHandler, resolvedUser, 'handler sees resolved request.user while running');
+		assert.equal(res.__next, true);
+		assert.equal(request.user, undefined, 'request.user must be cleared before falling through to default chain');
+	});
 });
 
 describe('withMCPAuth — onAuthError', () => {

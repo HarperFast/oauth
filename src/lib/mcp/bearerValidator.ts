@@ -42,11 +42,6 @@ const MAX_AUTH_EXPIRY_OFFSET_SECONDS = 365 * 24 * 60 * 60;
  * Decode ONLY the unverified payload's `iss` claim from a compact JWS (`a.b.c`)
  * to determine whether this plugin owns the token. Returns `undefined` for any
  * non-JWT or payload without a non-empty string `iss`.
- *
- * Security note: this value is used strictly as a routing/ownership discriminator
- * (`unverifiedIss === resolveIssuer(...)`). Cryptographic verification of the
- * full token (including `iss`) runs immediately afterward via
- * `verifyMCPAccessToken`.
  */
 function extractUnverifiedIssuer(token: string): string | undefined {
 	if (typeof token !== 'string' || !token || token.length > MAX_TOKEN_LENGTH) {
@@ -77,13 +72,13 @@ function extractUnverifiedIssuer(token: string): string | undefined {
 	}
 }
 
-function extractResourcePathname(resourceUrl: string): string {
+function extractResourcePathname(resourceUrl: string): string | null {
 	try {
 		const { pathname } = new URL(resourceUrl);
 		const normalized = pathname.length > 1 && pathname.endsWith('/') ? pathname.slice(0, -1) : pathname;
 		return normalized || '/';
 	} catch {
-		return '/mcp';
+		return null;
 	}
 }
 
@@ -99,7 +94,7 @@ export function createMCPBearerValidator(options: MCPBearerValidatorOptions = {}
 	let cachedResourceInput: string | undefined;
 	let cachedIssuer: string | undefined;
 	let cachedResource: string | undefined;
-	let cachedResourcePathname: string | undefined;
+	let cachedResourcePathname: string | null | undefined;
 
 	return function mcpBearerValidator(
 		token: string,
@@ -121,7 +116,7 @@ export function createMCPBearerValidator(options: MCPBearerValidatorOptions = {}
 			cfg.resource !== cachedResourceInput ||
 			!cachedIssuer ||
 			!cachedResource ||
-			!cachedResourcePathname
+			cachedResourcePathname === undefined
 		) {
 			cachedCfg = cfg;
 			cachedIssuerInput = cfg.issuer;
@@ -138,20 +133,18 @@ export function createMCPBearerValidator(options: MCPBearerValidatorOptions = {}
 			return undefined;
 		}
 
+		const requestPathname = getRequestPathname(request);
+		if (resourcePathname !== null && !pathOwned(requestPathname, resourcePathname)) {
+			return undefined;
+		}
+
 		const logger = options.logger ?? OAuthResource.logger;
 		const emitAudit = options.emitAudit ?? emitMCPAuditEvent;
 		const keyStore: KeySource = options.keyStore ?? (defaultKeyStore ??= new MCPKeyStore(logger));
 
 		return (async (): Promise<MCPBearerValidationResult> => {
-			const requestPathname = getRequestPathname(request);
 			if ((requestPathname ?? request?.url ?? '').length > 2048) {
 				throw credentialRejection('request path exceeds the maximum allowed length');
-			}
-			// Enforce route scoping before key lookup and auditing so unverified
-			// tokens carrying a forged `iss` on non-MCP routes cannot flood the
-			// audit log or trigger key-store reads.
-			if (!pathOwned(requestPathname, resourcePathname)) {
-				throw credentialRejection('token audience does not match the requested resource');
 			}
 
 			const reject = (reason: string): never => {
@@ -163,10 +156,14 @@ export function createMCPBearerValidator(options: MCPBearerValidatorOptions = {}
 						timestamp: new Date().toISOString(),
 					});
 				} catch {
-					throw credentialRejection(reason);
+					// Audit is best-effort; still throw the credential rejection below.
 				}
 				throw credentialRejection(reason);
 			};
+
+			if (resourcePathname === null) {
+				return reject('MCP resource URL is invalid');
+			}
 
 			const verified = await verifyMCPAccessToken(token, {
 				cfg,

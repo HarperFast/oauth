@@ -303,29 +303,31 @@ disabled on reload, when all providers are removed, or when the application
 scope closes):
 
 - **Abstains synchronously (`undefined`)** when `mcp.enabled` is not `true` or
-  `mcp.issuer` is unset, or when the Bearer token is not a 3-segment compact JWT
-  whose unverified payload `iss` matches `resolveIssuer(request, mcpConfig)` —
-  so native Harper operation tokens and other plugins' Bearer validators
-  continue down the chain with zero async overhead. (Harper's `authentication()`
-  middleware also checks `validateOperationToken` first and only invokes
-  registered Bearer validators when operation-token verification throws
-  `'invalid token'`.)
+  `mcp.issuer` is unset, when the Bearer token is not a 3-segment compact JWT
+  whose unverified payload `iss` matches `resolveIssuer(request, mcpConfig)`, or
+  when the request path (`originalPathname ?? pathname`) is outside
+  `mcp.resource`'s path prefix (`pathOwned`) — so native Harper operation tokens
+  and other plugins' Bearer validators on non-MCP routes continue down the chain
+  with zero async overhead (while a plugin MCP token presented to a non-MCP
+  route with no matching validator still receives `401` from Harper's deferred
+  operation-token rejection, without reading signing keys or flooding the audit
+  log). Note: configuring `mcp.resource` with a root path (e.g.
+  `https://my-app.example.com` or `https://my-app.example.com/`) binds
+  `pathOwned` to `/`, making tokens valid across every application route prefix;
+  leave `mcp.resource` unset (defaulting to `<issuer>/mcp`) or give it an
+  explicit sub-path to keep tokens scoped to that route. (Harper's
+  `authentication()` middleware also checks `validateOperationToken` first and
+  only invokes registered Bearer validators when operation-token verification
+  throws `'invalid token'`.)
 - **Authoritatively rejects (`credentialRejectionError(reason, 401)`)** once a
-  token's unverified `iss` claims this plugin's MCP issuer:
-  - If the request path (`originalPathname ?? pathname`) is outside
-    `mcp.resource`'s path prefix (`pathOwned`), it throws `credentialRejectionError`
-    immediately before key lookup and without emitting `oauth.mcp.token.rejected`
-    (suppressing log amplification when a valid `/mcp` token is sent to other
-    routes). Note: configuring `mcp.resource` with a root path (e.g.
-    `https://my-app.example.com` or `https://my-app.example.com/`) binds
-    `pathOwned` to `/`, making tokens valid across every application route
-    prefix; leave `mcp.resource` unset (defaulting to `<issuer>/mcp`) or give it
-    an explicit sub-path to keep tokens scoped to that route.
-  - If no signing keys are available, cryptographic verification (`alg`, `typ` in
-    `['at+jwt', 'JWT']`, `iss`, `aud`, `exp`) fails, or `sub` is a quarantined
-    `unverified:<claim>#<hash>` principal (#231), it emits
-    `oauth.mcp.token.rejected` and throws `credentialRejectionError(reason, 401)`,
-    stopping core auth from falling back to another validator.
+  token's unverified `iss` claims this plugin's MCP issuer on a route covered by
+  `mcp.resource`:
+  - If `mcp.resource` cannot be parsed as a URL, no signing keys are available,
+    cryptographic verification (`alg`, `typ` in `['at+jwt', 'JWT']`, `iss`,
+    `aud`, `exp`) fails, or `sub` is a quarantined `unverified:<claim>#<hash>`
+    principal (#231), it emits `oauth.mcp.token.rejected` and throws
+    `credentialRejectionError(reason, 401)`, stopping core auth from falling
+    back to another validator.
 - **Accepts (`{ username: sub, authExpiresAt, authCacheable: false }`)**
   when verification succeeds (`authExpiresAt` is clamped to at most 365 days in
   the future to match Harper's `effectiveExpiry` bound, and `authCacheable` is
@@ -433,14 +435,15 @@ middleware instead of terminating at the handler). This mirrors Harper's own
 
 ### Options
 
-| Option        | Type                                                 | Default                    | Purpose                                                                                                                                       |
-| ------------- | ---------------------------------------------------- | -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `path`        | `string`                                             | (unset)                    | Set only for the default-group fallback — the path this guard owns; requests outside it fall through to `next()`.                             |
-| `onAuthError` | `(request, reason: string) => any`                   | (unset)                    | Custom denial handler. **Any falsy return falls back to the default 401** — a no-return handler can't accidentally turn a denial into a pass. |
-| `getConfig`   | `() => MCPConfig \| undefined`                       | live plugin config         | MCP config source, read per request. Override for tests.                                                                                      |
-| `logger`      | `Logger`                                             | plugin logger              | Logger for verification failures. Override for tests.                                                                                         |
-| `keyStore`    | `{ getAllPublicKeys(): Promise<...> }`               | the plugin's `MCPKeyStore` | Signing-key source. Override for tests.                                                                                                       |
-| `getUser`     | `(username, password, request) => Promise<...> \| …` | `server.getUser`           | Harper user resolver used to populate `request.user`. Override for tests.                                                                     |
+| Option                | Type                                                 | Default                    | Purpose                                                                                                                                                                                  |
+| --------------------- | ---------------------------------------------------- | -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `path`                | `string`                                             | (unset)                    | Set only for the default-group fallback — the path this guard owns; requests outside it fall through to `next()`.                                                                        |
+| `onAuthError`         | `(request, reason: string) => any`                   | (unset)                    | Custom denial handler for `401` rejections (not invoked on `503` user-lookup timeouts). **Any falsy return falls back to the default 401** — a no-return handler can't turn into a pass. |
+| `getConfig`           | `() => MCPConfig \| undefined`                       | live plugin config         | MCP config source, read per request. Override for tests.                                                                                                                                 |
+| `logger`              | `Logger`                                             | plugin logger              | Logger for verification failures. Override for tests.                                                                                                                                    |
+| `keyStore`            | `{ getAllPublicKeys(): Promise<...> }`               | the plugin's `MCPKeyStore` | Signing-key source. Override for tests.                                                                                                                                                  |
+| `getUser`             | `(username, password, request) => Promise<...> \| …` | `server.getUser`           | Harper user resolver used to populate `request.user`. Override for tests.                                                                                                                |
+| `userLookupTimeoutMs` | `number`                                             | `5000`                     | Deadline in milliseconds for `getUser` resolution; returns `503 Retry-After: 5` directly if exceeded.                                                                                    |
 
 A request whose path exceeds 2048 characters is rejected before any token work
 (DoS guard). If MCP is disabled, no token is presented, or no signing keys exist

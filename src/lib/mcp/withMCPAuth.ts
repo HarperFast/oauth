@@ -40,16 +40,8 @@
  *   (otherwise it would 401 unrelated routes), and register with
  *   `{ before: 'authentication' }` so it runs outermost — ahead of core auth.
  *   This mirrors the precedent in Harper's own server/static.ts. In this mode
- *   the wrapped handler MUST terminate the request (not call `next`): when
- *   `withMCPAuth` leaves `request.user` unset (for example on a role-less
- *   `client_credentials` agent or a quarantined subject), calling `next` hands
- *   the request to core `authentication()`, which rejects the bearer token
- *   (`401 WWW-Authenticate: Basic` on Harpers without `registerBearerValidator`,
- *   or a deferred `401` without `WWW-Authenticate` when the validator is
- *   registered); and when `withMCPAuth` has populated `request.user`, core
- *   `authentication()` treats the request as already authenticated and runs the
- *   rest of the default chain as that Harper user without enforcing the token's
- *   `scope`.
+ *   the wrapped handler MUST terminate the request (not call `next`); see
+ *   `docs/mcp-oauth.md#registration`.
  */
 
 import * as harper from 'harper';
@@ -177,6 +169,8 @@ export interface WithMCPAuthOptions {
 	emitAudit?: (payload: MCPTokenRejectedAuditPayload) => void;
 	/** Resolver used to populate `request.user`; defaults to `server.getUser`. */
 	getUser?: (username: string, password: string | null, request: Request) => Promise<any> | any;
+	/** Timeout in milliseconds for `getUser` resolution; defaults to 5000. */
+	userLookupTimeoutMs?: number;
 }
 
 type HttpListener = (request: Request, next: (req: Request) => any) => any;
@@ -247,9 +241,9 @@ export function getRequestPathname(request: Request | undefined): string | undef
 
 /**
  * True when `pathname` is `routePath` or a segment-bounded sub-path of it
- * ('/mcp' matches '/mcp' and '/mcp/x' but not '/mcponaut'). Trailing slashes
- * on `routePath` are ignored. Mirrors Harper's `matchesRoute` urlPath semantics
- * so the default-group fallback behaves like the urlPath registration.
+ * ('/mcp' matches '/mcp' and '/mcp/x' but not '/mcponaut'). Trailing slashes on
+ * `routePath` are ignored. Mirrors Harper's `matchesRoute` urlPath semantics so
+ * the default-group fallback behaves like the urlPath registration.
  */
 export function pathOwned(pathname: string | undefined, routePath: string): boolean {
 	const path = routePath.length > 1 && routePath.endsWith('/') ? routePath.slice(0, -1) : routePath;
@@ -275,7 +269,9 @@ export function withMCPAuth(handler: HttpListener, options: WithMCPAuthOptions =
 
 	return async function mcpAuthListener(request: Request, next: (req: Request) => any): Promise<any> {
 		const logger = options.logger ?? OAuthResource.logger;
-		const requestPathname = getRequestPathname(request);
+		const requestPathname =
+			request?.pathname ?? (typeof request?.url === 'string' ? request.url.split('?')[0] : undefined);
+		const fullRequestPathname = getRequestPathname(request);
 
 		// Default-group registration: only guard our own path; let everything
 		// else continue down the chain (to core auth and other middleware).
@@ -345,7 +341,7 @@ export function withMCPAuth(handler: HttpListener, options: WithMCPAuthOptions =
 		// for DoS mitigation): withMCPAuth can be registered outermost and doesn't
 		// go through parseRoute, so enforce the limit independently — fail closed
 		// before any token work.
-		if ((requestPathname ?? request.url ?? '').length > 2048) {
+		if ((fullRequestPathname ?? request.url ?? '').length > 2048) {
 			return deny('request path exceeds the maximum allowed length');
 		}
 
@@ -399,15 +395,21 @@ export function withMCPAuth(handler: HttpListener, options: WithMCPAuthOptions =
 			const getUser =
 				options.getUser ?? (typeof serverObj?.getUser === 'function' ? serverObj.getUser.bind(serverObj) : undefined);
 			if (typeof getUser === 'function') {
-				const lookupTimeoutMs = (options as any).userLookupTimeoutMs ?? USER_LOOKUP_TIMEOUT_MS;
+				const lookupTimeoutMs =
+					typeof options.userLookupTimeoutMs === 'number' &&
+					Number.isFinite(options.userLookupTimeoutMs) &&
+					options.userLookupTimeoutMs > 0
+						? options.userLookupTimeoutMs
+						: USER_LOOKUP_TIMEOUT_MS;
 				try {
 					resolvedUser = await resolveUserWithDeadline(getUser(claims.sub, null, request), lookupTimeoutMs);
 				} catch (error) {
 					const isRejectedUser =
-						(harper as any).isCredentialRejection?.(error) === true ||
 						(typeof error === 'object' &&
 							error !== null &&
-							Object.getOwnPropertySymbols(error).some((s) => s.description === 'harper.credentialRejection')) ||
+							Object.getOwnPropertySymbols(error).some(
+								(s) => s.description === 'harper.credentialRejection' && (error as any)[s] === true
+							)) ||
 						(error as any)?.statusCode === 401 ||
 						(error as any)?.statusCode === 403;
 					if (isRejectedUser) {
@@ -452,6 +454,7 @@ export function withMCPAuth(handler: HttpListener, options: WithMCPAuthOptions =
 		}
 
 		request.mcp = claims;
+		let didPopulateUser = false;
 		if (
 			shouldPopulateUser &&
 			isPlainObject(resolvedUser) &&
@@ -459,12 +462,20 @@ export function withMCPAuth(handler: HttpListener, options: WithMCPAuthOptions =
 			isPlainObject(resolvedUser.role.permission)
 		) {
 			request.user = resolvedUser as any;
+			didPopulateUser = true;
 		}
 
 		// Token is valid — hand off to the app's handler. Its response is returned
 		// verbatim (no double-wrapping). `next` is forwarded so the handler may
 		// fall through if it wants (urlPath mode); see the module header for the
 		// default-group caveat.
-		return handler(request, next);
+		const handlerNext =
+			path && didPopulateUser
+				? (req: Request = request) => {
+						delete (req as any).user;
+						return next(req);
+					}
+				: next;
+		return handler(request, handlerNext);
 	};
 }
