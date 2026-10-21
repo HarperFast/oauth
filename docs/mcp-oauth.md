@@ -272,28 +272,39 @@ are not a resource requirement).
 ### Core Bearer validator (`server.registerBearerValidator`)
 
 When `mcp.enabled: true` on a Harper version that exposes
-`server.registerBearerValidator` (`HarperFast/harper#3313`), the plugin registers
-a Bearer validator with Harper's core authentication pipeline (and disposes it
-when `mcp.enabled` is disabled on reload, when all providers are removed, or
-when the application scope closes):
+`server.registerBearerValidator` and `credentialRejectionError`
+(`HarperFast/harper#3313`), the plugin registers a Bearer validator with
+Harper's core authentication pipeline (and disposes it when `mcp.enabled` is
+disabled on reload, when all providers are removed, or when the application
+scope closes):
 
-- **Abstains synchronously (`undefined`)** when `mcp.enabled` is not `true`, or
-  when the Bearer token is not a 3-segment compact JWT whose unverified payload
-  `iss` matches `resolveIssuer(request, mcpConfig)` — so native Harper operation
-  tokens and other plugins' Bearer validators continue down the chain with zero
-  async overhead.
+- **Abstains synchronously (`undefined`)** when `mcp.enabled` is not `true` or
+  `mcp.issuer` is unset, or when the Bearer token is not a 3-segment compact JWT
+  whose unverified payload `iss` matches `resolveIssuer(request, mcpConfig)` —
+  so native Harper operation tokens and other plugins' Bearer validators
+  continue down the chain with zero async overhead. (Harper's `authentication()`
+  middleware also checks `validateOperationToken` first and only invokes
+  registered Bearer validators when operation-token verification throws
+  `'invalid token'`.)
 - **Authoritatively rejects (`credentialRejectionError(reason, 401)`)** once a
-  token's unverified `iss` claims this plugin's MCP issuer, if the request path
-  is outside `mcp.resource`'s path prefix (`pathOwned`), no signing keys are
-  available, cryptographic verification (`alg`, `typ` in `['at+jwt', 'JWT']`,
-  `iss`, `aud`, `exp`) fails, or `sub` is a quarantined `unverified:<claim>#<hash>`
-  principal (#231) — emitting `oauth.mcp.token.rejected` and stopping core auth
-  from falling back to another validator.
-- **Accepts (`{ username: sub, authExpiresAt: exp, authCacheable }`)** when
-  verification succeeds (`authCacheable` is `false` whenever `mcp.resource` has a
-  non-root path prefix such as `/mcp`, so Harper's header-keyed
-  `authorizationCache` cannot replay an `/mcp`-scoped token on non-MCP routes).
-  Harper's `authentication()` middleware then resolves `request.user` via
+  token's unverified `iss` claims this plugin's MCP issuer:
+  - If the request path (`originalPathname ?? pathname`) is outside
+    `mcp.resource`'s path prefix (`pathOwned`, including dot-segment and
+    encoded-separator traversal hardening), it throws `credentialRejectionError`
+    immediately before key lookup and without emitting `oauth.mcp.token.rejected`
+    (suppressing log amplification when a valid `/mcp` token is sent to other
+    routes).
+  - If no signing keys are available, cryptographic verification (`alg`, `typ` in
+    `['at+jwt', 'JWT']`, `iss`, `aud`, `exp`) fails, or `sub` is a quarantined
+    `unverified:<claim>#<hash>` principal (#231), it emits
+    `oauth.mcp.token.rejected` and throws `credentialRejectionError(reason, 401)`,
+    stopping core auth from falling back to another validator.
+- **Accepts (`{ username: sub, authExpiresAt: exp, authCacheable: false }`)**
+  when verification succeeds (`authCacheable` is always `false` so every request
+  re-evaluates `pathOwned` and live `OAuthResource.mcpConfig`, preventing
+  Harper's header-keyed `authorizationCache` from replaying an `/mcp` token on
+  non-MCP routes or after `mcp.enabled` is disabled on reload). Harper's
+  `authentication()` middleware then resolves `request.user` via
   `server.getUser(username, null, request)` and requires a provisioned role
   (`user.role.permission`); unprovisioned subjects without an `hdb_user` row
   receive `401` from core auth unless mapped to a provisioned Harper username
@@ -301,7 +312,11 @@ when the application scope closes):
 
 On older Harper builds without `server.registerBearerValidator`, the plugin
 logs a one-time warning when `mcp.enabled: true` and continues running; use
-`withMCPAuth` on a custom route for those builds.
+`withMCPAuth` on a custom route for those builds. During a mixed-version
+rollout where some nodes run a Harper build with `server.registerBearerValidator`
+and others do not, native `/mcp` Bearer authentication succeeds only on
+upgraded nodes — upgrade Harper across all nodes serving `/mcp` before
+directing MCP OAuth clients to native `/mcp`.
 
 ### The `withMCPAuth` wrapper
 
@@ -328,12 +343,18 @@ When a valid token is presented, the wrapper attaches the verified claims on
 
 ```typescript
 request.mcp = { sub, client_id, aud, scope };
-// request.user is resolved via server.getUser(sub, null, request) when available,
-// or falls back to { username: sub }. Quarantined subjects (unverified:<claim>#<hash>)
-// never call getUser and leave request.user as undefined so roleless isolation is
-// preserved. If getUser throws a credential rejection or returns active === false,
-// withMCPAuth fails closed with 401 (or 503 Retry-After: 1 on transient user-store
-// errors) before invoking the handler.
+// request.user is resolved via server.getUser(sub, null, request) (bounded by a
+// 5-second timeout) when available and populated only when the resolved user is
+// active and carries a plain-object role.permission (matching principalFromClaim
+// in Harper's security/bearerValidators.ts); when server.getUser is not exposed
+// by the host runtime, it falls back to { username: sub }. Subjects without a
+// provisioned hdb_user role (such as client_credentials agents where sub =
+// client_id and getUser returns { username }, or quarantined
+// unverified:<claim>#<hash> subjects which skip getUser entirely) leave
+// request.user as undefined while still populating request.mcp. If getUser
+// throws a credential rejection or returns active === false, withMCPAuth fails
+// closed with 401 (or 503 Retry-After: 1 on transient user-store errors or
+// timeouts) before invoking the handler.
 ```
 
 Tokens are read from the `Authorization: Bearer` header only (RFC 6750 §2.1) —

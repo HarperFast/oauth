@@ -36,7 +36,8 @@
 
 import { suite, test, before, after } from 'node:test';
 import { strictEqual, ok } from 'node:assert/strict';
-import { createHash, createPrivateKey, randomUUID, sign } from 'node:crypto';
+import { createHash, createPrivateKey, randomBytes, randomUUID, sign } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { createRequire } from 'node:module';
@@ -44,6 +45,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import {
 	setupHarperWithFixture,
 	teardownHarper,
+	sendOperation,
 	type ContextWithHarper,
 	type HarperTestContext,
 	type StartedHarperTestContext,
@@ -53,6 +55,10 @@ const require = createRequire(import.meta.url);
 
 function getHarperBinPath(): string {
 	return join(dirname(require.resolve('harper')), 'bin', 'harper.js');
+}
+
+function harperSupportsBearerValidator(binPath: string): boolean {
+	return existsSync(join(dirname(binPath), '..', 'security', 'bearerValidators.js'));
 }
 
 function formParserKeepsRepeatedValues(): boolean {
@@ -343,11 +349,15 @@ suite('Native application MCP: the OAuth resource is not a generated tool (#281)
 		if (dataRootDir) await rm(dataRootDir, { recursive: true, force: true, maxRetries: 10 });
 	});
 
-	async function rpc(sessionId: string | undefined, message: object): Promise<Response> {
+	async function rpc(
+		sessionId: string | undefined,
+		message: object,
+		authHeader: string = authorization
+	): Promise<Response> {
 		return fetch(new URL('/mcp', started.harper.httpURL), {
 			method: 'POST',
 			headers: {
-				'Authorization': authorization,
+				'Authorization': authHeader,
 				'Content-Type': 'application/json',
 				'Accept': 'application/json, text/event-stream',
 				...(sessionId && { 'mcp-session-id': sessionId, 'mcp-protocol-version': '2025-06-18' }),
@@ -357,17 +367,104 @@ suite('Native application MCP: the OAuth resource is not a generated tool (#281)
 		});
 	}
 
-	async function request(sessionId: string, method: string, params: object): Promise<any> {
+	async function request(
+		sessionId: string,
+		method: string,
+		params: object,
+		authHeader: string = authorization
+	): Promise<any> {
 		let res: Response;
 		let body: any;
 		try {
-			res = await rpc(sessionId, { id: randomUUID(), method, params });
+			res = await rpc(sessionId, { id: randomUUID(), method, params }, authHeader);
 			body = await res.json();
 		} catch (error) {
 			throw new Error(`${method}: no complete JSON-RPC response`, { cause: error });
 		}
 		strictEqual(res.status, 200, `${method}: ${JSON.stringify(body)}`);
 		return body;
+	}
+
+	let provisionedMcpUser = false;
+	async function completeMcpOAuthFlow(): Promise<string> {
+		if (!provisionedMcpUser) {
+			await sendOperation(started.harper, {
+				operation: 'add_user',
+				username: 'mcp-oauth-user',
+				password: 'McpOauthUserP@ss123!',
+				active: true,
+				role: 'super_user',
+			});
+			provisionedMcpUser = true;
+		}
+		const seedRes = await fetch(new URL('/mcp-test/seed-family', started.harper.httpURL));
+		strictEqual(seedRes.status, 200);
+		await seedRes.body?.cancel();
+
+		const redirectUri = 'https://client.test/cb';
+		const codeVerifier = randomBytes(32).toString('base64url');
+		const codeChallenge = createHash('sha256').update(codeVerifier).digest('base64url');
+		const clientState = randomBytes(8).toString('hex');
+
+		const authorizeUrl = new URL('/oauth/mcp/authorize', started.harper.httpURL);
+		authorizeUrl.searchParams.set('response_type', 'code');
+		authorizeUrl.searchParams.set('client_id', CLIENT_ID);
+		authorizeUrl.searchParams.set('redirect_uri', redirectUri);
+		authorizeUrl.searchParams.set('code_challenge', codeChallenge);
+		authorizeUrl.searchParams.set('code_challenge_method', 'S256');
+		authorizeUrl.searchParams.set('resource', 'https://mcp.test/mcp');
+		authorizeUrl.searchParams.set('state', clientState);
+
+		const authorizeRes = await fetch(authorizeUrl, { redirect: 'manual' });
+		strictEqual(authorizeRes.status, 302, 'MCP authorize must redirect to upstream IdP');
+		const idpLocation = authorizeRes.headers.get('location');
+		ok(idpLocation, 'MCP authorize must set Location');
+		const browserCookie = authorizeRes.headers.getSetCookie().find((c) => c.startsWith('__Host-oauth_browser'));
+		ok(browserCookie, 'MCP authorize must set __Host-oauth_browser cookie');
+		const browserCookiePair = browserCookie!.split(';')[0];
+		await authorizeRes.body?.cancel();
+
+		const upstreamState = new URL(idpLocation!).searchParams.get('state');
+		ok(upstreamState, 'upstream redirect must carry state');
+
+		const callbackUrl = new URL('/oauth/test/callback', started.harper.httpURL);
+		callbackUrl.searchParams.set('code', 'upstream-code-279');
+		callbackUrl.searchParams.set('state', upstreamState!);
+		const callbackRes = await fetch(callbackUrl, {
+			redirect: 'manual',
+			headers: { cookie: browserCookiePair },
+		});
+		strictEqual(callbackRes.status, 302, 'OAuth callback must redirect back to MCP client redirect_uri');
+		const finalLocation = callbackRes.headers.get('location');
+		ok(finalLocation, 'OAuth callback must set Location');
+		await callbackRes.body?.cancel();
+
+		const mcpCode = new URL(finalLocation!).searchParams.get('code');
+		ok(mcpCode, 'final redirect must carry an MCP authorization code');
+
+		const tokenRes = await fetch(new URL('/oauth/mcp/token', started.harper.httpURL), {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({
+				grant_type: 'authorization_code',
+				code: mcpCode!,
+				code_verifier: codeVerifier,
+				redirect_uri: redirectUri,
+				client_id: CLIENT_ID,
+			}),
+		});
+		const tokenBody = (await tokenRes.json()) as any;
+		strictEqual(tokenRes.status, 200, `MCP token exchange must return 200: ${JSON.stringify(tokenBody)}`);
+		ok(typeof tokenBody.access_token === 'string', 'token response must include access_token');
+		return tokenBody.access_token;
+	}
+
+	async function mintTestToken(params: Record<string, string | number>): Promise<string> {
+		const url = new URL('/mcp-test/mint-token', started.harper.httpURL);
+		for (const [k, v] of Object.entries(params)) url.searchParams.set(k, String(v));
+		const res = await fetch(url);
+		strictEqual(res.status, 200);
+		return ((await res.json()) as any).accessToken;
 	}
 
 	async function assertOAuthToolsExcluded(label: string): Promise<void> {
@@ -464,6 +561,127 @@ suite('Native application MCP: the OAuth resource is not a generated tool (#281)
 			await rename(`${configPath}.tmp`, configPath);
 			await waitForLogin('redirect');
 			await assertOAuthToolsExcluded('provider reload');
+		}
+	);
+
+	test(
+		'withMCPAuth populates request.user for a provisioned Harper user and leaves role-less subjects without request.user (#279)',
+		{ timeout: 120_000 },
+		async () => {
+			const accessToken = await completeMcpOAuthFlow();
+			const provisionedRes = await fetch(new URL('/mcp-custom', started.harper.httpURL), {
+				headers: { Authorization: `Bearer ${accessToken}` },
+				signal: AbortSignal.timeout(requestTimeoutMs),
+			});
+			strictEqual(provisionedRes.status, 200);
+			const provisionedBody = (await provisionedRes.json()) as any;
+			strictEqual(provisionedBody.user, 'mcp-oauth-user');
+			strictEqual(provisionedBody.hasRolePermission, true);
+			strictEqual(provisionedBody.mcpSub, 'mcp-oauth-user');
+
+			const unprovisionedToken = await mintTestToken({ sub: 'unprovisioned-agent' });
+			const unprovisionedRes = await fetch(new URL('/mcp-custom', started.harper.httpURL), {
+				headers: { Authorization: `Bearer ${unprovisionedToken}` },
+				signal: AbortSignal.timeout(requestTimeoutMs),
+			});
+			strictEqual(unprovisionedRes.status, 200);
+			const unprovisionedBody = (await unprovisionedRes.json()) as any;
+			strictEqual(unprovisionedBody.user, null, 'role-less getUser view must not populate request.user');
+			strictEqual(unprovisionedBody.hasRolePermission, false);
+			strictEqual(unprovisionedBody.mcpSub, 'unprovisioned-agent');
+		}
+	);
+
+	test(
+		'completes the plugin OAuth flow and authenticates native /mcp tools/list and tools/call via registerBearerValidator (#279)',
+		{ timeout: 120_000 },
+		async (t) => {
+			const capsRes = await fetch(new URL('/mcp-test/capabilities', started.harper.httpURL));
+			strictEqual(capsRes.status, 200);
+			const caps = (await capsRes.json()) as { hasBearerValidator: boolean };
+			strictEqual(
+				caps.hasBearerValidator,
+				harperSupportsBearerValidator(harperBinPath),
+				'runtime server.registerBearerValidator capability matches installed Harper binary'
+			);
+			if (!caps.hasBearerValidator) {
+				t.skip('installed Harper does not expose server.registerBearerValidator (HarperFast/harper#3313)');
+				return;
+			}
+
+			const accessToken = await completeMcpOAuthFlow();
+			const bearerAuth = `Bearer ${accessToken}`;
+
+			const init = await rpc(
+				undefined,
+				{
+					id: randomUUID(),
+					method: 'initialize',
+					params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'oauth-279', version: '1' } },
+				},
+				bearerAuth
+			);
+			const sessionId = init.headers.get('mcp-session-id');
+			ok(sessionId, `initialize with plugin Bearer token: ${init.status} ${await init.text()}`);
+			strictEqual((await rpc(sessionId, { method: 'notifications/initialized' }, bearerAuth)).status, 202);
+
+			const list = await request(sessionId, 'tools/list', {}, bearerAuth);
+			const names: string[] = list.result.tools.map((tool: { name: string }) => tool.name);
+			ok(names.includes('get_NativeMcpControl'), `tools/list with plugin Bearer token lists control tool (${names})`);
+
+			const control = await request(
+				sessionId,
+				'tools/call',
+				{ name: 'get_NativeMcpControl', arguments: {} },
+				bearerAuth
+			);
+			const controlText = JSON.stringify(control.result);
+			ok(
+				!control.result?.isError && controlText.includes('native-mcp') && controlText.includes('mcp-oauth-user'),
+				`tools/call executes as mapped Harper user mcp-oauth-user: ${JSON.stringify(control)}`
+			);
+
+			// Wrong-audience token -> 401
+			const wrongAudToken = await mintTestToken({ aud: 'https://other.test/mcp' });
+			const wrongAudRes = await rpc(
+				undefined,
+				{ id: randomUUID(), method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {} } },
+				`Bearer ${wrongAudToken}`
+			);
+			strictEqual(wrongAudRes.status, 401, 'wrong-audience MCP token must be rejected with 401');
+			await wrongAudRes.body?.cancel();
+
+			// Expired token -> 401
+			const expiredToken = await mintTestToken({ ttl: -60 });
+			const expiredRes = await rpc(
+				undefined,
+				{ id: randomUUID(), method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {} } },
+				`Bearer ${expiredToken}`
+			);
+			strictEqual(expiredRes.status, 401, 'expired MCP token must be rejected with 401');
+			await expiredRes.body?.cancel();
+
+			// Valid /mcp token presented to a non-MCP REST route -> 401 (pathOwned)
+			const nonMcpRes = await fetch(new URL('/NativeMcpControl', started.harper.httpURL), {
+				headers: { Authorization: bearerAuth },
+				signal: AbortSignal.timeout(requestTimeoutMs),
+			});
+			strictEqual(nonMcpRes.status, 401, 'MCP token scoped to /mcp must be rejected on non-MCP route');
+			await nonMcpRes.body?.cancel();
+
+			// Non-plugin Bearer token (Harper operation_token) is unaffected -> 200
+			const opTokens = (await sendOperation(started.harper, {
+				operation: 'create_authentication_tokens',
+				username: 'mcp-oauth-user',
+				password: 'McpOauthUserP@ss123!',
+			})) as { operation_token: string };
+			ok(typeof opTokens?.operation_token === 'string', 'Harper issued an operation_token');
+			const opRes = await fetch(new URL('/NativeMcpControl', started.harper.httpURL), {
+				headers: { Authorization: `Bearer ${opTokens.operation_token}` },
+				signal: AbortSignal.timeout(requestTimeoutMs),
+			});
+			strictEqual(opRes.status, 200, 'Harper operation_token must remain unaffected by MCP Bearer validator');
+			await opRes.body?.cancel();
 		}
 	);
 });

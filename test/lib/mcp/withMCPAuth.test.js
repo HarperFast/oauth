@@ -290,9 +290,10 @@ describe('withMCPAuth — happy path', () => {
 			aud: RESOURCE,
 			scope: 'mcp:read',
 		});
-		// The handler observes request.mcp already populated.
+		// The handler observes request.mcp already populated; without a resolved
+		// Harper user carrying role.permission, request.user stays undefined.
 		assert.equal(calls[0].request.mcp.sub, 'alice@example.com');
-		assert.deepEqual(request.user, { username: 'alice@example.com' });
+		assert.equal(request.user, undefined);
 	});
 
 	it('resolves request.user via getUser(sub, null, request) when available (#279)', async () => {
@@ -320,7 +321,7 @@ describe('withMCPAuth — happy path', () => {
 		assert.equal(request.user, harperUser);
 	});
 
-	it('accepts a role-less user view ({ username: sub }) returned by Harper getUser for subjects with no hdb_user row', async () => {
+	it('leaves request.user undefined when getUser returns a role-less view ({ username: sub }) for subjects with no hdb_user row', async () => {
 		const sub = 'https://agent.example.com/client.json';
 		const token = mint({ subject: sub });
 		const request = req(`Bearer ${token}`);
@@ -330,7 +331,8 @@ describe('withMCPAuth — happy path', () => {
 		);
 
 		assert.equal(res.status, 200);
-		assert.deepEqual(request.user, { username: sub });
+		assert.equal(request.user, undefined);
+		assert.equal(request.mcp.sub, sub);
 	});
 
 	it('binds default server.getUser to server when resolving request.user', async () => {
@@ -340,13 +342,21 @@ describe('withMCPAuth — happy path', () => {
 		globalThis.server = {
 			tag: 'bound-server',
 			async getUser(username) {
-				return { username, boundTag: this.tag };
+				return {
+					username,
+					boundTag: this.tag,
+					role: { id: 'developer', permission: { super_user: false } },
+				};
 			},
 		};
 		try {
 			const res = await withMCPAuth(spyHandler().handler, opts())(request, NEXT);
 			assert.equal(res.status, 200);
-			assert.deepEqual(request.user, { username: 'alice@example.com', boundTag: 'bound-server' });
+			assert.deepEqual(request.user, {
+				username: 'alice@example.com',
+				boundTag: 'bound-server',
+				role: { id: 'developer', permission: { super_user: false } },
+			});
 		} finally {
 			globalThis.server = prevServer;
 		}
@@ -547,6 +557,14 @@ describe('withMCPAuth — default-group registration (path option)', () => {
 		const ok = await wrapped2(req(`Bearer ${token}`, { pathname: '/mcp' }), NEXT);
 		assert.equal(ok.status, 200);
 		assert.equal(calls.length, 1);
+
+		// Traversal and encoded-separator paths must fail closed with 401 rather than
+		// matching /mcp or falling through to downstream normalization.
+		for (const badPath of ['/mcp/../SomeTable/1', '/mcp/%2e%2e/SomeTable/1', '/other/../mcp', '/mcp/foo%2fbar']) {
+			const res = await wrapped2(req(`Bearer ${token}`, { pathname: badPath }), NEXT);
+			assert.equal(res.status, 401, `expected 401 for unsafe path ${badPath}`);
+		}
+		assert.equal(calls.length, 1, 'handler must not run for traversal paths');
 	});
 });
 

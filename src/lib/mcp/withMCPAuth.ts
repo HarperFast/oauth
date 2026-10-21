@@ -170,14 +170,44 @@ export interface WithMCPAuthOptions {
 	 * Defaults to `harper.server?.getUser ?? globalThis.server?.getUser`. When
 	 * available and `request.user` is not already set (and `sub` is not a
 	 * quarantined `unverified:<claim>#<hash>` principal), `withMCPAuth` resolves
-	 * `payload.sub` so `request.user` carries the Harper user object (and role
-	 * permissions) alongside `request.mcp`, failing closed if `getUser` throws
-	 * or resolves an inactive user (`active === false`). Injectable for tests.
+	 * `payload.sub` and populates `request.user` when the returned user carries a
+	 * plain-object `role.permission`, failing closed with 401 if `getUser` throws a
+	 * tagged credential rejection (or 401/403) or returns `active === false`, and
+	 * 503 if `getUser` throws an untagged error or exceeds the 5 s lookup deadline.
+	 * Injectable for tests.
 	 */
 	getUser?: (username: string, password: string | null, request: Request) => Promise<any> | any;
 }
 
 type HttpListener = (request: Request, next: (req: Request) => any) => any;
+
+const USER_LOOKUP_TIMEOUT_MS = 5_000;
+
+function isPlainObject(value: unknown): value is Record<string, any> {
+	return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+async function resolveUserWithDeadline<T>(promiseOrValue: T | Promise<T>, timeoutMs: number): Promise<T> {
+	if (promiseOrValue == null || typeof (promiseOrValue as Promise<T>).then !== 'function') {
+		return promiseOrValue as T;
+	}
+	const pending = Promise.resolve(promiseOrValue);
+	pending.catch(() => {});
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			pending,
+			new Promise<never>((_resolve, reject) => {
+				timer = setTimeout(() => {
+					reject(new Error(`server.getUser timed out after ${timeoutMs}ms`));
+				}, timeoutMs);
+				timer.unref?.();
+			}),
+		]);
+	} finally {
+		clearTimeout(timer);
+	}
+}
 
 /**
  * Extract a bearer token from the `Authorization` header. Header-only by design
@@ -195,15 +225,67 @@ function extractBearerToken(headers: any): string | undefined {
 }
 
 /**
+ * Read the unstripped pathname from a Harper request. When Harper dispatches a
+ * `urlPath` subroute with `after: 'authentication'` (such as native `/mcp`),
+ * `stripPrefix(request, urlPath)` wraps the request before running `authentication`
+ * so `request.pathname` is stripped (`'/'`) while `request.originalPathname`
+ * preserves the unstripped target pathname (`'/mcp'`).
+ */
+export function getRequestPathname(request: Request | undefined): string | undefined {
+	const reqAny = request as any;
+	return (
+		reqAny?.originalPathname ??
+		request?.pathname ??
+		(typeof request?.url === 'string' ? request.url.split('?')[0] : undefined)
+	);
+}
+
+/**
+ * True when `pathname` contains backslashes, NUL bytes, percent-encoded path
+ * separators/NULs, malformed percent-encoding, or `.`/`..` dot-segments (raw or
+ * percent-encoded). Rejecting these prevents `/mcp/../SomeTable/1` or
+ * `/mcp/%2e%2e/SomeTable/1` from matching `/mcp` before downstream router
+ * normalization resolves a different target.
+ */
+function hasUnsafePathSegments(pathname: string): boolean {
+	if (pathname.includes('\\') || pathname.includes('\0') || /%2f|%5c|%00/i.test(pathname)) {
+		return true;
+	}
+	for (const seg of pathname.split('/')) {
+		if (!seg) continue;
+		if (seg === '.' || seg === '..') return true;
+		if (seg.includes('%')) {
+			try {
+				const decoded = decodeURIComponent(seg);
+				if (
+					decoded === '.' ||
+					decoded === '..' ||
+					decoded.includes('/') ||
+					decoded.includes('\\') ||
+					decoded.includes('\0')
+				) {
+					return true;
+				}
+			} catch {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+/**
  * True when `pathname` is `routePath` or a segment-bounded sub-path of it
- * ('/mcp' matches '/mcp' and '/mcp/x' but not '/mcponaut'). Trailing slashes on
- * `routePath` are ignored. Mirrors Harper's `matchesRoute` urlPath semantics so
- * the default-group fallback behaves like the urlPath registration.
+ * ('/mcp' matches '/mcp' and '/mcp/x' but not '/mcponaut') and contains no
+ * dot-segments or encoded path separators. Trailing slashes on `routePath` are
+ * ignored. Mirrors Harper's `matchesRoute` urlPath semantics so the
+ * default-group fallback behaves like the urlPath registration.
  */
 export function pathOwned(pathname: string | undefined, routePath: string): boolean {
 	const path = routePath.length > 1 && routePath.endsWith('/') ? routePath.slice(0, -1) : routePath;
 	const p = pathname ?? '/';
-	if (path === '/') return p.startsWith('/');
+	if (!p.startsWith('/') || hasUnsafePathSegments(p)) return false;
+	if (path === '/') return true;
 	return p === path || p.startsWith(path + '/');
 }
 
@@ -224,11 +306,16 @@ export function withMCPAuth(handler: HttpListener, options: WithMCPAuthOptions =
 
 	return async function mcpAuthListener(request: Request, next: (req: Request) => any): Promise<any> {
 		const logger = options.logger ?? OAuthResource.logger;
+		const requestPathname = getRequestPathname(request);
 
 		// Default-group registration: only guard our own path; let everything
-		// else continue down the chain (to core auth and other middleware).
-		if (path && !pathOwned(request.pathname, path)) {
-			return next(request);
+		// else continue down the chain (to core auth and other middleware),
+		// unless the path contains traversal/encoded-separator segments that
+		// could normalize into the guarded route downstream.
+		if (path && !pathOwned(requestPathname, path)) {
+			if (!requestPathname || !hasUnsafePathSegments(requestPathname)) {
+				return next(request);
+			}
 		}
 
 		// Build the spec 401. protectedResourceMetadataUrl derefs mcpConfig
@@ -293,8 +380,11 @@ export function withMCPAuth(handler: HttpListener, options: WithMCPAuthOptions =
 		// for DoS mitigation): withMCPAuth can be registered outermost and doesn't
 		// go through parseRoute, so enforce the limit independently — fail closed
 		// before any token work.
-		if ((request.pathname ?? request.url ?? '').length > 2048) {
+		if ((requestPathname ?? request.url ?? '').length > 2048) {
 			return deny('request path exceeds the maximum allowed length');
+		}
+		if (requestPathname && hasUnsafePathSegments(requestPathname)) {
+			return deny('request path is invalid');
 		}
 
 		const cfg = getConfig();
@@ -348,7 +438,7 @@ export function withMCPAuth(handler: HttpListener, options: WithMCPAuthOptions =
 				options.getUser ?? (typeof serverObj?.getUser === 'function' ? serverObj.getUser.bind(serverObj) : undefined);
 			if (typeof getUser === 'function') {
 				try {
-					resolvedUser = await getUser(claims.sub, null, request);
+					resolvedUser = await resolveUserWithDeadline(getUser(claims.sub, null, request), USER_LOOKUP_TIMEOUT_MS);
 				} catch (error) {
 					const isRejectedUser =
 						(harper as any).isCredentialRejection?.(error) === true ||
@@ -387,8 +477,18 @@ export function withMCPAuth(handler: HttpListener, options: WithMCPAuthOptions =
 		}
 
 		request.mcp = claims;
-		if (shouldPopulateUser) {
-			request.user = resolvedUser ?? { username: claims.sub };
+		// Parity with Harper's principalFromClaim (security/bearerValidators.ts):
+		// core server.getUser answers an unknown username with a role-less `{ username }`
+		// view. Only populate `request.user` when the resolved user carries a plain-object
+		// `role.permission`, so a role-less subject (such as a client_credentials agent)
+		// never becomes a truthy `request.user` on a custom route.
+		if (
+			shouldPopulateUser &&
+			isPlainObject(resolvedUser) &&
+			isPlainObject(resolvedUser.role) &&
+			isPlainObject(resolvedUser.role.permission)
+		) {
+			request.user = resolvedUser as any;
 		}
 
 		// Token is valid — hand off to the app's handler. Its response is returned

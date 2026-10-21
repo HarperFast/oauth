@@ -1003,12 +1003,14 @@ describe('OAuth Plugin Options Watcher', () => {
 	});
 
 	describe('MCP core Bearer validator registration (#279)', () => {
-		it('registers lazily when mcp.enabled is true, exercises live config, and disposes on disable or close', async () => {
+		it('registers lazily when mcp.enabled is true, exercises live config, and disposes on disable, provider removal, or close', async () => {
 			let registeredValidator = null;
+			let registerCount = 0;
 			let disposedCount = 0;
 			const warnings = [];
 			scope.logger.warn = (msg) => warnings.push(msg);
 			scope.server.registerBearerValidator = (validator) => {
+				registerCount++;
 				registeredValidator = validator;
 				return () => {
 					disposedCount++;
@@ -1029,11 +1031,24 @@ describe('OAuth Plugin Options Watcher', () => {
 			await waitFor(() => lastResourceSet !== startupSet);
 
 			assert.equal(typeof registeredValidator, 'function', 'should register the MCP bearer validator when enabled');
+			assert.equal(registerCount, 1);
 			assert.equal(
 				warnings.some((w) => typeof w === 'string' && w.includes('registerBearerValidator')),
 				false,
 				'should not warn when registerBearerValidator is present'
 			);
+
+			// An enabled -> enabled reload must NOT register a second validator.
+			const firstEnabledSet = lastResourceSet;
+			scope.options._config = {
+				...scope.options._config,
+				debug: true,
+				mcp: { enabled: true, issuer: 'https://app.example.com' },
+			};
+			configChangeListeners[0]();
+			await waitFor(() => lastResourceSet !== firstEnabledSet);
+			assert.equal(registerCount, 1, 'enabled -> enabled reload must not re-register the validator');
+			assert.equal(disposedCount, 0);
 
 			// Exercise the registered validator: non-owned token abstains synchronously.
 			assert.equal(
@@ -1058,7 +1073,7 @@ describe('OAuth Plugin Options Watcher', () => {
 			await waitFor(() => lastResourceSet !== enabledSet);
 			assert.equal(disposedCount, 1, 'should dispose the bearer validator when mcp.enabled is disabled on reload');
 
-			// Re-enable MCP and verify scope close also disposes.
+			// Re-enable MCP, then remove all providers — validator must be disposed.
 			const disabledSet = lastResourceSet;
 			scope.options._config = {
 				...scope.options._config,
@@ -1066,9 +1081,31 @@ describe('OAuth Plugin Options Watcher', () => {
 			};
 			configChangeListeners[0]();
 			await waitFor(() => lastResourceSet !== disabledSet);
+			assert.equal(registerCount, 2);
+
+			const reenabledSet = lastResourceSet;
+			const savedProviders = scope.options._config.providers;
+			scope.options._config = {
+				...scope.options._config,
+				providers: {},
+			};
+			configChangeListeners[0]();
+			await waitFor(() => lastResourceSet !== reenabledSet);
+			assert.equal(disposedCount, 2, 'should dispose the bearer validator when all providers are removed');
+
+			// Restore provider + MCP and verify scope close also disposes.
+			const noProvidersSet = lastResourceSet;
+			scope.options._config = {
+				...scope.options._config,
+				providers: savedProviders,
+				mcp: { enabled: true, issuer: 'https://app.example.com' },
+			};
+			configChangeListeners[0]();
+			await waitFor(() => lastResourceSet !== noProvidersSet);
+			assert.equal(registerCount, 3);
 
 			closeListeners[0]();
-			assert.equal(disposedCount, 2, 'should dispose the registered bearer validator on scope close');
+			assert.equal(disposedCount, 3, 'should dispose the registered bearer validator on scope close');
 		});
 
 		it('warns once when mcp.enabled is true and scope.server.registerBearerValidator is missing', async () => {

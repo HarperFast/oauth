@@ -1,7 +1,3 @@
-/**
- * Unit tests for createMCPBearerValidator / registerMCPBearerValidator (#279).
- */
-
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync } from 'node:crypto';
@@ -63,10 +59,11 @@ function makeValidator(extra = {}) {
 	return { validator, events };
 }
 
-function req({ pathname = '/mcp', url, host = 'app.example.com' } = {}) {
+function req({ pathname = '/mcp', originalPathname, url, host = 'app.example.com' } = {}) {
 	return {
 		headers: { host },
 		pathname,
+		...(originalPathname !== undefined ? { originalPathname } : {}),
 		url: url ?? pathname,
 		method: 'POST',
 	};
@@ -75,7 +72,7 @@ function req({ pathname = '/mcp', url, host = 'app.example.com' } = {}) {
 describe('createMCPBearerValidator — ownership ("not mine" returns undefined)', () => {
 	it('returns undefined synchronously when MCP is disabled or unconfigured', () => {
 		const token = mint();
-		for (const cfg of [undefined, { enabled: false, issuer: ISSUER }]) {
+		for (const cfg of [undefined, { enabled: false, issuer: ISSUER }, { enabled: true }]) {
 			const { validator, events } = makeValidator({ getConfig: () => cfg });
 			const res = validator(token, req());
 			assert.equal(res, undefined);
@@ -169,17 +166,26 @@ describe('createMCPBearerValidator — owned-token rejections (fail closed with 
 		assert.equal(events[0].aud, RESOURCE);
 	});
 
-	it('rejects a token minted for /mcp when presented to a non-MCP route (RFC 8707 path binding)', async () => {
+	it('rejects a token minted for /mcp when presented to a non-MCP or traversal route without auditing or reading keys', async () => {
 		const token = mint();
-		const { validator, events } = makeValidator();
+		let keyReads = 0;
+		const { validator, events } = makeValidator({
+			keyStore: {
+				async getAllPublicKeys() {
+					keyReads++;
+					return [key];
+				},
+			},
+		});
 
-		await assertCredentialRejection(
-			validator(token, req({ pathname: '/SomeTable/1' })),
-			/token audience does not match the requested resource/
-		);
-		assert.equal(events.length, 1);
-		assert.equal(events[0].reason, 'token audience does not match the requested resource');
-		assert.equal(events[0].aud, RESOURCE);
+		for (const badPath of ['/SomeTable/1', '/mcp/../SomeTable/1', '/mcp/%2e%2e/SomeTable/1', '/mcp/foo%2fbar']) {
+			await assertCredentialRejection(
+				validator(token, req({ pathname: badPath })),
+				/token audience does not match the requested resource/
+			);
+		}
+		assert.equal(keyReads, 0, 'pre-verification route mismatch must not read signing keys');
+		assert.equal(events.length, 0, 'pre-verification route mismatch must not emit audit events');
 	});
 
 	it('rejects a token with a disallowed typ header that claims our issuer', async () => {
@@ -280,7 +286,7 @@ describe('createMCPBearerValidator — happy path', () => {
 		assert.equal(result.username, 'alice@example.com');
 		assert.equal(typeof result.authExpiresAt, 'number');
 		assert.ok(result.authExpiresAt > Math.floor(Date.now() / 1000));
-		assert.equal(result.authCacheable, false, 'must opt out of header-only authorizationCache for sub-path resource');
+		assert.equal(result.authCacheable, false, 'must opt out of header-only authorizationCache');
 		assert.deepEqual(
 			Object.keys(result).sort(),
 			['authCacheable', 'authExpiresAt', 'username'],
@@ -289,7 +295,15 @@ describe('createMCPBearerValidator — happy path', () => {
 		assert.equal(events.length, 0);
 	});
 
-	it('sets authCacheable: true when issuer is pinned and resource pathname is "/"', async () => {
+	it('reads request.originalPathname when Harper stripPrefix sets request.pathname to "/" on native /mcp', async () => {
+		const token = mint({ subject: 'alice@example.com' });
+		const { validator } = makeValidator();
+		const result = await validator(token, req({ pathname: '/', originalPathname: '/mcp' }));
+		assert.equal(result?.username, 'alice@example.com');
+		assert.equal(result?.authCacheable, false);
+	});
+
+	it('returns authCacheable: false even when resource pathname is "/" so key retirement and mcp.enabled flips apply immediately', async () => {
 		const rootResource = 'https://app.example.com';
 		const token = mint({ subject: 'alice@example.com', audience: rootResource });
 		const { validator } = makeValidator({
@@ -297,7 +311,7 @@ describe('createMCPBearerValidator — happy path', () => {
 		});
 		const result = await validator(token, req({ pathname: '/SomeTable/1' }));
 		assert.equal(result?.username, 'alice@example.com');
-		assert.equal(result?.authCacheable, true);
+		assert.equal(result?.authCacheable, false);
 	});
 });
 
@@ -306,6 +320,19 @@ describe('registerMCPBearerValidator', () => {
 		assert.equal(registerMCPBearerValidator(undefined), undefined);
 		assert.equal(registerMCPBearerValidator({}), undefined);
 		assert.equal(registerMCPBearerValidator({ registerBearerValidator: 'not-a-fn' }), undefined);
+	});
+
+	it('returns a no-op disposer when server.registerBearerValidator returns void so reload tracking stays idempotent', () => {
+		let registerCount = 0;
+		const server = {
+			registerBearerValidator() {
+				registerCount++;
+			},
+		};
+		const unregister = registerMCPBearerValidator(server, () => config, { logger: silentLogger });
+		assert.equal(registerCount, 1);
+		assert.equal(typeof unregister, 'function');
+		unregister();
 	});
 
 	it('registers the validator with server.registerBearerValidator and returns its disposer', async () => {
