@@ -405,6 +405,7 @@ suite('MCP OAuth Stage 7: full round-trip e2e', (ctx: ContextWithHarper) => {
 			new RegExp(`^unverified:${escapeRegExp(STUB_USER_EMAIL)}#[0-9a-f]{16}$`),
 			'sub must be the quarantine principal for an untrusted claim with no matching account'
 		);
+		strictEqual(mcpBody.user, null, 'quarantine principal must leave request.user undefined (#231 / #279)');
 		strictEqual(mcpBody.aud, 'https://mcp.test/mcp', 'aud must match the configured resource');
 		strictEqual(mcpBody.client_id, clientId, 'client_id must match the registered client');
 

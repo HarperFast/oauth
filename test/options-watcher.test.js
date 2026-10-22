@@ -114,6 +114,44 @@ describe('OAuth Plugin Options Watcher', () => {
 		await assert.rejects(handleApplication(scope), /mcp\.issuer is not set/);
 	});
 
+	it('should fail to start when mcp.enabled and mcp.resource is not a valid http(s) URL (redacting embedded credentials)', async () => {
+		for (const badResource of [
+			'not a valid url',
+			'ftp://app.example.com/mcp',
+			'https://app.example.com/mcp?foo=bar',
+			'https://app.example.com/mcp#frag',
+		]) {
+			scope.options._config.mcp = {
+				enabled: true,
+				issuer: 'https://app.example.com',
+				resource: badResource,
+			};
+			await assert.rejects(handleApplication(scope), /mcp\.resource must be an absolute http\(s\) URL/);
+		}
+
+		scope.options._config.mcp = {
+			enabled: true,
+			issuer: 'https://app.example.com',
+			resource: 'https://user:secretpass@app.example.com/mcp',
+		};
+		await assert.rejects(handleApplication(scope), (err) => {
+			assert.match(err.message, /mcp\.resource must be an absolute http\(s\) URL/);
+			assert.ok(!err.message.includes('secretpass'), `must redact credentials in error: ${err.message}`);
+			return true;
+		});
+	});
+
+	it('should treat an empty or whitespace-only mcp.resource as unset (falling back to <issuer>/mcp)', async () => {
+		scope.options._config.mcp = {
+			enabled: true,
+			issuer: 'https://app.example.com',
+			resource: '   ',
+		};
+		await handleApplication(scope);
+		assert.ok(resources.oauth, 'OAuth resource should be registered');
+		assert.equal(OAuthResource.mcpConfig.resource, undefined);
+	});
+
 	it('should start when mcp.enabled and mcp.issuer is a valid https origin', async () => {
 		scope.options._config.mcp = { enabled: true, issuer: 'https://app.example.com' };
 		await handleApplication(scope);
@@ -999,6 +1037,203 @@ describe('OAuth Plugin Options Watcher', () => {
 			// happened before the throwing log call — a later failure must not
 			// suppress it.
 			await waitFor(() => fetchCount > 0);
+		});
+	});
+
+	describe('MCP core Bearer validator registration (#279)', () => {
+		it('registers lazily when mcp.enabled is true, exercises live config, and disposes on disable, provider removal, or close', async () => {
+			let registeredValidator = null;
+			let registerCount = 0;
+			let disposedCount = 0;
+			const warnings = [];
+			scope.logger.warn = (msg) => warnings.push(msg);
+			scope.server.registerBearerValidator = (validator) => {
+				registerCount++;
+				registeredValidator = validator;
+				return () => {
+					disposedCount++;
+				};
+			};
+
+			await handleApplication(scope);
+			assert.equal(registeredValidator, null, 'must not register a bearer validator while mcp.enabled is off');
+
+			const startupSet = lastResourceSet;
+			scope.options._config = {
+				...scope.options._config,
+				mcp: { enabled: true, issuer: 'https://app.example.com' },
+			};
+			configChangeListeners[0]();
+			await waitFor(() => lastResourceSet !== startupSet);
+
+			assert.equal(typeof registeredValidator, 'function', 'should register the MCP bearer validator when enabled');
+			assert.equal(registerCount, 1);
+			assert.equal(
+				warnings.some((w) => typeof w === 'string' && w.includes('registerBearerValidator')),
+				false,
+				'should not warn when registerBearerValidator is present'
+			);
+
+			const firstEnabledSet = lastResourceSet;
+			scope.options._config = {
+				...scope.options._config,
+				debug: true,
+				mcp: { enabled: true, issuer: 'https://app.example.com' },
+			};
+			configChangeListeners[0]();
+			await waitFor(() => lastResourceSet !== firstEnabledSet);
+			assert.equal(registerCount, 1, 'enabled -> enabled reload must not re-register the validator');
+			assert.equal(disposedCount, 0);
+
+			assert.equal(
+				registeredValidator('opaque-token', { pathname: '/mcp', headers: { host: 'app.example.com' } }),
+				undefined
+			);
+
+			const forgedOwnedToken = `a.${Buffer.from(JSON.stringify({ iss: 'https://app.example.com' })).toString('base64url')}.c`;
+			assert.equal(
+				registeredValidator(forgedOwnedToken, { pathname: '/SomeTable/1', headers: { host: 'app.example.com' } }),
+				undefined,
+				'off-path requests abstain synchronously so other validators on non-MCP routes can run'
+			);
+			await assert.rejects(
+				registeredValidator(forgedOwnedToken, { pathname: '/mcp', headers: { host: 'app.example.com' } }),
+				(err) => err.statusCode === 401
+			);
+
+			const enabledSet = lastResourceSet;
+			scope.options._config = {
+				...scope.options._config,
+				mcp: { enabled: false, issuer: 'https://app.example.com' },
+			};
+			configChangeListeners[0]();
+			await waitFor(() => lastResourceSet !== enabledSet);
+			assert.equal(disposedCount, 1, 'should dispose the bearer validator when mcp.enabled is disabled on reload');
+
+			const disabledSet = lastResourceSet;
+			scope.options._config = {
+				...scope.options._config,
+				mcp: { enabled: true, issuer: 'https://app.example.com' },
+			};
+			configChangeListeners[0]();
+			await waitFor(() => lastResourceSet !== disabledSet);
+			assert.equal(registerCount, 2);
+
+			const reenabledSet = lastResourceSet;
+			const savedProviders = scope.options._config.providers;
+			scope.options._config = {
+				...scope.options._config,
+				providers: {},
+			};
+			configChangeListeners[0]();
+			await waitFor(() => lastResourceSet !== reenabledSet);
+			assert.equal(disposedCount, 2, 'should dispose the bearer validator when all providers are removed');
+
+			const noProvidersSet = lastResourceSet;
+			scope.options._config = {
+				...scope.options._config,
+				providers: savedProviders,
+				mcp: { enabled: true, issuer: 'https://app.example.com' },
+			};
+			configChangeListeners[0]();
+			await waitFor(() => lastResourceSet !== noProvidersSet);
+			assert.equal(registerCount, 3);
+
+			closeListeners[0]();
+			assert.equal(disposedCount, 3, 'should dispose the registered bearer validator on scope close');
+		});
+
+		it('warns once when mcp.enabled is true and scope.server.registerBearerValidator is missing', async () => {
+			const warnings = [];
+			scope.logger.warn = (msg) => {
+				if (typeof msg === 'string' && msg.includes('registerBearerValidator')) {
+					warnings.push(msg);
+				}
+			};
+			scope.options._config.mcp = { enabled: true, issuer: 'https://app.example.com' };
+
+			await handleApplication(scope);
+			assert.equal(warnings.length, 1, 'should warn once at startup when registerBearerValidator is unavailable');
+
+			const startupSet = lastResourceSet;
+			scope.options._config = { ...scope.options._config, debug: true };
+			configChangeListeners[0]();
+			await waitFor(() => lastResourceSet !== startupSet);
+			assert.equal(warnings.length, 1, 'should not repeat the missing-hook warning on reload');
+		});
+
+		it('clears the disposer handle even when the disposer throws so a subsequent re-enable registers again', async () => {
+			let registerCount = 0;
+			let shouldThrowOnDispose = true;
+			scope.server.registerBearerValidator = () => {
+				registerCount++;
+				return () => {
+					if (shouldThrowOnDispose) {
+						throw new Error('disposer failed');
+					}
+				};
+			};
+			scope.options._config.mcp = { enabled: true, issuer: 'https://app.example.com' };
+
+			await handleApplication(scope);
+			assert.equal(registerCount, 1);
+
+			const startupSet = lastResourceSet;
+			scope.options._config = {
+				...scope.options._config,
+				mcp: { enabled: false, issuer: 'https://app.example.com' },
+			};
+			configChangeListeners[0]();
+			await waitFor(() => lastResourceSet !== startupSet);
+
+			shouldThrowOnDispose = false;
+			const disabledSet = lastResourceSet;
+			scope.options._config = {
+				...scope.options._config,
+				mcp: { enabled: true, issuer: 'https://app.example.com' },
+			};
+			configChangeListeners[0]();
+			await waitFor(() => lastResourceSet !== disabledSet);
+			assert.equal(registerCount, 2, 'should re-register on re-enable after a throwing disposer');
+		});
+
+		it('a reload that disables mcp.enabled disposes the bearer validator immediately even when the same snapshot errors', async () => {
+			let disposedCount = 0;
+			scope.server.registerBearerValidator = () => () => {
+				disposedCount++;
+			};
+			scope.options._config.mcp = { enabled: true, issuer: 'https://app.example.com' };
+			await handleApplication(scope);
+			assert.equal(OAuthResource.mcpConfig?.enabled, true);
+
+			let errorLogged = false;
+			scope.logger.error = (msg) => {
+				if (typeof msg === 'string' && msg.includes('Failed to update OAuth configuration')) errorLogged = true;
+			};
+
+			// Snapshot both disables mcp.enabled AND has a reserved 'mcp' provider name that throws in initializeProviders.
+			scope.options._config = {
+				...scope.options._config,
+				mcp: { enabled: false, issuer: 'https://app.example.com' },
+				providers: {
+					...scope.options._config.providers,
+					mcp: { provider: 'generic', clientId: 'x', clientSecret: 'y' },
+				},
+			};
+			configChangeListeners[0]();
+			await waitFor(() => errorLogged);
+
+			assert.ok(errorLogged, 'the rejected reload should be logged');
+			assert.equal(
+				OAuthResource.mcpConfig?.enabled,
+				false,
+				'mcp.enabled must be disabled immediately on a disabling reload'
+			);
+			assert.equal(
+				disposedCount,
+				1,
+				'bearer validator must be disposed immediately even when the reload snapshot errors'
+			);
 		});
 	});
 });

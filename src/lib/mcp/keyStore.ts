@@ -141,6 +141,8 @@ let keysTable: Table | undefined;
 
 // Enumeration cache: stores raw decoded records; retirement filter runs per-call.
 let enumCache: { records: MCPSigningKeyRecord[]; fetchedAt: number } | null = null;
+let pendingEnumerate: Promise<MCPSigningKeyRecord[]> | null = null;
+let enumGeneration = 0;
 
 // In-process single-flight guard for key writes. Cross-node races are handled
 // by convergence (multi-key JWKS + double-checked locking inside write lambdas),
@@ -149,6 +151,17 @@ let pendingWrite: Promise<MCPSigningKeyRecord[]> | null = null;
 
 // Single-entry memo: derive public key from PEM only when PEM changes.
 let pinnedPublicKeyMemo: { pem: string; publicPem: string } | null = null;
+
+// Stable projection memo for `getAllPublicKeys`: avoids per-request array/object
+// allocations and preserves array reference identity (`===`) across cache
+// refreshes while the live key set is unchanged.
+let publicKeysProjectionMemo: {
+	sourceRecords: MCPSigningKeyRecord[];
+	accessTtl: number;
+	computedAtSec: number;
+	nextBoundarySec: number;
+	projected: MCPPublicKeyRecord[];
+} | null = null;
 
 // Cache timestamp function — overridable in tests via _setCacheNowMs.
 let _getCacheNowMs: () => number = () => Date.now();
@@ -182,12 +195,18 @@ function getKeysTable(): Table {
 export function resetMCPKeysTableCache(): void {
 	keysTable = undefined;
 	enumCache = null;
+	pendingEnumerate = null;
+	enumGeneration = 0;
 	pendingWrite = null;
 	pinnedPublicKeyMemo = null;
+	publicKeysProjectionMemo = null;
 }
 
 function invalidateEnumCache(): void {
 	enumCache = null;
+	pendingEnumerate = null;
+	enumGeneration++;
+	publicKeysProjectionMemo = null;
 }
 
 function encodeRecord(record: MCPSigningKeyRecord): Record<string, any> {
@@ -332,18 +351,36 @@ export class MCPKeyStore {
 		if (!bypassCache && enumCache && nowMs - enumCache.fetchedAt < ENUM_CACHE_TTL_MS) {
 			return enumCache.records;
 		}
-		const table = getKeysTable();
-		const records: MCPSigningKeyRecord[] = [];
-		for await (const raw of table.search({})) {
-			if (raw?.kid) {
-				records.push(decodeRecord(raw));
-			}
+		if (!bypassCache && pendingEnumerate) {
+			return pendingEnumerate;
 		}
-		// Pre-sort so downstream callers (partitionRetired, selectNewestKey) receive
-		// records in newest-first order without redundant sorts.
-		const sorted = sortByNewest(records);
-		enumCache = { records: sorted, fetchedAt: nowMs };
-		return sorted;
+		const gen = enumGeneration;
+		const run = (async (): Promise<MCPSigningKeyRecord[]> => {
+			const table = getKeysTable();
+			const records: MCPSigningKeyRecord[] = [];
+			for await (const raw of table.search({})) {
+				if (raw?.kid) {
+					records.push(decodeRecord(raw));
+				}
+			}
+			// Pre-sort so downstream callers (partitionRetired, selectNewestKey) receive
+			// records in newest-first order without redundant sorts.
+			const sorted = sortByNewest(records);
+			if (gen === enumGeneration) {
+				enumCache = { records: sorted, fetchedAt: _getCacheNowMs() };
+			}
+			return sorted;
+		})();
+		if (!bypassCache) {
+			const p = run.finally(() => {
+				if (pendingEnumerate === p) {
+					pendingEnumerate = null;
+				}
+			});
+			pendingEnumerate = p;
+			return p;
+		}
+		return run;
 	}
 
 	/**
@@ -493,6 +530,63 @@ export class MCPKeyStore {
 	}
 
 	/**
+	 * Public keys for token verification. Unlike `getAllPublicKeys` (which swallows
+	 * table errors and returns `[]` so the JWKS endpoint doesn't 500 pre-mint),
+	 * this method propagates table-read errors so token verifiers can distinguish
+	 * a transient database outage from an empty key set.
+	 */
+	async getPublicKeysForVerification(mcpConfig?: MCPConfig): Promise<MCPPublicKeyRecord[]> {
+		const records = await this.enumerateKeys();
+		const accessTtl = coerceInterval(mcpConfig?.accessTokenTtl) || DEFAULT_ACCESS_TOKEN_TTL;
+		const nowSeconds = Math.floor(_getCacheNowMs() / 1000);
+		if (
+			publicKeysProjectionMemo &&
+			publicKeysProjectionMemo.sourceRecords === records &&
+			publicKeysProjectionMemo.accessTtl === accessTtl &&
+			nowSeconds >= publicKeysProjectionMemo.computedAtSec &&
+			nowSeconds <= publicKeysProjectionMemo.nextBoundarySec
+		) {
+			return publicKeysProjectionMemo.projected;
+		}
+		const { live } = partitionRetired(records, accessTtl, nowSeconds);
+		const gcThreshold = 2 * accessTtl;
+		let nextBoundarySec = Number.POSITIVE_INFINITY;
+		for (let i = 1; i < records.length; i++) {
+			const boundary = records[i - 1].created_at + gcThreshold;
+			if (nowSeconds <= boundary && boundary < nextBoundarySec) {
+				nextBoundarySec = boundary;
+			}
+		}
+		const prevProjected = publicKeysProjectionMemo?.projected;
+		// Strip private_key_pem: the private half must never leave the key store.
+		const projected =
+			prevProjected &&
+			prevProjected.length === live.length &&
+			prevProjected.every(
+				(p, i) =>
+					p.kid === live[i].kid &&
+					p.alg === live[i].alg &&
+					p.public_key_pem === live[i].public_key_pem &&
+					p.created_at === live[i].created_at
+			)
+				? prevProjected
+				: live.map((k) => ({
+						kid: k.kid,
+						alg: k.alg,
+						public_key_pem: k.public_key_pem,
+						created_at: k.created_at,
+					}));
+		publicKeysProjectionMemo = {
+			sourceRecords: records,
+			accessTtl,
+			computedAtSec: nowSeconds,
+			nextBoundarySec,
+			projected,
+		};
+		return projected;
+	}
+
+	/**
 	 * Public keys to publish at the JWKS endpoint and use for token verification.
 	 *
 	 * Returns only the LIVE key set — retired keys (whose immediate successor was
@@ -507,12 +601,7 @@ export class MCPKeyStore {
 	 */
 	async getAllPublicKeys(mcpConfig?: MCPConfig): Promise<MCPPublicKeyRecord[]> {
 		try {
-			const records = await this.enumerateKeys();
-			const accessTtl = coerceInterval(mcpConfig?.accessTokenTtl) || DEFAULT_ACCESS_TOKEN_TTL;
-			const nowSeconds = Math.floor(Date.now() / 1000);
-			const { live } = partitionRetired(records, accessTtl, nowSeconds);
-			// Strip private_key_pem: the private half must never leave the key store.
-			return live.map((k) => ({ kid: k.kid, alg: k.alg, public_key_pem: k.public_key_pem, created_at: k.created_at }));
+			return await this.getPublicKeysForVerification(mcpConfig);
 		} catch (error) {
 			this.logger?.error?.(
 				'Failed to read MCP signing keys for JWKS:',

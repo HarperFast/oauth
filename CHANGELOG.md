@@ -4,6 +4,24 @@ All notable changes to `@harperfast/oauth` are documented here. The format is ba
 
 ## [Unreleased]
 
+### Added
+
+- **MCP Bearer validator for Harper core routes (`server.registerBearerValidator`) and `request.user` in `withMCPAuth`** (#279):
+  - When `mcp.enabled: true` on a Harper version with `server.registerBearerValidator` (`HarperFast/harper#3313`), the plugin registers its MCP access-token verifier with Harper core authentication so OAuth-authenticated MCP clients can call Harper's native `/mcp` endpoint (and other Harper-owned routes matching `mcp.resource`) as their mapped Harper user. On older Harper builds without the hook, the plugin logs a one-time warning and continues running.
+  - `withMCPAuth` now populates `request.user` alongside `request.mcp` when `server.getUser(sub, null, request)` resolves an active Harper user with a provisioned role (`role.permission`), while leaving `request.user` as `undefined` for role-less `client_credentials` agents, unprovisioned subjects, and quarantined `unverified:<claim>#<hash>` subjects (#231).
+
+### Changed
+
+- `withMCPAuth` now resolves `request.user` via `server.getUser(sub, null, request)` on each authenticated request by default (failing closed with `401` when `getUser` rejects or returns `active: false`, and returning `503 Retry-After: 5` if lookup exceeds `userLookupTimeoutMs` or loading signing keys throws a transient error). Pass `{ resolveUser: false }` to skip `getUser` lookup and leave `request.user` untouched (#279).
+- When `mcp.enabled: true` and `mcp.resource` is set, startup and config reloads now validate that `mcp.resource` is a valid `http(s)` URL with no query string, fragment, or embedded credentials (treating an empty or whitespace-only `mcp.resource` as unset so it falls back to `<issuer>/mcp`) (#279).
+
+### Security
+
+- **MCP Bearer validator path & quarantine hardening** (#279):
+  - Quarantined `unverified:<claim>#<hash>` subjects (#231) and role-less subjects are never resolved to a Harper `request.user` on native `/mcp` or `withMCPAuth` routes.
+  - The core Bearer validator returns `authCacheable: false` so Harper's header-only `authorizationCache` cannot replay a `/mcp`-bound token onto non-MCP REST routes or after `mcp.enabled` is disabled on live reload; an origin-root `mcp.resource` (`pathname === '/'`) and ambiguous path segments (`.`, `..`, `%2e`, `%2f`, `%5c`, `\`, `//`) always abstain/reject so an MCP token cannot grant blanket REST access across `/`.
+  - Disabling `mcp.enabled` on a live config reload disposes the registered Bearer validator immediately before any subsequent provider or MCP config check in the same snapshot can throw.
+
 ### Fixed
 
 - Exclude OAuth authentication endpoints from Harper's generated application MCP tools. REST endpoints are unchanged (#281).

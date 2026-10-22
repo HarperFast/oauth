@@ -779,10 +779,29 @@ describe('MCPKeyStore', () => {
 
 		seedKey(stored, { kid: 'k1' });
 
-		await store.getAllPublicKeys();
-		await store.getAllPublicKeys();
+		const first = await store.getAllPublicKeys();
+		const second = await store.getAllPublicKeys();
 
 		assert.equal(searchCalls, 1, 'second call served from cache');
+		assert.equal(second, first, 'returns the exact same projected array reference across cache hits');
+	});
+
+	it('cache: getAllPublicKeys preserves projected array reference across 5s TTL refresh when live keys are unchanged', async () => {
+		seedKey(stored, { kid: 'k1' });
+		let fakeNow = Date.now();
+		_setCacheNowMs(() => fakeNow);
+		try {
+			const first = await store.getAllPublicKeys();
+			fakeNow += 6_000;
+			const afterRefresh = await store.getAllPublicKeys();
+			assert.equal(
+				afterRefresh,
+				first,
+				'projected array reference is preserved across TTL refresh when live keys match'
+			);
+		} finally {
+			_setCacheNowMs(null);
+		}
 	});
 
 	it('cache: stale-empty cache after first-boot — getAllPublicKeys sees the new key', async () => {
@@ -1026,6 +1045,71 @@ describe('MCPKeyStore ES256', () => {
 			issuer: 'https://as.example.com',
 		});
 		assert.equal(claims.sub, 'alice@example.com');
+	});
+
+	it('getAllPublicKeys returns a new array reference when a key crosses its retirement boundary within the enumCache window (#279)', async () => {
+		let nowMs = 1_000_000_000_000;
+		_setCacheNowMs(() => nowMs);
+		try {
+			const nowSec = Math.floor(nowMs / 1000);
+			seedKey(stored, { kid: 'old-key', created_at: nowSec - 200 });
+			seedKey(stored, { kid: 'new-key', created_at: nowSec - 99 });
+			const cfg = { keyRotationInterval: 50, accessTokenTtl: 50 };
+
+			const beforeBoundary = await store.getAllPublicKeys(cfg);
+			assert.equal(beforeBoundary.length, 2, 'both keys active at t=nowSec (old-key retires at nowSec+1)');
+
+			const cachedSameSec = await store.getAllPublicKeys(cfg);
+			assert.equal(cachedSameSec, beforeBoundary, 'same array reference returned within the same active set');
+
+			// Advance 2 seconds (still within 5s CACHE_TTL_MS, but across old-key's retirement boundary).
+			nowMs += 2000;
+			const afterBoundary = await store.getAllPublicKeys(cfg);
+			assert.notEqual(
+				afterBoundary,
+				beforeBoundary,
+				'crossing retirement boundary must return a new array reference so verifiedTokenMemo invalidates'
+			);
+			assert.equal(afterBoundary.length, 1);
+			assert.equal(afterBoundary[0].kid, 'new-key');
+		} finally {
+			_setCacheNowMs();
+		}
+	});
+
+	it('getAllPublicKeys returns a new array reference after key rotation and coalesces concurrent cold-cache reads (#279)', async () => {
+		let searchCalls = 0;
+		const origSearch = global.databases.oauth.harper_oauth_mcp_keys.search;
+		global.databases.oauth.harper_oauth_mcp_keys.search = async function* () {
+			searchCalls++;
+			await new Promise((r) => setTimeout(r, 10));
+			yield* origSearch.call(this);
+		};
+
+		seedKey(stored, { kid: 'k1', created_at: Math.floor(Date.now() / 1000) - 200 });
+		const [first, second, third] = await Promise.all([
+			store.getAllPublicKeys({ keyRotationInterval: 3600, accessTokenTtl: 3600 }),
+			store.getAllPublicKeys({ keyRotationInterval: 3600, accessTokenTtl: 3600 }),
+			store.getAllPublicKeys({ keyRotationInterval: 3600, accessTokenTtl: 3600 }),
+		]);
+		assert.equal(searchCalls, 1, 'concurrent cold-cache calls must share a single table.search({})');
+		assert.equal(first, second);
+		assert.equal(second, third);
+
+		// Force rotation by shrinking keyRotationInterval so k1 is aged out of signing.
+		await store.getSigningKey({ keyRotationInterval: 60, accessTokenTtl: 3600 });
+		const afterRotation = await store.getAllPublicKeys({ keyRotationInterval: 60, accessTokenTtl: 3600 });
+		assert.notEqual(afterRotation, first, 'rotation must produce a new array reference');
+		assert.equal(afterRotation.length, 2);
+	});
+
+	it('getPublicKeysForVerification propagates table read errors while getAllPublicKeys falls back to [] (#279)', async () => {
+		global.databases.oauth.harper_oauth_mcp_keys.search = () => {
+			throw new Error('storage offline');
+		};
+		await assert.rejects(store.getPublicKeysForVerification(), /storage offline/);
+		const fallback = await store.getAllPublicKeys();
+		assert.deepEqual(fallback, []);
 	});
 });
 

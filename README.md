@@ -198,7 +198,7 @@ The plugin manages its own tables in the `oauth` database — see [`schema/oauth
 
 ## MCP OAuth (experimental)
 
-The plugin can also act as an OAuth 2.1 authorization server for **Model Context Protocol** clients (Claude Desktop, Cursor, `mcp-remote`), letting them authenticate against the same upstream providers. Two steps: enable it in config, and guard your MCP route with `withMCPAuth`.
+The plugin can also act as an OAuth 2.1 authorization server for **Model Context Protocol** clients (Claude Desktop, Cursor, `mcp-remote`), letting them authenticate against the same upstream providers. When `mcp.enabled: true` on Harper with `server.registerBearerValidator`, native `/mcp` authentication is registered automatically; for a custom app-owned MCP route, wrap your listener with `withMCPAuth`.
 
 ```yaml
 # config.yaml
@@ -214,7 +214,7 @@ The plugin can also act as an OAuth 2.1 authorization server for **Model Context
 ```
 
 ```typescript
-// resources.ts
+// Optional custom MCP route (in config.yaml, also set mcp.resource: https://my-app.example.com/custom-mcp)
 import { server } from 'harper';
 import { withMCPAuth } from '@harperfast/oauth';
 
@@ -222,7 +222,7 @@ import { withMCPAuth } from '@harperfast/oauth';
 server.http(
 	withMCPAuth((request) => ({ status: 200, body: JSON.stringify({ user: request.mcp.sub }) })),
 	{
-		urlPath: '/mcp',
+		urlPath: '/custom-mcp',
 	}
 );
 ```

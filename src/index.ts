@@ -21,6 +21,7 @@ import { clearOAuthSession, SESSION_CLEAR_FAILED_HEADERS } from './lib/handlers.
 import { HookManager } from './lib/hookManager.ts';
 import { DynamicProviderCache, DEFAULT_DYNAMIC_PROVIDER_CACHE_TTL_SECONDS } from './lib/dynamicProviderCache.ts';
 import { registerWellKnownHandlers } from './lib/mcp/wellKnown.ts';
+import { registerMCPBearerValidator } from './lib/mcp/bearerValidator.ts';
 import { interactivePrivateKeyJwtEnabled } from './lib/mcp/clientAuthMethod.ts';
 import { algFromPrivateKeyPem } from './lib/mcp/keyStore.ts';
 import { redactSecrets } from './lib/redact.ts';
@@ -154,8 +155,22 @@ export async function handleApplication(scope: Scope): Promise<void> {
 	let providers: ProviderRegistry = {};
 	let debugMode = false;
 	let isInitialized = false;
+	let warnedMissingBearerValidator = false;
+	let unregisterBearerValidator: (() => void) | undefined;
 	let pluginDefaults: any = {}; // Store plugin defaults for dynamic provider resolution
 	const dynamicProviderCache = new DynamicProviderCache(); // TTL cache for dynamically-resolved providers
+
+	function disposeBearerValidator() {
+		if (!unregisterBearerValidator) return;
+		const dispose = unregisterBearerValidator;
+		try {
+			dispose();
+		} catch (error) {
+			logger?.error?.('Failed to unregister MCP bearer validator:', error);
+		} finally {
+			unregisterBearerValidator = undefined;
+		}
+	}
 
 	// Create hookManager instance scoped to this application
 	const hookManager = new HookManager(logger);
@@ -212,6 +227,19 @@ export async function handleApplication(scope: Scope): Promise<void> {
 			OAuthResource.allowUnverifiedClaimInheritance = false;
 		}
 
+		// Apply a disabling `mcp.enabled` value immediately — before any MCP or
+		// provider validation below can throw on an unrelated field in the same
+		// snapshot — so an operator setting `mcp.enabled: false` always disposes
+		// the bearer validator and disables MCP even if the reload is rejected.
+		const rawMcpEnabled =
+			options.mcp && typeof options.mcp === 'object' ? coerceConfigBoolean(expandEnvVar(options.mcp.enabled)) : false;
+		if (rawMcpEnabled !== true) {
+			if (OAuthResource.mcpConfig) {
+				OAuthResource.mcpConfig = { ...OAuthResource.mcpConfig, enabled: false };
+			}
+			disposeBearerValidator();
+		}
+
 		// Build the MCP config block up front so we can fail fast on an unsafe
 		// combination before mutating any provider state. expandEnvVarsDeep so
 		// sensitive leaves (mcp.dynamicClientRegistration.initialAccessToken) and
@@ -265,8 +293,34 @@ export async function handleApplication(scope: Scope): Promise<void> {
 				// Unparseable URL — validOrigin stays false.
 			}
 			if (!validOrigin) {
+				const redactedIssuer = String(mcpConfig.issuer).replace(/(\/\/)[^/@]+@/g, '$1<redacted>@');
 				throw new Error(
-					`mcp.issuer must be an absolute http(s) origin like "https://your-host" (got: "${mcpConfig.issuer}")`
+					`mcp.issuer must be an absolute http(s) origin like "https://your-host" (got: "${redactedIssuer}")`
+				);
+			}
+		}
+		if (typeof mcpConfig?.resource === 'string' && mcpConfig.resource.trim() === '') {
+			delete mcpConfig.resource;
+		}
+		if (mcpConfig?.enabled && mcpConfig.resource !== undefined) {
+			let validResource = false;
+			if (typeof mcpConfig.resource === 'string') {
+				try {
+					const parsedResource = new URL(mcpConfig.resource);
+					validResource =
+						(parsedResource.protocol === 'http:' || parsedResource.protocol === 'https:') &&
+						parsedResource.search === '' &&
+						parsedResource.hash === '' &&
+						parsedResource.username === '' &&
+						parsedResource.password === '';
+				} catch {
+					validResource = false;
+				}
+			}
+			if (!validResource) {
+				const redactedResource = String(mcpConfig.resource).replace(/(\/\/)[^/@]+@/g, '$1<redacted>@');
+				throw new Error(
+					`mcp.resource must be an absolute http(s) URL without query, fragment, or credentials (got: "${redactedResource}")`
 				);
 			}
 		}
@@ -402,6 +456,7 @@ export async function handleApplication(scope: Scope): Promise<void> {
 			// stale config after the plugin is no longer validly configured.
 			OAuthResource.mcpConfig = undefined;
 			OAuthResource.allowUnverifiedClaimInheritance = false;
+			disposeBearerValidator();
 			resources.set(
 				'oauth',
 				{
@@ -444,6 +499,30 @@ export async function handleApplication(scope: Scope): Promise<void> {
 
 			// Register the OAuth resource class
 			resources.set('oauth', OAuthResource, { mcp: false });
+
+			if (mcpConfig?.enabled) {
+				if (!unregisterBearerValidator) {
+					let registerFailed = false;
+					try {
+						unregisterBearerValidator = registerMCPBearerValidator(server, () => OAuthResource.mcpConfig, {
+							logger,
+						});
+					} catch (error) {
+						registerFailed = true;
+						logger?.error?.('Failed to register MCP bearer validator:', error);
+					}
+					if (!unregisterBearerValidator && !registerFailed && !warnedMissingBearerValidator) {
+						logger?.warn?.(
+							'MCP: scope.server.registerBearerValidator (or harper.credentialRejectionError) is not available in this Harper version; ' +
+								"plugin-issued MCP bearer tokens will not authenticate Harper's native /mcp endpoint " +
+								'(upgrade Harper to a version with server.registerBearerValidator, or guard a custom route with withMCPAuth).'
+						);
+						warnedMissingBearerValidator = true;
+					}
+				}
+			} else {
+				disposeBearerValidator();
+			}
 
 			// Log all configured providers
 			logger?.info?.('OAuth plugin ready:', {
@@ -622,6 +701,7 @@ export async function handleApplication(scope: Scope): Promise<void> {
 
 	// Clean up on scope close
 	scope.on('close', () => {
+		disposeBearerValidator();
 		logger?.info?.('OAuth plugin shutting down');
 	});
 }

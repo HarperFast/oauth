@@ -9,6 +9,13 @@
  *   GET /mcp-test/family?id                     → the stored family, or { exists: false }
  *   GET /mcp-test/revoke?id                     → {} (MCPRefreshFamilyStore.revoke)
  *   GET /mcp-test/rotate?id&hash                → {} (MCPRefreshFamilyStore.rotate)
+ *   GET /mcp-test/capabilities                  → { hasBearerValidator }
+ *   GET /mcp-test/mint-token?sub&aud&iss&ttl    → { accessToken } (signed with MCPKeyStore active key)
+ *
+ * Also registers `GET /mcp-custom` (wrapped with `withMCPAuth`) and a second
+ * test bearer validator (when `server.registerBearerValidator` is available) for
+ * `'foreign-bearer-token-for-mcp-test'` so the integration suite can verify
+ * validator-chain fallthrough alongside `operation_token`.
  *
  * These routes are server.http handlers and run outside a request transaction;
  * Harper's REST handler runs POST /oauth/mcp/token inside one.
@@ -21,14 +28,17 @@
  */
 import { createHash, createPrivateKey, createPublicKey } from 'node:crypto';
 import { server, databases, Resource } from 'harper';
+import { registerHooks, withMCPAuth } from './node_modules/@harperfast/oauth/dist/index.js';
 import { MCPAssertionJtiStore, jtiKey } from './node_modules/@harperfast/oauth/dist/lib/mcp/assertionJtiStore.js';
 import { _setDnsLookup, _setFetch } from './node_modules/@harperfast/oauth/dist/lib/mcp/cimd.js';
 import { MCPClientStore } from './node_modules/@harperfast/oauth/dist/lib/mcp/clientStore.js';
+import { MCPKeyStore } from './node_modules/@harperfast/oauth/dist/lib/mcp/keyStore.js';
 import {
 	MCPRefreshFamilyStore,
 	makeRefreshToken,
 	newFamilyId,
 } from './node_modules/@harperfast/oauth/dist/lib/mcp/refreshTokenStore.js';
+import { signAccessToken } from './node_modules/@harperfast/oauth/dist/lib/mcp/tokenIssuer.js';
 
 const RUNTIME_CLIENT_ID = 'runtime-public-client';
 
@@ -135,17 +145,93 @@ async function handle(request) {
 			const family = await new MCPRefreshFamilyStore().get(q.get('id'));
 			return json(family ? { exists: true, ...family } : { exists: false });
 		}
+		case '/capabilities': {
+			return json({ hasBearerValidator: typeof server.registerBearerValidator === 'function' });
+		}
+		case '/mint-token': {
+			const keyPair = await new MCPKeyStore().getSigningKey();
+			const { token } = signAccessToken(
+				{
+					issuer: q.get('iss') ?? 'https://mcp.test',
+					subject: q.get('sub') ?? 'mcp-oauth-user',
+					audience: q.get('aud') ?? 'https://mcp.test/mcp',
+					clientId: q.get('client_id') ?? RUNTIME_CLIENT_ID,
+					scope: 'mcp',
+					ttlSeconds: Number(q.get('ttl') ?? 600),
+				},
+				keyPair
+			);
+			return json({ accessToken: token });
+		}
 		default:
 			return json({ error: 'not found' }, 404);
 	}
 }
 
+// Intercept upstream IdP token + userinfo calls for http://idp.test so the
+// test can drive the full /oauth/mcp/authorize -> /oauth/test/callback ->
+// /oauth/mcp/token flow without an external HTTP server.
+const originalFetch = globalThis.fetch;
+globalThis.fetch = async (input, init) => {
+	const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+	if (url === 'http://idp.test/token') {
+		return new Response(
+			JSON.stringify({
+				access_token: 'idp-test-upstream-token',
+				token_type: 'Bearer',
+				expires_in: 3600,
+			}),
+			{ status: 200, headers: { 'Content-Type': 'application/json' } }
+		);
+	}
+	if (url === 'http://idp.test/userinfo') {
+		return new Response(
+			JSON.stringify({
+				sub: 'idp-sub-279',
+				email: 'idp-user@example.test',
+				name: 'Test IdP User',
+			}),
+			{ status: 200, headers: { 'Content-Type': 'application/json' } }
+		);
+	}
+	return originalFetch(input, init);
+};
+
+// Map the upstream IdP identity (idp-user@example.test) to the provisioned
+// Harper account (mcp-oauth-user) via onLogin (#279).
+registerHooks({
+	onLogin: async (user) => ({
+		user: user.username === 'idp-user@example.test' ? 'mcp-oauth-user' : user.username,
+	}),
+});
+
 server.http(handle, { urlPath: '/mcp-test' });
+if (typeof server.registerBearerValidator === 'function') {
+	server.registerBearerValidator((token) => {
+		if (token === 'foreign-bearer-token-for-mcp-test') {
+			return { username: 'mcp-oauth-user' };
+		}
+		return undefined;
+	});
+}
+server.http(
+	withMCPAuth((request) =>
+		json({
+			user: request.user?.username ?? null,
+			hasRolePermission: Boolean(request.user?.role?.permission),
+			mcpSub: request.mcp?.sub ?? null,
+		})
+	),
+	{ urlPath: '/mcp-custom' }
+);
 
 export class NativeMcpControl extends Resource {
 	static loadAsInstance = false;
 
 	get() {
-		return { control: 'native-mcp' };
+		return {
+			control: 'native-mcp',
+			user: this.getContext()?.user?.username ?? null,
+		};
 	}
 }

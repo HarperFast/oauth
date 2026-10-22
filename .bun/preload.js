@@ -11,6 +11,20 @@ import { mock } from 'bun:test';
 //
 // This mock Resource class provides enough functionality for OAuthResource to extend
 // and for tests to work properly
+const CREDENTIAL_REJECTION = Symbol('harper.credentialRejection');
+function markCredentialRejection(error) {
+	if (!error || typeof error !== 'object') {
+		throw new TypeError('markCredentialRejection expects an Error or object');
+	}
+	Object.defineProperty(error, CREDENTIAL_REJECTION, { value: true });
+	return error;
+}
+function credentialRejectionError(message = 'Invalid bearer credential', statusCode = 401) {
+	const error = new Error(message);
+	error.statusCode = statusCode;
+	return markCredentialRejection(error);
+}
+
 mock.module('harper', () => {
 	return {
 		Resource: class Resource {
@@ -36,5 +50,7 @@ mock.module('harper', () => {
 			fatal() {},
 			notify() {},
 		},
+		markCredentialRejection,
+		credentialRejectionError,
 	};
 });

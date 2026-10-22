@@ -42,10 +42,7 @@ asserts each one, see [MCP OAuth conformance](./mcp-oauth-conformance.md).
 
 ## Quickstart
 
-Two pieces: turn on the authorization server in `config.yaml`, and guard your MCP
-route handler with `withMCPAuth`.
-
-**1. Enable the authorization server** (`config.yaml`):
+Enable the authorization server in `config.yaml`:
 
 ```yaml
 '@harperfast/oauth':
@@ -59,14 +56,56 @@ route handler with `withMCPAuth`.
     issuer: https://my-app.example.com # required; pin to your public origin
 ```
 
-**2. Guard your MCP handler** (`resources.ts`):
+On Harper builds that ship `server.registerBearerValidator` (`HarperFast/harper#3313`),
+the plugin automatically registers its MCP token verifier with Harper's core
+authentication pipeline.
+
+**Option A — Native `/mcp` (Harper's built-in Streamable HTTP MCP server & generated tools):**
+When `server.registerBearerValidator` is present, Harper's built-in `/mcp`
+endpoint accepts `Authorization: Bearer` access tokens minted by this plugin
+and resolves `request.user` via `server.getUser(sub, null, request)` without
+any custom route registration. Keep two Harper core behaviors in mind:
+
+1. Harper core's `resolveUser` requires `sub` to resolve to an active `hdb_user`
+   record with a provisioned `role` (`user.role.permission`); either provision
+   matching Harper users or map the OAuth identity to an existing Harper username
+   in an `onLogin` hook (returning `{ user: '<harper-username>' }`).
+2. Harper's built-in `/mcp` mount accepts tokenless requests as anonymous
+   sessions (`200`) and settles deferred credential rejections with a bare `401`
+   (no `WWW-Authenticate` header), so Option A works only for clients that
+   already hold a token or are configured to start OAuth discovery
+   (`/.well-known/oauth-protected-resource/mcp`) themselves. For clients that
+   require a `401 WWW-Authenticate: Bearer resource_metadata="…"` challenge on
+   initial connection or token expiry to bootstrap discovery, use Option B.
+
+**Option B — Custom HTTP route with `withMCPAuth` (`resources.ts`):**
+If you are registering your own custom HTTP route handler (or need the RFC 9728
+`401 WWW-Authenticate: Bearer resource_metadata="…"` challenge to bootstrap
+discovery, or are running on an older Harper build without
+`server.registerBearerValidator`, or serving role-less/quarantined subjects that
+do not have an `hdb_user` row), guard it with `withMCPAuth`.
+
+A deployment has one canonical `mcp.resource` (defaulting to `<issuer>/mcp`).
+When mounting a custom route at `/custom-mcp`, set `mcp.resource` to match that
+route in `config.yaml` — this moves Protected Resource Metadata, `/oauth/mcp/authorize`
+target validation, the minted token `aud`, and the core validator's `pathOwned`
+prefix to `/custom-mcp` (so native `/mcp` stops accepting these tokens; Options A
+and B are either/or):
+
+```yaml
+mcp:
+  enabled: true
+  issuer: https://my-app.example.com
+  resource: https://my-app.example.com/custom-mcp
+```
 
 ```typescript
 import { server } from 'harper';
 import { withMCPAuth } from '@harperfast/oauth';
 
-// Your MCP endpoint. request.mcp is guaranteed present here — the guard rejects
-// missing/invalid tokens before your handler runs, so no optional-chaining needed.
+// Your custom MCP endpoint. request.mcp is guaranteed present here — the guard
+// rejects missing/invalid tokens before your handler runs, and resolves
+// request.user via server.getUser(sub, null, request) when available.
 function mcpHandler(request) {
 	const { sub, client_id, scope } = request.mcp; // verified token claims
 	// Harper HTTP listeners return { status, body, headers? }; MCP messages are
@@ -74,22 +113,23 @@ function mcpHandler(request) {
 	return { status: 200, body: JSON.stringify({ jsonrpc: '2.0', result: { hello: sub } }) };
 }
 
-// Register on a urlPath subroute so Harper's core auth never sees the request.
-server.http(withMCPAuth(mcpHandler), { urlPath: '/mcp' });
+// Register on a urlPath subroute so the route has its own dispatch chain.
+server.http(withMCPAuth(mcpHandler), { urlPath: '/custom-mcp' });
 ```
 
-That's it. An MCP client pointed at `https://my-app.example.com/mcp` now
-discovers the authorization server, registers itself, walks the user through your
-GitHub login, and presents a bearer token on every subsequent call — which
-`withMCPAuth` verifies before `mcpHandler` runs.
+With Option B, an MCP client pointed at `https://my-app.example.com/custom-mcp`
+receives the `401 WWW-Authenticate: Bearer resource_metadata="…"` challenge on
+an unauthenticated request, discovers the authorization server, registers
+itself, walks the user through your GitHub login, and presents a bearer token on
+every subsequent call.
 
-> **Why `urlPath`, not the default route?** Harper's core auth is a default-group
-> middleware that consumes `Authorization: Bearer` and rejects any token that
-> isn't a Harper _operation_ token — answering with `WWW-Authenticate: Basic`,
-> not the `Bearer` challenge MCP clients need. Registering on a `urlPath`
-> subroute gives the route its own dispatch chain that core auth never runs on.
-> See [The `withMCPAuth` wrapper](#the-withmcpauth-wrapper) for the default-group
-> fallback.
+> **Why `urlPath` for custom `withMCPAuth` routes?** On older Harper builds
+> without `server.registerBearerValidator` (where the plugin logs a one-time
+> startup warning), or when you want `withMCPAuth`'s RFC 9728
+> `WWW-Authenticate: Bearer resource_metadata="…"` challenge on a custom route,
+> registering on a `urlPath` subroute gives the route its own dispatch chain
+> independent of the default chain. See [The `withMCPAuth` wrapper](#the-withmcpauth-wrapper)
+> for details and the default-group fallback.
 
 ---
 
@@ -251,12 +291,91 @@ are not a resource requirement).
 
 ---
 
-## The `withMCPAuth` wrapper
+## Native `/mcp` integration & the `withMCPAuth` wrapper
 
-`withMCPAuth(handler, options?)` wraps an MCP route handler so every request must
-present a valid access token minted by this plugin before the handler runs. It is
-the bearer-token counterpart to `withOAuthValidation` (which guards
-cookie/session routes).
+### Core Bearer validator (`server.registerBearerValidator`)
+
+When `mcp.enabled: true` on a Harper version that exposes
+`server.registerBearerValidator` and `credentialRejectionError`
+(`HarperFast/harper#3313`), the plugin registers a Bearer validator with
+Harper's core authentication pipeline (and disposes it when `mcp.enabled` is
+disabled on reload, when all providers are removed, or when the application
+scope closes):
+
+- **Abstains synchronously (`undefined`)** when `mcp.enabled` is not `true` or
+  `mcp.issuer` is unset, when the Bearer token is not a 3-segment compact JWT
+  whose unverified payload `iss` matches `resolveIssuer(request, mcpConfig)`, or
+  when the request path (`originalPathname ?? pathname`) is outside
+  `mcp.resource`'s path prefix or contains ambiguous path segments (`.`, `..`,
+  `%2e`, `%2f`, `%5c`, `\`, `//`) — so native Harper operation tokens
+  and other plugins' Bearer validators on non-MCP routes continue down the chain
+  with zero async overhead (while a plugin MCP token presented to a non-MCP
+  route with no matching validator still receives `401` from Harper's deferred
+  operation-token rejection, without reading signing keys or flooding the audit
+  log). Note: configuring `mcp.resource` with an origin-root path (e.g.
+  `https://my-app.example.com` or `https://my-app.example.com/`, where
+  `pathname === '/'`) also abstains synchronously in the core Bearer validator
+  so an MCP token can never act as a blanket REST credential across every
+  Harper table and route on `/`; leave `mcp.resource` unset (defaulting to
+  `<issuer>/mcp`) or configure a dedicated path prefix (such as `/mcp`) for
+  core Bearer validator routes, or use `withMCPAuth` on a custom route.
+  (Harper's `authentication()` middleware also checks
+  `validateOperationToken` first and only invokes registered Bearer validators
+  when operation-token verification throws `'invalid token'`.)
+- **Authoritatively rejects (`credentialRejectionError(reason, 401)`)** once a
+  token's unverified `iss` claims this plugin's MCP issuer on a route covered by
+  `mcp.resource`:
+  - If `mcp.resource` cannot be parsed as a URL, no signing keys are available,
+    cryptographic verification (`alg`, `typ` in `['at+jwt', 'JWT']`, `iss`,
+    `aud`, `exp`) fails, or `sub` is a quarantined `unverified:<claim>#<hash>`
+    principal (#231), it emits `oauth.mcp.token.rejected` and throws
+    `credentialRejectionError(reason, 401)`, stopping core auth from falling
+    back to another validator. (If loading signing keys from the `mcp_keys`
+    table throws a transient error, it rejects with
+    `credentialRejectionError('temporarily unable to load MCP signing keys')`
+    without emitting a false `oauth.mcp.token.rejected` audit event.)
+- **Accepts (`{ username: sub, authExpiresAt, authCacheable: false }`)**
+  when verification succeeds (`authExpiresAt` is clamped to at most 365 days in
+  the future to match Harper's `effectiveExpiry` bound, and `authCacheable` is
+  always `false` so every request re-evaluates the route path prefix and live
+  `OAuthResource.mcpConfig`, preventing Harper's header-keyed
+  `authorizationCache` from replaying an `/mcp` token on non-MCP routes or after
+  `mcp.enabled` is disabled on reload). Verified tokens are memoized in an
+  in-process 1024-entry LRU cache keyed by token, `issuer`, `resource`, and the
+  `MCPKeyStore` active key-set reference (invalidating immediately on expiry,
+  key rotation, or key retirement): on Node 22+, non-plugin tokens abstain in
+  `~1.1 µs` on `/mcp` (`<0.1 µs` off-path), repeat MCP token calls hit the memo
+  in `~0.9 µs`, and cold cryptographic verification takes `~31 µs` (RS256) or
+  `~69 µs` (ES256). Harper's `authentication()` middleware
+  then resolves `request.user` via `server.getUser(username, null, request)` and
+  requires a provisioned role (`user.role.permission`); unprovisioned subjects
+  without an `hdb_user` row receive `401` from core auth unless mapped to a
+  provisioned Harper username via an `onLogin` hook.
+
+| Token subject (`sub`)                        | Option A (native `/mcp` via `registerBearerValidator`)    | Option B (custom route via `withMCPAuth`)             |
+| -------------------------------------------- | --------------------------------------------------------- | ----------------------------------------------------- |
+| Provisioned `hdb_user`                       | `200` (`request.user` set)                                | `200` (`request.mcp` + `request.user` set)            |
+| `onLogin`-mapped `hdb_user`                  | `200` (`request.user` set)                                | `200` (`request.mcp` + `request.user` set)            |
+| Unprovisioned user (no `hdb_user` row)       | `401` (core auth requires `role.permission`)              | `200` (`request.mcp` set; `request.user` `undefined`) |
+| Quarantined subject (`unverified:<claim>#…`) | `401` (rejected by validator)                             | `200` (`request.mcp` set; `request.user` `undefined`) |
+| `client_credentials` agent (no `hdb_user`)   | `401` unless `client_id` has a provisioned `hdb_user` row | `200` (`request.mcp` set; `request.user` `undefined`) |
+
+On older Harper builds without `server.registerBearerValidator`, the plugin
+logs a one-time warning when `mcp.enabled: true` and continues running; use
+`withMCPAuth` on a custom route for those builds. During a mixed-version
+rollout where some nodes run a Harper build with `server.registerBearerValidator`
+and others do not, native `/mcp` Bearer authentication succeeds only on
+upgraded nodes — upgrade Harper across all nodes serving `/mcp` before
+directing MCP OAuth clients to native `/mcp`.
+
+### The `withMCPAuth` wrapper
+
+`withMCPAuth(handler, options?)` wraps a custom HTTP route handler so every
+request must present a valid access token minted by this plugin before the
+handler runs. It is the bearer-token counterpart to `withOAuthValidation`
+(which guards cookie/session routes), and provides the RFC 9728
+`WWW-Authenticate: Bearer resource_metadata="…"` challenge directly on custom
+routes.
 
 On any failure it **fails closed** with the spec 401:
 
@@ -268,12 +387,27 @@ Content-Type: application/json
 {"error":"invalid_token","error_description":"<reason>"}
 ```
 
-When a valid token is presented, the wrapper attaches the verified claims and
-calls your handler:
+When a valid token is presented, the wrapper attaches the verified claims on
+`request.mcp`, populates `request.user` (or verifies an already-populated
+`request.user` matches `sub`), and calls your handler:
 
 ```typescript
 request.mcp = { sub, client_id, aud, scope };
+// request.user is populated when server.getUser(sub, null, request) resolves an active user with role.permission
 ```
+
+`request.user` is resolved via `server.getUser(sub, null, request)` (bounded by a
+5-second timeout) when available and set only when the resolved user is active and
+carries a plain-object `role.permission` (matching `principalFromClaim` in Harper's
+`security/bearerValidators.ts`). When `server.getUser` is not exposed by the host
+runtime, when `getUser` returns a role-less `{ username }` view (such as
+`client_credentials` agents with no `hdb_user` row), or when `sub` is a quarantined
+`unverified:<claim>#<hash>` principal (#231), `request.user` is left `undefined`
+while `request.mcp` is still populated. If `getUser` throws a credential rejection,
+returns `active === false`, or fails with an unexpected error, `withMCPAuth` fails
+closed with `401` (audited as `oauth.mcp.token.rejected`); if the `getUser` lookup
+exceeds its 5-second deadline, `withMCPAuth` returns `503 Retry-After: 5` without
+invoking the handler.
 
 Tokens are read from the `Authorization: Bearer` header only (RFC 6750 §2.1) —
 query-string and body tokens are ignored.
@@ -283,36 +417,46 @@ query-string and body tokens are ignored.
 **Primary — `urlPath` subroute (recommended):**
 
 ```typescript
-server.http(withMCPAuth(mcpHandler), { urlPath: '/mcp' });
+// In config.yaml: mcp.resource: https://my-app.example.com/custom-mcp
+server.http(withMCPAuth(mcpHandler), { urlPath: '/custom-mcp' });
 ```
 
 Harper dispatches a `urlPath` subroute on its own chain and returns, so the
-default chain — where core auth lives — never runs for `/mcp`. The bearer
+default chain — where core auth lives — never runs for `/custom-mcp`. The bearer
 challenge can't be clobbered. This is the same isolation `/.well-known/*` uses.
 No `path` option and no ordering hint are needed.
 
 **Fallback — default group, ahead of core auth:**
 
 ```typescript
-server.http(withMCPAuth(mcpHandler, { path: '/mcp' }), { before: 'authentication' });
+// In config.yaml: mcp.resource: https://my-app.example.com/custom-mcp
+server.http(withMCPAuth(mcpHandler, { path: '/custom-mcp' }), { before: 'authentication' });
 ```
 
 When the route shares the default chain with auth (no `urlPath`), pass `path` so
 the wrapper guards only that path and calls `next()` for everything else, and
 register with `{ before: 'authentication' }` so it runs ahead of core auth. In
-this mode the wrapped handler **must terminate the request** (not call `next`),
-or core auth runs afterward and re-rejects the token. This mirrors Harper's own
+this mode the wrapped handler **must terminate the request** (not call `next`):
+calling `next` hands the request to core `authentication()`, which rejects the
+bearer token with `WWW-Authenticate: Basic` when `withMCPAuth` leaves
+`request.user` unset (for example on a role-less `client_credentials` agent or a
+quarantined subject), or passes through `authentication()` on the already-set
+`request.user` when `withMCPAuth` populated it (reaching downstream default-chain
+middleware instead of terminating at the handler). This mirrors Harper's own
 `server/static.ts`.
 
 ### Options
 
-| Option        | Type                                   | Default                    | Purpose                                                                                                                                       |
-| ------------- | -------------------------------------- | -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `path`        | `string`                               | (unset)                    | Set only for the default-group fallback — the path this guard owns; requests outside it fall through to `next()`.                             |
-| `onAuthError` | `(request, reason: string) => any`     | (unset)                    | Custom denial handler. **Any falsy return falls back to the default 401** — a no-return handler can't accidentally turn a denial into a pass. |
-| `getConfig`   | `() => MCPConfig \| undefined`         | live plugin config         | MCP config source, read per request. Override for tests.                                                                                      |
-| `logger`      | `Logger`                               | plugin logger              | Logger for verification failures. Override for tests.                                                                                         |
-| `keyStore`    | `{ getAllPublicKeys(): Promise<...> }` | the plugin's `MCPKeyStore` | Signing-key source. Override for tests.                                                                                                       |
+| Option                | Type                                                 | Default                    | Purpose                                                                                                                                                                                  |
+| --------------------- | ---------------------------------------------------- | -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `path`                | `string`                                             | (unset)                    | Set only for the default-group fallback — the path this guard owns; requests outside it fall through to `next()`.                                                                        |
+| `onAuthError`         | `(request, reason: string) => any`                   | (unset)                    | Custom denial handler for `401` rejections (not invoked on `503` user-lookup timeouts). **Any falsy return falls back to the default 401** — a no-return handler can't turn into a pass. |
+| `getConfig`           | `() => MCPConfig \| undefined`                       | live plugin config         | MCP config source, read per request. Override for tests.                                                                                                                                 |
+| `logger`              | `Logger`                                             | plugin logger              | Logger for verification failures. Override for tests.                                                                                                                                    |
+| `keyStore`            | `{ getAllPublicKeys(): Promise<...> }`               | the plugin's `MCPKeyStore` | Signing-key source. Override for tests.                                                                                                                                                  |
+| `resolveUser`         | `boolean`                                            | `true`                     | Whether to resolve `request.user` via `getUser` / `server.getUser`. Set `false` to skip `getUser` lookup and leave `request.user` untouched.                                             |
+| `getUser`             | `(username, password, request) => Promise<...> \| …` | `server.getUser`           | Harper user resolver used to populate `request.user`. Override for tests.                                                                                                                |
+| `userLookupTimeoutMs` | `number`                                             | `5000`                     | Deadline in milliseconds for `getUser` resolution; returns `503 Retry-After: 5` directly if exceeded.                                                                                    |
 
 A request whose path exceeds 2048 characters is rejected before any token work
 (DoS guard). If MCP is disabled, no token is presented, or no signing keys exist
@@ -332,6 +476,7 @@ guard fails closed.
 In that setup, **inject `getConfig`** so the wrapper sees the config:
 
 ```typescript
+// In the plugin component's config.yaml: mcp.resource: https://my-app.example.com/custom-mcp
 server.http(
 	withMCPAuth(mcpHandler, {
 		// Pin issuer/resource to the values the plugin component issues tokens with,
@@ -339,10 +484,10 @@ server.http(
 		getConfig: () => ({
 			enabled: true,
 			issuer: 'https://my-app.example.com',
-			resource: 'https://my-app.example.com/mcp',
+			resource: 'https://my-app.example.com/custom-mcp',
 		}),
 	}),
-	{ urlPath: '/mcp' }
+	{ urlPath: '/custom-mcp' }
 );
 ```
 
@@ -407,12 +552,12 @@ Token lifecycle events are written to Harper's structured log (`hdb.log`) at
 MCP audit: {"event":"oauth.mcp.token.issued","client_id":"…","sub":"…","aud":"https://my-app.example.com/mcp","scope":"…","jti":"…","timestamp":"2026-06-29T17:00:00.000Z"}
 ```
 
-| `event`                     | When                                                                  |
-| --------------------------- | --------------------------------------------------------------------- |
-| `oauth.mcp.token.issued`    | An access token was minted (authorization-code grant)                 |
-| `oauth.mcp.token.refreshed` | A token pair was rotated (refresh-token grant)                        |
-| `oauth.mcp.token.rejected`  | A bearer token was rejected by `withMCPAuth`                          |
-| `oauth.mcp.token.retired`   | A pre-provenance refresh family was retired instead of rotated (#229) |
+| `event`                     | When                                                                          |
+| --------------------------- | ----------------------------------------------------------------------------- |
+| `oauth.mcp.token.issued`    | An access token was minted (authorization-code grant)                         |
+| `oauth.mcp.token.refreshed` | A token pair was rotated (refresh-token grant)                                |
+| `oauth.mcp.token.rejected`  | A bearer token was rejected by `withMCPAuth` or the core MCP Bearer validator |
+| `oauth.mcp.token.retired`   | A pre-provenance refresh family was retired instead of rotated (#229)         |
 
 Payloads never carry `access_token`, `refresh_token`, or `client_secret`; a
 minted token's payload carries only its `jti`, and a `retired` payload (no
