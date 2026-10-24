@@ -451,14 +451,22 @@ describe('withMCPAuth — happy path', () => {
 		const events = [];
 		const request = req(`Bearer ${token}`);
 		const { handler, calls } = spyHandler();
-		const res = await withMCPAuth(
-			handler,
-			opts({
-				emitAudit: (p) => events.push(p),
-				userLookupTimeoutMs: 20,
-				getUser: () => new Promise(() => {}),
-			})
-		)(request, NEXT);
+		// The lookup timer is unref()'d and this getUser never settles, so nothing else keeps the event loop
+		// alive until the timeout fires; without a referenced handle the runner can cancel the test first.
+		const keepAlive = setInterval(() => {}, 1000);
+		let res;
+		try {
+			res = await withMCPAuth(
+				handler,
+				opts({
+					emitAudit: (p) => events.push(p),
+					userLookupTimeoutMs: 20,
+					getUser: () => new Promise(() => {}),
+				})
+			)(request, NEXT);
+		} finally {
+			clearInterval(keepAlive);
+		}
 
 		assert.equal(res.status, 503);
 		assert.equal(res.headers['Retry-After'], '5');
