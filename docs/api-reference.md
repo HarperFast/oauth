@@ -77,14 +77,14 @@ Redeems a one-time code from a handed-off sign-in (see [Signing in on another or
 
 **Responses** (all with `Cache-Control: no-store`):
 
-| Status | Body                                                  | When                                                                                                                                         |
-| ------ | ----------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| 200    | `{ "authenticated": true, "provider": "<provider>" }` | Session written; the response carries Harper's `Set-Cookie: <origin>-hdb-session=…` for the calling origin                                   |
-| 404    | `{ "error": "Not found" }`                            | `postLoginRedirectOrigins` is empty (the endpoint does not exist, as before)                                                                 |
-| 403    | `{ "error": "origin_not_allowed", "message": … }`     | `Origin` missing, repeated, `null`, not a bare origin, or not listed. Checked first; the code is not consumed                                |
-| 400    | `{ "error": "invalid_request", "message": … }`        | `code` missing, repeated, or not code-shaped. The code is not consumed                                                                       |
-| 400    | `{ "error": "invalid_grant", "message": … }`          | Code unknown, expired, already used, issued for a different origin, or presented from a different browser. Any of these consumes a live code |
-| 500    | `{ "error": "server_error", "message": … }`           | Storage or session write failed, or Harper sessions are disabled. Start the sign-in again                                                    |
+| Status | Body                                                  | When                                                                                                                                                                                      |
+| ------ | ----------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 200    | `{ "authenticated": true, "provider": "<provider>" }` | Session written; the response carries Harper's `Set-Cookie: <origin>-hdb-session=…` for the calling origin                                                                                |
+| 404    | `{ "error": "Not found" }`                            | `postLoginRedirectOrigins` is empty (the endpoint does not exist, as before)                                                                                                              |
+| 403    | `{ "error": "origin_not_allowed", "message": … }`     | `Origin` missing, repeated, `null`, not a bare origin, or not listed. Checked first; the code is not consumed                                                                             |
+| 400    | `{ "error": "invalid_request", "message": … }`        | `code` missing, repeated, or not code-shaped. The code is not consumed                                                                                                                    |
+| 400    | `{ "error": "invalid_grant", "message": … }`          | Code unknown, expired, already used, issued for a different origin, or presented from a different browser. Only a redeem that passes every check consumes the code; redeem each code once |
+| 500    | `{ "error": "server_error", "message": … }`           | Storage or session write failed, or Harper sessions are disabled. Start the sign-in again                                                                                                 |
 
 ```javascript
 await fetch('https://studio.example.com/oauth/handoff', {

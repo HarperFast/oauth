@@ -321,14 +321,15 @@ const res = await fetch('https://studio.example.com/oauth/handoff', {
 
 The browser sends the page's `Origin`, so Harper creates the session under that origin's cookie name, and every later credentialed call from the page uses it. See [`POST /oauth/handoff`](./api-reference.md#sign-in-handoff-endpoint) for the request, responses and errors.
 
-**Errors** after the provider returns (denied consent, a failed token exchange, an `onLogin` denial without its own `redirect`, …) go back to the `redirect` URL on the listed origin with the same `error`/`reason` query parameters a same-origin sign-in gets, placed before the fragment: `https://pr-12.app.example.com/?error=auth_failed&reason=token_exchange#/check-oauth`. A storage failure for the code itself is `error=server_error&reason=handoff_storage`. An expired or invalid `state` still goes to `/oauth/<provider>/login?error=session_expired` on this origin, as before.
+**Errors** after the provider returns (denied consent, a failed token exchange, an `onLogin` denial without its own `redirect`, …) go back to the `redirect` URL on the listed origin with the same `error`/`reason` query parameters a same-origin sign-in gets, placed before the fragment: `https://pr-12.app.example.com/?error=auth_failed&reason=token_exchange#/check-oauth`. A storage failure for the code itself is `error=server_error&reason=handoff_storage`. A sign-in started for an origin that was removed from the list before it finished fails on this origin's path with `error=access_denied&reason=handoff_origin_not_allowed`, and no session is created anywhere. An expired or invalid `state` still goes to `/oauth/<provider>/login?error=session_expired` on this origin, as before.
 
 **Security properties.**
 
-- The code is 256 random bits, single-use (an atomic counter, so concurrent presentations cannot both win), valid for 60 seconds, and stored only as its SHA-256. It is never a session id or a provider token; the provider tokens stay server-side.
+- The code is 256 random bits, single-use, valid for 60 seconds, and stored only as its SHA-256. It is never a session id or a provider token; the provider tokens stay server-side, and are cleared from the stored row when the code is redeemed.
+- Single use is an atomic counter, as for client-assertion replay. Two presentations racing exactly can both be refused (fail closed), so redeem each code once. Like every table-backed guard, it holds per node within Harper's replication delay; any extra winner is still bound to the same origin and browser.
 - It is bound to the target origin: the redeem's `Origin` header must be a listed origin **and** equal the origin the code was issued for.
 - It is bound to the browser that started the sign-in, through the same `__Host-oauth_browser` cookie that already defends the callback against login CSRF. An attacker's code planted in a victim's page is refused, and a stolen code cannot be redeemed without the victim's cookie.
-- Any presentation of a live code from a listed origin consumes it, whether or not it then succeeds.
+- Only a redeem that passes every check consumes the code: a presentation from the wrong origin or browser leaves it for the right page.
 - Refusals are logged with the reason and the origin, never the code.
 
 **Requirements.**

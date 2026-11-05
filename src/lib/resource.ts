@@ -467,7 +467,7 @@ export class OAuthResource extends Resource {
 					mcpConfig: OAuthResource.mcpConfig,
 					logger,
 					allowUnverifiedClaimInheritance: OAuthResource.allowUnverifiedClaimInheritance,
-					handoffOrigins: OAuthResource.handoffOrigins,
+					handoffOrigins: () => OAuthResource.handoffOrigins,
 				});
 
 			case 'user':

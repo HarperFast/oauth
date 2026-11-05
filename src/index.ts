@@ -255,7 +255,8 @@ export async function handleApplication(scope: Scope): Promise<void> {
 		OAuthResource.handoffOrigins = OAuthResource.handoffOrigins.filter((pattern) => keptSources.has(pattern.source));
 		if (handoffOrigins.length > 0) {
 			logger?.info?.(
-				`OAuth: sign-in may be handed off to ${handoffOrigins.map((pattern) => pattern.source).join(', ')} (postLoginRedirectOrigins)`
+				`OAuth: sign-in may be handed off to ${handoffOrigins.map((pattern) => pattern.source).join(', ')} ` +
+					'(postLoginRedirectOrigins); those origins also need credentialed CORS (http.corsAccessList)'
 			);
 		}
 

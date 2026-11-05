@@ -124,7 +124,8 @@ export function parseOriginPattern(entry: string): OriginPattern {
  * this environment) all mean an EMPTY allowlist: today's behavior. That is the
  * fail-closed direction for this setting, unlike allowlists where empty means
  * "allow any", so it does not throw. An unresolved placeholder entry inside a
- * list is dropped with a warning. Any other invalid entry throws naming it.
+ * list or a comma-separated string is dropped with a warning. Any other invalid
+ * entry throws naming it.
  */
 export function normalizePostLoginRedirectOrigins(value: unknown, logger?: Logger): OriginPattern[] {
 	const option = POST_LOGIN_REDIRECT_ORIGINS_OPTION;
@@ -149,12 +150,12 @@ export function normalizePostLoginRedirectOrigins(value: unknown, logger?: Logge
 		if (typeof entry !== 'string') {
 			throw new Error(`${option} entries must be strings (got ${JSON.stringify(entry)})`);
 		}
-		if (isUnresolvedEnvPlaceholder(entry)) {
-			logger?.warn?.(`OAuth: ${option} entry ${entry.trim()} references an unset variable; ignoring that entry`);
-			continue;
-		}
 		for (const piece of entry.split(/[\s,]+/)) {
 			if (piece === '') continue;
+			if (isUnresolvedEnvPlaceholder(piece)) {
+				logger?.warn?.(`OAuth: ${option} entry ${piece} references an unset variable; ignoring that entry`);
+				continue;
+			}
 			const pattern = parseOriginPattern(piece);
 			patterns.set(pattern.source, pattern);
 		}
@@ -315,26 +316,29 @@ export interface LoginHandoffRecord {
 /** A storage failure while issuing a code; the callback maps it to `server_error` / `handoff_storage`. */
 export class LoginHandoffStorageError extends Error {
 	readonly reason = 'handoff_storage';
-	constructor(cause: unknown) {
+	constructor() {
+		// No `cause`: the write carried provider tokens, and a storage
+		// diagnostic must not carry them into the callback's error log.
 		super('Failed to store the sign-in handoff');
-		this.cause = cause;
 	}
 }
 
-export type RedeemRefusal = 'unknown' | 'expired' | 'replayed';
+export type RedeemRefusal = 'unknown' | 'expired' | 'replayed' | 'mismatch';
 
 /**
  * Issue a code for `record` and return it. Storage errors throw
  * {@link LoginHandoffStorageError}; the code itself is never logged.
  */
-export async function issueLoginHandoff(record: Omit<LoginHandoffRecord, 'expiresAt'>): Promise<string> {
+export async function issueLoginHandoff(
+	record: Omit<LoginHandoffRecord, 'expiresAt'>,
+	logger?: Logger
+): Promise<string> {
 	const code = randomBytes(32).toString('base64url');
 	const expiresAt = Date.now() + LOGIN_HANDOFF_TTL_MS;
 	const id = handoffKey(code);
 	try {
 		// Its own context: the row commits on its own transaction, before the
-		// redirect that carries the code goes out. The per-record expiresAt
-		// overrides the table default.
+		// redirect that carries the code goes out.
 		await getHandoffTable().put(
 			{
 				id,
@@ -347,45 +351,75 @@ export async function issueLoginHandoff(record: Omit<LoginHandoffRecord, 'expire
 			{ expiresAt }
 		);
 	} catch (error) {
-		throw new LoginHandoffStorageError(error);
+		logger?.error?.(
+			'OAuth handoff: failed to store the code:',
+			error instanceof Error ? `${error.name}: ${error.message}` : 'unknown error'
+		);
+		throw new LoginHandoffStorageError();
 	}
 	return code;
 }
 
 /**
- * Consume a code. Exactly one presentation of a live code gets its record:
- * each presentation adds 1 to the row's `uses` with an atomic patch and only
- * the one that reads back 1 wins (see assertionJtiStore.ts for why the reads
- * pass a fresh context). A losing or late presentation is refused; the winner
- * deletes the row. Storage errors propagate: a redeem that could not check
- * must not succeed.
+ * Re-reads of a code not found yet, in ms. The page redeems moments after the
+ * callback's redirect, possibly on another node than the one that wrote the
+ * row, so a miss waits out replication briefly before it is final.
+ */
+let missRetryDelaysMs: readonly number[] = [100, 250, 500];
+
+/**
+ * Override the miss re-read delays (for testing only)
+ * @internal
+ */
+export function setLoginHandoffMissRetryDelays(delays: readonly number[]): void {
+	missRetryDelaysMs = delays;
+}
+
+/**
+ * Consume a code. `check` runs on the stored record BEFORE anything is
+ * consumed, so a presentation from the wrong origin or browser leaves the code
+ * for the right page; it returns a refusal reason, or null to proceed.
+ *
+ * Single use: the winner adds 1 to `uses` with an atomic patch that also
+ * clears the stored session, and only a presenter that reads back 1 proceeds
+ * (assertionJtiStore.ts explains the fresh-context reads). The row is kept,
+ * scrubbed, until its expiry: deleting it would let a presenter that read the
+ * live row before the delete re-create it at `uses: 1` and also win. Two
+ * presentations whose patches both land before either read-back are both
+ * refused (fail closed), and, as for every table-backed guard here, single
+ * use holds per node within the replication delay; every winner is still
+ * bound to the same origin and browser. Storage errors propagate.
  */
 export async function redeemLoginHandoff(
-	code: string
-): Promise<{ record: LoginHandoffRecord } | { refused: RedeemRefusal }> {
+	code: string,
+	check: (record: LoginHandoffRecord) => string | null = () => null
+): Promise<{ record: LoginHandoffRecord } | { refused: RedeemRefusal; detail?: string }> {
 	const table = getHandoffTable();
 	const id = handoffKey(code);
 	// Explicit field access below: Harper records are tracked objects that
 	// spread copies nothing from (AGENTS.md).
-	const row = await table.get(id, {});
+	let row = await table.get(id, {});
+	for (const delay of missRetryDelaysMs) {
+		if (row) break;
+		await new Promise((resolve) => setTimeout(resolve, delay));
+		row = await table.get(id, {});
+	}
 	if (!row || typeof row.origin !== 'string') return { refused: 'unknown' };
 	const expiresAt = Number(row.expires_at);
 	if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) return { refused: 'expired' };
-	await table.patch(id, { uses: { __op__: 'add', value: 1 } }, { expiresAt });
-	if ((await table.get(id, {}))?.uses !== 1) return { refused: 'replayed' };
+	if (Number(row.uses) > 0 || typeof row.session !== 'string') return { refused: 'replayed' };
 	const record: LoginHandoffRecord = {
 		origin: row.origin,
 		browserNonceHash: String(row.browser_hash ?? ''),
 		provider: String(row.provider ?? ''),
-		session: JSON.parse(String(row.session)),
+		session: JSON.parse(row.session),
 		expiresAt,
 	};
-	try {
-		await table.delete(id, {});
-	} catch {
-		// The counter already refuses every later presentation; the row's
-		// expiry reaps it.
-	}
+	const mismatch = check(record);
+	if (mismatch) return { refused: 'mismatch', detail: mismatch };
+	await table.patch(id, { uses: { __op__: 'add', value: 1 }, session: null }, { expiresAt });
+	if ((await table.get(id, {}))?.uses !== 1) return { refused: 'replayed' };
+	if (expiresAt <= Date.now()) return { refused: 'expired' };
 	return { record };
 }
 
@@ -396,6 +430,12 @@ export async function redeemLoginHandoff(
 function errorResponse(status: number, error: string, message: string) {
 	return { status, headers: { 'Cache-Control': 'no-store' }, body: { error, message } };
 }
+
+const REFUSAL_LOG: Record<Exclude<RedeemRefusal, 'mismatch'>, string> = {
+	unknown: 'unknown code',
+	expired: 'code expired',
+	replayed: 'code already used',
+};
 
 /**
  * Redeem a handoff code into a Harper session for the calling origin.
@@ -408,8 +448,8 @@ function errorResponse(status: number, error: string, message: string) {
  * - 403 `origin_not_allowed`: `Origin` missing, repeated, `null`, or not allowlisted.
  * - 400 `invalid_request`: no `code`, a repeated one, or not code-shaped.
  * - 400 `invalid_grant`: unknown, expired or already used; or bound to another
- *   origin or another browser. Every presentation of a live code that passes
- *   the Origin check consumes it, whether or not it then succeeds.
+ *   origin or another browser. Only a presentation that passes every check
+ *   consumes the code.
  * - 500 `server_error`: storage or session write failed, or sessions are off.
  *
  * Refusals are logged with the reason and origin, never the code.
@@ -424,8 +464,8 @@ export async function handleLoginHandoffRedeem(
 		return { status: 404, body: { error: 'Not found' } };
 	}
 
-	// The Origin check runs first, before any storage read. A browser cannot
-	// forge Origin; the browser binding below covers a non-browser caller that can.
+	// Before any storage read. A browser cannot forge Origin; the browser
+	// binding covers a non-browser caller that can.
 	const origin = readRawHeader(request.headers, 'origin');
 	if (typeof origin !== 'string' || matchAllowedOrigin(origin, patterns) !== origin) {
 		logger?.warn?.(
@@ -447,44 +487,37 @@ export async function handleLoginHandoffRedeem(
 		return errorResponse(500, 'server_error', 'Sessions are not available');
 	}
 
+	const browserSecret = readBrowserSecret(request);
 	let result: Awaited<ReturnType<typeof redeemLoginHandoff>>;
 	try {
-		result = await redeemLoginHandoff(code);
+		result = await redeemLoginHandoff(code, (record) => {
+			if (record.origin !== origin) return `code was issued for ${JSON.stringify(record.origin)}`;
+			if (!browserSecretMatches(browserSecret, record.browserNonceHash)) {
+				return 'browser binding mismatch (not the browser that started the sign-in)';
+			}
+			return null;
+		});
 	} catch (error) {
 		logger?.error?.(
 			`OAuth handoff for ${JSON.stringify(origin)}: storage error:`,
-			error instanceof Error ? error.message : String(error)
+			error instanceof Error ? `${error.name}: ${error.message}` : 'unknown error'
 		);
 		return errorResponse(500, 'server_error', 'Unable to complete the sign-in, please try again');
 	}
 
-	const refuse = (reason: string) => {
+	if ('refused' in result) {
+		const reason = result.refused === 'mismatch' ? result.detail : REFUSAL_LOG[result.refused];
 		logger?.warn?.(`OAuth handoff refused for ${JSON.stringify(origin)}: ${reason}`);
 		return errorResponse(400, 'invalid_grant', 'The handoff code is invalid, expired or already used');
-	};
-	if ('refused' in result) {
-		return refuse(
-			result.refused === 'replayed'
-				? 'code already used'
-				: result.refused === 'expired'
-					? 'code expired'
-					: 'unknown code'
-		);
 	}
 	const { record } = result;
-	if (record.origin !== origin) {
-		return refuse(`code was issued for ${JSON.stringify(record.origin)}`);
-	}
-	if (!browserSecretMatches(readBrowserSecret(request), record.browserNonceHash)) {
-		return refuse('browser binding mismatch (not the browser that started the sign-in)');
-	}
 
 	try {
 		await request.session.update(record.session);
 	} catch (error) {
 		logger?.error?.(
 			`OAuth handoff for ${JSON.stringify(origin)}: session write failed:`,
-			error instanceof Error ? error.message : String(error)
+			error instanceof Error ? `${error.name}: ${error.message}` : 'unknown error'
 		);
 		return errorResponse(500, 'server_error', 'Unable to complete the sign-in, please try again');
 	}

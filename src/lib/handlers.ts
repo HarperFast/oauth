@@ -303,10 +303,12 @@ export async function handleCallback(
 		mcpConfig?: MCPConfig;
 		logger?: Logger;
 		allowUnverifiedClaimInheritance?: boolean;
-		handoffOrigins?: readonly OriginPattern[];
+		/** The live allowlist, or a getter for it: re-read before a code is issued. */
+		handoffOrigins?: readonly OriginPattern[] | (() => readonly OriginPattern[]);
 	}
 ): Promise<any> {
 	const { mcpConfig, logger, allowUnverifiedClaimInheritance = false, handoffOrigins = [] } = opts ?? {};
+	const currentHandoffOrigins = typeof handoffOrigins === 'function' ? handoffOrigins : () => handoffOrigins;
 	// Get query parameters from target
 	const code = target.get?.('code');
 	const state = target.get?.('state');
@@ -382,21 +384,46 @@ export async function handleCallback(
 	// A human flow started with an allowlisted absolute `redirect` hands the
 	// session to that origin instead of writing it here (loginHandoff.ts). Its
 	// errors return there too, with the same error/reason parameters.
-	const handoff: HandoffTarget | null = mcpState ? null : resolveStateHandoff(tokenData, handoffOrigins);
+	const handoff: HandoffTarget | null = mcpState ? null : resolveStateHandoff(tokenData, currentHandoffOrigins());
 	const errorRedirect = (params: Record<string, string>): string =>
 		handoff
 			? buildHandoffErrorRedirect(handoff.target, params)
 			: buildErrorRedirect(tokenData.originalUrl || config.postLoginRedirect || '/', params);
+	// A flow started for an origin that is no longer allowed fails, here on
+	// the path, rather than becoming a sign-in on this origin.
+	const handoffRevokedResponse = () => {
+		logger?.warn?.(
+			`OAuth callback: sign-in was started for ${JSON.stringify(tokenData.handoffOrigin)}, which ` +
+				`postLoginRedirectOrigins no longer allows (provider '${providerName}')`
+		);
+		return {
+			status: 302,
+			headers: {
+				Location: buildErrorRedirect(tokenData.originalUrl || config.postLoginRedirect || '/', {
+					error: 'access_denied',
+					reason: 'handoff_origin_not_allowed',
+				}),
+			},
+		};
+	};
 	// Store the finished session under a one-time code and send the browser to
 	// the target with the code in the fragment. Nothing is written to this
 	// request's session: a preview sign-in must not also sign the user in here.
 	const handOffSession = async (to: HandoffTarget, sessionData: Record<string, any>) => {
-		const handoffCode = await issueLoginHandoff({
-			origin: to.origin,
-			browserNonceHash: String(tokenData.browserNonceHash),
-			provider: providerName,
-			session: sessionData,
-		});
+		// The provider exchange and onLogin ran since the check above; a reload
+		// in that window that removed the origin must still stop the code.
+		if (resolveStateHandoff(tokenData, currentHandoffOrigins())?.origin !== to.origin) {
+			return handoffRevokedResponse();
+		}
+		const handoffCode = await issueLoginHandoff(
+			{
+				origin: to.origin,
+				browserNonceHash: String(tokenData.browserNonceHash),
+				provider: providerName,
+				session: sessionData,
+			},
+			logger
+		);
 		logger?.info?.(`OAuth: sign-in for provider '${providerName}' handed to ${JSON.stringify(to.origin)}`);
 		return {
 			status: 302,
@@ -460,6 +487,10 @@ export async function handleCallback(
 			});
 			return { status: 302, headers: { Location: errorUrl } };
 		}
+	}
+
+	if (!mcpState && !handoff && typeof tokenData.handoffOrigin === 'string') {
+		return handoffRevokedResponse();
 	}
 
 	// MCP browser binding — every /oauth/mcp/authorize flow (the CIMD interstitial
