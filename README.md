@@ -195,6 +195,7 @@ The plugin manages its own tables in the `oauth` database — see [`schema/oauth
 - `mcp_auth_codes` — single-use PKCE authorization codes (5-minute expiration)
 - `mcp_refresh_families` — OAuth 2.1 single-use refresh-token rotation state
 - `mcp_assertion_jtis` — RFC 7523 client-assertion replay guard (120-second expiration)
+- `login_handoffs` — one-time codes that hand a finished sign-in to a `postLoginRedirectOrigins` origin (60-second expiration; keyed by the code's hash)
 
 ## MCP OAuth (experimental)
 
@@ -237,6 +238,7 @@ The plugin serves discovery (`/.well-known/*`), Dynamic Client Registration, the
 
 - **HTTPS required** - OAuth requires HTTPS in production
 - **CSRF protection** - Automatic via state parameter validation
+- **Post-login redirects stay on this origin** - The `redirect` parameter is reduced to its path, unless `postLoginRedirectOrigins` lists its origin; then the sign-in is handed there with a single-use, 60-second code bound to that origin and to the initiating browser. See [Signing in on another origin](./docs/configuration.md#signing-in-on-another-origin-postloginredirectorigins).
 - **ID token verification** - OIDC providers verify token signatures
 - **Secure sessions** - Use Harper's secure session configuration
 - **Token storage** - Tokens stored in session (configure secure cookies)

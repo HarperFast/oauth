@@ -43,6 +43,16 @@ export interface OAuthPluginConfig {
 	 * NOT enable this flag.
 	 */
 	allowUnverifiedClaimInheritance?: boolean;
+	/**
+	 * Origins a login's absolute `redirect` may name, as `https://host` or
+	 * `https://*.example.com` (one label) entries: a YAML list or a comma/
+	 * whitespace-separated string, `${ENV_VAR}`-expandable. The provider
+	 * callback stays on `redirectUri`, then hands the finished sign-in to that
+	 * origin with a one-time code the page redeems at `POST /oauth/handoff`.
+	 * Empty, absent, or an unset `${VAR}` = no handoff (absolute redirects are
+	 * reduced to their path, as always).
+	 */
+	postLoginRedirectOrigins?: string | string[];
 }
 
 // ============================================================================
@@ -1001,7 +1011,12 @@ export interface Table {
 	 * `context.transaction` onto it, so pass a new object for each read.
 	 */
 	get(id: string, context?: Record<string, unknown>): Promise<any>;
-	put(record: any): Promise<any>;
+	/**
+	 * Write a whole record (its primary key is read from the record). The
+	 * optional context's `expiresAt` (epoch ms) sets the record's expiry; a
+	 * context also opens its own transaction rather than joining the caller's.
+	 */
+	put(record: any, context?: { expiresAt?: number }): Promise<any>;
 	/**
 	 * Partial update: writes only the given fields, applied at commit on top of
 	 * the record as then stored, so fields written by a concurrent request
@@ -1010,7 +1025,8 @@ export interface Table {
 	 * `expiresAt` (epoch ms) sets the record's expiry.
 	 */
 	patch(id: string, update: Record<string, any>, context?: { expiresAt?: number }): Promise<void>;
-	delete(id: string): Promise<void>;
+	/** Delete a record. A context, as for `get`, opens a new transaction. */
+	delete(id: string, context?: Record<string, unknown>): Promise<void>;
 	/**
 	 * Enumerate records matching a query. An empty query (`{}`) returns all rows.
 	 * The runtime table returns an `AsyncIterable`; consume with `for await`.
