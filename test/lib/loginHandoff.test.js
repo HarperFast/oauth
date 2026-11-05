@@ -392,6 +392,14 @@ describe('handoff code store', () => {
 		assert.ok((await redeemLoginHandoff(code)).record);
 	});
 
+	it('bounds how many redeems re-read a miss at once', async () => {
+		setLoginHandoffMissRetryDelays([20]);
+		const before = table.readContexts.length;
+		const misses = Array.from({ length: 40 }, (_, i) => redeemLoginHandoff(String(i).padStart(43, 'Z')));
+		assert.ok((await Promise.all(misses)).every((r) => r.refused === 'unknown'));
+		assert.equal(table.readContexts.length - before, 40 + 32, 'only 32 of 40 concurrent misses re-read');
+	});
+
 	it('re-reads a code not found yet (replication lag), then gives up', async () => {
 		setLoginHandoffMissRetryDelays([1, 1]);
 		const code = await issueLoginHandoff(record());
@@ -531,7 +539,8 @@ describe('POST /oauth/handoff (handleLoginHandoffRedeem)', () => {
 			() => live,
 			logger
 		);
-		assert.equal(refused.status, 400);
+		assert.equal(refused.status, 403);
+		assert.equal(refused.body.error, 'origin_not_allowed');
 		table.get = get;
 		assert.equal((await redeem({ origin: PREVIEW, cookie: cookieFor(SECRET) })).status, 200);
 	});

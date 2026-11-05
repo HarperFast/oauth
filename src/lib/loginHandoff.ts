@@ -341,6 +341,10 @@ export async function issueLoginHandoff(
  */
 let missRetryDelaysMs: readonly number[] = [100, 300];
 
+/** Redeems re-reading a miss at once; past this, a miss is final at once. */
+const MAX_MISS_RETRIERS = 32;
+let missRetriers = 0;
+
 /**
  * Override the miss re-read delays (for testing only)
  * @internal
@@ -373,10 +377,17 @@ export async function redeemLoginHandoff(
 	// Explicit field access below: Harper records are tracked objects that
 	// spread copies nothing from (AGENTS.md).
 	let row = await table.get(id, {});
-	for (const delay of missRetryDelaysMs) {
-		if (row) break;
-		await new Promise((resolve) => setTimeout(resolve, delay));
-		row = await table.get(id, {});
+	if (!row && missRetriers < MAX_MISS_RETRIERS) {
+		missRetriers++;
+		try {
+			for (const delay of missRetryDelaysMs) {
+				await new Promise((resolve) => setTimeout(resolve, delay));
+				row = await table.get(id, {});
+				if (row) break;
+			}
+		} finally {
+			missRetriers--;
+		}
 	}
 	if (!row || typeof row.origin !== 'string') return { refused: 'unknown' };
 	const expiresAt = Number(row.expires_at);
@@ -407,6 +418,8 @@ export async function redeemLoginHandoff(
 function errorResponse(status: number, error: string, message: string) {
 	return { status, headers: { 'Cache-Control': 'no-store' }, body: { error, message } };
 }
+
+const ORIGIN_REMOVED = 'origin removed from the allowlist';
 
 const REFUSAL_LOG: Record<Exclude<RedeemRefusal, 'mismatch'>, string> = {
 	unknown: 'unknown code',
@@ -474,7 +487,7 @@ export async function handleLoginHandoffRedeem(
 	let result: Awaited<ReturnType<typeof redeemLoginHandoff>>;
 	try {
 		result = await redeemLoginHandoff(code, (record) => {
-			if (matchAllowedOrigin(origin, currentPatterns()) !== origin) return 'origin removed from the allowlist';
+			if (matchAllowedOrigin(origin, currentPatterns()) !== origin) return ORIGIN_REMOVED;
 			if (record.origin !== origin) return `code was issued for ${JSON.stringify(record.origin)}`;
 			if (!browserSecretMatches(browserSecret, record.browserNonceHash)) {
 				return 'browser binding mismatch (not the browser that started the sign-in)';
@@ -489,6 +502,10 @@ export async function handleLoginHandoffRedeem(
 		return errorResponse(500, 'server_error', 'Unable to complete the sign-in, please try again');
 	}
 
+	if ('refused' in result && result.detail === ORIGIN_REMOVED) {
+		logger?.warn?.(`OAuth handoff refused for ${JSON.stringify(origin)}: ${ORIGIN_REMOVED}`);
+		return errorResponse(403, 'origin_not_allowed', 'This origin may not complete a sign-in handoff');
+	}
 	if ('refused' in result) {
 		const reason = result.refused === 'mismatch' ? result.detail : REFUSAL_LOG[result.refused];
 		logger?.warn?.(`OAuth handoff refused for ${JSON.stringify(origin)}: ${reason}`);
@@ -497,7 +514,7 @@ export async function handleLoginHandoffRedeem(
 	const { record } = result;
 	// A reload during the storage round trips may have removed this origin.
 	if (matchAllowedOrigin(origin, currentPatterns()) !== origin) {
-		logger?.warn?.(`OAuth handoff refused for ${JSON.stringify(origin)}: origin removed from the allowlist`);
+		logger?.warn?.(`OAuth handoff refused for ${JSON.stringify(origin)}: ${ORIGIN_REMOVED}`);
 		return errorResponse(403, 'origin_not_allowed', 'This origin may not complete a sign-in handoff');
 	}
 
