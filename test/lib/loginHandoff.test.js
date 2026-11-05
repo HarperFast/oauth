@@ -256,6 +256,15 @@ describe('postLoginRedirectOrigins patterns', () => {
 			}
 			assert.equal(isAllowedPostLoginOrigin('https://hdbms-pr-12.app.dev.studio.harperfabric.com/', ''), false);
 			assert.equal(isAllowedPostLoginOrigin('https://studio.example.com/', `${dev}, https://studio.example.com`), true);
+			// central-manager passes config.yaml's literal `${VAR}` and relies on it being expanded.
+			const ENV = 'OAUTH_TEST_EXPORT_HANDOFF_ORIGINS';
+			try {
+				assert.equal(isAllowedPostLoginOrigin('https://pr-1.app.dev.studio.harperfabric.com/', `\${${ENV}}`), false);
+				process.env[ENV] = dev;
+				assert.equal(isAllowedPostLoginOrigin('https://pr-1.app.dev.studio.harperfabric.com/', `\${${ENV}}`), true);
+			} finally {
+				delete process.env[ENV];
+			}
 		});
 	});
 
