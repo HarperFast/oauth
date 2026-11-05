@@ -309,7 +309,8 @@ By default a sign-in always finishes on the origin of `redirectUri`: the session
 3. The page reads `oauth_handoff` from `location.hash`, removes it (`history.replaceState`), and redeems it within 60 seconds:
 
 ```javascript
-const code = new URLSearchParams(location.hash.split('?')[1] ?? '').get('oauth_handoff');
+const q = location.hash.indexOf('?');
+const code = q === -1 ? null : new URLSearchParams(location.hash.slice(q + 1)).get('oauth_handoff');
 const res = await fetch('https://studio.example.com/oauth/handoff', {
 	method: 'POST',
 	credentials: 'include',
@@ -325,7 +326,7 @@ The browser sends the page's `Origin`, so Harper creates the session under that 
 
 **Security properties.**
 
-- The code is 256 random bits, single-use, valid for 60 seconds, and stored only as its SHA-256. It is never a session id or a provider token; the provider tokens stay server-side, and are cleared from the stored row when the code is redeemed.
+- The code is 256 random bits, single-use, valid for 60 seconds, and stored only as its SHA-256. It is never a session id or a provider token; the provider tokens stay server-side, and the redeem clears them from the code's row (Harper's audit log, like the session table's, keeps the original write for its retention period).
 - Single use is an atomic counter, as for client-assertion replay. Two presentations racing exactly can both be refused (fail closed), so redeem each code once. Like every table-backed guard, it holds per node within Harper's replication delay; any extra winner is still bound to the same origin and browser.
 - It is bound to the target origin: the redeem's `Origin` header must be a listed origin **and** equal the origin the code was issued for.
 - It is bound to the browser that started the sign-in, through the same `__Host-oauth_browser` cookie that already defends the callback against login CSRF. An attacker's code planted in a victim's page is refused, and a stolen code cannot be redeemed without the victim's cookie.
@@ -335,7 +336,8 @@ The browser sends the page's `Origin`, so Harper creates the session under that 
 **Requirements.**
 
 - The target origin must be **same-site** with this host (share a registrable domain, e.g. `pr-12.app.example.com` and `studio.example.com`). The browser-binding cookie is `SameSite=Lax`, and Harper's session cookie set on the redeem response would be a third-party cookie for a cross-site page.
-- Harper must allow the page's origin for credentialed CORS (`http.corsAccessList`), or the browser will not let the page read the redeem's response or send its later calls with cookies.
+- Harper must allow the page's origin for credentialed CORS (`http.corsAccessList`), or the browser will not let the page read the redeem's response or send its later calls with cookies. Before Harper 5.4, `http.corsAccessList` matches exact origins only, so a wildcard preview pattern needs Harper 5.4 or an entry per origin.
+- An `onLogin` hook that denies or defers the sign-in with its own `redirect` sends the browser there, as for any sign-in; a relative hook `redirect` resolves against this host, not the listed origin.
 - List only origins you trust as much as the app on `redirectUri`: a listed origin can complete a sign-in for any user who follows its login link.
 - Values a hook adds to the session pass through JSON on the way (numbers, strings, booleans, arrays and plain objects survive unchanged; a `Date` becomes a string).
 

@@ -43,7 +43,6 @@ import type { Logger, Request, Table } from '../types.ts';
 
 declare const databases: any;
 
-/** Plugin option name; also used in config errors and log lines. */
 export const POST_LOGIN_REDIRECT_ORIGINS_OPTION = 'postLoginRedirectOrigins';
 
 /** Fragment query parameter that carries the one-time code to the target page. */
@@ -52,7 +51,7 @@ export const HANDOFF_FRAGMENT_PARAM = 'oauth_handoff';
 /** Lifetime of a handoff code, from issue at the callback to redeem. */
 export const LOGIN_HANDOFF_TTL_MS = 60_000;
 
-/** A handoff target longer than this is not handed off (falls back to path-only). */
+/** Applies to the normalized href, which is what the state stores and the callback re-checks. */
 const MAX_HANDOFF_TARGET_LENGTH = 2048;
 
 /** 32 random bytes, base64url: exactly 43 characters from this set. */
@@ -217,16 +216,16 @@ export interface HandoffTarget {
 export function resolveHandoffTarget(redirect: unknown, patterns: readonly OriginPattern[]): HandoffTarget | null {
 	if (typeof redirect !== 'string' || redirect.length > MAX_HANDOFF_TARGET_LENGTH) return null;
 	const origin = matchAllowedOrigin(redirect, patterns);
-	return origin ? { origin, target: new URL(redirect).href } : null;
+	if (!origin) return null;
+	const target = new URL(redirect).href;
+	return target.length > MAX_HANDOFF_TARGET_LENGTH ? null : { origin, target };
 }
 
 /**
- * Resolve the handoff recorded in a verified state token at the callback. The
- * origin is re-checked against the CURRENT allowlist: one removed by a config
- * reload since the login started is no longer handed to (the flow falls back
- * to today's path-only redirect on this origin). A state without a browser
- * binding hash is never handed off: the redeem's browser check needs it (and
- * every state handleLogin mints carries one).
+ * Resolve the handoff recorded in a verified state token against the CURRENT
+ * allowlist; null when the origin has been removed since the login started
+ * (the callback then refuses the sign-in). A state without a browser binding
+ * hash is never handed off: the redeem's browser check needs it.
  */
 export function resolveStateHandoff(
 	tokenData: { originalUrl?: unknown; handoffOrigin?: unknown; browserNonceHash?: unknown },
@@ -251,9 +250,10 @@ export function appendHandoffCode(target: string, code: string): string {
 	const queryStart = fragment.indexOf('?');
 	const head = queryStart === -1 ? fragment : fragment.slice(0, queryStart);
 	const query = queryStart === -1 ? '' : fragment.slice(queryStart + 1);
+	// Compare decoded names, as the page's URLSearchParams will read them.
 	const kept = query
 		.split('&')
-		.filter((part) => part !== '' && part !== HANDOFF_FRAGMENT_PARAM && !part.startsWith(`${HANDOFF_FRAGMENT_PARAM}=`));
+		.filter((part) => part !== '' && new URLSearchParams(part).keys().next().value !== HANDOFF_FRAGMENT_PARAM);
 	kept.push(`${HANDOFF_FRAGMENT_PARAM}=${code}`);
 	url.hash = `${head}?${kept.join('&')}`;
 	return url.href;
@@ -271,10 +271,6 @@ export function buildHandoffErrorRedirect(target: string, params: Record<string,
 	}
 	return url.href;
 }
-
-// ---------------------------------------------------------------------------
-// Code store (oauth.login_handoffs)
-// ---------------------------------------------------------------------------
 
 let handoffTable: Table | undefined;
 
@@ -408,11 +404,18 @@ export async function redeemLoginHandoff(
 	const expiresAt = Number(row.expires_at);
 	if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) return { refused: 'expired' };
 	if (Number(row.uses) > 0 || typeof row.session !== 'string') return { refused: 'replayed' };
+	let session: Record<string, any>;
+	try {
+		session = JSON.parse(row.session);
+	} catch {
+		// A parse error quotes its input, which holds provider tokens.
+		throw new Error('stored handoff session is not valid JSON');
+	}
 	const record: LoginHandoffRecord = {
 		origin: row.origin,
 		browserNonceHash: String(row.browser_hash ?? ''),
 		provider: String(row.provider ?? ''),
-		session: JSON.parse(row.session),
+		session,
 		expiresAt,
 	};
 	const mismatch = check(record);
@@ -422,10 +425,6 @@ export async function redeemLoginHandoff(
 	if (expiresAt <= Date.now()) return { refused: 'expired' };
 	return { record };
 }
-
-// ---------------------------------------------------------------------------
-// POST /oauth/handoff
-// ---------------------------------------------------------------------------
 
 function errorResponse(status: number, error: string, message: string) {
 	return { status, headers: { 'Cache-Control': 'no-store' }, body: { error, message } };
@@ -457,9 +456,11 @@ const REFUSAL_LOG: Record<Exclude<RedeemRefusal, 'mismatch'>, string> = {
 export async function handleLoginHandoffRedeem(
 	request: Request,
 	body: any,
-	patterns: readonly OriginPattern[],
+	allowlist: readonly OriginPattern[] | (() => readonly OriginPattern[]),
 	logger?: Logger
 ): Promise<any> {
+	const currentPatterns = typeof allowlist === 'function' ? allowlist : () => allowlist;
+	const patterns = currentPatterns();
 	if (patterns.length === 0) {
 		return { status: 404, body: { error: 'Not found' } };
 	}
@@ -488,6 +489,10 @@ export async function handleLoginHandoffRedeem(
 	}
 
 	const browserSecret = readBrowserSecret(request);
+	if (!browserSecret) {
+		logger?.warn?.(`OAuth handoff refused for ${JSON.stringify(origin)}: no browser binding cookie`);
+		return errorResponse(400, 'invalid_grant', 'The handoff code is invalid, expired or already used');
+	}
 	let result: Awaited<ReturnType<typeof redeemLoginHandoff>>;
 	try {
 		result = await redeemLoginHandoff(code, (record) => {
@@ -511,6 +516,11 @@ export async function handleLoginHandoffRedeem(
 		return errorResponse(400, 'invalid_grant', 'The handoff code is invalid, expired or already used');
 	}
 	const { record } = result;
+	// A reload during the storage round trips may have removed this origin.
+	if (matchAllowedOrigin(origin, currentPatterns()) !== origin) {
+		logger?.warn?.(`OAuth handoff refused for ${JSON.stringify(origin)}: origin removed from the allowlist`);
+		return errorResponse(403, 'origin_not_allowed', 'This origin may not complete a sign-in handoff');
+	}
 
 	try {
 		await request.session.update(record.session);

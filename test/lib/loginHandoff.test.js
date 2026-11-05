@@ -61,12 +61,25 @@ function applyPatch(stored, update) {
 	return next;
 }
 
+/**
+ * A read without a context joins the request's transaction and sees its
+ * snapshot, taken at the first such read (AGENTS.md); a context opens a fresh
+ * one that sees committed writes. The mock models both, so a read-back that
+ * lost its fresh context would see the pre-patch row and fail the tests.
+ */
 function installHandoffTable() {
 	const rows = new Map();
+	const snapshot = new Map();
 	const table = {
 		rows,
 		puts: [],
-		get: async (id) => rows.get(id) ?? null,
+		readContexts: [],
+		get: async (id, context) => {
+			table.readContexts.push(context);
+			if (context !== undefined) return rows.get(id) ?? null;
+			if (!snapshot.has(id)) snapshot.set(id, rows.get(id) ?? null);
+			return snapshot.get(id);
+		},
 		put: async (record, context) => {
 			table.puts.push({ record, context });
 			rows.set(record.id, { ...record });
@@ -261,6 +274,8 @@ describe('postLoginRedirectOrigins patterns', () => {
 			assert.equal(resolveHandoffTarget('/#/check-oauth', patterns()), null);
 			assert.equal(resolveHandoffTarget(['https://x'], patterns()), null);
 			assert.equal(resolveHandoffTarget(`${PREVIEW}/#/${'a'.repeat(2048)}`, patterns()), null);
+			// Under the cap raw, over it once normalized (each space becomes %20).
+			assert.equal(resolveHandoffTarget(`${PREVIEW}/#/${' '.repeat(900)}x`, patterns()), null);
 		});
 	});
 
@@ -279,6 +294,9 @@ describe('postLoginRedirectOrigins patterns', () => {
 				appendHandoffCode(`${PREVIEW}/#/a?oauth_handoff=PLANTED&b=1&oauth_handoff`, 'CODE'),
 				`${PREVIEW}/#/a?b=1&oauth_handoff=CODE`
 			);
+			const encoded = new URL(appendHandoffCode(`${PREVIEW}/#/a?%6fauth_handoff=PLANTED&o%61uth_handoff=X`, 'CODE'));
+			const query = encoded.hash.slice(encoded.hash.indexOf('?') + 1);
+			assert.deepEqual(new URLSearchParams(query).getAll('oauth_handoff'), ['CODE']);
 		});
 	});
 });
@@ -313,6 +331,14 @@ describe('handoff code store', () => {
 		assert.equal(table.puts[0].context.expiresAt, row.expires_at, 'per-record Harper expiry set');
 	});
 
+	it('reads in fresh transactions, never the request snapshot', async () => {
+		const code = await issueLoginHandoff(record());
+		assert.ok((await redeemLoginHandoff(code)).record);
+		assert.ok(table.readContexts.length >= 2);
+		assert.ok(table.readContexts.every((context) => context && typeof context === 'object'));
+		assert.equal(new Set(table.readContexts).size, table.readContexts.length, 'a new context per read');
+	});
+
 	it('is single-use, keeping a scrubbed tombstone until expiry', async () => {
 		const code = await issueLoginHandoff(record());
 		const first = await redeemLoginHandoff(code);
@@ -325,8 +351,6 @@ describe('handoff code store', () => {
 	});
 
 	it('a presenter that read the live row before the winner finished cannot also win', async () => {
-		// The winner's cleanup must not let a slower presenter, which read the
-		// row before it, patch it back into existence at uses: 1.
 		const code = await issueLoginHandoff(record());
 		const patch = table.patch;
 		let patches = 0;
@@ -346,8 +370,6 @@ describe('handoff code store', () => {
 	it('never lets two concurrent presentations both win', async () => {
 		const code = await issueLoginHandoff(record());
 		const results = await Promise.all([redeemLoginHandoff(code), redeemLoginHandoff(code), redeemLoginHandoff(code)]);
-		// When every patch lands before any read-back, all read > 1 and all are
-		// refused: fail closed.
 		assert.ok(results.filter((r) => r.record).length <= 1);
 		assert.ok(results.filter((r) => r.refused === 'replayed').length >= 2);
 	});
@@ -447,7 +469,6 @@ describe('POST /oauth/handoff (handleLoginHandoffRedeem)', () => {
 				assert.equal(result.status, 403);
 				assert.equal(result.body.error, 'origin_not_allowed');
 				assert.equal(session.update.mock.calls.length, 0);
-				// The code was not consumed: the right origin can still redeem it.
 				assert.equal((await redeem({ origin: PREVIEW, cookie: cookieFor(SECRET) })).status, 200);
 			});
 		}
@@ -468,6 +489,43 @@ describe('POST /oauth/handoff (handleLoginHandoffRedeem)', () => {
 		assert.equal((await redeem({ origin: PREVIEW })).status, 400);
 		assert.equal(session.update.mock.calls.length, 0);
 		assert.equal((await redeem({ origin: PREVIEW, cookie: cookieFor(SECRET) })).status, 200);
+	});
+
+	it('refuses a request without a browser cookie before reading storage', async () => {
+		const table = globalThis.databases.oauth.login_handoffs;
+		const reads = table.readContexts.length;
+		const result = await redeem({ origin: PREVIEW });
+		assert.equal(result.status, 400);
+		assert.equal(result.body.error, 'invalid_grant');
+		assert.equal(table.readContexts.length, reads);
+	});
+
+	it('re-checks the live allowlist before writing the session', async () => {
+		let live = patterns();
+		const table = globalThis.databases.oauth.login_handoffs;
+		const patch = table.patch;
+		table.patch = async (...args) => {
+			live = []; // a reload lands during the redeem's storage round trips
+			return patch(...args);
+		};
+		const result = await handleLoginHandoffRedeem(
+			redeemRequest({ origin: PREVIEW, cookie: cookieFor(SECRET) }),
+			{ code },
+			() => live,
+			logger
+		);
+		assert.equal(result.status, 403);
+		assert.equal(result.body.error, 'origin_not_allowed');
+		assert.equal(session.update.mock.calls.length, 0);
+	});
+
+	it('answers server_error for a corrupt stored session without logging it', async () => {
+		const table = globalThis.databases.oauth.login_handoffs;
+		const [id] = table.rows.keys();
+		table.rows.set(id, { ...table.rows.get(id), session: '{"accessToken":"gho_SECRET' });
+		const result = await redeem({ origin: PREVIEW, cookie: cookieFor(SECRET) });
+		assert.equal(result.status, 500);
+		assert.ok(!loggedText(logger).includes('gho_SECRET'));
 	});
 
 	it('refuses a second redeem', async () => {
@@ -623,9 +681,7 @@ describe('login and callback with postLoginRedirectOrigins', () => {
 			assert.equal(location.search, '', 'nothing in the query (no server log, no Referer)');
 			const match = /^#\/check-oauth\?oauth_handoff=([A-Za-z0-9_-]{43})$/.exec(location.hash);
 			assert.ok(match, result.headers.Location);
-			// Not written to the callback's own (dev Studio) session.
 			assert.equal(request.session.update.mock.calls.length, 0);
-			// The code is never a token: no provider token, ID token or session id in the URL.
 			for (const secret of [
 				'gho_access_token_value',
 				'ghr_refresh_token_value',
@@ -634,7 +690,6 @@ describe('login and callback with postLoginRedirectOrigins', () => {
 			]) {
 				assert.ok(!result.headers.Location.includes(secret), secret);
 			}
-			// Bound to the origin, the browser and the provider result.
 			const redeemed = await redeemLoginHandoff(match[1]);
 			assert.equal(redeemed.record.origin, PREVIEW);
 			assert.equal(redeemed.record.browserNonceHash, hashBrowserSecret(SECRET));
@@ -690,6 +745,24 @@ describe('login and callback with postLoginRedirectOrigins', () => {
 			assert.equal(request.session.update.mock.calls.length, 0);
 			const [row] = globalThis.databases.oauth.login_handoffs.rows.values();
 			assert.equal(JSON.parse(row.session).oauth.authTrust, 'untrusted');
+		});
+
+		it('does not send an error to an origin removed while the provider exchange ran', async () => {
+			let live = patterns();
+			provider.exchangeCodeForToken = createMockFn(async () => {
+				live = [];
+				throw new Error('Token exchange failed: 400');
+			});
+			const result = await handleCallback(
+				request,
+				target({ code: 'idp-code', state: 'state-1' }),
+				provider,
+				config,
+				hookManager,
+				'github',
+				{ logger, handoffOrigins: () => live }
+			);
+			assert.equal(result.headers.Location, '/?error=auth_failed&reason=token_exchange#/check-oauth');
 		});
 
 		it('returns upstream errors to the target origin, params before the fragment', async () => {

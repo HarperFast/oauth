@@ -186,7 +186,6 @@ export async function handleLogin(
 			sessionId: request.session?.id,
 			providerName, // Bind state token to this provider
 			browserNonceHash: hashBrowserSecret(browserSecret),
-			// The callback re-checks this against the current allowlist.
 			...(handoff ? { handoffOrigin: handoff.origin } : {}),
 		});
 	} catch (error) {
@@ -385,10 +384,14 @@ export async function handleCallback(
 	// session to that origin instead of writing it here (loginHandoff.ts). Its
 	// errors return there too, with the same error/reason parameters.
 	const handoff: HandoffTarget | null = mcpState ? null : resolveStateHandoff(tokenData, currentHandoffOrigins());
-	const errorRedirect = (params: Record<string, string>): string =>
-		handoff
-			? buildHandoffErrorRedirect(handoff.target, params)
+	// Re-resolved per use: an error after a reload that removed the origin must
+	// not redirect to it.
+	const errorRedirect = (params: Record<string, string>): string => {
+		const live = handoff && resolveStateHandoff(tokenData, currentHandoffOrigins());
+		return live && live.origin === handoff.origin
+			? buildHandoffErrorRedirect(live.target, params)
 			: buildErrorRedirect(tokenData.originalUrl || config.postLoginRedirect || '/', params);
+	};
 	// A flow started for an origin that is no longer allowed fails, here on
 	// the path, rather than becoming a sign-in on this origin.
 	const handoffRevokedResponse = () => {
@@ -409,7 +412,7 @@ export async function handleCallback(
 	// Store the finished session under a one-time code and send the browser to
 	// the target with the code in the fragment. Nothing is written to this
 	// request's session: a preview sign-in must not also sign the user in here.
-	const handOffSession = async (to: HandoffTarget, sessionData: Record<string, any>) => {
+	const handOffSession = async (to: HandoffTarget, sessionData: Record<string, any>, successLog: string) => {
 		// The provider exchange and onLogin ran since the check above; a reload
 		// in that window that removed the origin must still stop the code.
 		if (resolveStateHandoff(tokenData, currentHandoffOrigins())?.origin !== to.origin) {
@@ -424,7 +427,7 @@ export async function handleCallback(
 			},
 			logger
 		);
-		logger?.info?.(`OAuth: sign-in for provider '${providerName}' handed to ${JSON.stringify(to.origin)}`);
+		logger?.info?.(`${successLog}; handed to ${JSON.stringify(to.origin)}`);
 		return {
 			status: 302,
 			headers: { 'Location': appendHandoffCode(to.target, handoffCode), 'Cache-Control': 'no-store' },
@@ -854,9 +857,11 @@ export async function handleCallback(
 						Object.assign(sessionData, remainingHookData);
 					}
 					if (handoff) {
-						logger?.info?.(`OAuth: login successful (roleless, non-adoptable) for ${JSON.stringify(resolvedUser)}`);
-						// `return await`: a rejection must reach the catch below, not escape it.
-						return await handOffSession(handoff, sessionData);
+						return await handOffSession(
+							handoff,
+							sessionData,
+							`OAuth: login successful (roleless, non-adoptable) for ${JSON.stringify(resolvedUser)}`
+						);
 					}
 					if (typeof request.session?.update === 'function') {
 						await request.session.update(sessionData);
@@ -885,7 +890,7 @@ export async function handleCallback(
 			return handleMCPCallback(request, mcpState, resolvedUser, mcpConfig ?? {}, logger);
 		}
 
-		// Store in session if available (or hand it to the allowlisted origin)
+		// Store in session if available
 		if (handoff || request.session) {
 			// Calculate token expiration and refresh thresholds
 			// For providers that don't return expires_in (like GitHub), tokens don't expire
@@ -941,9 +946,11 @@ export async function handleCallback(
 			}
 
 			if (handoff) {
-				logger?.info?.(`OAuth login successful for user: ${JSON.stringify(user.username)}`);
-				// `return await`: a rejection must reach the catch below, not escape it.
-				return await handOffSession(handoff, sessionData);
+				return await handOffSession(
+					handoff,
+					sessionData,
+					`OAuth login successful for user: ${JSON.stringify(user.username)}`
+				);
 			}
 
 			// Store user info and OAuth metadata in session
