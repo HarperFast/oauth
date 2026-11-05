@@ -11,7 +11,8 @@ All notable changes to `@harperfast/oauth` are documented here. The format is ba
   - A login whose `redirect` is an absolute `https` URL on a listed origin runs the callback as usual, but stores the finished session under a one-time code instead of writing it on the callback's origin, and redirects to that URL with `oauth_handoff=<code>` in the fragment. Errors after the provider returns go to that URL too, with the usual `error`/`reason` query parameters.
   - `isAllowedPostLoginOrigin(url, allowlist)` (plus `matchAllowedOrigin`, `normalizePostLoginRedirectOrigins`, `parseOriginPattern`) is exported, so an application can test its configured value with the plugin's own matcher.
   - New endpoint `POST /oauth/handoff` (`{ code }`), called with credentials from the listed page: Harper core names the session cookie after the request's `Origin`, so the redeem creates that page's own session. 404 while the allowlist is empty.
-  - The code is single-use (atomic counter), lives 60 seconds, is stored only as its hash, and is bound to the target origin (the redeem's `Origin` must equal it) and to the initiating browser (`__Host-oauth_browser`), so a planted or stolen code is refused. Refusals are logged without the code. New `oauth.login_handoffs` table.
+  - The code is single-use (atomic counter; per node within the replication delay), lives 60 seconds, is stored only as its hash, and is bound to the target origin (the redeem's `Origin` must equal it) and to the initiating browser (`__Host-oauth_browser`), so a planted or stolen code is refused. A refused presentation does not consume it. Refusals are logged without the code. New `oauth.login_handoffs` table.
+  - A sign-in started for an origin removed from the list before it finishes fails (`error=access_denied&reason=handoff_origin_not_allowed`) instead of signing the user in on the callback's origin.
 
 ## [2.10.0] - 2026-10-24
 

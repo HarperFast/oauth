@@ -21,6 +21,7 @@ import {
 	handleLoginHandoffRedeem,
 	handoffKey,
 	resetLoginHandoffTableCache,
+	setLoginHandoffMissRetryDelays,
 	LOGIN_HANDOFF_TTL_MS,
 	HANDOFF_FRAGMENT_PARAM,
 } from '../../dist/lib/loginHandoff.js';
@@ -83,6 +84,7 @@ function installHandoffTable() {
 		system: { hdb_user: { get: async () => null } },
 	};
 	resetLoginHandoffTableCache();
+	setLoginHandoffMissRetryDelays([]);
 	return table;
 }
 
@@ -190,6 +192,16 @@ describe('postLoginRedirectOrigins patterns', () => {
 				parsed.map((p) => p.source),
 				['https://studio.example.com', 'https://*.app.example.com']
 			);
+		});
+
+		it('drops an unset ${VAR} piece of a comma-separated string, with a warning', () => {
+			const logger = createMockLogger();
+			const parsed = normalizePostLoginRedirectOrigins(`${PREVIEWS}, \${${ENV}}`, logger);
+			assert.deepEqual(
+				parsed.map((p) => p.source),
+				[PREVIEWS]
+			);
+			assert.equal(logger.warn.mock.calls.length, 1);
 		});
 
 		it('drops an unset ${VAR} entry inside a list, with a warning', () => {
@@ -301,23 +313,68 @@ describe('handoff code store', () => {
 		assert.equal(table.puts[0].context.expiresAt, row.expires_at, 'per-record Harper expiry set');
 	});
 
-	it('is single-use', async () => {
+	it('is single-use, keeping a scrubbed tombstone until expiry', async () => {
 		const code = await issueLoginHandoff(record());
 		const first = await redeemLoginHandoff(code);
 		assert.equal(first.record.origin, PREVIEW);
 		assert.deepEqual(first.record.session, record().session);
-		assert.deepEqual(await redeemLoginHandoff(code), { refused: 'unknown' });
+		assert.deepEqual(await redeemLoginHandoff(code), { refused: 'replayed' });
+		const tombstone = table.rows.get(handoffKey(code));
+		assert.equal(tombstone.uses, 1);
+		assert.equal(tombstone.session, null, 'provider tokens do not outlive the redeem');
 	});
 
-	it('is single-use under concurrent presentations', async () => {
+	it('a presenter that read the live row before the winner finished cannot also win', async () => {
+		// The winner's cleanup must not let a slower presenter, which read the
+		// row before it, patch it back into existence at uses: 1.
 		const code = await issueLoginHandoff(record());
-		// Keep the row after the winner's delete so both racers see it.
-		table.delete = async () => {};
+		const patch = table.patch;
+		let patches = 0;
+		let releaseSecond;
+		const gate = new Promise((resolve) => (releaseSecond = resolve));
+		table.patch = async (...args) => {
+			if (++patches === 2) await gate;
+			return patch(...args);
+		};
+		const first = redeemLoginHandoff(code);
+		const second = redeemLoginHandoff(code);
+		assert.ok((await first).record, 'the first presenter wins');
+		releaseSecond();
+		assert.deepEqual(await second, { refused: 'replayed' });
+	});
+
+	it('never lets two concurrent presentations both win', async () => {
+		const code = await issueLoginHandoff(record());
 		const results = await Promise.all([redeemLoginHandoff(code), redeemLoginHandoff(code), redeemLoginHandoff(code)]);
-		// Never more than one winner. When every patch lands before any
-		// read-back, all of them read > 1 and all are refused: fail closed.
+		// When every patch lands before any read-back, all read > 1 and all are
+		// refused: fail closed.
 		assert.ok(results.filter((r) => r.record).length <= 1);
 		assert.ok(results.filter((r) => r.refused === 'replayed').length >= 2);
+	});
+
+	it('a refused check consumes nothing', async () => {
+		const code = await issueLoginHandoff(record());
+		assert.deepEqual(await redeemLoginHandoff(code, () => 'wrong origin'), {
+			refused: 'mismatch',
+			detail: 'wrong origin',
+		});
+		assert.ok((await redeemLoginHandoff(code)).record);
+	});
+
+	it('re-reads a code not found yet (replication lag), then gives up', async () => {
+		setLoginHandoffMissRetryDelays([1, 1]);
+		const code = await issueLoginHandoff(record());
+		const row = table.rows.get(handoffKey(code));
+		table.rows.delete(handoffKey(code));
+		const get = table.get;
+		let reads = 0;
+		table.get = async (id, context) => {
+			if (++reads === 2) table.rows.set(handoffKey(code), row);
+			return get(id, context);
+		};
+		assert.ok((await redeemLoginHandoff(code)).record, 'found on a re-read');
+		table.get = get;
+		assert.deepEqual(await redeemLoginHandoff('A'.repeat(43)), { refused: 'unknown' });
 	});
 
 	it('expires after the TTL', async () => {
@@ -395,22 +452,22 @@ describe('POST /oauth/handoff (handleLoginHandoffRedeem)', () => {
 			});
 		}
 
-		it('refuses (and burns) a code issued for a different allowlisted origin', async () => {
+		it('refuses a code issued for a different allowlisted origin, without consuming it', async () => {
 			const result = await redeem({ origin: OTHER_PREVIEW, cookie: cookieFor(SECRET) });
 			assert.equal(result.status, 400);
 			assert.equal(result.body.error, 'invalid_grant');
 			assert.equal(session.update.mock.calls.length, 0);
-			assert.equal((await redeem({ origin: PREVIEW, cookie: cookieFor(SECRET) })).status, 400);
+			assert.equal((await redeem({ origin: PREVIEW, cookie: cookieFor(SECRET) })).status, 200);
 		});
 	});
 
-	it('refuses (and burns) a code presented from another browser', async () => {
+	it('refuses a code presented from another browser, without consuming it', async () => {
 		const result = await redeem({ origin: PREVIEW, cookie: cookieFor(OTHER_SECRET) });
 		assert.equal(result.status, 400);
 		assert.equal(result.body.error, 'invalid_grant');
 		assert.equal((await redeem({ origin: PREVIEW })).status, 400);
-		assert.equal((await redeem({ origin: PREVIEW, cookie: cookieFor(SECRET) })).status, 400);
 		assert.equal(session.update.mock.calls.length, 0);
+		assert.equal((await redeem({ origin: PREVIEW, cookie: cookieFor(SECRET) })).status, 200);
 	});
 
 	it('refuses a second redeem', async () => {
@@ -442,9 +499,12 @@ describe('POST /oauth/handoff (handleLoginHandoffRedeem)', () => {
 		await redeem({ origin: 'https://evil.example.com' });
 		await redeem({ origin: PREVIEW, cookie: cookieFor(SECRET) }, { code: [code, code] });
 		await redeem({ origin: OTHER_PREVIEW, cookie: cookieFor(SECRET) });
+		await redeem({ origin: PREVIEW, cookie: cookieFor(OTHER_SECRET) });
 		await redeem({ origin: PREVIEW, cookie: cookieFor(SECRET) });
+		await redeem({ origin: PREVIEW, cookie: cookieFor(SECRET) });
+		await redeem({ origin: PREVIEW, cookie: cookieFor(SECRET) }, { code: 'B'.repeat(43) });
 		const text = loggedText(logger);
-		assert.ok(logger.warn.mock.calls.length >= 4, 'each refusal is logged');
+		assert.equal(logger.warn.mock.calls.length, 6, 'each refusal is logged');
 		assert.ok(text.includes('evil.example.com') && text.includes(OTHER_PREVIEW), 'origins are logged');
 		assert.ok(!text.includes(code), 'the code never reaches a log line');
 		assert.ok(!text.includes(handoffKey(code)), 'nor its storage key');
@@ -585,10 +645,41 @@ describe('login and callback with postLoginRedirectOrigins', () => {
 			assert.equal(redeemed.record.session.oauth.authTrust, 'hook');
 		});
 
-		it('keeps today’s behavior when the allowlist is empty (or the origin was removed since login)', async () => {
+		it('keeps today’s behavior for a flow started without a handoff', async () => {
+			delete stateData.handoffOrigin;
+			stateData.originalUrl = '/#/check-oauth';
 			const result = await callback([]);
 			assert.equal(result.headers.Location, '/#/check-oauth');
 			assert.equal(request.session.update.mock.calls.length, 1);
+			assert.equal(globalThis.databases.oauth.login_handoffs.rows.size, 0);
+		});
+
+		it('refuses a flow whose origin was removed since login, without a session anywhere', async () => {
+			const result = await callback([]);
+			assert.equal(result.headers.Location, '/?error=access_denied&reason=handoff_origin_not_allowed#/check-oauth');
+			assert.equal(provider.exchangeCodeForToken.mock.calls.length, 0, 'refused before the code exchange');
+			assert.equal(request.session.update.mock.calls.length, 0);
+			assert.equal(globalThis.databases.oauth.login_handoffs.rows.size, 0);
+		});
+
+		it('re-checks the live allowlist before issuing the code', async () => {
+			let live = patterns();
+			const exchange = provider.exchangeCodeForToken;
+			provider.exchangeCodeForToken = createMockFn(async (...args) => {
+				live = []; // a reload lands while the provider exchange runs
+				return exchange(...args);
+			});
+			const result = await handleCallback(
+				request,
+				target({ code: 'idp-code', state: 'state-1' }),
+				provider,
+				config,
+				hookManager,
+				'github',
+				{ logger, handoffOrigins: () => live }
+			);
+			assert.equal(result.headers.Location, '/?error=access_denied&reason=handoff_origin_not_allowed#/check-oauth');
+			assert.equal(request.session.update.mock.calls.length, 0);
 			assert.equal(globalThis.databases.oauth.login_handoffs.rows.size, 0);
 		});
 
