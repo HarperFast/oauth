@@ -214,6 +214,26 @@ describe('postLoginRedirectOrigins patterns', () => {
 		});
 	});
 
+	describe('isAllowedPostLoginOrigin (package export)', () => {
+		it('is exported from the package entry and applies the same rules', async () => {
+			const { isAllowedPostLoginOrigin } = await import('../../dist/index.js');
+			const dev = 'https://*.app.dev.studio.harperfabric.com';
+			assert.equal(isAllowedPostLoginOrigin('https://hdbms-pr-12.app.dev.studio.harperfabric.com/#/x', dev), true);
+			for (const bad of [
+				'http://hdbms-pr-12.app.dev.studio.harperfabric.com/',
+				'https://a.b.app.dev.studio.harperfabric.com/',
+				'https://hdbms-pr-12.app.dev.studio.harperfabric.com.evil.com/',
+				'https://u@hdbms-pr-12.app.dev.studio.harperfabric.com/',
+				'https://hdbms-pr-12.app.dev.studio.harperfabric.com:8443/',
+				'https://evil.com/hdbms-pr-12.app.dev.studio.harperfabric.com',
+			]) {
+				assert.equal(isAllowedPostLoginOrigin(bad, dev), false, bad);
+			}
+			assert.equal(isAllowedPostLoginOrigin('https://hdbms-pr-12.app.dev.studio.harperfabric.com/', ''), false);
+			assert.equal(isAllowedPostLoginOrigin('https://studio.example.com/', `${dev}, https://studio.example.com`), true);
+		});
+	});
+
 	describe('resolveHandoffTarget', () => {
 		it('returns the parsed target and its origin', () => {
 			assert.deepEqual(
