@@ -524,7 +524,7 @@ export class OAuthResource extends Resource {
 		// Sign-in handoff redeem (postLoginRedirectOrigins). 404 while the
 		// allowlist is empty, exactly as before the route existed.
 		if (providerName === 'handoff' && !action) {
-			return handleLoginHandoffRedeem(request, data, OAuthResource.handoffOrigins, logger);
+			return handleLoginHandoffRedeem(request, data, () => OAuthResource.handoffOrigins, logger);
 		}
 
 		// Handle MCP endpoints (/oauth/mcp/<action>)
