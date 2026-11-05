@@ -874,10 +874,17 @@ export function extractPluginDefaults(options: OAuthPluginConfig): Partial<OAuth
 	const pluginDefaults: Partial<OAuthProviderConfig> = {};
 
 	// Copy all non-provider config to defaults, expanding environment variables.
-	// `mcp` and `allowUnverifiedClaimInheritance` are plugin-level options that
-	// do not apply per-provider and are excluded from the provider defaults copy.
+	// `mcp`, `allowUnverifiedClaimInheritance` and `postLoginRedirectOrigins` are
+	// plugin-level options that do not apply per-provider and are excluded from
+	// the provider defaults copy.
 	for (const [key, value] of Object.entries(options)) {
-		if (key !== 'providers' && key !== 'debug' && key !== 'mcp' && key !== 'allowUnverifiedClaimInheritance') {
+		if (
+			key !== 'providers' &&
+			key !== 'debug' &&
+			key !== 'mcp' &&
+			key !== 'allowUnverifiedClaimInheritance' &&
+			key !== 'postLoginRedirectOrigins'
+		) {
 			pluginDefaults[key as keyof OAuthProviderConfig] = expandEnvVar(value);
 		}
 	}

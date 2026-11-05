@@ -25,6 +25,7 @@ import { registerMCPBearerValidator } from './lib/mcp/bearerValidator.ts';
 import { interactivePrivateKeyJwtEnabled } from './lib/mcp/clientAuthMethod.ts';
 import { algFromPrivateKeyPem } from './lib/mcp/keyStore.ts';
 import { redactSecrets } from './lib/redact.ts';
+import { normalizePostLoginRedirectOrigins, type OriginPattern } from './lib/loginHandoff.ts';
 import type { Scope, OAuthPluginConfig, ProviderRegistry, OAuthHooks, OAuthProviderConfig } from './types.ts';
 
 // Export HookManager class, OAuthResource class, and types
@@ -225,6 +226,27 @@ export async function handleApplication(scope: Scope): Promise<void> {
 			);
 		} else {
 			OAuthResource.allowUnverifiedClaimInheritance = false;
+		}
+
+		// Sign-in handoff allowlist. Like the escape hatch above, a narrowing is
+		// applied at once and a widening only once the whole reload succeeds
+		// (OAuthResource.configure() below): the live list drops at once to the
+		// patterns the new snapshot keeps, so a reload rejected by an unrelated
+		// key can never leave a removed origin live, nor add one. An invalid
+		// value empties the live list before the error propagates.
+		let handoffOrigins: OriginPattern[];
+		try {
+			handoffOrigins = normalizePostLoginRedirectOrigins(options.postLoginRedirectOrigins, logger);
+		} catch (error) {
+			OAuthResource.handoffOrigins = [];
+			throw error;
+		}
+		const keptSources = new Set(handoffOrigins.map((pattern) => pattern.source));
+		OAuthResource.handoffOrigins = OAuthResource.handoffOrigins.filter((pattern) => keptSources.has(pattern.source));
+		if (handoffOrigins.length > 0) {
+			logger?.info?.(
+				`OAuth: sign-in may be handed off to ${handoffOrigins.map((pattern) => pattern.source).join(', ')} (postLoginRedirectOrigins)`
+			);
 		}
 
 		// Apply a disabling `mcp.enabled` value immediately — before any MCP or
@@ -456,6 +478,7 @@ export async function handleApplication(scope: Scope): Promise<void> {
 			// stale config after the plugin is no longer validly configured.
 			OAuthResource.mcpConfig = undefined;
 			OAuthResource.allowUnverifiedClaimInheritance = false;
+			OAuthResource.handoffOrigins = [];
 			disposeBearerValidator();
 			resources.set(
 				'oauth',
@@ -494,7 +517,8 @@ export async function handleApplication(scope: Scope): Promise<void> {
 				logger,
 				dynamicProviderCache,
 				mcpConfig,
-				allowUnverifiedClaimInheritance
+				allowUnverifiedClaimInheritance,
+				handoffOrigins
 			);
 
 			// Register the OAuth resource class

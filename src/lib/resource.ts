@@ -9,6 +9,7 @@ import type { RequestTarget } from 'harper';
 import type { Request, Logger, MCPConfig, ProviderRegistry, OAuthProviderConfig } from '../types.ts';
 import { handleLogin, handleCallback, handleLogout, handleUserInfo, handleTestPage } from './handlers.ts';
 import { handleMCPGet, handleMCPPost } from './mcp/index.ts';
+import { handleLoginHandoffRedeem, type OriginPattern } from './loginHandoff.ts';
 import type { HookManager } from './hookManager.ts';
 import type { DynamicProviderCache } from './dynamicProviderCache.ts';
 
@@ -68,6 +69,8 @@ export class OAuthResource extends Resource {
 	static logger: Logger | undefined = undefined;
 	static mcpConfig: MCPConfig | undefined = undefined;
 	static allowUnverifiedClaimInheritance: boolean = false;
+	/** Parsed `postLoginRedirectOrigins`; empty = no sign-in handoff (loginHandoff.ts). */
+	static handoffOrigins: readonly OriginPattern[] = [];
 
 	/**
 	 * Configure the OAuth resource with providers and settings
@@ -81,7 +84,8 @@ export class OAuthResource extends Resource {
 		logger?: Logger,
 		dynamicProviderCache?: DynamicProviderCache,
 		mcpConfig?: MCPConfig,
-		allowUnverifiedClaimInheritance?: boolean
+		allowUnverifiedClaimInheritance?: boolean,
+		handoffOrigins?: readonly OriginPattern[]
 	): void {
 		OAuthResource.providers = providers;
 		OAuthResource.debugMode = debugMode;
@@ -91,6 +95,7 @@ export class OAuthResource extends Resource {
 		OAuthResource.dynamicProviderCache = dynamicProviderCache ?? null;
 		OAuthResource.mcpConfig = mcpConfig;
 		OAuthResource.allowUnverifiedClaimInheritance = allowUnverifiedClaimInheritance ?? false;
+		OAuthResource.handoffOrigins = handoffOrigins ?? [];
 	}
 
 	/**
@@ -453,13 +458,16 @@ export class OAuthResource extends Resource {
 		// Handle specific actions
 		switch (action) {
 			case 'login':
-				return handleLogin(request, target, provider, config, providerName, logger);
+				return handleLogin(request, target, provider, config, providerName, logger, {
+					handoffOrigins: OAuthResource.handoffOrigins,
+				});
 
 			case 'callback':
 				return handleCallback(request, target, provider, config, hookManager, providerName, {
 					mcpConfig: OAuthResource.mcpConfig,
 					logger,
 					allowUnverifiedClaimInheritance: OAuthResource.allowUnverifiedClaimInheritance,
+					handoffOrigins: OAuthResource.handoffOrigins,
 				});
 
 			case 'user':
@@ -513,6 +521,12 @@ export class OAuthResource extends Resource {
 			return handleLogout(request, hookManager, logger);
 		}
 
+		// Sign-in handoff redeem (postLoginRedirectOrigins). 404 while the
+		// allowlist is empty, exactly as before the route existed.
+		if (providerName === 'handoff' && !action) {
+			return handleLoginHandoffRedeem(request, data, OAuthResource.handoffOrigins, logger);
+		}
+
 		// Handle MCP endpoints (/oauth/mcp/<action>)
 		if (providerName === 'mcp') {
 			return handleMCPPost(
@@ -558,5 +572,6 @@ export class OAuthResource extends Resource {
 		OAuthResource.logger = undefined;
 		OAuthResource.mcpConfig = undefined;
 		OAuthResource.allowUnverifiedClaimInheritance = false;
+		OAuthResource.handoffOrigins = [];
 	}
 }

@@ -9,6 +9,24 @@ type csrf_tokens @table(database: "oauth", expiration: 600) {
 	created_at: Float @createdTime # Harper-assigned on insert (epoch ms)
 }
 
+## Sign-in handoff codes (postLoginRedirectOrigins; central-manager#911)
+## One row per one-time code that hands a finished sign-in to an allowlisted
+## origin. The key is sha256(code), never the code. `session` is the JSON of the
+## session the callback would have written (it holds provider tokens: never
+## exposed, never logged). Single use is an atomic increment of `uses`, as in
+## mcp_assertion_jtis; each row carries a 60s per-record expiry, which the
+## table expiration below only backs up.
+type login_handoffs @table(database: "oauth", expiration: 60) {
+	id: ID @primaryKey # sha256(code), hex
+	origin: String # serialized origin the code was issued for; the redeem's Origin must equal it
+	browser_hash: String # hash of the __Host-oauth_browser secret that started the login
+	provider: String # provider registry key
+	session: String # JSON session data
+	expires_at: Float # epoch ms; refused once passed
+	uses: Int # presentations; only the one that reads back 1 is accepted
+	created_at: Float @createdTime # Harper-assigned (epoch ms)
+}
+
 ## MCP Dynamic Client Registration table (RFC 7591)
 ## Stores OAuth client registrations for MCP clients (Claude Desktop, Cursor,
 ## mcp-remote, etc.). No expiration: clients like Claude Desktop cache their
