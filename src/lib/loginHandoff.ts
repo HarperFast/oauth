@@ -192,6 +192,16 @@ export function matchAllowedOrigin(candidate: unknown, patterns: readonly Origin
 	return null;
 }
 
+/**
+ * True when `url` is an absolute https URL on an origin the allowlist permits.
+ * `allowlist` takes the same shapes as the `postLoginRedirectOrigins` option
+ * (a list, or a comma/whitespace-separated string), so an application can test
+ * its configured value with the plugin's own matcher. Throws on an invalid entry.
+ */
+export function isAllowedPostLoginOrigin(url: unknown, allowlist: unknown): boolean {
+	return matchAllowedOrigin(url, normalizePostLoginRedirectOrigins(allowlist)) !== null;
+}
+
 /** Where a sign-in hands off to: the target URL and its origin. */
 export interface HandoffTarget {
 	origin: string;

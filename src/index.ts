@@ -45,6 +45,16 @@ export type {
 	OnLoginResultNeedsConfirmation,
 } from './types.ts';
 
+// Export the postLoginRedirectOrigins matcher, so an application can test its
+// configured allowlist with the same code the plugin enforces it with
+export {
+	isAllowedPostLoginOrigin,
+	matchAllowedOrigin,
+	normalizePostLoginRedirectOrigins,
+	parseOriginPattern,
+} from './lib/loginHandoff.ts';
+export type { OriginPattern } from './lib/loginHandoff.ts';
+
 // Export multi-tenant SSO support
 export { TenantManager } from './lib/tenantManager.ts';
 export type { TenantConfig, TenantRegistryEntry } from './lib/tenantManager.ts';

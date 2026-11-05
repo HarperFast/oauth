@@ -300,6 +300,7 @@ By default a sign-in always finishes on the origin of `redirectUri`: the session
 - Matching runs on the parsed URL, so `https://evil.com/?x.app.example.com`, `https://pr-12.app.example.com@evil.com`, `https://pr-12.app.example.com.evil.com` and similar never match.
 - **Empty, absent, or an unset `${VAR}` placeholder means no handoff**, which is today's behavior; an unset placeholder does not fail startup, so one `config.yaml` can enable this in one environment only. An unset placeholder entry inside a list is dropped with a warning. Any other invalid entry fails startup (or rejects the reload) naming the entry.
 - On a live reload, removing an origin takes effect at once, even if another key in the same edit rejects the reload; adding one waits until the whole reload succeeds.
+- To test a value with the plugin's own matcher, `import { isAllowedPostLoginOrigin } from '@harperfast/oauth'`: `isAllowedPostLoginOrigin('https://pr-12.app.example.com/', 'https://*.app.example.com')` is `true`. It takes the option's shapes and throws on an invalid entry.
 
 **Flow.**
 
