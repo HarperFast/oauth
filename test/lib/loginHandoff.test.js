@@ -34,8 +34,8 @@ import { createMockFn, createMockLogger } from '../helpers/mockFn.js';
 const PREVIEWS = 'https://*.app.dev.studio.example.com';
 const PREVIEW = 'https://hdbms-pr-12.app.dev.studio.example.com';
 const OTHER_PREVIEW = 'https://hdbms-pr-13.app.dev.studio.example.com';
-const SECRET = 'browser-secret-for-tests';
-const OTHER_SECRET = 'a-different-browser';
+const SECRET = 'S'.repeat(43);
+const OTHER_SECRET = 'O'.repeat(43);
 
 function patterns(...entries) {
 	return normalizePostLoginRedirectOrigins(entries.length ? entries : [PREVIEWS]);
@@ -509,6 +509,33 @@ describe('POST /oauth/handoff (handleLoginHandoffRedeem)', () => {
 		assert.equal(table.readContexts.length, reads);
 	});
 
+	it('refuses a malformed browser cookie before reading storage', async () => {
+		const table = globalThis.databases.oauth.login_handoffs;
+		const reads = table.readContexts.length;
+		const result = await redeem({ origin: PREVIEW, cookie: '__Host-oauth_browser=forged' });
+		assert.equal(result.status, 400);
+		assert.equal(table.readContexts.length, reads);
+	});
+
+	it('an origin removed during the first read is refused without consuming the code', async () => {
+		let live = patterns();
+		const table = globalThis.databases.oauth.login_handoffs;
+		const get = table.get;
+		table.get = async (...args) => {
+			live = [];
+			return get(...args);
+		};
+		const refused = await handleLoginHandoffRedeem(
+			redeemRequest({ origin: PREVIEW, cookie: cookieFor(SECRET) }),
+			{ code },
+			() => live,
+			logger
+		);
+		assert.equal(refused.status, 400);
+		table.get = get;
+		assert.equal((await redeem({ origin: PREVIEW, cookie: cookieFor(SECRET) })).status, 200);
+	});
+
 	it('re-checks the live allowlist before writing the session', async () => {
 		let live = patterns();
 		const table = globalThis.databases.oauth.login_handoffs;
@@ -724,6 +751,26 @@ describe('login and callback with postLoginRedirectOrigins', () => {
 			assert.equal(provider.exchangeCodeForToken.mock.calls.length, 0, 'refused before the code exchange');
 			assert.equal(request.session.update.mock.calls.length, 0);
 			assert.equal(globalThis.databases.oauth.login_handoffs.rows.size, 0);
+		});
+
+		it('does not send the browser to an origin removed while the code was being stored', async () => {
+			let live = patterns();
+			const table = globalThis.databases.oauth.login_handoffs;
+			const put = table.put;
+			table.put = async (...args) => {
+				live = [];
+				return put(...args);
+			};
+			const result = await handleCallback(
+				request,
+				target({ code: 'idp-code', state: 'state-1' }),
+				provider,
+				config,
+				hookManager,
+				'github',
+				{ logger, handoffOrigins: () => live }
+			);
+			assert.equal(result.headers.Location, '/?error=access_denied&reason=handoff_origin_not_allowed#/check-oauth');
 		});
 
 		it('re-checks the live allowlist before issuing the code', async () => {

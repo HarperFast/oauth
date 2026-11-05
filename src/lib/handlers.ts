@@ -150,10 +150,7 @@ export async function handleLogin(
 	// Determine redirect URL: query param > referer header > config default
 	let redirectParam = target.get?.('redirect');
 
-	// An absolute `redirect` on a postLoginRedirectOrigins origin hands the
-	// finished sign-in to that origin (loginHandoff.ts). Only the explicit
-	// parameter opts in; a Referer never does. With no allowlist this is null
-	// and everything below is unchanged.
+	// Only the explicit parameter opts in to a handoff; a Referer never does.
 	const handoff = resolveHandoffTarget(redirectParam, opts?.handoffOrigins ?? []);
 
 	// Sanitize redirect parameter to prevent open redirect attacks
@@ -427,6 +424,11 @@ export async function handleCallback(
 			},
 			logger
 		);
+		// Again after the write: the redeem would refuse the code, but a
+		// removed origin must not receive the navigation either.
+		if (resolveStateHandoff(tokenData, currentHandoffOrigins())?.origin !== to.origin) {
+			return handoffRevokedResponse();
+		}
 		logger?.info?.(`${successLog}; handed to ${JSON.stringify(to.origin)}`);
 		return {
 			status: 302,

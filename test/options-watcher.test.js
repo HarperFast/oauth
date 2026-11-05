@@ -782,6 +782,21 @@ describe('OAuth Plugin Options Watcher', () => {
 			assert.deepEqual(sources(), []);
 		});
 
+		it('an invalid allowlist cannot stop mcp.enabled: false in the same reload from applying', async () => {
+			scope.options._config.mcp = { enabled: true, issuer: 'https://app.test.com' };
+			await handleApplication(scope);
+			assert.equal(OAuthResource.mcpConfig?.enabled, true);
+			scope.options._config = {
+				...scope.options._config,
+				mcp: { enabled: false, issuer: 'https://app.test.com' },
+				postLoginRedirectOrigins: ['http://insecure.example.com'],
+			};
+			configChangeListeners[0]();
+			await waitFor(() => errorLogged);
+			assert.equal(OAuthResource.mcpConfig?.enabled, false);
+			assert.deepEqual(sources(), []);
+		});
+
 		it('a successful reload applies a widened allowlist', async () => {
 			scope.options._config.postLoginRedirectOrigins = [A];
 			await handleApplication(scope);

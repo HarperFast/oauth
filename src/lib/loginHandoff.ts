@@ -1,38 +1,13 @@
 /**
- * Sign-in handoff to an allowlisted origin (HarperFast/central-manager#911)
+ * Sign-in handoff to an allowlisted origin (`postLoginRedirectOrigins`; flow and
+ * contract in docs/configuration.md). Constraints the code cannot state:
  *
- * The provider callback always lands on the registered `redirectUri`, so a
- * session written there is keyed to that host's origin. Harper core names the
- * session cookie after the request's `Origin` header (falling back to `Host`),
- * so a static app served from ANOTHER origin (a Studio PR preview, say) never
- * sees it and stays signed out.
- *
- * With `postLoginRedirectOrigins` set, a login whose `redirect` parameter names
- * an absolute https URL on an allowlisted origin finishes in two steps:
- *
- * 1. The callback builds the session exactly as it would have, but stores it
- *    server-side under a one-time code instead of writing it to the callback
- *    request's session, then redirects to the target URL with the code in the
- *    URL fragment (`#…?oauth_handoff=<code>`). The fragment never reaches a
- *    server log or a `Referer`.
- * 2. The target page's JS calls `POST /oauth/handoff` on this host with
- *    `credentials: 'include'` and `{ code }`. The browser sends the page's own
- *    `Origin`, so Harper core binds `request.session.update` to that origin's
- *    cookie name, and the redeem writes the stored session through it.
- *
- * The code is single-use (an atomic counter, as in assertionJtiStore.ts), lives
- * 60 seconds, is stored only as its SHA-256, and is bound to the target origin
- * (the redeem's `Origin` must equal it) and to the browser that started the
- * login (the redeem must carry the same `__Host-oauth_browser` cookie the
- * callback verified). The browser binding closes the login-CSRF shape a bare
- * code would reopen: an attacker's code planted in a victim's page fails,
- * because the victim's browser secret differs. That cookie is `SameSite=Lax`,
- * so the target origin must be same-site with this host; a cross-site target
- * would also hit third-party-cookie blocking on the session cookie itself.
- *
- * An empty or absent allowlist leaves every path byte-identical to before:
- * absolute redirects are reduced to their path, and `POST /oauth/handoff` is a
- * 404.
+ * - Harper core names the session cookie after the request's `Origin`, so only
+ *   a request the target page itself makes can create its session; the
+ *   callback (a top-level navigation) cannot.
+ * - The code is bound to the `__Host-oauth_browser` secret the callback
+ *   verified. That cookie is `SameSite=Lax`, so the target must be same-site
+ *   with this host.
  */
 
 import { createHash, randomBytes } from 'node:crypto';
@@ -56,6 +31,9 @@ const MAX_HANDOFF_TARGET_LENGTH = 2048;
 
 /** 32 random bytes, base64url: exactly 43 characters from this set. */
 const HANDOFF_CODE_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+
+/** The shape `generateBrowserSecret()` mints; anything else cannot match a binding. */
+const BROWSER_SECRET_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 
 /** One DNS label: letters, digits and inner hyphens (LDH), at most 63 characters. */
 const DNS_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
@@ -361,7 +339,7 @@ export async function issueLoginHandoff(
  * callback's redirect, possibly on another node than the one that wrote the
  * row, so a miss waits out replication briefly before it is final.
  */
-let missRetryDelaysMs: readonly number[] = [100, 250, 500];
+let missRetryDelaysMs: readonly number[] = [100, 300];
 
 /**
  * Override the miss re-read delays (for testing only)
@@ -489,13 +467,14 @@ export async function handleLoginHandoffRedeem(
 	}
 
 	const browserSecret = readBrowserSecret(request);
-	if (!browserSecret) {
-		logger?.warn?.(`OAuth handoff refused for ${JSON.stringify(origin)}: no browser binding cookie`);
+	if (!browserSecret || !BROWSER_SECRET_PATTERN.test(browserSecret)) {
+		logger?.warn?.(`OAuth handoff refused for ${JSON.stringify(origin)}: no well-formed browser binding cookie`);
 		return errorResponse(400, 'invalid_grant', 'The handoff code is invalid, expired or already used');
 	}
 	let result: Awaited<ReturnType<typeof redeemLoginHandoff>>;
 	try {
 		result = await redeemLoginHandoff(code, (record) => {
+			if (matchAllowedOrigin(origin, currentPatterns()) !== origin) return 'origin removed from the allowlist';
 			if (record.origin !== origin) return `code was issued for ${JSON.stringify(record.origin)}`;
 			if (!browserSecretMatches(browserSecret, record.browserNonceHash)) {
 				return 'browser binding mismatch (not the browser that started the sign-in)';
