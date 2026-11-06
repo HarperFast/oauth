@@ -16,7 +16,7 @@ Initiates the OAuth authentication flow by redirecting to the provider's authori
 
 **Query Parameters:**
 
-- `redirect` - URL to redirect to after successful authentication (optional)
+- `redirect` - URL to redirect to after successful authentication (optional). Reduced to its path, unless it is an absolute `https` URL on an origin listed in `postLoginRedirectOrigins`: then the sign-in is handed to that origin (see [Sign-in Handoff Endpoint](#sign-in-handoff-endpoint))
 
 **Example:**
 
@@ -52,6 +52,7 @@ Handles the OAuth callback from the provider. This URL must be configured in you
 
 - HTTP 302 redirect to original URL or home page
 - Sets session cookie with user and OAuth data
+- For a sign-in started with an allowlisted absolute `redirect` (`postLoginRedirectOrigins`): no session cookie; HTTP 302 to that URL with a one-time code appended to the fragment's query string, e.g. `https://pr-12.app.example.com/#/check-oauth?oauth_handoff=<code>`. Errors go to the same URL with `?error=…&reason=…` before the fragment.
 
 **Error Responses:**
 
@@ -59,6 +60,40 @@ Handles the OAuth callback from the provider. This URL must be configured in you
 - `?error=invalid_state` - CSRF validation failed
 - `?error=invalid_code` - Code exchange failed
 - `?error=session_expired` - CSRF token expired (>10 minutes)
+
+---
+
+### Sign-in Handoff Endpoint
+
+**Endpoint:** `POST /oauth/handoff`
+
+Redeems a one-time code from a handed-off sign-in (see [Signing in on another origin](./configuration.md#signing-in-on-another-origin-postloginredirectorigins)) into a Harper session for the **calling** origin. Call it from the page on the allowlisted origin with `credentials: 'include'`, within 60 seconds of the redirect.
+
+**Request:**
+
+- Header `Origin` (sent by the browser): must be a `postLoginRedirectOrigins` origin and equal the origin the code was issued for
+- Cookie `__Host-oauth_browser` (sent by the browser): must be the browser that started the sign-in
+- Body, JSON (`Content-Type: application/json`) or form-encoded: `{ "code": "<the oauth_handoff value>" }` (43 base64url characters)
+
+**Responses** (all with `Cache-Control: no-store`):
+
+| Status | Body                                                  | When                                                                                                                                                                                      |
+| ------ | ----------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 200    | `{ "authenticated": true, "provider": "<provider>" }` | Session written; the response carries Harper's `Set-Cookie: <origin>-hdb-session=…` for the calling origin                                                                                |
+| 404    | `{ "error": "Not found" }`                            | `postLoginRedirectOrigins` is empty (the endpoint does not exist, as before)                                                                                                              |
+| 403    | `{ "error": "origin_not_allowed", "message": … }`     | `Origin` missing, repeated, `null`, not a bare origin, or not listed (checked first, before the code is read), or removed from the list during the redeem                                 |
+| 400    | `{ "error": "invalid_request", "message": … }`        | `code` missing, repeated, or not code-shaped. The code is not consumed                                                                                                                    |
+| 400    | `{ "error": "invalid_grant", "message": … }`          | Code unknown, expired, already used, issued for a different origin, or presented from a different browser. Only a redeem that passes every check consumes the code; redeem each code once |
+| 500    | `{ "error": "server_error", "message": … }`           | Storage or session write failed, or Harper sessions are disabled. Start the sign-in again                                                                                                 |
+
+```javascript
+await fetch('https://studio.example.com/oauth/handoff', {
+	method: 'POST',
+	credentials: 'include',
+	headers: { 'Content-Type': 'application/json' },
+	body: JSON.stringify({ code }),
+});
+```
 
 ---
 

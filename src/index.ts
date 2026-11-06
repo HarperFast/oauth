@@ -25,6 +25,7 @@ import { registerMCPBearerValidator } from './lib/mcp/bearerValidator.ts';
 import { interactivePrivateKeyJwtEnabled } from './lib/mcp/clientAuthMethod.ts';
 import { algFromPrivateKeyPem } from './lib/mcp/keyStore.ts';
 import { redactSecrets } from './lib/redact.ts';
+import { normalizePostLoginRedirectOrigins, type OriginPattern } from './lib/loginHandoff.ts';
 import type { Scope, OAuthPluginConfig, ProviderRegistry, OAuthHooks, OAuthProviderConfig } from './types.ts';
 
 // Export HookManager class, OAuthResource class, and types
@@ -43,6 +44,9 @@ export type {
 	OnLoginResultDenied,
 	OnLoginResultNeedsConfirmation,
 } from './types.ts';
+
+// Lets an application test its postLoginRedirectOrigins value with the plugin's own matcher
+export { isAllowedPostLoginOrigin } from './lib/loginHandoff.ts';
 
 // Export multi-tenant SSO support
 export { TenantManager } from './lib/tenantManager.ts';
@@ -239,6 +243,21 @@ export async function handleApplication(scope: Scope): Promise<void> {
 			}
 			disposeBearerValidator();
 		}
+
+		// Sign-in handoff allowlist, after the MCP disable above so an invalid
+		// value cannot stop that from applying. Like the escape hatch, a
+		// narrowing applies at once (the live list drops to the patterns the new
+		// snapshot keeps) and a widening only in configure() below, once the
+		// whole reload succeeds. An invalid value empties the live list.
+		let handoffOrigins: OriginPattern[];
+		try {
+			handoffOrigins = normalizePostLoginRedirectOrigins(options.postLoginRedirectOrigins, logger);
+		} catch (error) {
+			OAuthResource.handoffOrigins = [];
+			throw error;
+		}
+		const keptSources = new Set(handoffOrigins.map((pattern) => pattern.source));
+		OAuthResource.handoffOrigins = OAuthResource.handoffOrigins.filter((pattern) => keptSources.has(pattern.source));
 
 		// Build the MCP config block up front so we can fail fast on an unsafe
 		// combination before mutating any provider state. expandEnvVarsDeep so
@@ -456,6 +475,7 @@ export async function handleApplication(scope: Scope): Promise<void> {
 			// stale config after the plugin is no longer validly configured.
 			OAuthResource.mcpConfig = undefined;
 			OAuthResource.allowUnverifiedClaimInheritance = false;
+			OAuthResource.handoffOrigins = [];
 			disposeBearerValidator();
 			resources.set(
 				'oauth',
@@ -494,11 +514,18 @@ export async function handleApplication(scope: Scope): Promise<void> {
 				logger,
 				dynamicProviderCache,
 				mcpConfig,
-				allowUnverifiedClaimInheritance
+				allowUnverifiedClaimInheritance,
+				handoffOrigins
 			);
 
 			// Register the OAuth resource class
 			resources.set('oauth', OAuthResource, { mcp: false });
+			if (handoffOrigins.length > 0) {
+				logger?.info?.(
+					`OAuth: sign-in may be handed off to ${handoffOrigins.map((pattern) => pattern.source).join(', ')} ` +
+						'(postLoginRedirectOrigins); those origins also need credentialed CORS (http.corsAccessList)'
+				);
+			}
 
 			if (mcpConfig?.enabled) {
 				if (!unregisterBearerValidator) {

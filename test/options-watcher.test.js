@@ -715,6 +715,98 @@ describe('OAuth Plugin Options Watcher', () => {
 		assert.equal(OAuthResource.allowUnverifiedClaimInheritance, true);
 	});
 
+	describe('postLoginRedirectOrigins (sign-in handoff allowlist)', () => {
+		const A = 'https://*.app.dev.studio.example.com';
+		const B = 'https://studio.example.com';
+		const sources = () => OAuthResource.handoffOrigins.map((pattern) => pattern.source);
+		const reservedProviderError = () => ({
+			...scope.options._config.providers,
+			mcp: { provider: 'generic', clientId: 'x', clientSecret: 'y' },
+		});
+		let errorLogged;
+		beforeEach(() => {
+			errorLogged = false;
+			scope.logger.error = (msg) => {
+				if (typeof msg === 'string' && msg.includes('Failed to update OAuth configuration')) errorLogged = true;
+			};
+		});
+
+		it('boots with an empty allowlist when unset, empty, or an unset ${VAR}', async () => {
+			for (const value of [undefined, '', [], '${OAUTH_TEST_UNSET_HANDOFF_ORIGINS}']) {
+				scope.options._config.postLoginRedirectOrigins = value;
+				await handleApplication(scope);
+				assert.deepEqual(sources(), [], String(value));
+			}
+		});
+
+		it('boots with the parsed allowlist, and refuses to boot on an invalid entry', async () => {
+			scope.options._config.postLoginRedirectOrigins = [A, B];
+			await handleApplication(scope);
+			assert.deepEqual(sources(), [A, B]);
+			scope.options._config.postLoginRedirectOrigins = ['http://insecure.example.com'];
+			await assert.rejects(handleApplication(scope), /postLoginRedirectOrigins/);
+		});
+
+		it('a narrowing reload applies immediately even when the same snapshot errors', async () => {
+			scope.options._config.postLoginRedirectOrigins = [A, B];
+			await handleApplication(scope);
+			scope.options._config = {
+				...scope.options._config,
+				postLoginRedirectOrigins: [A],
+				providers: reservedProviderError(),
+			};
+			configChangeListeners[0]();
+			await waitFor(() => errorLogged);
+			assert.deepEqual(sources(), [A], 'a removed origin must not stay live behind a rejected reload');
+		});
+
+		it('a widening reload does not apply when the same snapshot errors', async () => {
+			scope.options._config.postLoginRedirectOrigins = [A];
+			await handleApplication(scope);
+			scope.options._config = {
+				...scope.options._config,
+				postLoginRedirectOrigins: [A, B],
+				providers: reservedProviderError(),
+			};
+			configChangeListeners[0]();
+			await waitFor(() => errorLogged);
+			assert.deepEqual(sources(), [A]);
+		});
+
+		it('an invalid allowlist on reload empties the live list', async () => {
+			scope.options._config.postLoginRedirectOrigins = [A];
+			await handleApplication(scope);
+			scope.options._config = { ...scope.options._config, postLoginRedirectOrigins: ['https://*.com'] };
+			configChangeListeners[0]();
+			await waitFor(() => errorLogged);
+			assert.deepEqual(sources(), []);
+		});
+
+		it('an invalid allowlist cannot stop mcp.enabled: false in the same reload from applying', async () => {
+			scope.options._config.mcp = { enabled: true, issuer: 'https://app.test.com' };
+			await handleApplication(scope);
+			assert.equal(OAuthResource.mcpConfig?.enabled, true);
+			scope.options._config = {
+				...scope.options._config,
+				mcp: { enabled: false, issuer: 'https://app.test.com' },
+				postLoginRedirectOrigins: ['http://insecure.example.com'],
+			};
+			configChangeListeners[0]();
+			await waitFor(() => errorLogged);
+			assert.equal(OAuthResource.mcpConfig?.enabled, false);
+			assert.deepEqual(sources(), []);
+		});
+
+		it('a successful reload applies a widened allowlist', async () => {
+			scope.options._config.postLoginRedirectOrigins = [A];
+			await handleApplication(scope);
+			scope.options._config = { ...scope.options._config, postLoginRedirectOrigins: `${A}, ${B}` };
+			configChangeListeners[0]();
+			await waitFor(() => sources().length === 2);
+			assert.deepEqual(sources(), [A, B]);
+		});
+	});
+
 	describe('reload ordering vs. a per-key OptionsWatcher merge', () => {
 		// Harper's real OptionsWatcher#merge writes a multi-key edit into the
 		// live config ONE KEY AT A TIME and emits 'change' synchronously after

@@ -21,13 +21,14 @@ Complete configuration options for the `@harperfast/oauth` plugin.
 
 ### Global Options
 
-| Option                  | Type              | Default                   | Description                                                                                                                                                                                                                                                                                                                            |
-| ----------------------- | ----------------- | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `debug`                 | boolean           | `false`                   | Enable debug endpoints and logging                                                                                                                                                                                                                                                                                                     |
-| `redirectUri`           | string            | _(required — no default)_ | **Required.** Base OAuth callback URL providers redirect back to; the plugin appends the provider name. An app that omits it (and has no per-provider `redirectUri`) fails to start with a configuration error, rather than silently sending providers a `localhost` callback. See [Understanding Redirects](#understanding-redirects) |
-| `postLoginRedirect`     | string            | `/`                       | Default URL to redirect users after successful OAuth login                                                                                                                                                                                                                                                                             |
-| `cacheDynamicProviders` | boolean \| number | `300`                     | TTL (seconds) for providers resolved via the `onResolveProvider` hook. Number = seconds; `false` = never cache (call the hook every request); `true` = cache forever. Default 300s; freshness is controlled by this TTL (there is no manual invalidation).                                                                             |
-| `mcp`                   | object            | (off)                     | MCP OAuth flow configuration. See [MCP OAuth](#mcp-oauth) below                                                                                                                                                                                                                                                                        |
+| Option                     | Type               | Default                   | Description                                                                                                                                                                                                                                                                                                                            |
+| -------------------------- | ------------------ | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `debug`                    | boolean            | `false`                   | Enable debug endpoints and logging                                                                                                                                                                                                                                                                                                     |
+| `redirectUri`              | string             | _(required — no default)_ | **Required.** Base OAuth callback URL providers redirect back to; the plugin appends the provider name. An app that omits it (and has no per-provider `redirectUri`) fails to start with a configuration error, rather than silently sending providers a `localhost` callback. See [Understanding Redirects](#understanding-redirects) |
+| `postLoginRedirect`        | string             | `/`                       | Default URL to redirect users after successful OAuth login                                                                                                                                                                                                                                                                             |
+| `postLoginRedirectOrigins` | string \| string[] | (none)                    | Origins (`https://host` or `https://*.example.com`) a login's absolute `redirect` may name; the sign-in is handed to that origin with a one-time code. Empty or an unset `${VAR}` = off. See [Signing in on another origin](#signing-in-on-another-origin-postloginredirectorigins)                                                    |
+| `cacheDynamicProviders`    | boolean \| number  | `300`                     | TTL (seconds) for providers resolved via the `onResolveProvider` hook. Number = seconds; `false` = never cache (call the hook every request); `true` = cache forever. Default 300s; freshness is controlled by this TTL (there is no manual invalidation).                                                                             |
+| `mcp`                      | object             | (off)                     | MCP OAuth flow configuration. See [MCP OAuth](#mcp-oauth) below                                                                                                                                                                                                                                                                        |
 
 ### Provider Configuration
 
@@ -180,6 +181,7 @@ OAUTH_AUTH0_SCOPE="openid profile email"  # Optional
 OAUTH_DEBUG=true  # Enable debug mode
 OAUTH_REDIRECT_URI=https://yourdomain.com/oauth/callback  # OAuth callback URL
 OAUTH_POST_LOGIN_REDIRECT=/dashboard  # Where to send users after login
+OAUTH_POST_LOGIN_REDIRECT_ORIGINS=https://*.app.example.com  # If referenced as postLoginRedirectOrigins: ${OAUTH_POST_LOGIN_REDIRECT_ORIGINS}
 ```
 
 ## Understanding Redirects
@@ -266,7 +268,7 @@ window.location.href = '/oauth/github/login?redirect=' + encodeURIComponent('/ap
 3. `postLoginRedirect` config setting
 4. `/` (fallback)
 
-**Security:** The `redirect` parameter is automatically sanitized to prevent open redirect attacks. Only the path portion (pathname + search + hash) is preserved - any protocol, host, or port is stripped.
+**Security:** The `redirect` parameter is automatically sanitized to prevent open redirect attacks. Only the path portion (pathname + search + hash) is preserved - any protocol, host, or port is stripped. The one exception is an absolute `https` URL on an origin listed in [`postLoginRedirectOrigins`](#signing-in-on-another-origin-postloginredirectorigins), which hands the sign-in to that origin.
 
 ```javascript
 // Safe - these all work as expected
@@ -279,6 +281,65 @@ window.location.href = '/oauth/github/login?redirect=' + encodeURIComponent('/ap
 'http://attacker.com/steal'     → '/steal'
 '//evil.com/bad'                → '/bad'
 ```
+
+### Signing in on another origin (`postLoginRedirectOrigins`)
+
+By default a sign-in always finishes on the origin of `redirectUri`: the session cookie Harper sets is named after the request's origin, and the `redirect` parameter is reduced to its path. To let a static app on another origin (for example per-PR preview builds at `https://pr-12.app.example.com`) sign in with the same registered callback, list that origin:
+
+```yaml
+'@harperfast/oauth':
+  redirectUri: ${OAUTH_REDIRECT_URI} # unchanged: https://studio.example.com/oauth
+  postLoginRedirectOrigins: ${OAUTH_POST_LOGIN_REDIRECT_ORIGINS} # e.g. "https://*.app.example.com"
+```
+
+**Format.** A YAML list, or one string of entries separated by commas and/or whitespace (so one environment variable can carry several). Each entry is `https://host` or `https://*.suffix`, optionally with a `:port`:
+
+- `https` only. No path, query, fragment or credentials.
+- `*` is allowed only as the whole leftmost label and matches **exactly one** label: `https://*.app.example.com` matches `https://pr-12.app.example.com`, not `https://a.b.app.example.com` or `https://app.example.com`. The suffix needs at least two labels (`https://*.com` is rejected).
+- A port must match exactly; no port means 443.
+- Matching runs on the parsed URL, so `https://evil.com/?x.app.example.com`, `https://pr-12.app.example.com@evil.com`, `https://pr-12.app.example.com.evil.com` and similar never match.
+- **Empty, absent, or an unset `${VAR}` placeholder means no handoff**, which is today's behavior; an unset placeholder does not fail startup, so one `config.yaml` can enable this in one environment only. A placeholder may also be one entry of a list or one piece of a comma-separated value (`https://studio.example.com, ${PREVIEW_ORIGINS}`); an unset one there is dropped with a warning. A variable's value is not expanded again. Any other invalid entry fails startup (or rejects the reload) naming the entry.
+- On a live reload, removing an origin takes effect at once for new sign-ins and unredeemed codes, even if another key in the same edit rejects the reload; adding one waits until the whole reload succeeds. Removing an origin does not sign anyone out of it: a session already redeemed there lasts like any Harper session, which with no `authentication.cookie.expires` set means until the user signs out.
+- To test a value with the plugin's own matcher, `import { isAllowedPostLoginOrigin } from '@harperfast/oauth'`: `isAllowedPostLoginOrigin('https://pr-12.app.example.com/', 'https://*.app.example.com')` is `true`. It takes the option's shapes and throws on an invalid entry.
+
+**Flow.**
+
+1. The app sends the browser to `/oauth/<provider>/login?redirect=<absolute URL>`, e.g. `?redirect=https%3A%2F%2Fpr-12.app.example.com%2F%23%2Fcheck-oauth`. Only the explicit `redirect` parameter opts in; a `Referer` never does. A `redirect` on an origin that is not listed is reduced to its path, as always.
+2. The provider returns to `redirectUri` as usual. The callback runs every check and the `onLogin` hook exactly as before, but instead of writing the session there it stores it under a one-time code and redirects to the `redirect` URL with the code **in the fragment**: `https://pr-12.app.example.com/#/check-oauth?oauth_handoff=<code>`. (The code is appended to the fragment's own query string; a URL without a fragment gets `#?oauth_handoff=<code>`.) No session is created on the callback's origin.
+3. The page reads `oauth_handoff` from `location.hash`, removes it (`history.replaceState`), and redeems it within 60 seconds:
+
+```javascript
+const q = location.hash.indexOf('?');
+const code = q === -1 ? null : new URLSearchParams(location.hash.slice(q + 1)).get('oauth_handoff');
+const res = await fetch('https://studio.example.com/oauth/handoff', {
+	method: 'POST',
+	credentials: 'include',
+	headers: { 'Content-Type': 'application/json' },
+	body: JSON.stringify({ code }),
+});
+// 200 → the session cookie for THIS page's origin is set; continue as signed in.
+```
+
+The browser sends the page's `Origin`, so Harper creates the session under that origin's cookie name, and every later credentialed call from the page uses it. See [`POST /oauth/handoff`](./api-reference.md#sign-in-handoff-endpoint) for the request, responses and errors.
+
+**Errors** after the provider returns (denied consent, a failed token exchange, an `onLogin` denial without its own `redirect`, …) go back to the `redirect` URL on the listed origin with the same `error`/`reason` query parameters a same-origin sign-in gets, placed before the fragment: `https://pr-12.app.example.com/?error=auth_failed&reason=token_exchange#/check-oauth`. A storage failure for the code itself is `error=server_error&reason=handoff_storage`. A sign-in started for an origin that was removed from the list before it finished fails on this origin's path with `error=access_denied&reason=handoff_origin_not_allowed`, and no session is created anywhere. An expired or invalid `state` still goes to `/oauth/<provider>/login?error=session_expired` on this origin, as before.
+
+**Security properties.**
+
+- The code is 256 random bits, single-use, valid for 60 seconds, and stored only as its SHA-256. It is never a session id or a provider token; the provider tokens stay server-side, and the redeem clears them from the code's row (Harper's audit log, like the session table's, keeps the original write for its retention period).
+- Single use is an atomic counter, as for client-assertion replay. Two presentations racing exactly can both be refused (fail closed), so redeem each code once. Like every table-backed guard, it holds per node within Harper's replication delay; any extra winner is still bound to the same origin and browser.
+- It is bound to the target origin: the redeem's `Origin` header must be a listed origin **and** equal the origin the code was issued for.
+- It is bound to the browser that started the sign-in, through the same `__Host-oauth_browser` cookie that already defends the callback against login CSRF. An attacker's code planted in a victim's page is refused, and a stolen code cannot be redeemed without the victim's cookie.
+- Only a redeem that passes every check consumes the code: a presentation from the wrong origin or browser leaves it for the right page.
+- Refusals are logged with the reason and the origin, never the code.
+
+**Requirements.**
+
+- The target origin must be **same-site** with this host (share a registrable domain, e.g. `pr-12.app.example.com` and `studio.example.com`). The browser-binding cookie is `SameSite=Lax`, and Harper's session cookie set on the redeem response would be a third-party cookie for a cross-site page.
+- Harper must allow the page's origin for credentialed CORS (`http.corsAccessList`), or the browser will not let the page read the redeem's response or send its later calls with cookies. Before Harper 5.4, `http.corsAccessList` matches exact origins only, so a wildcard preview pattern needs Harper 5.4 or an entry per origin.
+- An `onLogin` hook that denies or defers the sign-in with its own `redirect` sends the browser there, as for any sign-in; a relative hook `redirect` resolves against this host, not the listed origin.
+- List only origins you trust as much as the app on `redirectUri`: a listed origin can complete a sign-in for any user who follows its login link.
+- Values a hook adds to the session pass through JSON on the way (numbers, strings, booleans, arrays and plain objects survive unchanged; a `Date` becomes a string).
 
 ### Single-Page Application (SPA) Integration
 

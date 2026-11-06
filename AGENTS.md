@@ -23,7 +23,8 @@ npm run format:check    # Prettier check
 3. **Session validator** (`src/lib/sessionValidator.ts`) — refreshes tokens on every request, at 80% of token lifetime
 4. **Hook system** (`src/lib/hookManager.ts`) — `onLogin`, `onLogout`, `onTokenRefresh`, `onMCPTokenIssued`
 5. **Provider registry** (`src/lib/config.ts`) — builds and validates provider config; presets in `src/lib/providers/`
-6. **Multi-tenant SSO** (`src/lib/multiTenantResource.ts`, `src/lib/tenantManager.ts`) — per-tenant provider resolution
+6. **Sign-in handoff** (`src/lib/loginHandoff.ts`) — `postLoginRedirectOrigins`: the callback stores the finished session under a one-time code instead of writing it, and `POST /oauth/handoff` redeems it on the target page's own request, because Harper core names the session cookie after the request's `Origin`
+7. **Multi-tenant SSO** (`src/lib/multiTenantResource.ts`, `src/lib/tenantManager.ts`) — per-tenant provider resolution
 
 `request.session` is `user` (Harper username), `oauthUser` (OAuth profile), `oauth` (token metadata for refresh — `providerConfigId`, `accessToken`, `refreshToken`, `expiresAt`, `authTrust`, …), plus any custom fields an `onLogin` hook adds. See `Session`/`OAuthSessionMetadata` in `src/types.ts` for the current full shape rather than duplicating it here — it grows fields (`authTrust`, `lastValidated` are recent additions).
 

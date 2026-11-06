@@ -37,6 +37,16 @@ import { resolveIssuer } from './mcp/wellKnown.ts';
 import { getRequestHeader } from './requestHeaders.ts';
 import type { HookManager } from './hookManager.ts';
 import { ResolveEmailError, AmbiguousEmailError, EmailLookupError } from './resolveEmailError.ts';
+import {
+	appendHandoffCode,
+	buildHandoffErrorRedirect,
+	issueLoginHandoff,
+	LoginHandoffStorageError,
+	resolveHandoffTarget,
+	resolveStateHandoff,
+	type HandoffTarget,
+	type OriginPattern,
+} from './loginHandoff.ts';
 
 /**
  * Sanitize a redirect parameter to prevent open redirect attacks
@@ -134,10 +144,14 @@ export async function handleLogin(
 	provider: IOAuthProvider,
 	config: OAuthProviderConfig,
 	providerName: string,
-	logger?: Logger
+	logger?: Logger,
+	opts?: { handoffOrigins?: readonly OriginPattern[] }
 ): Promise<any> {
 	// Determine redirect URL: query param > referer header > config default
 	let redirectParam = target.get?.('redirect');
+
+	// Only the explicit parameter opts in to a handoff; a Referer never does.
+	const handoff = resolveHandoffTarget(redirectParam, opts?.handoffOrigins ?? []);
 
 	// Sanitize redirect parameter to prevent open redirect attacks
 	if (redirectParam) {
@@ -148,7 +162,7 @@ export async function handleLogin(
 	// wraps headers behind `.asObject`, so direct property access is undefined.
 	const refererHeader = getRequestHeader(request.headers, 'referer');
 	const referer = refererHeader ? sanitizeRedirect(refererHeader) : undefined;
-	const originalUrl = redirectParam || referer || config.postLoginRedirect || '/';
+	const originalUrl = handoff?.target ?? (redirectParam || referer || config.postLoginRedirect || '/');
 
 	// Browser binding: session binding only covers flows initiated while logged
 	// in — Harper mints no anonymous session id, so the logged-out login flow
@@ -169,6 +183,7 @@ export async function handleLogin(
 			sessionId: request.session?.id,
 			providerName, // Bind state token to this provider
 			browserNonceHash: hashBrowserSecret(browserSecret),
+			...(handoff ? { handoffOrigin: handoff.origin } : {}),
 		});
 	} catch (error) {
 		// Sign-in can't proceed either way, but land on the app's sign-in page
@@ -179,7 +194,9 @@ export async function handleLogin(
 		return {
 			status: 302,
 			headers: {
-				Location: buildErrorRedirect(originalUrl, { error: 'server_error', reason: 'state_storage' }),
+				Location: handoff
+					? buildHandoffErrorRedirect(handoff.target, { error: 'server_error', reason: 'state_storage' })
+					: buildErrorRedirect(originalUrl, { error: 'server_error', reason: 'state_storage' }),
 			},
 		};
 	}
@@ -278,9 +295,16 @@ export async function handleCallback(
 	config: OAuthProviderConfig,
 	hookManager: HookManager,
 	providerName: string,
-	opts?: { mcpConfig?: MCPConfig; logger?: Logger; allowUnverifiedClaimInheritance?: boolean }
+	opts?: {
+		mcpConfig?: MCPConfig;
+		logger?: Logger;
+		allowUnverifiedClaimInheritance?: boolean;
+		/** The live allowlist, or a getter for it: re-read before a code is issued. */
+		handoffOrigins?: readonly OriginPattern[] | (() => readonly OriginPattern[]);
+	}
 ): Promise<any> {
-	const { mcpConfig, logger, allowUnverifiedClaimInheritance = false } = opts ?? {};
+	const { mcpConfig, logger, allowUnverifiedClaimInheritance = false, handoffOrigins = [] } = opts ?? {};
+	const currentHandoffOrigins = typeof handoffOrigins === 'function' ? handoffOrigins : () => handoffOrigins;
 	// Get query parameters from target
 	const code = target.get?.('code');
 	const state = target.get?.('state');
@@ -353,6 +377,65 @@ export async function handleCallback(
 
 	const mcpState = tokenData.mcp as MCPAuthorizeState | undefined;
 
+	// A human flow started with an allowlisted absolute `redirect` hands the
+	// session to that origin instead of writing it here (loginHandoff.ts). Its
+	// errors return there too, with the same error/reason parameters.
+	const handoff: HandoffTarget | null = mcpState ? null : resolveStateHandoff(tokenData, currentHandoffOrigins());
+	// Re-resolved per use: an error after a reload that removed the origin must
+	// not redirect to it.
+	const errorRedirect = (params: Record<string, string>): string => {
+		const live = handoff && resolveStateHandoff(tokenData, currentHandoffOrigins());
+		return live && live.origin === handoff.origin
+			? buildHandoffErrorRedirect(live.target, params)
+			: buildErrorRedirect(tokenData.originalUrl || config.postLoginRedirect || '/', params);
+	};
+	// A flow started for an origin that is no longer allowed fails, here on
+	// the path, rather than becoming a sign-in on this origin.
+	const handoffRevokedResponse = () => {
+		logger?.warn?.(
+			`OAuth callback: sign-in was started for ${JSON.stringify(tokenData.handoffOrigin)}, which ` +
+				`postLoginRedirectOrigins no longer allows (provider '${providerName}')`
+		);
+		return {
+			status: 302,
+			headers: {
+				Location: buildErrorRedirect(tokenData.originalUrl || config.postLoginRedirect || '/', {
+					error: 'access_denied',
+					reason: 'handoff_origin_not_allowed',
+				}),
+			},
+		};
+	};
+	// Store the finished session under a one-time code and send the browser to
+	// the target with the code in the fragment. Nothing is written to this
+	// request's session: a preview sign-in must not also sign the user in here.
+	const handOffSession = async (to: HandoffTarget, sessionData: Record<string, any>, successLog: string) => {
+		// The provider exchange and onLogin ran since the check above; a reload
+		// in that window that removed the origin must still stop the code.
+		if (resolveStateHandoff(tokenData, currentHandoffOrigins())?.origin !== to.origin) {
+			return handoffRevokedResponse();
+		}
+		const handoffCode = await issueLoginHandoff(
+			{
+				origin: to.origin,
+				browserNonceHash: String(tokenData.browserNonceHash),
+				provider: providerName,
+				session: sessionData,
+			},
+			logger
+		);
+		// Again after the write: the redeem would refuse the code, but a
+		// removed origin must not receive the navigation either.
+		if (resolveStateHandoff(tokenData, currentHandoffOrigins())?.origin !== to.origin) {
+			return handoffRevokedResponse();
+		}
+		logger?.info?.(`${successLog}; handed to ${JSON.stringify(to.origin)}`);
+		return {
+			status: 302,
+			headers: { 'Location': appendHandoffCode(to.target, handoffCode), 'Cache-Control': 'no-store' },
+		};
+	};
+
 	// Verify state token was issued for THIS provider (prevents cross-provider attacks).
 	if (tokenData.providerName !== providerName) {
 		logger?.warn?.(
@@ -361,7 +444,7 @@ export async function handleCallback(
 		if (mcpState) {
 			return mcpErrorRedirect(mcpState, 'invalid_request', 'cross-provider state mismatch');
 		}
-		const errorUrl = buildErrorRedirect(tokenData.originalUrl || config.postLoginRedirect || '/', {
+		const errorUrl = errorRedirect({
 			error: 'auth_failed',
 			reason: 'csrf',
 		});
@@ -385,7 +468,7 @@ export async function handleCallback(
 				'Authorization must complete in the session that initiated it'
 			);
 		}
-		const errorUrl = buildErrorRedirect(tokenData.originalUrl || config.postLoginRedirect || '/', {
+		const errorUrl = errorRedirect({
 			error: 'auth_failed',
 			reason: 'csrf',
 		});
@@ -403,12 +486,16 @@ export async function handleCallback(
 	if (tokenData.browserNonceHash && !mcpState) {
 		if (!browserSecretMatches(readBrowserSecret(request), tokenData.browserNonceHash)) {
 			logger?.warn?.(`OAuth callback: login browser binding mismatch (provider '${providerName}')`);
-			const errorUrl = buildErrorRedirect(tokenData.originalUrl || config.postLoginRedirect || '/', {
+			const errorUrl = errorRedirect({
 				error: 'auth_failed',
 				reason: 'csrf',
 			});
 			return { status: 302, headers: { Location: errorUrl } };
 		}
+	}
+
+	if (!mcpState && !handoff && typeof tokenData.handoffOrigin === 'string') {
+		return handoffRevokedResponse();
 	}
 
 	// MCP browser binding — every /oauth/mcp/authorize flow (the CIMD interstitial
@@ -453,7 +540,7 @@ export async function handleCallback(
 		if (mcpState) {
 			return mcpErrorRedirect(mcpState, error, errorDescription || error);
 		}
-		const errorUrl = buildErrorRedirect(tokenData.originalUrl || config.postLoginRedirect || '/', {
+		const errorUrl = errorRedirect({
 			error: 'oauth_failed',
 			reason: error,
 		});
@@ -466,7 +553,7 @@ export async function handleCallback(
 		if (mcpState) {
 			return mcpErrorRedirect(mcpState, 'invalid_request', 'Missing authorization code');
 		}
-		const errorUrl = buildErrorRedirect(tokenData.originalUrl || config.postLoginRedirect || '/', {
+		const errorUrl = errorRedirect({
 			error: 'invalid_request',
 		});
 		return { status: 302, headers: { Location: errorUrl } };
@@ -596,7 +683,7 @@ export async function handleCallback(
 			if (hookData.redirect) {
 				return { status: 302, headers: { Location: resolveHookRedirect(hookData.redirect) } };
 			}
-			const errorUrl = buildErrorRedirect(tokenData.originalUrl || config.postLoginRedirect || '/', {
+			const errorUrl = errorRedirect({
 				error: 'access_denied',
 				reason: reason || (denied ? 'denied' : 'confirmation_required'),
 			});
@@ -621,7 +708,7 @@ export async function handleCallback(
 			return {
 				status: 302,
 				headers: {
-					Location: buildErrorRedirect(tokenData.originalUrl || config.postLoginRedirect || '/', {
+					Location: errorRedirect({
 						error: 'auth_failed',
 						reason: 'identity_resolution',
 					}),
@@ -681,7 +768,7 @@ export async function handleCallback(
 						return {
 							status: 302,
 							headers: {
-								Location: buildErrorRedirect(tokenData.originalUrl || config.postLoginRedirect || '/', {
+								Location: errorRedirect({
 									error: 'access_denied',
 									reason: 'login_denied',
 								}),
@@ -710,7 +797,7 @@ export async function handleCallback(
 				return {
 					status: 302,
 					headers: {
-						Location: buildErrorRedirect(tokenData.originalUrl || config.postLoginRedirect || '/', {
+						Location: errorRedirect({
 							error: 'server_error',
 							reason: 'account_lookup_failed',
 						}),
@@ -737,7 +824,7 @@ export async function handleCallback(
 				if (mcpState) {
 					return handleMCPCallback(request, mcpState, quarantinePrincipal, mcpConfig ?? {}, logger);
 				}
-				if (request.session) {
+				if (handoff || request.session) {
 					const now = Date.now();
 					let expiresAt: number | undefined;
 					let refreshThreshold: number | undefined;
@@ -771,9 +858,16 @@ export async function handleCallback(
 						delete remainingHookData.oauthUser;
 						Object.assign(sessionData, remainingHookData);
 					}
-					if (typeof request.session.update === 'function') {
+					if (handoff) {
+						return await handOffSession(
+							handoff,
+							sessionData,
+							`OAuth: login successful (roleless, non-adoptable) for ${JSON.stringify(resolvedUser)}`
+						);
+					}
+					if (typeof request.session?.update === 'function') {
 						await request.session.update(sessionData);
-					} else {
+					} else if (request.session) {
 						Object.assign(request.session, sessionData);
 					}
 					logger?.info?.(`OAuth: login successful (roleless, non-adoptable) for ${JSON.stringify(resolvedUser)}`);
@@ -799,7 +893,7 @@ export async function handleCallback(
 		}
 
 		// Store in session if available
-		if (request.session) {
+		if (handoff || request.session) {
 			// Calculate token expiration and refresh thresholds
 			// For providers that don't return expires_in (like GitHub), tokens don't expire
 			// so we don't set expiration/refresh thresholds to avoid premature session cleanup
@@ -853,10 +947,18 @@ export async function handleCallback(
 				Object.assign(sessionData, remainingHookData);
 			}
 
+			if (handoff) {
+				return await handOffSession(
+					handoff,
+					sessionData,
+					`OAuth login successful for user: ${JSON.stringify(user.username)}`
+				);
+			}
+
 			// Store user info and OAuth metadata in session
-			if (typeof request.session.update === 'function') {
+			if (typeof request.session?.update === 'function') {
 				await request.session.update(sessionData);
-			} else {
+			} else if (request.session) {
 				Object.assign(request.session, sessionData);
 			}
 
@@ -886,7 +988,8 @@ export async function handleCallback(
 			error instanceof ResolveEmailError
 		) {
 			reason = error.reason;
-		} else if (message.startsWith('Token exchange failed')) reason = 'token_exchange';
+		} else if (error instanceof LoginHandoffStorageError) reason = error.reason;
+		else if (message.startsWith('Token exchange failed')) reason = 'token_exchange';
 		else if (message.includes('claim')) reason = 'user_mapping';
 		else if (message.includes('user info') || message.includes('userinfo')) reason = 'user_info';
 		else if (message.includes('hook') || message.includes('onLogin')) reason = 'login_hook';
@@ -895,8 +998,9 @@ export async function handleCallback(
 		}
 		// Matches the adoption gate's own account_lookup_failed convention: a retryable
 		// storage error is server_error, not auth_failed, so a client can tell them apart.
-		const errorCode = error instanceof EmailLookupError ? 'server_error' : 'auth_failed';
-		const errorUrl = buildErrorRedirect(tokenData.originalUrl || config.postLoginRedirect || '/', {
+		const errorCode =
+			error instanceof EmailLookupError || error instanceof LoginHandoffStorageError ? 'server_error' : 'auth_failed';
+		const errorUrl = errorRedirect({
 			error: errorCode,
 			reason,
 		});
