@@ -300,6 +300,16 @@ export class LoginHandoffStorageError extends Error {
 export type RedeemRefusal = 'unknown' | 'expired' | 'replayed' | 'mismatch';
 
 /**
+ * An error's stack (which leads with its name and message), never the object:
+ * a storage or session error's own properties and `cause` can carry the
+ * session being written, provider tokens included.
+ */
+function describeError(error: unknown): string {
+	if (!(error instanceof Error)) return 'unknown error';
+	return typeof error.stack === 'string' ? error.stack : `${error.name}: ${error.message}`;
+}
+
+/**
  * Issue a code for `record` and return it. Storage errors throw
  * {@link LoginHandoffStorageError}; the code itself is never logged.
  */
@@ -325,10 +335,7 @@ export async function issueLoginHandoff(
 			{ expiresAt }
 		);
 	} catch (error) {
-		logger?.error?.(
-			'OAuth handoff: failed to store the code:',
-			error instanceof Error ? `${error.name}: ${error.message}` : 'unknown error'
-		);
+		logger?.error?.('OAuth handoff: failed to store the code:', describeError(error));
 		throw new LoginHandoffStorageError();
 	}
 	return code;
@@ -495,10 +502,7 @@ export async function handleLoginHandoffRedeem(
 			return null;
 		});
 	} catch (error) {
-		logger?.error?.(
-			`OAuth handoff for ${JSON.stringify(origin)}: storage error:`,
-			error instanceof Error ? `${error.name}: ${error.message}` : 'unknown error'
-		);
+		logger?.error?.(`OAuth handoff for ${JSON.stringify(origin)}: storage error:`, describeError(error));
 		return errorResponse(500, 'server_error', 'Unable to complete the sign-in, please try again');
 	}
 
@@ -521,10 +525,7 @@ export async function handleLoginHandoffRedeem(
 	try {
 		await request.session.update(record.session);
 	} catch (error) {
-		logger?.error?.(
-			`OAuth handoff for ${JSON.stringify(origin)}: session write failed:`,
-			error instanceof Error ? `${error.name}: ${error.message}` : 'unknown error'
-		);
+		logger?.error?.(`OAuth handoff for ${JSON.stringify(origin)}: session write failed:`, describeError(error));
 		return errorResponse(500, 'server_error', 'Unable to complete the sign-in, please try again');
 	}
 

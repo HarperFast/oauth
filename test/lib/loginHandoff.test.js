@@ -10,6 +10,7 @@
 
 import { describe, it, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { inspect } from 'node:util';
 import {
 	parseOriginPattern,
 	normalizePostLoginRedirectOrigins,
@@ -45,11 +46,32 @@ function cookieFor(secret) {
 	return buildBrowserSecretCookie(secret).split(';')[0];
 }
 
-/** Every string any logger method received, joined, to assert a code never appears. */
+/**
+ * Everything any logger method received, joined, to assert a secret never
+ * appears. Objects are inspected as a logger would print them, own properties
+ * and `cause` included.
+ */
 function loggedText(logger) {
 	return ['debug', 'info', 'warn', 'error']
-		.flatMap((level) => logger[level].mock.calls.flatMap((call) => call.arguments.map((a) => String(a))))
+		.flatMap((level) =>
+			logger[level].mock.calls.flatMap((call) =>
+				call.arguments.map((a) => (typeof a === 'string' ? a : inspect(a, { depth: 10 })))
+			)
+		)
 		.join('\n');
+}
+
+/** A storage-style error whose own property and `cause` carry a provider token. */
+function errorCarryingToken(message) {
+	const error = new Error(message, { cause: new Error('write of {"accessToken":"gho_CAUSE"} failed') });
+	error.record = { session: '{"accessToken":"gho_PROPERTY"}' };
+	return error;
+}
+
+function assertLoggedStackWithoutTokens(logger, message) {
+	const text = loggedText(logger);
+	assert.ok(text.includes(`Error: ${message}\n    at `), 'the stack is logged');
+	assert.ok(!text.includes('gho_CAUSE') && !text.includes('gho_PROPERTY'), 'no token from the error object');
 }
 
 /** Harper's patch: plain fields replace, `{ __op__: 'add' }` adds to the stored number. */
@@ -422,6 +444,18 @@ describe('handoff code store', () => {
 		table.rows.set(handoffKey(code), { ...row, expires_at: Date.now() - 1 });
 		assert.deepEqual(await redeemLoginHandoff(code), { refused: 'expired' });
 	});
+
+	it('logs a storage failure with its stack but not the error object', async () => {
+		const logger = createMockLogger();
+		table.put = async () => {
+			throw errorCarryingToken('put failed');
+		};
+		await assert.rejects(issueLoginHandoff(record(), logger), (error) => {
+			assert.equal(error.cause, undefined);
+			return true;
+		});
+		assertLoggedStackWithoutTokens(logger, 'put failed');
+	});
 });
 
 describe('POST /oauth/handoff (handleLoginHandoffRedeem)', () => {
@@ -589,13 +623,24 @@ describe('POST /oauth/handoff (handleLoginHandoffRedeem)', () => {
 		}
 	});
 
-	it('answers server_error when storage fails', async () => {
+	it('answers server_error when storage fails, logging the stack but not the error object', async () => {
 		globalThis.databases.oauth.login_handoffs.get = async () => {
-			throw new Error('disk on fire');
+			throw errorCarryingToken('disk on fire');
 		};
 		const result = await redeem({ origin: PREVIEW, cookie: cookieFor(SECRET) });
 		assert.equal(result.status, 500);
 		assert.equal(result.body.error, 'server_error');
+		assertLoggedStackWithoutTokens(logger, 'disk on fire');
+	});
+
+	it('answers server_error when the session write fails, logging the stack but not the error object', async () => {
+		session.update = createMockFn(async () => {
+			throw errorCarryingToken('session store down');
+		});
+		const result = await redeem({ origin: PREVIEW, cookie: cookieFor(SECRET) });
+		assert.equal(result.status, 500);
+		assert.equal(result.body.error, 'server_error');
+		assertLoggedStackWithoutTokens(logger, 'session store down');
 	});
 
 	it('logs every refusal without the code', async () => {
