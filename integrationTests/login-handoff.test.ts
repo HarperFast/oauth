@@ -187,12 +187,15 @@ suite('sign-in handoff to an allowlisted origin', (ctx: ContextWithHarper) => {
 	});
 
 	test('a code redeemed from a different browser is refused', async () => {
-		const { callbackRes } = await driveLogin(ctx.harper.httpURL, `${PREVIEW}/#/check-oauth`);
+		const { callbackRes, browserCookie } = await driveLogin(ctx.harper.httpURL, `${PREVIEW}/#/check-oauth`);
 		const code = new URL(callbackRes.headers.get('location')!).hash.split('oauth_handoff=')[1];
-		const res = await redeem(ctx.harper.httpURL, PREVIEW, '__Host-oauth_browser=someone-else', code);
+		// Well-formed, so the refusal comes from the stored binding, not the cookie shape check.
+		const res = await redeem(ctx.harper.httpURL, PREVIEW, `__Host-oauth_browser=${'A'.repeat(43)}`, code);
 		strictEqual(res.status, 400);
 		strictEqual((await res.json()).error, 'invalid_grant');
 		ok(!res.headers.getSetCookie().some((c) => c.includes('hdb-session=')));
+		// The refused presentation left the code for the browser that started the sign-in.
+		strictEqual((await redeem(ctx.harper.httpURL, PREVIEW, browserCookie, code)).status, 200);
 	});
 
 	test('a redirect to an origin not on the list keeps today’s path-only behavior', async () => {

@@ -11,7 +11,7 @@
  */
 
 import { createHash, randomBytes } from 'node:crypto';
-import { expandEnvVarsDeep, isUnresolvedEnvPlaceholder } from './config.ts';
+import { expandEnvVar, isUnresolvedEnvPlaceholder } from './config.ts';
 import { browserSecretMatches, readBrowserSecret } from './mcp/consentBinding.ts';
 import { readRawHeader } from './requestHeaders.ts';
 import type { Logger, Request, Table } from '../types.ts';
@@ -92,10 +92,13 @@ export function parseOriginPattern(entry: string): OriginPattern {
 	return { source: `https://${wildcard ? '*.' : ''}${host}${port ? `:${port}` : ''}`, host, wildcard, port };
 }
 
+const ENTRY_SEPARATOR = /[\s,]+/;
+
 /**
  * Normalize the `postLoginRedirectOrigins` option. Accepts a YAML list, a
  * single string, or a comma/whitespace-separated string (so one env var can
- * carry several entries); `${VAR}` placeholders are expanded.
+ * carry several entries); `${VAR}` placeholders are expanded, whether the whole
+ * value, a list entry, or one piece of a comma-separated string.
  *
  * Empty, absent, or an unresolved `${VAR}` placeholder (the variable is unset in
  * this environment) all mean an EMPTY allowlist: today's behavior. That is the
@@ -106,19 +109,18 @@ export function parseOriginPattern(entry: string): OriginPattern {
  */
 export function normalizePostLoginRedirectOrigins(value: unknown, logger?: Logger): OriginPattern[] {
 	const option = POST_LOGIN_REDIRECT_ORIGINS_OPTION;
-	const expanded = expandEnvVarsDeep(value);
-	if (expanded === undefined || expanded === null) return [];
-	if (isUnresolvedEnvPlaceholder(expanded)) {
+	if (value === undefined || value === null) return [];
+	if (typeof value === 'string' && isUnresolvedEnvPlaceholder(expandEnvVar(value.trim()))) {
 		logger?.info?.(
-			`OAuth: ${option} references ${String(expanded).trim()}, which is not set; sign-in completes on this origin only`
+			`OAuth: ${option} references ${value.trim()}, which is not set; sign-in completes on this origin only`
 		);
 		return [];
 	}
 	let entries: unknown[];
-	if (typeof expanded === 'string') {
-		entries = [expanded];
-	} else if (Array.isArray(expanded)) {
-		entries = expanded;
+	if (typeof value === 'string') {
+		entries = [value];
+	} else if (Array.isArray(value)) {
+		entries = value;
 	} else {
 		throw new Error(`${option} must be a list of origin patterns or a comma-separated string`);
 	}
@@ -127,14 +129,19 @@ export function normalizePostLoginRedirectOrigins(value: unknown, logger?: Logge
 		if (typeof entry !== 'string') {
 			throw new Error(`${option} entries must be strings (got ${JSON.stringify(entry)})`);
 		}
-		for (const piece of entry.split(/[\s,]+/)) {
+		for (const piece of entry.split(ENTRY_SEPARATOR)) {
 			if (piece === '') continue;
-			if (isUnresolvedEnvPlaceholder(piece)) {
-				logger?.warn?.(`OAuth: ${option} entry ${piece} references an unset variable; ignoring that entry`);
-				continue;
+			// Each piece is expanded once; a variable's value may hold several
+			// entries but is not expanded again.
+			for (const source of String(expandEnvVar(piece)).split(ENTRY_SEPARATOR)) {
+				if (source === '') continue;
+				if (isUnresolvedEnvPlaceholder(source)) {
+					logger?.warn?.(`OAuth: ${option} entry ${source} references an unset variable; ignoring that entry`);
+					continue;
+				}
+				const pattern = parseOriginPattern(source);
+				patterns.set(pattern.source, pattern);
 			}
-			const pattern = parseOriginPattern(piece);
-			patterns.set(pattern.source, pattern);
 		}
 	}
 	return [...patterns.values()];

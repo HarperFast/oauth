@@ -239,6 +239,33 @@ describe('postLoginRedirectOrigins patterns', () => {
 			assert.equal(logger.warn.mock.calls.length, 1);
 		});
 
+		it('expands a set ${VAR} piece of a comma-separated string', () => {
+			process.env[ENV] = `${PREVIEW}, ${OTHER_PREVIEW}`;
+			const parsed = normalizePostLoginRedirectOrigins(`https://studio.example.com, \${${ENV}}`);
+			assert.deepEqual(
+				parsed.map((p) => p.source),
+				['https://studio.example.com', PREVIEW, OTHER_PREVIEW]
+			);
+			const listed = normalizePostLoginRedirectOrigins([`https://studio.example.com \${${ENV}}`]);
+			assert.equal(listed.length, 3);
+		});
+
+		it('does not expand a variable named inside another variable, with a warning', () => {
+			const logger = createMockLogger();
+			process.env[`${ENV}_INNER`] = PREVIEW;
+			process.env[ENV] = `https://studio.example.com, \${${ENV}_INNER}`;
+			try {
+				const parsed = normalizePostLoginRedirectOrigins(`\${${ENV}}`, logger);
+				assert.deepEqual(
+					parsed.map((p) => p.source),
+					['https://studio.example.com']
+				);
+				assert.equal(logger.warn.mock.calls.length, 1);
+			} finally {
+				delete process.env[`${ENV}_INNER`];
+			}
+		});
+
 		it('drops an unset ${VAR} entry inside a list, with a warning', () => {
 			const logger = createMockLogger();
 			const parsed = normalizePostLoginRedirectOrigins([`\${${ENV}}`, PREVIEWS], logger);
