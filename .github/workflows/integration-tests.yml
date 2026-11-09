@@ -3,7 +3,6 @@ name: Integration Tests
 on:
   pull_request:
   workflow_dispatch:
-  # On main, release.yml runs this before it publishes.
   workflow_call:
 
 jobs:

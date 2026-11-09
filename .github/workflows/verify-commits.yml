@@ -26,7 +26,6 @@ jobs:
     name: Conventional PR title
     runs-on: ubuntu-latest
     steps:
-      # A squash merge uses the PR title as the commit message on main.
       - name: Check PR title
         env:
           TITLE: ${{ github.event.pull_request.title }}
