@@ -48,23 +48,19 @@ function azureTenantUri(kind: 'issuer' | 'keys', guid: string): string {
 	return kind === 'issuer' ? `https://${AZURE_HOST}/${guid}/v2.0` : `https://${AZURE_HOST}/${guid}/discovery/v2.0/keys`;
 }
 
-/**
- * No query, or exactly one non-empty `appid`: the query Azure documents for
- * apps with custom signing keys
- * (https://learn.microsoft.com/en-us/entra/identity-platform/access-tokens).
- */
+// https://learn.microsoft.com/en-us/entra/identity-platform/access-tokens (custom signing keys)
 function hasEmptyOrAppIdOnlyQuery(url: URL): boolean {
 	if (url.search === '') return true;
-	const keys = [...url.searchParams.keys()];
-	return keys.length === 1 && keys[0] === 'appid' && url.searchParams.get('appid') !== '';
+	const pairs = [...url.searchParams];
+	return pairs.length === 1 && pairs[0][0] === 'appid' && pairs[0][1] !== '';
 }
 
 /**
  * The `{segment}` of an exact `https://login.microsoftonline.com/{segment}/discovery/v2.0/keys`
- * URL — full-URL match: exact host, no port/userinfo/fragment, a query
- * `hasEmptyOrAppIdOnlyQuery` accepts, exactly one path segment before the
- * fixed suffix. `null` for anything else, including a lookalike with extra
- * path segments or a different host.
+ * URL — full-URL match: exact host, no port/userinfo/fragment, no query
+ * other than one `appid`, exactly one path segment before the fixed suffix.
+ * `null` for anything else, including a lookalike with extra path segments
+ * or a different host.
  */
 function azureJwksSegment(jwksUri: string | null | undefined): string | null {
 	if (!jwksUri) return null;
@@ -480,8 +476,7 @@ export function resolveAzureIssuerBinding(config: OAuthProviderConfig, providerN
 	} catch {
 		/* advisory log only */
 	}
-	// `appid` names the calling app, not the tenant, so it still applies on
-	// the tenant's own keys URL (custom-signed `kid`s are only served with it).
+	// Custom-signed `kid`s are only served with `appid`.
 	const appId = new URL(config.jwksUri as string).searchParams.get('appid');
 	const tenantKeysUri = azureTenantUri('keys', pinnedGuid);
 	config.jwksUri = appId ? `${tenantKeysUri}?appid=${encodeURIComponent(appId)}` : tenantKeysUri;
