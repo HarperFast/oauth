@@ -1,21 +1,38 @@
 name: Release
 
 on:
-  release:
-    types: [published]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
+  integration-tests:
+    uses: ./.github/workflows/integration-tests.yml
+    permissions:
+      contents: read
+
   release:
-    name: Publish to npm
+    name: Release
+    needs: integration-tests
     runs-on: ubuntu-latest
     environment: Release
     permissions:
-      contents: read
-      id-token: write
+      contents: write # version commit, tag and GitHub Release
+      issues: write # semantic-release comments on released issues
+      pull-requests: write # and on released PRs
+      id-token: write # npm trusted publishing and provenance
 
     steps:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
 
       - name: Setup Node.js
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
@@ -24,8 +41,7 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
           cache: 'npm'
 
-      # Trusted publishing (OIDC) requires npm >= 11.5.1; the Node 22 runner
-      # ships npm 10.x, so upgrade before publishing.
+      # Trusted publishing (OIDC) requires npm >= 11.5.1; Node 22 ships npm 10.x.
       - name: Upgrade npm for trusted publishing
         run: npm install -g npm@^11.5.1
 
@@ -41,21 +57,21 @@ jobs:
       - name: Run tests
         run: npm test
 
-      # Prereleases (tags like v2.1.0-beta.1) go to the `next` dist-tag so they
-      # don't move `latest`; full releases go to `latest`.
-      - name: Determine npm dist-tag
-        id: disttag
+      # Picks the version from the conventional commits since the last tag, then
+      # commits it, tags it and creates the GitHub Release (.releaserc.json).
+      - name: Version and GitHub Release
         env:
-          TAG_NAME: ${{ github.event.release.tag_name }}
-        run: |
-          if [[ "$TAG_NAME" == *-* ]]; then
-            echo "tag=next" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=latest" >> "$GITHUB_OUTPUT"
-          fi
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx semantic-release
 
-      # Auth is via npm trusted publishing (OIDC) using the id-token below — no
-      # NODE_AUTH_TOKEN/secret. Configured at npmjs.com: Trusted Publisher ->
-      # HarperFast/oauth, release.yml, Release environment.
+      # Publishes whenever package.json's version isn't on npm yet, so re-running
+      # this workflow on main recovers a release whose publish failed.
+      # Trusted publisher at npmjs.com: HarperFast/oauth, release.yml, Release.
       - name: Publish to npm
-        run: npm publish --provenance --access public --tag "${{ steps.disttag.outputs.tag }}"
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if [ -n "$(npm view "@harperfast/oauth@$version" version)" ]; then
+            echo "@harperfast/oauth@$version is already on npm"
+          else
+            npm publish --provenance --access public
+          fi

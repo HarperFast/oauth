@@ -1,22 +1,20 @@
 # Maintaining `@harperfast/oauth`
 
-For a Harper maintainer cutting releases, triaging CI, or picking up an open design decision.
+For a Harper maintainer shipping releases, triaging CI, or picking up an open design decision.
 
 ## Releasing
 
-1. Open a PR titled `Release X.Y.Z` that only touches `package.json`, `package-lock.json`, and `CHANGELOG.md` — see #257 ("Release 2.8.0") and #261 ("Release 2.8.1") for the shape.
-   - Bump the version (`npm version X.Y.Z --no-git-tag-version`). The diff in `package.json` and `package-lock.json` is version metadata only — no dependency-graph churn.
-   - In `CHANGELOG.md`, turn the `## [Unreleased]` heading into `## [X.Y.Z] - YYYY-MM-DD`. Every entry needs its upgrade note written before the heading changes, not after.
-2. Merge the release PR, then publish a GitHub Release tagged `vX.Y.Z`. That `release: published` event is what triggers `.github/workflows/release.yml` — there's no separate publish step. Nothing checks that `X.Y.Z` matches the tagged commit's `package.json` version — get the version bump merged first.
-   - Auth is npm trusted publishing (OIDC `id-token: write`), so no `NODE_AUTH_TOKEN` secret to manage; the workflow runs `npm publish --provenance --access public`.
-   - The dist-tag is derived from the tag name: anything containing a hyphen (`v2.9.0-beta.1`) publishes to `next`; anything else publishes to `latest`.
-   - The workflow re-runs lint, format-check, and `npm test` before publishing — that's the build plus the mocked Node unit tests only. It does **not** run the Bun tests or the real-Harper integration tests (those are separate `pr-checks.yml` / `integration-tests.yml` jobs on `main`), so a release can publish from a commit whose integration run never passed on that exact SHA. Confirm `main`'s integration CI is green before tagging.
+Merging to `main` releases. Every push to `main` runs `.github/workflows/release.yml`: the real-Harper integration tests, lint, format check and unit tests, then [semantic-release](https://semantic-release.gitbook.io/semantic-release/) (`.releaserc.json`), then npm.
 
-**Versioning in practice:** `CHANGELOG.md` states the project follows Semantic Versioning, but 2.6.0, 2.7.0, and 2.8.0 each shipped a contract-tightening change — a setting that used to have a default now required, an exported interface's return shape changed — as a **minor**, with an explicit upgrade note in the CHANGELOG entry, rather than as a major. That's a real precedent (see those CHANGELOG entries and each release PR's description), not a documented house exception to the semver claim above it — the two are in tension. Know the precedent before deciding how to version a similar change, and decide explicitly rather than defaulting to it.
+- **The version comes from the commit messages** since the last `v*` tag ([Conventional Commits](https://www.conventionalcommits.org/)): `fix:` or `perf:` is a patch, `feat:` a minor, and a `!` after the type (`feat!:`) or a `BREAKING CHANGE:` footer a major. `docs:`, `test:`, `chore:`, `ci:`, `refactor:` and `style:` alone release nothing. Renovate's commits follow suit: `fix(deps):` (runtime) releases a patch, `chore(deps):` (dev) nothing.
+- **On a release**, semantic-release commits the version to `package.json` and `package-lock.json` (`chore(release): X.Y.Z [skip ci]`), tags `vX.Y.Z`, and publishes a GitHub Release whose notes are generated from the commits. The workflow then publishes to npm with provenance through trusted publishing (OIDC; configured at npmjs.com for this repo, `release.yml`, `Release` environment, so keep that file name and environment).
+- **Commit messages are checked on every PR** (`verify-commits.yml`, `commitlint.config.cjs`). A squash merge uses the PR title as the commit message, so title PRs the same way.
+- **Upgrade notes** belong in a `BREAKING CHANGE:` footer, which is the text the release notes carry. Releases up to 2.10.0 shipped some contract-tightening changes as minors with an upgrade note in `CHANGELOG.md`; that file now ends at 2.11.0, so decide per change whether it is breaking and mark it so.
+- **A failed publish** (npm down, say) leaves the tag and GitHub Release in place. Re-run the Release workflow on `main` (`workflow_dispatch`): it publishes whenever `package.json`'s version isn't on npm yet.
 
-## Before each release
+## Recurring checks
 
-- **Re-run the ChatGPT capture from #244.** Interactive `private_key_jwt` stays opt-in because ChatGPT signs its client assertions with the token-endpoint URL as `aud` (forbidden by RFC 7523bis), not the issuer. The release gate for flipping the default on is ChatGPT switching to the issuer `aud` — there's no vendor changelog to watch, so capture a real code exchange before cutting a release and check the signed `aud`. On deployments that already opted in, a successful `private_key_jwt` verification logs the accepted `aud` form at info level; a rejected token-endpoint-`aud` assertion logs a separate warning (rate-limited per client) that names the token-endpoint form explicitly rather than the issuer (`src/lib/mcp/token.ts`).
+- **Re-run the ChatGPT capture from #244.** Interactive `private_key_jwt` stays opt-in because ChatGPT signs its client assertions with the token-endpoint URL as `aud` (forbidden by RFC 7523bis), not the issuer. The release gate for flipping the default on is ChatGPT switching to the issuer `aud` — there's no vendor changelog to watch, so capture a real code exchange now and then (and before flipping the default) and check the signed `aud`. On deployments that already opted in, a successful `private_key_jwt` verification logs the accepted `aud` form at info level; a rejected token-endpoint-`aud` assertion logs a separate warning (rate-limited per client) that names the token-endpoint form explicitly rather than the issuer (`src/lib/mcp/token.ts`).
 - **Check #258 once old tokens have aged out.** `typAccepted()` in `src/lib/mcp/tokenIssuer.ts` still accepts the legacy `typ: JWT` header alongside RFC 9068's `at+jwt`, to avoid invalidating tokens minted mid-rollout by an older node. Once every node has been on `at+jwt`-only minting for at least one full access-token TTL, remove the `JWT` branch and update the corresponding note in `docs/mcp-oauth-conformance.md`.
 
 ## CI and review automation
