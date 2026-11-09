@@ -7,13 +7,6 @@ on:
 
 permissions: {}
 
-concurrency:
-  # Pushes (main only) share one queue. A manual run gets its own, so it never
-  # replaces a pending release; expression comparisons ignore case, so a ref
-  # check would let a branch named MAIN in.
-  group: release-${{ github.event_name == 'push' && 'main' || github.run_id }}
-  cancel-in-progress: false
-
 jobs:
   checks:
     uses: ./.github/workflows/pr-checks.yml
@@ -29,6 +22,12 @@ jobs:
     name: Release
     needs: [checks, integration-tests]
     if: github.ref == 'refs/heads/main'
+    # One release at a time, pushes and manual runs alike, so publishes stay in
+    # order. A newer pending run replacing an older one is fine: it releases
+    # everything since the last tag.
+    concurrency:
+      group: release-publish
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     environment: Release
     permissions:
