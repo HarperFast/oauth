@@ -30,8 +30,18 @@ jobs:
         env:
           TITLE: ${{ github.event.pull_request.title }}
         run: |
-          pattern='^((build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\([^)]+\))?!?: .+|Revert ".+")$'
-          if [[ ! "$TITLE" =~ $pattern || ${#TITLE} -gt 100 ]]; then
-            echo "::error::PR title is not a conventional commit header (e.g. 'fix: ...'): $TITLE"
-            exit 1
-          fi
+          node -e '
+            const title = process.env.TITLE;
+            const header = /^((build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\([^)]+\))?!?: .+|Revert ".+")$/;
+            const problem = !header.test(title)
+              ? "is not a conventional commit header (e.g. \"fix: ...\")"
+              : title.length > 100
+                ? "is longer than 100 characters"
+                : title.endsWith(".")
+                  ? "ends with a full stop"
+                  : null;
+            if (problem) {
+              console.log(`::error::PR title ${problem}: ${title}`);
+              process.exit(1);
+            }
+          '
