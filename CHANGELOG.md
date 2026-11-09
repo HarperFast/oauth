@@ -2,17 +2,18 @@
 
 All notable changes to `@harperfast/oauth` are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Entries prior to 2.2.0 were backfilled from the [GitHub release notes](https://github.com/HarperFast/oauth/releases).
 
-## [Unreleased]
+## [2.11.0] - 2026-11-09
 
 ### Added
 
-- **Sign in on an allowlisted origin other than `redirectUri`'s (`postLoginRedirectOrigins`)** (HarperFast/central-manager#911). Lets Google, GitHub and org SSO finish on, for example, per-PR preview builds that share one registered callback:
+- **Sign in on an allowlisted origin other than `redirectUri`'s (`postLoginRedirectOrigins`)** (#290, HarperFast/central-manager#911). Lets Google, GitHub and org SSO finish on, for example, per-PR preview builds that share one registered callback:
   - New plugin option `postLoginRedirectOrigins`: `https://host` or `https://*.suffix` entries (the wildcard matches exactly one label), as a YAML list or a comma/whitespace-separated, `${ENV_VAR}`-expandable string. Empty, absent, or an unset placeholder leaves every path exactly as before.
   - A login whose `redirect` is an absolute `https` URL on a listed origin runs the callback as usual, but stores the finished session under a one-time code instead of writing it on the callback's origin, and redirects to that URL with `oauth_handoff=<code>` in the fragment. Errors after the provider returns go to that URL too, with the usual `error`/`reason` query parameters.
   - `isAllowedPostLoginOrigin(url, allowlist)` is exported, so an application can test its configured value with the plugin's own matcher.
   - New endpoint `POST /oauth/handoff` (`{ code }`), called with credentials from the listed page: Harper core names the session cookie after the request's `Origin`, so the redeem creates that page's own session. 404 while the allowlist is empty.
   - The code is single-use (atomic counter; per node within the replication delay), lives 60 seconds, is stored only as its hash, and is bound to the target origin (the redeem's `Origin` must equal it) and to the initiating browser (`__Host-oauth_browser`), so a planted or stolen code is refused. A refused presentation does not consume it. Refusals are logged without the code. New `oauth.login_handoffs` table.
   - A sign-in started for an origin removed from the list before it finishes fails (`error=access_denied&reason=handoff_origin_not_allowed`) instead of signing the user in on the callback's origin.
+  - **Upgrade note:** nothing changes until `postLoginRedirectOrigins` is set; the new table is created at startup either way. To use it, each listed origin must be same-site with this host and allowed for credentialed CORS (`http.corsAccessList`, exact origins only before Harper 5.4). Removing an origin stops new hand-offs but signs no one out. Known limits are tracked in #291–#296.
 
 ## [2.10.0] - 2026-10-24
 
