@@ -1,6 +1,4 @@
-// Renders release notes with .releaserc.json's own commit-analyzer and release-notes-generator
-// settings, so a preset the installed changelog writer cannot render fails a PR check instead
-// of the release run on main.
+// A notes preset the installed changelog writer cannot render must fail a PR, not the release run on main.
 import { readFile } from 'node:fs/promises';
 import { analyzeCommits } from '@semantic-release/commit-analyzer';
 import { generateNotes } from '@semantic-release/release-notes-generator';
