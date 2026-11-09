@@ -22,9 +22,9 @@ jobs:
     name: Release
     needs: [checks, integration-tests]
     if: github.ref == 'refs/heads/main'
-    # One release at a time, pushes and manual runs alike, so publishes stay in
-    # order. A newer pending run replacing an older one is fine: it releases
-    # everything since the last tag.
+    # One release job at a time, pushes and manual runs alike. The newest pending
+    # run releases everything since the last tag; see docs/maintaining.md for an
+    # older run that skips because main moved on.
     concurrency:
       group: release-publish
       cancel-in-progress: false
