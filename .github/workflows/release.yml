@@ -8,7 +8,10 @@ on:
 permissions: {}
 
 concurrency:
-  group: release-${{ github.ref }}
+  # Pushes (main only) share one queue. A manual run gets its own, so it never
+  # replaces a pending release; expression comparisons ignore case, so a ref
+  # check would let a branch named MAIN in.
+  group: release-${{ github.event_name == 'push' && 'main' || github.run_id }}
   cancel-in-progress: false
 
 jobs:
