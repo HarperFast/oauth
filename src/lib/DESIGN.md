@@ -19,6 +19,11 @@ trying to parse around it. **Do not reintroduce a path that fetches keys from
 `/common`/`/organizations`/`consumers` directly for a pinned provider** — it
 would reopen the gap this design closes.
 
+Azure's documented `?appid=<client-id>` query (custom signing keys) is the
+one query the keys-URL matchers accept (`hasEmptyOrAppIdOnlyQuery`). It
+names the calling app, not a tenant, so it carries over to the rewritten
+tenant URL and never changes which key pool the URL selects.
+
 A multi-tenant authority with **no** pin is left completely untouched
 (`issuer` never set, `jwksUri` never rewritten) — adoption-eligibility for an
 Azure alias is opt-in, one tenant at a time, by design (an array pin is
