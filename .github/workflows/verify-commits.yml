@@ -31,7 +31,7 @@ jobs:
           TITLE: ${{ github.event.pull_request.title }}
         run: |
           pattern='^((build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\([^)]+\))?!?: .+|Revert ".+")$'
-          if [[ ! "$TITLE" =~ $pattern ]]; then
+          if [[ ! "$TITLE" =~ $pattern || ${#TITLE} -gt 100 ]]; then
             echo "::error::PR title is not a conventional commit header (e.g. 'fix: ...'): $TITLE"
             exit 1
           fi
