@@ -206,6 +206,8 @@ Pinning `issuer` alongside a multi-tenant `tenantId` does **not** keep the provi
       clientSecret: ${OAUTH_AZURE_CLIENT_SECRET}
 ```
 
+If your app uses custom signing keys (claims mapping), Microsoft has you append `?appid=<client-id>` to the keys URL. Set `jwksUri` explicitly with that query (for example `https://login.microsoftonline.com/common/discovery/v2.0/keys?appid=<client-id>`) and leave `tenantId` unset, since `tenantId` overwrites `jwksUri`. The plugin handles that URL the same as the one without the query, and a pinned provider keeps `?appid=` when it redirects to the tenant's own keys. Any other query on an Azure keys URL isn't recognized as one.
+
 If you need more than one tenant to sign in, configure a separate provider entry per tenant (each pinned to its own tenant GUID) rather than pinning one multi-tenant provider to an array of issuers — an array would let those tenants adopt each other's Harper accounts if they ever shared an email, so it's rejected outright.
 
 ### `userInfoUrl` fetchEmail and the `profile` scope

@@ -8,6 +8,7 @@ import { AZURE_CONSUMERS_TENANT_ID, isAzureJwksUri, resolveAzureIssuerBinding } 
 
 const GUID_A = '12345678-1234-1234-1234-123456789012';
 const GUID_B = '87654321-4321-4321-4321-210987654321';
+const APP_ID = '11111111-2222-3333-4444-555555555555';
 
 function baseConfig(overrides = {}) {
 	return {
@@ -65,6 +66,13 @@ describe('isAzureJwksUri', () => {
 				'https://login.microsoftonline.com/common/discovery/keys?appid=11111111-2222-3333-4444-555555555555'
 			),
 			true
+		);
+	});
+
+	it("is still false for a real-tenant-GUID segment carrying '?appid=' — the query doesn't make a tenant-exclusive authority exempt", () => {
+		assert.equal(
+			isAzureJwksUri(`https://login.microsoftonline.com/${GUID_A}/discovery/v2.0/keys?appid=${APP_ID}`),
+			false
 		);
 	});
 
@@ -338,6 +346,24 @@ describe('resolveAzureIssuerBinding', () => {
 			assert.throws(() => resolveAzureIssuerBinding(config, 'azure'), /different tenant/);
 		});
 
+		it("'?appid=<client-id>' on a real tenant GUID derives the issuer and leaves jwksUri (query included) untouched", () => {
+			const config = baseConfig({
+				jwksUri: `https://login.microsoftonline.com/${GUID_A}/discovery/v2.0/keys?appid=${APP_ID}`,
+				issuer: null,
+			});
+			resolveAzureIssuerBinding(config, 'azure');
+			assert.equal(config.issuer, `https://login.microsoftonline.com/${GUID_A}/v2.0`);
+			assert.equal(config.jwksUri, `https://login.microsoftonline.com/${GUID_A}/discovery/v2.0/keys?appid=${APP_ID}`);
+		});
+
+		it("'?appid=<client-id>' on a real tenant GUID still rejects a pin naming a different tenant", () => {
+			const config = baseConfig({
+				jwksUri: `https://login.microsoftonline.com/${GUID_A}/discovery/v2.0/keys?appid=${APP_ID}`,
+				issuer: `https://login.microsoftonline.com/${GUID_B}/v2.0`,
+			});
+			assert.throws(() => resolveAzureIssuerBinding(config, 'azure'), /different tenant/);
+		});
+
 		it('is idempotent — calling it twice does not throw or change the result', () => {
 			const config = baseConfig({
 				jwksUri: `https://login.microsoftonline.com/${GUID_A}/discovery/v2.0/keys`,
@@ -419,6 +445,17 @@ describe('resolveAzureIssuerBinding', () => {
 				`https://login.microsoftonline.com/${GUID_A}/discovery/v2.0/keys?appid=11111111-2222-3333-4444-555555555555`
 			);
 			assert.equal(config.issuer, `https://login.microsoftonline.com/${GUID_A}/v2.0`);
+		});
+
+		it("'?appid=<client-id>' pinned-alias rewrite is idempotent — the rewritten tenant URL keeps its query and a second call is a no-op", () => {
+			const config = baseConfig({
+				jwksUri: `https://login.microsoftonline.com/common/discovery/v2.0/keys?appid=${APP_ID}`,
+				issuer: `https://login.microsoftonline.com/${GUID_A}/v2.0`,
+			});
+			resolveAzureIssuerBinding(config, 'azure');
+			const afterFirst = { ...config };
+			resolveAzureIssuerBinding(config, 'azure');
+			assert.deepEqual(config, afterFirst);
 		});
 
 		it("'?appid=<client-id>' on the older v1 keys shape with no pin is ALSO untouched — same shared key pool, same app-identifying query param", () => {

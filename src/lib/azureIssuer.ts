@@ -49,12 +49,9 @@ function azureTenantUri(kind: 'issuer' | 'keys', guid: string): string {
 }
 
 /**
- * True when `url`'s query string is either empty, or consists of exactly
- * one `appid` parameter with a non-empty value — Azure's documented form
- * for identifying the calling application on these shared keys endpoints
+ * No query, or exactly one non-empty `appid`: the query Azure documents for
+ * apps with custom signing keys
  * (https://learn.microsoft.com/en-us/entra/identity-platform/access-tokens).
- * Any other query (extra/duplicate/renamed params, or an empty `appid`)
- * is NOT accepted — callers treat that the same as before this existed.
  */
 function hasEmptyOrAppIdOnlyQuery(url: URL): boolean {
 	if (url.search === '') return true;
@@ -62,19 +59,12 @@ function hasEmptyOrAppIdOnlyQuery(url: URL): boolean {
 	return keys.length === 1 && keys[0] === 'appid' && url.searchParams.get('appid') !== '';
 }
 
-/** The `appid` query parameter's value on `jwksUri`, or `null` if it has no query. Call only once the shape is already confirmed valid. */
-function azureJwksAppId(jwksUri: string): string | null {
-	const url = new URL(jwksUri);
-	return url.search === '' ? null : url.searchParams.get('appid');
-}
-
 /**
  * The `{segment}` of an exact `https://login.microsoftonline.com/{segment}/discovery/v2.0/keys`
- * URL — full-URL match: exact host, no port/userinfo/fragment, exactly one
- * path segment before the fixed suffix, and a query that's either empty or
- * exactly Azure's documented `?appid=<client-id>` form. `null` for anything
- * else, including a lookalike with extra path segments, a different host,
- * or any other query.
+ * URL — full-URL match: exact host, no port/userinfo/fragment, a query
+ * `hasEmptyOrAppIdOnlyQuery` accepts, exactly one path segment before the
+ * fixed suffix. `null` for anything else, including a lookalike with extra
+ * path segments or a different host.
  */
 function azureJwksSegment(jwksUri: string | null | undefined): string | null {
 	if (!jwksUri) return null;
@@ -490,14 +480,11 @@ export function resolveAzureIssuerBinding(config: OAuthProviderConfig, providerN
 	} catch {
 		/* advisory log only */
 	}
-	// Preserve the shared alias URL's own `?appid=` (if any, see
-	// `hasEmptyOrAppIdOnlyQuery` above) on the rewritten tenant-exclusive
-	// URL — it identifies the calling application to Azure, not the tenant,
-	// so it still applies once `jwksUri` is redirected.
-	const appId = azureJwksAppId(config.jwksUri as string);
-	config.jwksUri = appId
-		? `${azureTenantUri('keys', pinnedGuid)}?appid=${encodeURIComponent(appId)}`
-		: azureTenantUri('keys', pinnedGuid);
+	// `appid` names the calling app, not the tenant, so it still applies on
+	// the tenant's own keys URL (custom-signed `kid`s are only served with it).
+	const appId = new URL(config.jwksUri as string).searchParams.get('appid');
+	const tenantKeysUri = azureTenantUri('keys', pinnedGuid);
+	config.jwksUri = appId ? `${tenantKeysUri}?appid=${encodeURIComponent(appId)}` : tenantKeysUri;
 	// Canonicalized WITHIN the pin's own form (case, trailing slash) — never
 	// rewritten to the other form, same rationale as the real-tenant-GUID
 	// case above.
