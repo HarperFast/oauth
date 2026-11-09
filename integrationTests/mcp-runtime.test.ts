@@ -508,7 +508,8 @@ suite('Native application MCP: the OAuth resource is not a generated tool (#281)
 	// event for the same path within 50 ms of the first and never re-sends it. Each rewrite
 	// here follows a reload the test already waited for, so pausing first keeps it out of
 	// that window; without it, a fast reload followed at once by the next rewrite is never seen.
-	const CONFIG_REWRITE_GAP_MS = 250;
+	const CHOKIDAR_CHANGE_THROTTLE_MS = 50;
+	const CONFIG_REWRITE_GAP_MS = CHOKIDAR_CHANGE_THROTTLE_MS + 200;
 
 	async function replaceConfig(yaml: string): Promise<void> {
 		await sleep(CONFIG_REWRITE_GAP_MS);
