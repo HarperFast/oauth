@@ -1,10 +1,10 @@
 name: Integration Tests
 
 on:
-  push:
-    branches: [main]
   pull_request:
   workflow_dispatch:
+  # On main, release.yml runs this before it publishes.
+  workflow_call:
 
 jobs:
   integration-tests:
