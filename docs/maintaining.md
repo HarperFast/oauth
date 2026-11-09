@@ -4,13 +4,13 @@ For a Harper maintainer shipping releases, triaging CI, or picking up an open de
 
 ## Releasing
 
-Merging to `main` releases. Every push to `main` runs `.github/workflows/release.yml`: the real-Harper integration tests, lint, format check and unit tests, then [semantic-release](https://semantic-release.gitbook.io/semantic-release/) (`.releaserc.json`).
+Merging to `main` releases. Every push to `main` runs `.github/workflows/release.yml`: it calls `pr-checks.yml` (lint, format, unit tests on Node 22 and 24, Bun) and `integration-tests.yml` (real Harper), and once both pass runs [semantic-release](https://semantic-release.gitbook.io/semantic-release/) (`.releaserc.json`).
 
 - **The version comes from the commit messages** since the last `v*` tag ([Conventional Commits](https://www.conventionalcommits.org/)): `fix:` or `perf:` is a patch, `feat:` a minor, and a `!` after the type (`feat!:`) or a `BREAKING CHANGE:` footer a major. `docs:`, `test:`, `chore:`, `ci:`, `refactor:` and `style:` alone release nothing. Renovate's commits follow suit: `fix(deps):` (runtime) releases a patch, `chore(deps):` (dev) nothing.
 - **On a release**, semantic-release commits the version to `package.json` and `package-lock.json` (`chore(release): X.Y.Z [skip ci]`), tags `vX.Y.Z`, publishes to npm with provenance through trusted publishing (OIDC; configured at npmjs.com for this repo, `release.yml` and the `Release` environment, so keep that file name and environment), and then creates the GitHub Release, whose notes are generated from the commits.
 - **Commit messages and the PR title are checked on every PR** (`verify-commits.yml`, `commitlint.config.cjs`); a squash merge uses the PR title as the commit message.
 - **Upgrade notes** belong in a `BREAKING CHANGE:` footer, which is the text the release notes carry. Releases up to 2.10.0 shipped some contract-tightening changes as minors with an upgrade note in `CHANGELOG.md`; that file now ends at 2.11.0, so decide per change whether it is breaking and mark it so.
-- **A failed release** opens an issue. If npm publishing failed after the version commit and tag were pushed, delete the tag (`git push origin :refs/tags/vX.Y.Z`) and run the Release workflow on `main` (Actions → Release → Run workflow); semantic-release releases the same version again. Re-running the failed job does not retry the publish: it checks out the commit from before the version bump, so semantic-release stops.
+- **A failed release** shows as a red Release run on `main`. If npm publishing failed after the version commit and tag were pushed, delete the tag (`git push origin :refs/tags/vX.Y.Z`) and run the Release workflow on `main` (Actions → Release → Run workflow); semantic-release releases the same version again. Re-running the failed job does not retry the publish: it checks out the commit from before the version bump, so semantic-release stops.
 
 ## Recurring checks
 
