@@ -17,8 +17,22 @@ jobs:
         with:
           fetch-depth: 0
 
-      # semantic-release picks the next version from these messages on main.
       - name: Commitlint
         uses: wagoid/commitlint-github-action@b948419dd99f3fd78a6548d48f94e3df7f6bf3ed # v6.2.1
         with:
           configFile: commitlint.config.cjs
+
+  pr-title:
+    name: Conventional PR title
+    runs-on: ubuntu-latest
+    steps:
+      # A squash merge uses the PR title as the commit message on main.
+      - name: Check PR title
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          pattern='^((build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\([^)]+\))?!?: .+|Revert ".+")$'
+          if [[ ! "$TITLE" =~ $pattern ]]; then
+            echo "::error::PR title is not a conventional commit header (e.g. 'fix: ...'): $TITLE"
+            exit 1
+          fi
