@@ -504,6 +504,20 @@ suite('Native application MCP: the OAuth resource is not a generated tool (#281)
 		}
 	}
 
+	// Harper's OptionsWatcher watches config.yaml with chokidar, which drops a second change
+	// event for the same path within 50 ms of the first and never re-sends it. Each rewrite
+	// here follows a reload the test already waited for, so pausing first keeps it out of
+	// that window; without it, a fast reload followed at once by the next rewrite is never seen.
+	const CONFIG_REWRITE_GAP_MS = 250;
+
+	async function replaceConfig(yaml: string): Promise<void> {
+		await sleep(CONFIG_REWRITE_GAP_MS);
+		// Atomically: an in-place write can be read while truncated, which OptionsWatcher
+		// reports as remove then ready, never as the change this plugin listens for.
+		await writeFile(`${configPath}.tmp`, yaml);
+		await rename(`${configPath}.tmp`, configPath);
+	}
+
 	async function waitForLogin(expected: 'redirect' | 'fallback'): Promise<void> {
 		const deadline = Date.now() + 30_000;
 		let last = '';
@@ -545,10 +559,7 @@ suite('Native application MCP: the OAuth resource is not a generated tool (#281)
 		async () => {
 			const noProviderYaml = configuredYaml.replace(/^ {2}providers:\n(?: {4}.*\n)+/m, '  providers: {}\n');
 			ok(noProviderYaml !== configuredYaml, 'fixture config has a providers block');
-			// Replace the watched file atomically: an in-place write can be read while truncated, which
-			// OptionsWatcher reports as remove then ready, never as the change this plugin listens for.
-			await writeFile(`${configPath}.tmp`, noProviderYaml);
-			await rename(`${configPath}.tmp`, configPath);
+			await replaceConfig(noProviderYaml);
 			await waitForLogin('fallback');
 			await assertOAuthToolsExcluded('no-provider reload');
 		}
@@ -558,8 +569,7 @@ suite('Native application MCP: the OAuth resource is not a generated tool (#281)
 		'restores REST login while OAuth tools remain absent from the current catalog',
 		{ timeout: 120_000 },
 		async () => {
-			await writeFile(`${configPath}.tmp`, configuredYaml);
-			await rename(`${configPath}.tmp`, configPath);
+			await replaceConfig(configuredYaml);
 			await waitForLogin('redirect');
 			await assertOAuthToolsExcluded('provider reload');
 		}
@@ -770,8 +780,7 @@ suite('Native application MCP: the OAuth resource is not a generated tool (#281)
 			const mcpDisabledYaml = configuredYaml.replace('    enabled: true\n', '    enabled: false\n');
 			ok(mcpDisabledYaml !== configuredYaml, 'fixture config has mcp.enabled: true');
 			try {
-				await writeFile(`${configPath}.tmp`, mcpDisabledYaml);
-				await rename(`${configPath}.tmp`, configPath);
+				await replaceConfig(mcpDisabledYaml);
 				const disableDeadline = Date.now() + 30_000;
 				let disabledStatus = 0;
 				while (Date.now() < disableDeadline) {
@@ -797,8 +806,7 @@ suite('Native application MCP: the OAuth resource is not a generated tool (#281)
 					'disabling mcp.enabled on reload must dispose the Bearer validator and reject previously used tokens (authCacheable: false)'
 				);
 			} finally {
-				await writeFile(`${configPath}.tmp`, configuredYaml);
-				await rename(`${configPath}.tmp`, configPath);
+				await replaceConfig(configuredYaml);
 				const restoreDeadline = Date.now() + 30_000;
 				while (Date.now() < restoreDeadline) {
 					const wk = await fetch(new URL('/.well-known/oauth-protected-resource/mcp', started.harper.httpURL), {
