@@ -291,6 +291,51 @@ are not a resource requirement).
 
 ---
 
+## Signing in with the application's session
+
+By default the authorization server sends the user to **one** upstream provider (`mcp.providers`). An
+application that has its own sign-in — a password login, several OAuth providers — can instead let the
+user authorize an MCP client with the Harper session they already have:
+
+```yaml
+'@harperfast/oauth':
+  package: '@harperfast/oauth'
+  mcp:
+    enabled: true
+    issuer: https://my-app.example.com
+    sessionLogin:
+      loginUrl: '/#/sign-in?redirect={returnTo}' # your sign-in page; {returnTo} is the authorize request
+      switchAccountUrl: '/#/sign-out?redirect={returnTo}' # optional
+```
+
+With `sessionLogin` set, `/oauth/mcp/authorize` (after the usual client, redirect, PKCE and resource
+checks) does one of three things:
+
+- **Signed out** — `302` to `loginUrl`, with `{returnTo}` replaced by the URL-encoded authorize request.
+  Your sign-in page must send the user back to that path when they finish, and allow only paths starting
+  `/oauth/mcp/authorize?` there.
+- **Signed in, refused** by [`onMCPSessionAuthorize`](./lifecycle-hooks.md#onmcpsessionauthorize) — a page
+  saying so, with the switch-account link if configured and a Cancel link back to the client.
+- **Signed in** — a consent page for every client (CIMD and registered alike) naming the account, the client
+  and its redirect host, with **Allow** and **Deny**.
+
+Allow/Deny posts to `/oauth/mcp/confirm`. A code is minted only when the POST carries the page's one-time
+consent token, comes from the issuer's origin (`Origin` header), from the browser that loaded the page
+(`__Host-oauth_browser`), with the same signed-in user, and the hook allows it again. A consent is used at
+most once (an atomic counter in `oauth.mcp_session_consents`) and expires after 10 minutes. The token,
+refresh and audit behavior that follows is unchanged.
+
+Constraints:
+
+- **Same origin.** Harper names the session cookie after the request's `Origin`, falling back to `Host`
+  on a top-level navigation, so the session is visible here only when your UI is served from the issuer's
+  origin and any proxy in front passes `Host` through unchanged.
+- **Cookie sessions only.** A request carrying an `Authorization` header is never treated as signed in.
+- **No upstream provider needed.** The plugin serves MCP in this mode even with no providers configured;
+  `mcp.providers` is ignored (with a startup warning) for MCP flows. Human `/oauth/<provider>/login` is
+  unaffected.
+- Turning `sessionLogin` off refuses consent pages already shown.
+
 ## Native `/mcp` integration & the `withMCPAuth` wrapper
 
 ### Core Bearer validator (`server.registerBearerValidator`)

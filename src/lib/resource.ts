@@ -359,7 +359,15 @@ export class OAuthResource extends Resource {
 		// Handle MCP endpoints (/oauth/mcp/<action>) — `mcp` is not a regular
 		// provider so it bypasses the provider lookup below.
 		if (providerName === 'mcp') {
-			return handleMCPGet(action, request, target, OAuthResource.mcpConfig, providers, logger);
+			return handleMCPGet(
+				action,
+				request,
+				target,
+				OAuthResource.mcpConfig,
+				providers,
+				logger,
+				OAuthResource.hookManager ?? undefined
+			);
 		}
 
 		// Check if provider exists in static registry or dynamic cache

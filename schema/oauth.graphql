@@ -27,6 +27,21 @@ type login_handoffs @table(database: "oauth", expiration: 60) {
 	created_at: Float @createdTime # Harper-assigned (epoch ms)
 }
 
+## MCP consents awaiting approval in mcp.sessionLogin mode (one row per consent page).
+## The key is sha256(token), never the token. Single use is an atomic increment of
+## `uses`, as in login_handoffs; each row carries a per-record expiry, which the
+## table expiration below only backs up.
+type mcp_session_consents @table(database: "oauth", expiration: 600) {
+	id: ID @primaryKey # sha256(consent token), hex
+	user: String # Harper username of the cookie session the page was shown to
+	client_id: String
+	browser_hash: String # hash of the __Host-oauth_browser secret that loaded the page
+	state: String # JSON MCPAuthorizeState of the validated authorize request
+	expires_at: Float # epoch ms; refused once passed
+	uses: Int # presentations; only the one that reads back 1 is accepted
+	created_at: Float @createdTime # Harper-assigned (epoch ms)
+}
+
 ## MCP Dynamic Client Registration table (RFC 7591)
 ## Stores OAuth client registrations for MCP clients (Claude Desktop, Cursor,
 ## mcp-remote, etc.). No expiration: clients like Claude Desktop cache their

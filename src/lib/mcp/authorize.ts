@@ -46,6 +46,8 @@ import {
 	readBrowserSecret,
 } from './consentBinding.ts';
 import { resolveIssuer, resolveResource } from './wellKnown.ts';
+import { renderSessionAuthorize } from './sessionLogin.ts';
+import type { HookManager } from '../hookManager.ts';
 
 type ErrorJSON = {
 	status: 400 | 429 | 500;
@@ -209,7 +211,7 @@ export function escapeHtml(str: string): string {
  * Return true when the redirect URI is a loopback address (any form of
  * localhost, 127.0.0.1, or [::1]) — used to show the loopback warning.
  */
-function isLoopbackRedirect(redirectUri: string): boolean {
+export function isLoopbackRedirect(redirectUri: string): boolean {
 	try {
 		return LOCAL_HOSTS.has(new URL(redirectUri).hostname);
 	} catch {
@@ -389,8 +391,9 @@ export async function handleAuthorize(
 	target: RequestTarget,
 	mcpConfig: MCPConfig,
 	providers: ProviderRegistry,
-	logger?: Logger
-): Promise<ErrorJSON | Redirect | HtmlResponse> {
+	logger?: Logger,
+	hookManager?: HookManager
+): Promise<ErrorJSON | Redirect | HtmlResponse | Awaited<ReturnType<typeof renderSessionAuthorize>>> {
 	const query = readQuery(target);
 
 	// Phase 1: client_id and redirect_uri MUST validate before any redirect.
@@ -495,6 +498,10 @@ export async function handleAuthorize(
 		clientAuthMethod: permitted.method,
 	};
 
+	if (mcpConfig.sessionLogin) {
+		return renderSessionAuthorize(request, client, mcpState, mcpConfig, hookManager, logger);
+	}
+
 	// CIMD clients: show the interstitial confirmation page before redirecting.
 	if (client._cimd) {
 		// Select the provider now so we can generate a confirm token bound to it.
@@ -567,6 +574,13 @@ export async function handleAuthorizeConfirm(
 	providers: ProviderRegistry,
 	logger?: Logger
 ): Promise<ErrorJSON | Redirect> {
+	// Session mode never mints an upstream confirm token, so one presented here predates the mode.
+	if (mcpConfig.sessionLogin) {
+		return {
+			status: 400,
+			body: { error: 'invalid_request', error_description: 'Confirm token is invalid or expired' },
+		};
+	}
 	const confirmToken = typeof body?.confirm_token === 'string' ? body.confirm_token : undefined;
 	if (!confirmToken) {
 		return { status: 400, body: { error: 'invalid_request', error_description: 'confirm_token is required' } };

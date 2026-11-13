@@ -1,0 +1,19 @@
+# Integration-test fixture for MCP authorization through the application's own
+# session (mcp.sessionLogin). No upstream providers at all: session mode must
+# boot and serve MCP on its own. A password sign-in resource stands in for the
+# host application's login.
+
+rest: true
+
+'@harperfast/oauth':
+  package: '@harperfast/oauth'
+  mcp:
+    enabled: true
+    issuer: 'https://mcp.test'
+    resource: 'https://mcp.test/mcp'
+    dynamicClientRegistration: {}
+    sessionLogin:
+      loginUrl: '/sign-in?return={returnTo}'
+
+jsResource:
+  files: 'app.js'

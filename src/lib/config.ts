@@ -397,6 +397,27 @@ function validateDcrInitialAccessToken(dcr: Record<string, any>): void {
  *   there is no safe default gate value to fall back to either (open
  *   registration is only ever chosen by omitting the key).
  */
+export const SESSION_LOGIN_RETURN_PLACEHOLDER = '{returnTo}';
+
+/**
+ * A `mcp.sessionLogin` URL: a same-origin path (one leading `/`, never `//` or a scheme) holding
+ * `{returnTo}` exactly once, with nothing that could break out of an HTML attribute or a Location header.
+ */
+function normalizeSessionLoginUrl(value: unknown, path: string): string {
+	if (typeof value !== 'string' || !value || isUnresolvedEnvPlaceholder(value)) {
+		throw new Error(`${path} must be set to a same-origin path when mcp.sessionLogin is configured`);
+	}
+	if (!value.startsWith('/') || value.startsWith('//') || /[\s"'<>`\\\u0000-\u001f\u007f]/.test(value)) {
+		throw new Error(
+			`${path} must be a same-origin path starting with a single "/" and no quotes, spaces or backslashes`
+		);
+	}
+	if (value.split(SESSION_LOGIN_RETURN_PLACEHOLDER).length !== 2) {
+		throw new Error(`${path} must contain ${SESSION_LOGIN_RETURN_PLACEHOLDER} exactly once`);
+	}
+	return value;
+}
+
 export function normalizeMcpSecurityConfig(mcpConfig: Record<string, any>, logger?: Logger): void {
 	// mcp.enabled is the one field kept on the pre-#207 warn-and-drop path (see
 	// normalizeBooleanField's doc); the feature-scoped booleans below fail closed.
@@ -514,6 +535,23 @@ export function normalizeMcpSecurityConfig(mcpConfig: Record<string, any>, logge
 					logger
 				);
 			}
+		}
+	}
+
+	const sessionLogin = mcpConfig.sessionLogin;
+	if (mcpActive && sessionLogin !== undefined && sessionLogin !== null) {
+		if (typeof sessionLogin !== 'object' || Array.isArray(sessionLogin)) {
+			throw new Error('mcp.sessionLogin must be a mapping with a loginUrl');
+		}
+		sessionLogin.loginUrl = normalizeSessionLoginUrl(sessionLogin.loginUrl, 'mcp.sessionLogin.loginUrl');
+		if (sessionLogin.switchAccountUrl !== undefined) {
+			sessionLogin.switchAccountUrl = normalizeSessionLoginUrl(
+				sessionLogin.switchAccountUrl,
+				'mcp.sessionLogin.switchAccountUrl'
+			);
+		}
+		if (mcpConfig.providers !== undefined) {
+			logger?.warn?.('mcp.providers is ignored while mcp.sessionLogin is set');
 		}
 	}
 

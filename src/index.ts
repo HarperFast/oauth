@@ -465,7 +465,9 @@ export async function handleApplication(scope: Scope): Promise<void> {
 		dynamicProviderCache.updateTTL(options.cacheDynamicProviders ?? DEFAULT_DYNAMIC_PROVIDER_CACHE_TTL_SECONDS);
 
 		// Update the resource with new providers
-		if (Object.keys(providers).length === 0) {
+		// Session-mode MCP authorization needs no upstream provider, so it alone keeps the resource up.
+		const sessionLoginOnly = Boolean(mcpConfig?.enabled && mcpConfig.sessionLogin);
+		if (Object.keys(providers).length === 0 && !sessionLoginOnly) {
 			// No valid providers configured - register a simple error resource.
 			// Fail closed: clear the MCP config static too. OAuthResource.configure()
 			// (the only other writer) runs only in the else branch, so without this a
