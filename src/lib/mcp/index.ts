@@ -67,7 +67,7 @@ export async function handleMCPPost(
 	}
 
 	if (action === 'confirm') {
-		if (mcpConfig.sessionLogin && body?.consent_token !== undefined) {
+		if (mcpConfig.sessionLogin) {
 			return handleSessionConsentConfirm(request, body, mcpConfig, hookManager, logger);
 		}
 		return handleAuthorizeConfirm(request, body, mcpConfig, providers, logger);
