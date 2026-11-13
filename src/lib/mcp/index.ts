@@ -17,8 +17,6 @@ import { handleToken } from './token.ts';
 export { MCPAuthCodeStore, resetMCPAuthCodesTableCache } from './authCodeStore.ts';
 export { handleAuthorize, handleAuthorizeConfirm, selectMCPProvider } from './authorize.ts';
 export { handleMCPCallback } from './callback.ts';
-export { handleSessionConsentConfirm, renderSessionAuthorize, sessionUsername } from './sessionLogin.ts';
-export { issueSessionConsent, redeemSessionConsent, resetMCPSessionConsentsTableCache } from './sessionConsentStore.ts';
 export { isCimdClientId, resolveClient, CimdClientError } from './cimd.ts';
 export {
 	BROWSER_SECRET_COOKIE_NAME,
@@ -69,7 +67,7 @@ export async function handleMCPPost(
 	}
 
 	if (action === 'confirm') {
-		if (body?.consent_token !== undefined) {
+		if (mcpConfig.sessionLogin && body?.consent_token !== undefined) {
 			return handleSessionConsentConfirm(request, body, mcpConfig, hookManager, logger);
 		}
 		return handleAuthorizeConfirm(request, body, mcpConfig, providers, logger);

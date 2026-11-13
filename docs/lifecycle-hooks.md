@@ -529,7 +529,7 @@ async function onMCPSessionAuthorize(
 
 **Returns:** only a result whose `allow` is exactly `true` allows. `displayName` (≤ 200 characters) is shown on the consent page instead of the username; `description` (≤ 300 characters) is shown on the refusal page and sent as the client's `error_description`. Both are escaped. The OAuth error is always `access_denied`.
 
-**Fails closed:** a missing or malformed result, a thrown error (sync or async), or no answer within 5 seconds refuses, and `signal` is aborted. Because it runs twice, keep it free of side effects that matter if repeated.
+**Fails closed:** a missing or malformed result, a thrown error (sync or async), or no answer within 5 seconds refuses, and `signal` is aborted. Cancellation is cooperative: pass `signal` to anything slow the hook awaits, or it keeps running after the refusal. Because it runs twice, keep it free of side effects that matter if repeated.
 
 **Example:**
 

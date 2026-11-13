@@ -322,7 +322,9 @@ checks) does one of three things:
 Allow/Deny posts to `/oauth/mcp/confirm`. A code is minted only when the POST carries the page's one-time
 consent token, comes from the issuer's origin (`Origin` header), from the browser that loaded the page
 (`__Host-oauth_browser`), with the same signed-in user, and the hook allows it again. A consent is used at
-most once (an atomic counter in `oauth.mcp_session_consents`) and expires after 10 minutes. The token,
+most once per node (an atomic counter in `oauth.mcp_session_consents`, like sign-in handoffs: within the
+replication delay a presentation on each node can win, every one bound to the same browser, user and PKCE
+challenge) and expires after 10 minutes. The token,
 refresh and audit behavior that follows is unchanged.
 
 Constraints:

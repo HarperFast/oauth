@@ -71,6 +71,7 @@ describe('mcp.sessionLogin', () => {
 	let originalDatabases;
 	let consents;
 	let authCodes;
+	let hiddenReads = 0;
 
 	before(() => {
 		originalDatabases = global.databases;
@@ -84,6 +85,7 @@ describe('mcp.sessionLogin', () => {
 		resetMCPAuthCodesTableCache();
 		resetMCPSessionConsentsTableCache();
 		consents = new Map();
+		hiddenReads = 0;
 		authCodes = new Map();
 		const encoded = { ...CLIENT };
 		for (const field of ['redirect_uris', 'grant_types', 'response_types'])
@@ -93,7 +95,13 @@ describe('mcp.sessionLogin', () => {
 				harper_oauth_mcp_clients: { get: async (id) => (id === CLIENT.client_id ? encoded : null) },
 				mcp_auth_codes: { put: async (record) => authCodes.set(record.code, record) },
 				mcp_session_consents: {
-					get: async (id) => (consents.has(id) ? { ...consents.get(id) } : null),
+					get: async (id) => {
+						if (hiddenReads > 0) {
+							hiddenReads--;
+							return null;
+						}
+						return consents.has(id) ? { ...consents.get(id) } : null;
+					},
 					put: async (record) => consents.set(record.id, { ...record }),
 					patch: async (id, changes) => {
 						const row = consents.get(id);
@@ -231,6 +239,39 @@ describe('mcp.sessionLogin', () => {
 			assert.equal(authCodes.size, 1);
 		});
 
+		it('waits out replication when the consent is not visible yet on this node', async () => {
+			const token = consentTokenOf(await showConsent());
+			hiddenReads = 1;
+			assert.equal((await confirm(token)).status, 302);
+		});
+
+		it('passes the client name to the approval hook as it did to the consent hook', async () => {
+			const seen = [];
+			const manager = hooks(async (input) => {
+				seen.push([input.phase, input.clientName]);
+				return { allow: true };
+			});
+			const token = consentTokenOf(await showConsent({}, manager));
+			await confirm(token, 'approve', {}, manager);
+			assert.deepEqual(seen, [
+				['consent', CLIENT.client_name],
+				['approve', CLIENT.client_name],
+			]);
+		});
+
+		it('leaves a consent_token POST to the upstream confirm path when sessionLogin is off', async () => {
+			const response = await handleMCPPost(
+				'confirm',
+				request({ origin: ISSUER }),
+				{ consent_token: 'a'.repeat(43), decision: 'approve' },
+				{ enabled: true, issuer: ISSUER },
+				{},
+				hooks()
+			);
+			assert.equal(response.status, 400);
+			assert.match(response.body.error_description, /confirm_token is required/);
+		});
+
 		it('refuses with access_denied when the hook refuses at approval', async () => {
 			const token = consentTokenOf(await showConsent());
 			const response = await confirm(
@@ -331,6 +372,20 @@ describe('mcp.sessionLogin', () => {
 				assert.throws(() => normalize({ loginUrl }));
 			});
 		}
+
+		it('rejects a present but empty sessionLogin block', () => {
+			assert.throws(() => normalize(null));
+		});
+
+		it('treats an empty switchAccountUrl as unset', () => {
+			const config = {
+				enabled: true,
+				issuer: ISSUER,
+				sessionLogin: { loginUrl: '/s?r={returnTo}', switchAccountUrl: null },
+			};
+			normalizeMcpSecurityConfig(config);
+			assert.equal('switchAccountUrl' in config.sessionLogin, false);
+		});
 
 		it('stays inert while MCP is disabled', () => {
 			assert.doesNotThrow(() => normalizeMcpSecurityConfig({ enabled: false, sessionLogin: { loginUrl: 'nope' } }));
