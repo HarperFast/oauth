@@ -150,6 +150,18 @@ suite('MCP sessionLogin: password session → consent → token', (ctx: ContextW
 		ok(code, 'redirect carries a code');
 		strictEqual((await approve(ISSUER)).status, 400, 'a consent approves once');
 
+		// On a non-default port, Host and Origin both carry the port, so the cookie set under the
+		// sign-in's Origin is found again on a top-level authorize GET that has only Host.
+		const portedSignIn = await send(base, 'POST', '/SignIn', {
+			headers: { 'content-type': 'application/json', 'origin': 'http://mcp.test:8443', 'host': 'mcp.test:8443' },
+			body: JSON.stringify({ username: USERNAME, password: PASSWORD }),
+		});
+		strictEqual(portedSignIn.status, 200, portedSignIn.body);
+		const portedConsent = await send(base, 'GET', authorizePath, {
+			headers: { host: 'mcp.test:8443', cookie: cookiesFrom(portedSignIn).join('; ') },
+		});
+		strictEqual(portedConsent.status, 200, 'a ported origin finds its session on the authorize GET');
+
 		const tokenReply = await send(base, 'POST', '/oauth/mcp/token', {
 			headers: { 'content-type': 'application/x-www-form-urlencoded' },
 			body: new URLSearchParams({

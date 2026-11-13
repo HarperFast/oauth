@@ -35,6 +35,7 @@ type mcp_session_consents @table(database: "oauth", expiration: 600) {
 	id: ID @primaryKey # sha256(consent token), hex
 	user: String # Harper username of the cookie session the page was shown to
 	client_id: String
+	client_name: String # shown on the page; passed to onMCPSessionAuthorize again on approval
 	browser_hash: String # hash of the __Host-oauth_browser secret that loaded the page
 	state: String # JSON MCPAuthorizeState of the validated authorize request
 	expires_at: Float # epoch ms; refused once passed

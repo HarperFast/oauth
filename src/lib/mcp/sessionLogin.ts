@@ -1,11 +1,6 @@
 /**
- * MCP authorization through the host application's own Harper session (`mcp.sessionLogin`).
- *
- * After `/oauth/mcp/authorize` has validated the request, a signed-out browser is sent to the app's sign-in
- * page with the authorize request as its return path; a signed-in one gets a consent page naming the
- * account. The approve/deny POST to `/oauth/mcp/confirm` mints a code only for the session user the page
- * was shown to, from the browser that loaded it, from the issuer's own origin, once, and after the app's
- * `onMCPSessionAuthorize` hook allowed it (see docs/mcp-oauth.md "Signing in with the application's session").
+ * MCP authorization through the host application's own Harper session (`mcp.sessionLogin`;
+ * docs/mcp-oauth.md "Signing in with the application's session").
  */
 
 import type { HookManager } from '../hookManager.ts';
@@ -198,6 +193,7 @@ ${switchAccountLink(mcpConfig, returnPath)}
 		token = await issueSessionConsent({
 			user,
 			clientId: state.clientId,
+			clientName,
 			browserNonceHash,
 			state: { ...state, browserNonceHash },
 		});
@@ -307,7 +303,13 @@ export async function handleSessionConsentConfirm(
 	}
 	const verdict = hookManager
 		? await hookManager.callOnMCPSessionAuthorize(
-				{ user, clientId: consent.clientId, scope: consent.state.scope, phase: 'approve' },
+				{
+					user,
+					clientId: consent.clientId,
+					clientName: consent.clientName,
+					scope: consent.state.scope,
+					phase: 'approve',
+				},
 				request
 			)
 		: { allow: true as const };

@@ -702,6 +702,16 @@ export interface OAuthHooks {
 	onTokenRefresh?: (session: any, refreshed: boolean, request?: any) => Promise<void>;
 
 	/**
+	 * Decide whether the signed-in user may authorize an MCP client in `mcp.sessionLogin` mode.
+	 * Called when the consent page renders (`phase: 'consent'`, to name the account and refuse early)
+	 * and again on approval (`phase: 'approve'`, authoritative). Only `{ allow: true }` allows;
+	 * anything else, a throw, or no answer within 5 seconds refuses. `signal` aborts when the plugin
+	 * stops waiting; cancellation is cooperative, so a hook that ignores it keeps running. Must not have
+	 * side effects that matter if it runs twice.
+	 */
+	onMCPSessionAuthorize?: (input: MCPSessionAuthorizeInput, request: any) => Promise<MCPSessionAuthorizeResult>;
+
+	/**
 	 * Called after an MCP access or refresh token is minted, before the response
 	 * is returned. Use for rate-limiting by client_id, usage attribution,
 	 * pushing to a queue, etc.
@@ -718,14 +728,6 @@ export interface OAuthHooks {
 	 * @param request - The HTTP request that triggered issuance (typed as any for
 	 *   Harper version independence). NOT sanitized — see SECURITY above.
 	 */
-	/**
-	 * Decide whether the signed-in user may authorize an MCP client in `mcp.sessionLogin` mode.
-	 * Called when the consent page renders (`phase: 'consent'`, to name the account and refuse early)
-	 * and again on approval (`phase: 'approve'`, authoritative). Only `{ allow: true }` allows;
-	 * anything else, a throw, or no answer within 5 seconds refuses. `signal` aborts when the plugin
-	 * stops waiting. Must not have side effects that matter if it runs twice.
-	 */
-	onMCPSessionAuthorize?: (input: MCPSessionAuthorizeInput, request: any) => Promise<MCPSessionAuthorizeResult>;
 	onMCPTokenIssued?: (
 		event: {
 			/** 'access' = authorization_code; 'client_credentials' = headless agent grant (sub is the client, not a user). */

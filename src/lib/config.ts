@@ -539,12 +539,14 @@ export function normalizeMcpSecurityConfig(mcpConfig: Record<string, any>, logge
 	}
 
 	const sessionLogin = mcpConfig.sessionLogin;
-	if (mcpActive && sessionLogin !== undefined && sessionLogin !== null) {
-		if (typeof sessionLogin !== 'object' || Array.isArray(sessionLogin)) {
+	if (mcpActive && sessionLogin !== undefined) {
+		if (!sessionLogin || typeof sessionLogin !== 'object' || Array.isArray(sessionLogin)) {
 			throw new Error('mcp.sessionLogin must be a mapping with a loginUrl');
 		}
 		sessionLogin.loginUrl = normalizeSessionLoginUrl(sessionLogin.loginUrl, 'mcp.sessionLogin.loginUrl');
-		if (sessionLogin.switchAccountUrl !== undefined) {
+		if (sessionLogin.switchAccountUrl == null) {
+			delete sessionLogin.switchAccountUrl;
+		} else {
 			sessionLogin.switchAccountUrl = normalizeSessionLoginUrl(
 				sessionLogin.switchAccountUrl,
 				'mcp.sessionLogin.switchAccountUrl'
