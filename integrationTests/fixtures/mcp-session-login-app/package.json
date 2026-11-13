@@ -1,0 +1,6 @@
+{
+	"name": "mcp-session-login-fixture",
+	"private": true,
+	"type": "module",
+	"description": "Integration-test fixture for mcp.sessionLogin. The @harperfast/oauth dep is installed at test setup time via scripts/install-fixtures.js (npm pack + install)."
+}

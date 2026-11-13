@@ -12,12 +12,21 @@ import type {
 	Logger,
 	OAuthProviderConfig,
 	EmailCandidate,
+	MCPSessionAuthorizeInput,
+	MCPSessionAuthorizeResult,
 } from '../types.ts';
 import { ResolveEmailError } from './resolveEmailError.ts';
 
 /** Bounds `onResolveEmail` so a stalled selector (e.g. a slow DB lookup) can't hold the
  *  OAuth callback open indefinitely — same bound as the GitHub `/user/emails` fetch itself. */
 const ON_RESOLVE_EMAIL_TIMEOUT_MS = 5000;
+
+/** Bounds `onMCPSessionAuthorize` the same way; on expiry the hook is aborted and the answer is a refusal. */
+export const MCP_SESSION_AUTHORIZE_TIMEOUT_MS = 5000;
+
+const SESSION_AUTHORIZE_ALLOWED: MCPSessionAuthorizeResult = Object.freeze({ allow: true });
+const DISPLAY_NAME_MAX = 200;
+const DESCRIPTION_MAX = 300;
 
 /**
  * Hook Manager
@@ -180,6 +189,55 @@ export class HookManager {
 					// Intentionally ignored — logging is best-effort.
 				}
 			});
+	}
+
+	/**
+	 * Call onMCPSessionAuthorize (mcp.sessionLogin). Allows when no hook is registered. Fails closed on
+	 * everything else: only a result whose `allow` is exactly `true` allows; a throw (sync or async), a
+	 * malformed result, or no answer within the timeout refuses, and the hook's signal is aborted once
+	 * the plugin stops waiting. Returned strings are trimmed to a bound; callers escape them.
+	 */
+	async callOnMCPSessionAuthorize(
+		input: Omit<MCPSessionAuthorizeInput, 'signal'>,
+		request: any
+	): Promise<MCPSessionAuthorizeResult> {
+		const hook = this.hooks.onMCPSessionAuthorize;
+		if (!hook) return SESSION_AUTHORIZE_ALLOWED;
+		const controller = new AbortController();
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		try {
+			const result: unknown = await Promise.race([
+				Promise.resolve().then(() => hook({ ...input, signal: controller.signal }, request)),
+				new Promise((_, reject) => {
+					timer = setTimeout(
+						() => reject(new Error(`timed out after ${MCP_SESSION_AUTHORIZE_TIMEOUT_MS}ms`)),
+						MCP_SESSION_AUTHORIZE_TIMEOUT_MS
+					);
+				}),
+			]);
+			const answer = result && typeof result === 'object' ? (result as Record<string, unknown>) : undefined;
+			if (answer?.allow === true) {
+				return typeof answer.displayName === 'string' && answer.displayName
+					? { allow: true, displayName: answer.displayName.slice(0, DISPLAY_NAME_MAX) }
+					: SESSION_AUTHORIZE_ALLOWED;
+			}
+			return typeof answer?.description === 'string' && answer.description
+				? { allow: false, description: answer.description.slice(0, DESCRIPTION_MAX) }
+				: { allow: false };
+		} catch (error) {
+			try {
+				this.logger?.error?.(
+					'onMCPSessionAuthorize hook failed; refusing:',
+					error instanceof Error ? error.message : String(error)
+				);
+			} catch {
+				// Logging is best-effort; the refusal stands.
+			}
+			return { allow: false };
+		} finally {
+			clearTimeout(timer);
+			controller.abort();
+		}
 	}
 
 	/**

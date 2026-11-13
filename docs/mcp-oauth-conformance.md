@@ -17,7 +17,7 @@ file to see the full set. Status is ✅ (asserted) or ⚠️ (see [Known deltas]
 Test files (all under `test/lib/mcp/` unless noted): `wellKnown` · `authorize` ·
 `token` · `tokenAuditHook` · `dcr` · `cimd` · `clientAssertion` · `tokenIssuer` ·
 `withMCPAuth` · `bearerValidator` · `consentBinding` · `refreshTokenStore` · `callback` · `assertionJtiStore` ·
-`index` · `rateLimit`; `handlers` under `test/lib/`; `options-watcher` under `test/`; **e2e** =
+`index` · `rateLimit` · `sessionLogin`; `handlers` under `test/lib/`; `options-watcher` under `test/`; **e2e** =
 `integrationTests/mcp-oauth-e2e.test.ts` (suite _MCP OAuth Stage 7: full round-trip e2e_).
 
 ---
@@ -88,6 +88,16 @@ Test files (all under `test/lib/mcp/` unless noted): `wellKnown` · `authorize` 
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --- |
 | Consent interstitial — 200 HTML (not 302), shows authoritative `client_id` host + redirect hostname + loopback warning; HTML-escaped; anti-clickjacking + no-store | `authorize.ts:handleAuthorize` (CIMD) / `buildInterstitialPage` / `escapeHtml` | `authorize` "returns 200 HTML interstitial…", "displays the authoritative client_id hostname…", "escapes XSS in client_name"                                                                 | ✅  |
 | Browser binding — `__Host-` per-flow nonce cookie; confirm requires hash-match; callback re-checks; one-time confirm token                                         | `consentBinding.ts` / `authorize.ts:handleAuthorizeConfirm` / `handlers.ts`    | `authorize` "rejects a confirm without the consent cookie…"; `handlers` "rejects when the consent cookie is missing…"; `consentBinding` "buildConsentCookie uses a \_\_Host- per-flow name…" | ✅  |
+
+## Application-session authorization (`mcp.sessionLogin`)
+
+| Requirement                                                                                                                                | Implemented in                                                                                | Test                                                                                                                 | Status |
+| ------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- | ------ |
+| Authenticated resource owner without an upstream IdP: the cookie session's user, never an `Authorization`-header identity                  | `sessionLogin.ts:sessionUsername`                                                             | `sessionLogin` "does not treat a request carrying an Authorization header as signed in"; **e2e** `mcp-session-login` | ✅     |
+| Signed-out user sent to the app's sign-in with the authorize request to return to                                                          | `sessionLogin.ts:renderSessionAuthorize`                                                      | `sessionLogin` "sends a signed-out browser to the sign-in page…"                                                     | ✅     |
+| Explicit consent for every client, naming the account; escaped; anti-framing, `form-action 'self'`, no-store; Deny returns `access_denied` | `sessionLogin.ts:renderSessionAuthorize` / `handleSessionConsentConfirm`                      | `sessionLogin` "shows a consent page naming the account…", "returns access_denied when the user denies…"             | ✅     |
+| Consent bound to browser, session user and issuer origin; checked before it is spent; single use                                           | `sessionLogin.ts:handleSessionConsentConfirm` / `sessionConsentStore.ts:redeemSessionConsent` | `sessionLogin` "refuses … without spending the consent", "refuses a second approval…"; **e2e** `mcp-session-login`   | ✅     |
+| App policy hook is authoritative at approval and fails closed                                                                              | `hookManager.ts:callOnMCPSessionAuthorize`                                                    | `sessionLogin` "onMCPSessionAuthorize contract"                                                                      | ✅     |
 
 ## Bearer guard & no-passthrough (RFC 6750 · 8707)
 

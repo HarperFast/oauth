@@ -507,6 +507,40 @@ async function handleMCPTokenIssued(event, request) {
 }
 ```
 
+### onMCPSessionAuthorize
+
+Called in [`mcp.sessionLogin`](./mcp-oauth.md#signing-in-with-the-applications-session) mode to decide whether the user signed in to your application may authorize an MCP client. It runs twice per authorization: when the consent page renders (`phase: 'consent'`, so the page can name the account and refuse early) and when the user approves (`phase: 'approve'`, authoritative — the code is minted only if this call allows). Not registered ⇒ every signed-in user may authorize.
+
+**Signature:**
+
+```typescript
+async function onMCPSessionAuthorize(
+	input: {
+		user: string; // Harper username of the cookie session
+		clientId: string;
+		clientName?: string;
+		scope?: string;
+		phase: 'consent' | 'approve';
+		signal: AbortSignal; // aborted once the plugin stops waiting
+	},
+	request: Request
+): Promise<{ allow: true; displayName?: string } | { allow: false; description?: string }>;
+```
+
+**Returns:** only a result whose `allow` is exactly `true` allows. `displayName` (≤ 200 characters) is shown on the consent page instead of the username; `description` (≤ 300 characters) is shown on the refusal page and sent as the client's `error_description`. Both are escaped. The OAuth error is always `access_denied`.
+
+**Fails closed:** a missing or malformed result, a thrown error (sync or async), or no answer within 5 seconds refuses, and `signal` is aborted. Because it runs twice, keep it free of side effects that matter if repeated.
+
+**Example:**
+
+```javascript
+async function handleMCPSessionAuthorize({ user }) {
+	const account = await tables.Account.get(user);
+	if (account?.status !== 'ACTIVE') return { allow: false, description: 'This account is not active.' };
+	return { allow: true, displayName: account.email };
+}
+```
+
 ## Hook Registration
 
 Hooks are **lazy-referenced** - they are looked up when OAuth events occur (login, logout, token refresh), not when registered. This means you can call `registerHooks()` at any time, and there's no specific initialization window. The hooks are simply stored and referenced later when needed.

@@ -128,6 +128,12 @@ export interface MCPConfig {
 	 * warning is logged at startup and rotation is silently skipped.
 	 */
 	keyRotationInterval?: number;
+	/**
+	 * Authorize MCP clients through the host application's own Harper cookie session instead of an
+	 * upstream provider (docs/mcp-oauth.md "Signing in with the application's session"). While set,
+	 * `providers` is not consulted for MCP flows.
+	 */
+	sessionLogin?: MCPSessionLoginConfig;
 	/** Access-token lifetime in seconds. Default: 3600 (1h). */
 	accessTokenTtl?: number;
 	/** Refresh-token (family) lifetime in seconds. Default: 2592000 (30d). */
@@ -712,6 +718,14 @@ export interface OAuthHooks {
 	 * @param request - The HTTP request that triggered issuance (typed as any for
 	 *   Harper version independence). NOT sanitized — see SECURITY above.
 	 */
+	/**
+	 * Decide whether the signed-in user may authorize an MCP client in `mcp.sessionLogin` mode.
+	 * Called when the consent page renders (`phase: 'consent'`, to name the account and refuse early)
+	 * and again on approval (`phase: 'approve'`, authoritative). Only `{ allow: true }` allows;
+	 * anything else, a throw, or no answer within 5 seconds refuses. `signal` aborts when the plugin
+	 * stops waiting. Must not have side effects that matter if it runs twice.
+	 */
+	onMCPSessionAuthorize?: (input: MCPSessionAuthorizeInput, request: any) => Promise<MCPSessionAuthorizeResult>;
 	onMCPTokenIssued?: (
 		event: {
 			/** 'access' = authorization_code; 'client_credentials' = headless agent grant (sub is the client, not a user). */
@@ -725,6 +739,26 @@ export interface OAuthHooks {
 		request: any
 	) => Promise<void>;
 }
+
+/** `mcp.sessionLogin`: same-origin paths, each containing `{returnTo}` exactly once. */
+export interface MCPSessionLoginConfig {
+	/** Where a signed-out user signs in; `{returnTo}` becomes the URL-encoded authorize request. */
+	loginUrl: string;
+	/** Optional link on the consent page to sign in as someone else. */
+	switchAccountUrl?: string;
+}
+
+export interface MCPSessionAuthorizeInput {
+	/** Harper username of the cookie session */
+	user: string;
+	clientId: string;
+	clientName?: string;
+	scope?: string;
+	phase: 'consent' | 'approve';
+	signal: AbortSignal;
+}
+
+export type MCPSessionAuthorizeResult = { allow: true; displayName?: string } | { allow: false; description?: string };
 
 /**
  * OAuth Provider Configuration

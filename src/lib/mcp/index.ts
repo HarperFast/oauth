@@ -10,12 +10,15 @@ import type { RequestTarget } from 'harper';
 import type { HookManager } from '../hookManager.ts';
 import type { Logger, MCPConfig, ProviderRegistry, Request } from '../../types.ts';
 import { handleAuthorize, handleAuthorizeConfirm } from './authorize.ts';
+import { handleSessionConsentConfirm } from './sessionLogin.ts';
 import { handleRegister } from './dcr.ts';
 import { handleToken } from './token.ts';
 
 export { MCPAuthCodeStore, resetMCPAuthCodesTableCache } from './authCodeStore.ts';
 export { handleAuthorize, handleAuthorizeConfirm, selectMCPProvider } from './authorize.ts';
 export { handleMCPCallback } from './callback.ts';
+export { handleSessionConsentConfirm, renderSessionAuthorize, sessionUsername } from './sessionLogin.ts';
+export { issueSessionConsent, redeemSessionConsent, resetMCPSessionConsentsTableCache } from './sessionConsentStore.ts';
 export { isCimdClientId, resolveClient, CimdClientError } from './cimd.ts';
 export {
 	BROWSER_SECRET_COOKIE_NAME,
@@ -66,6 +69,9 @@ export async function handleMCPPost(
 	}
 
 	if (action === 'confirm') {
+		if (body?.consent_token !== undefined) {
+			return handleSessionConsentConfirm(request, body, mcpConfig, hookManager, logger);
+		}
 		return handleAuthorizeConfirm(request, body, mcpConfig, providers, logger);
 	}
 
@@ -83,14 +89,15 @@ export async function handleMCPGet(
 	target: RequestTarget,
 	mcpConfig: MCPConfig | undefined,
 	providers: ProviderRegistry,
-	logger?: Logger
+	logger?: Logger,
+	hookManager?: HookManager
 ): Promise<any> {
 	if (!mcpConfig?.enabled) {
 		return { status: 404, body: { error: 'Not found' } };
 	}
 
 	if (action === 'authorize') {
-		return handleAuthorize(request, target, mcpConfig, providers, logger);
+		return handleAuthorize(request, target, mcpConfig, providers, logger, hookManager);
 	}
 
 	return { status: 404, body: { error: 'Not found' } };
