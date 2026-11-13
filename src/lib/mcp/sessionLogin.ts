@@ -19,7 +19,6 @@ import { escapeHtml, isLoopbackRedirect } from './authorize.ts';
 import { resolveIssuer } from './wellKnown.ts';
 import { issueSessionConsent, redeemSessionConsent, SESSION_CONSENT_TOKEN_PATTERN } from './sessionConsentStore.ts';
 
-/** The authorize path the return URL points at (the plugin's `oauth` resource, `mcp` action). */
 const AUTHORIZE_PATH = '/oauth/mcp/authorize';
 const CONFIRM_PATH = '/oauth/mcp/confirm';
 const MAX_RETURN_URL_LENGTH = 2048;
@@ -74,7 +73,6 @@ export function sessionUsername(request: Request): string | undefined {
 	return username;
 }
 
-/** The authorize request rebuilt from its validated parameters, as the sign-in page's return path. */
 function authorizeReturnPath(state: MCPAuthorizeState): string {
 	const query = new URLSearchParams({
 		response_type: 'code',
@@ -143,10 +141,6 @@ function switchAccountLink(mcpConfig: MCPConfig, returnPath: string): string {
 	return `<p><a href="${escapeHtml(withReturnTo(template, returnPath))}">Use a different account</a></p>`;
 }
 
-/**
- * The session-mode answer to a validated `GET /oauth/mcp/authorize`: a redirect to sign in, a refusal page,
- * or the consent page.
- */
 export async function renderSessionAuthorize(
 	request: Request,
 	client: MCPClientRecord,

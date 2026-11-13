@@ -8,14 +8,13 @@ import type { MCPAuthorizeState, Table } from '../../types.ts';
 
 declare const databases: any;
 
-export const SESSION_CONSENT_TTL_MS = 10 * 60_000;
+const SESSION_CONSENT_TTL_MS = 10 * 60_000;
 
 export const SESSION_CONSENT_TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 
 /** Re-reads of a consent not found yet, in ms: the POST can reach a node the GET's write has not replicated to. */
 const MISS_RETRY_DELAYS_MS: readonly number[] = [100, 300];
 
-/** Redeems re-reading a miss at once; past this, a miss is final at once. */
 const MAX_MISS_RETRIERS = 32;
 let missRetriers = 0;
 
@@ -52,7 +51,6 @@ export interface SessionConsent {
 	expiresAt: number;
 }
 
-/** The row commits on its own transaction, before the page carrying its token goes out. */
 export async function issueSessionConsent(consent: Omit<SessionConsent, 'expiresAt'>): Promise<string> {
 	const token = randomBytes(32).toString('base64url');
 	const expiresAt = Date.now() + SESSION_CONSENT_TTL_MS;
